@@ -154,10 +154,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
 
   async onModuleInit(): Promise<void> {
     this.unsubscribeRemoval = this.connectionRegistry.addConnectionRemovalListener((id) => this.forget(id));
-    void this.license
-      .ensureValidated()
-      .finally(() => this.start())
-      .catch((error) => this.logger.error(`KV cache footprint start failed: ${errorMessage(error)}`));
+    this.startAfter(this.license.ensureValidated());
     this.sweepDeletedRetirees();
     this.sweepTimer = setInterval(() => this.sweepDeletedRetirees(), this.intervalMs);
     this.sweepTimer.unref?.();

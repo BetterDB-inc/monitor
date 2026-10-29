@@ -49,6 +49,10 @@ class TestPoller extends MultiConnectionPoller {
     (this as unknown as { start(): void }).start();
   }
 
+  startAfterNow(gate: Promise<unknown>): void {
+    (this as unknown as { startAfter(gate: Promise<unknown>): void }).startAfter(gate);
+  }
+
   active(): boolean {
     return (this as unknown as { isPollingActive(): boolean }).isPollingActive();
   }
@@ -155,6 +159,44 @@ describe('MultiConnectionPoller teardown', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('MultiConnectionPoller startAfter', () => {
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  };
+
+  it('starts only once the gate resolves', async () => {
+    const { poller, polledIds } = setup();
+    let open!: () => void;
+    poller.startAfterNow(new Promise<void>((resolve) => (open = resolve)));
+    await settle();
+    expect(poller.active()).toBe(false);
+    open();
+    await settle();
+    expect(poller.active()).toBe(true);
+    expect(polledIds()).toEqual(['d']);
+    await poller.onModuleDestroy();
+  });
+
+  it('starts even when the gate rejects', async () => {
+    const { poller } = setup();
+    poller.startAfterNow(Promise.reject(new Error('licence lookup failed')));
+    await settle();
+    expect(poller.active()).toBe(true);
+    await poller.onModuleDestroy();
+  });
+
+  it('stays stopped when destroyed before the gate resolves', async () => {
+    const { poller, polledIds } = setup();
+    let open!: () => void;
+    poller.startAfterNow(new Promise<void>((resolve) => (open = resolve)));
+    await poller.onModuleDestroy();
+    open();
+    await settle();
+    expect(poller.active()).toBe(false);
+    expect(polledIds()).toEqual([]);
   });
 });
 

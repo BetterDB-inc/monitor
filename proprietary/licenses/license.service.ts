@@ -1152,15 +1152,18 @@ export class LicenseService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Wait for validation with timeout
-    const timeout = new Promise<EntitlementResponse>((_, reject) =>
-      setTimeout(() => reject(new Error('License validation timeout')), timeoutMs),
-    );
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<EntitlementResponse>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('License validation timeout')), timeoutMs);
+    });
 
     try {
       return await Promise.race([this.validationPromise, timeout]);
     } catch (error) {
       this.logger.warn(`ensureValidated timeout, using community tier: ${(error as Error).message}`);
       return this.getCommunityEntitlement('Validation timeout');
+    } finally {
+      clearTimeout(timer);
     }
   }
 
