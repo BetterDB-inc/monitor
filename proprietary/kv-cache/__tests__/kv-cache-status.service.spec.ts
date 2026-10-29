@@ -1,3 +1,5 @@
+import { Feature } from '@betterdb/shared';
+import { KvCacheFootprintService } from '../kv-cache-footprint.service';
 import { KvCacheStatusService, toPublicEngine } from '../kv-cache-status.service';
 
 const engine = {
@@ -14,6 +16,7 @@ describe('KvCacheStatusService', () => {
   const footprint = {
     getSampleKey: jest.fn().mockReturnValue('m@1@0@abc…@bfloat16'),
     getFootprintIntervalMs: jest.fn().mockReturnValue(300000),
+    getLastScanAttempt: jest.fn().mockReturnValue(null),
   } as any;
   const service = new KvCacheStatusService(storage, footprint, registry);
 
@@ -65,6 +68,8 @@ describe('KvCacheStatusService', () => {
       footprintIntervalMs: 300000,
       sampleKey: 'm@1@0@abc…@bfloat16',
       engines: [toPublicEngine(engine as any)],
+      lastScanAttemptAt: null,
+      lastScanError: null,
     });
   });
 
@@ -79,6 +84,59 @@ describe('KvCacheStatusService', () => {
   it('reports not detected without a snapshot', async () => {
     storage.getKvCacheFootprintSnapshots.mockResolvedValue([]);
     expect((await service.getStatus('c1')).hasLmcache).toBe(false);
+  });
+
+  it('reports a failing scheduled scan and clears it once a scan succeeds', async () => {
+    const keys = ['m/x@1@0@1@bfloat16', 'm/x@1@0@2@bfloat16', 'm/x@1@0@3@bfloat16'];
+    let denied = true;
+    const client = {
+      getDbSize: jest.fn().mockResolvedValue(keys.length),
+      call: jest.fn(async (cmd: string) => {
+        if (cmd === 'SCAN') {
+          if (denied) throw new Error("NOPERM User monitor has no permissions to run the 'scan' command");
+          return ['0', keys];
+        }
+        return { MEMORY: 100, TTL: -1, EXISTS: 0, CLIENT: '' }[cmd];
+      }),
+      getClient: () => {
+        throw new Error('no raw client');
+      },
+      getInfoParsed: jest.fn().mockResolvedValue({
+        memory: { used_memory: '1000', maxmemory: '0', maxmemory_policy: 'noeviction' },
+        stats: { evicted_keys: '0' },
+        keyspace: { db0: { keys: keys.length, expires: 0, avg_ttl: 0 } },
+      }),
+      getRole: jest.fn().mockResolvedValue({ role: 'master' }),
+    };
+    const connections = {
+      list: jest.fn().mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }]),
+      get: jest.fn().mockReturnValue(client),
+      getConfig: jest.fn().mockReturnValue({ id: 'c1', name: 'one', host: 'h', port: 6379, dbIndex: 0 }),
+    } as any;
+    const store = {
+      saveKvCacheFootprintSnapshot: jest.fn(),
+      getKvCacheFootprintSnapshots: jest.fn().mockResolvedValue([]),
+    } as any;
+    const license = { hasFeature: (feature: string) => feature === Feature.KV_CACHE_MONITORING } as any;
+    const realFootprint = new KvCacheFootprintService(connections, store, license);
+    const statuses = new KvCacheStatusService(store, realFootprint, { list: () => [] } as any);
+    const poll = () =>
+      (realFootprint as any)
+        .pollConnection({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 })
+        .catch(() => undefined);
+
+    const before = Date.now();
+    await poll();
+    const failing = await statuses.getStatus('c1');
+    expect(failing.latest).toBeNull();
+    expect(failing.lastScanError).toMatch(/NOPERM/);
+    expect(failing.lastScanAttemptAt).toBeGreaterThanOrEqual(before);
+
+    denied = false;
+    await poll();
+    const recovered = await statuses.getStatus('c1');
+    expect(recovered.lastScanError).toBeNull();
+    expect(recovered.lastScanAttemptAt).toBeNull();
   });
 
   it('caps the history range and buckets it in storage', async () => {

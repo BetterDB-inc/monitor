@@ -42,6 +42,7 @@ export class KvCacheStatusService {
   async getStatus(connectionId: string): Promise<KvCacheStatus> {
     const recent = await this.storage.getKvCacheFootprintSnapshots({ connectionId, limit: 2 });
     const latest = recent[recent.length - 1];
+    const attempt = this.footprint.getLastScanAttempt(connectionId);
     return {
       hasLmcache: latest?.detected === true,
       latest: latest ?? null,
@@ -49,6 +50,8 @@ export class KvCacheStatusService {
       footprintIntervalMs: this.footprint.getFootprintIntervalMs(),
       sampleKey: this.footprint.getSampleKey(connectionId),
       engines: this.engines.list(connectionId).map(toPublicEngine),
+      lastScanAttemptAt: attempt?.at ?? null,
+      lastScanError: attempt?.error ?? null,
     };
   }
 

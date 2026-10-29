@@ -810,6 +810,32 @@ describe('KvCacheFootprintService', () => {
     expect((await service.triggerCollection('c1'))?.otherDbs).toEqual([0]);
   });
 
+  it('records a failed manual scan until the next successful one', async () => {
+    const { service, client } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM this user has no permissions to run the scan command'));
+    await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+    expect(service.getLastScanAttempt('c1')).toEqual({
+      at: expect.any(Number),
+      error: 'NOPERM this user has no permissions to run the scan command',
+    });
+    await service.triggerCollection('c1');
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
+  it('forgets a failed scan when the connection is removed', async () => {
+    const { service, client, registry } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM'));
+    await service.onModuleInit();
+    try {
+      await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+      expect(service.getLastScanAttempt('c1')).not.toBeNull();
+      registry.removed('c1');
+      expect(service.getLastScanAttempt('c1')).toBeNull();
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
   it('keeps going when a listener throws', async () => {
     const { service, storage } = setup();
     service.onSnapshot(() => { throw new Error('boom'); });

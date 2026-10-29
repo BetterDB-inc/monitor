@@ -101,6 +101,8 @@ export interface KvCacheStatus {
   footprintIntervalMs: number;
   sampleKey: string | null;
   engines: KvCacheEngine[];
+  lastScanAttemptAt: number | null;
+  lastScanError: string | null;
 }
 
 export interface KvCacheSettings {

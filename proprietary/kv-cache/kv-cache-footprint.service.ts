@@ -70,6 +70,11 @@ interface SlotView {
   rangesByNode: number[][][];
 }
 
+export interface ScanAttempt {
+  at: number;
+  error: string;
+}
+
 interface ScanTargets {
   nodes: ScanNode[];
   skipped: number;
@@ -133,6 +138,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private readonly announcing = new Map<string, Promise<void>>();
   private readonly lastEvicted = new Map<string, { timestamp: number; counts: Map<string, number> }>();
   private readonly sampleKeys = new Map<string, string>();
+  private readonly lastAttempts = new Map<string, ScanAttempt>();
   private readonly undetectedUntil = new Map<string, number>();
   private readonly undetected = new Set<string>();
   private readonly partialMisses = new Map<string, number>();
@@ -196,6 +202,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
+    this.lastAttempts.delete(connectionId);
     this.undetectedUntil.delete(connectionId);
     this.undetected.delete(connectionId);
     this.partialMisses.delete(connectionId);
@@ -296,6 +303,10 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     return this.sampleKeys.get(connectionId) ?? null;
   }
 
+  getLastScanAttempt(connectionId: string): ScanAttempt | null {
+    return this.lastAttempts.get(connectionId) ?? null;
+  }
+
   async triggerCollection(connectionId: string): Promise<KvCacheFootprintSnapshot | null> {
     const target = this.target(connectionId);
     if (!target) throw new NotFoundException(`Connection '${connectionId}' not found`);
@@ -360,10 +371,18 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     if (!this.connectionRegistry.getConfig(ctx.connectionId)) return null;
     const running = this.running.get(ctx.connectionId);
     if (running) return running;
+    const generation = this.generationOf(ctx.connectionId);
     const run = this.runCollection(ctx, plan);
     this.running.set(ctx.connectionId, run);
     try {
-      return await run;
+      const snapshot = await run;
+      if (snapshot) this.lastAttempts.delete(ctx.connectionId);
+      return snapshot;
+    } catch (error) {
+      if (this.generationOf(ctx.connectionId) === generation) {
+        this.lastAttempts.set(ctx.connectionId, { at: Date.now(), error: errorMessage(error) });
+      }
+      throw error;
     } finally {
       if (this.running.get(ctx.connectionId) === run) this.running.delete(ctx.connectionId);
     }
