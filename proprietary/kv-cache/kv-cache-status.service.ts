@@ -52,6 +52,7 @@ export class KvCacheStatusService {
       engines: this.engines.list(connectionId).map(toPublicEngine),
       lastScanAttemptAt: attempt?.at ?? null,
       lastScanError: attempt?.error ?? null,
+      scanCooldownUntil: this.footprint.getScanCooldownUntil(connectionId),
     };
   }
 

@@ -63,6 +63,7 @@ export function KvCacheGuard({ children }: Props) {
       pending={awaitingFirstScan(status.data)}
       scanError={status.data.lastScanError ?? null}
       intervalMs={status.data.footprintIntervalMs}
+      cooldownUntil={status.data.scanCooldownUntil ?? null}
       onLinkEngine={() => setLinkOpen(true)}
     />
   );

@@ -103,6 +103,7 @@ export interface KvCacheStatus {
   engines: KvCacheEngine[];
   lastScanAttemptAt: number | null;
   lastScanError: string | null;
+  scanCooldownUntil: number | null;
 }
 
 export interface KvCacheSettings {

@@ -15,6 +15,7 @@ interface Props {
   pending?: boolean;
   scanError?: string | null;
   intervalMs?: number;
+  cooldownUntil?: number | null;
 }
 
 function formatInterval(ms: number): string {
@@ -24,7 +25,14 @@ function formatInterval(ms: number): string {
   return `${hours} hour${hours === 1 ? '' : 's'}`;
 }
 
-export function KvCacheNotDetected({ latest, onLinkEngine, pending = false, scanError = null, intervalMs }: Props) {
+export function KvCacheNotDetected({
+  latest,
+  onLinkEngine,
+  pending = false,
+  scanError = null,
+  intervalMs,
+  cooldownUntil = null,
+}: Props) {
   const rescan = useRescanKvCache();
   const canMutate = useCanEditKvCache();
   const { mutate } = rescan;
@@ -56,7 +64,10 @@ export function KvCacheNotDetected({ latest, onLinkEngine, pending = false, scan
               The last scan failed: {scanError}
               <span className="block text-muted-foreground">
                 BetterDB retries within{' '}
-                {intervalMs ? formatInterval(intervalMs) : 'the footprint interval'}.
+                {intervalMs
+                  ? formatInterval(intervalMs + Math.max(0, (cooldownUntil ?? 0) - Date.now()))
+                  : 'the footprint interval'}
+                .
               </span>
             </p>
           )}

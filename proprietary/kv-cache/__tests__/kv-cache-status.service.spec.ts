@@ -17,6 +17,7 @@ describe('KvCacheStatusService', () => {
     getSampleKey: jest.fn().mockReturnValue('m@1@0@abc…@bfloat16'),
     getFootprintIntervalMs: jest.fn().mockReturnValue(300000),
     getLastScanAttempt: jest.fn().mockReturnValue(null),
+    getScanCooldownUntil: jest.fn().mockReturnValue(null),
   } as any;
   const service = new KvCacheStatusService(storage, footprint, registry);
 
@@ -70,7 +71,15 @@ describe('KvCacheStatusService', () => {
       engines: [toPublicEngine(engine as any)],
       lastScanAttemptAt: null,
       lastScanError: null,
+      scanCooldownUntil: null,
     });
+  });
+
+  it('reports when the undetected recheck cooldown ends', async () => {
+    storage.getKvCacheFootprintSnapshots.mockResolvedValue([]);
+    footprint.getScanCooldownUntil.mockReturnValueOnce(123_456);
+    expect((await service.getStatus('c1')).scanCooldownUntil).toBe(123_456);
+    expect(footprint.getScanCooldownUntil).toHaveBeenCalledWith('c1');
   });
 
   it('uses the only snapshot as latest', async () => {

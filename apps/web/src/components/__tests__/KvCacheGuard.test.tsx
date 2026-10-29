@@ -225,6 +225,21 @@ describe('KvCacheGuard', () => {
     expect(screen.queryByText('Scanning for LMCache keys')).toBeNull();
   });
 
+  it('counts the undetected recheck cooldown in the retry time', async () => {
+    getStatus.mockResolvedValue({
+      hasLmcache: false,
+      latest,
+      sampleKey: null,
+      engines: [],
+      footprintIntervalMs: 300_000,
+      lastScanAttemptAt: 1,
+      lastScanError: "Connection 'c1' is not connected",
+      scanCooldownUntil: Date.now() + 25 * 60_000,
+    });
+    renderGuard();
+    expect(await screen.findByText(/retries within 30 minutes/)).toBeInTheDocument();
+  });
+
   it('shows a failed scan once when the rescan fails the same way', async () => {
     getStatus.mockResolvedValue({
       hasLmcache: false,
