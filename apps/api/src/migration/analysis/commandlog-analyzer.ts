@@ -1,4 +1,6 @@
+import type Valkey from 'iovalkey';
 import type { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { MetricsParser } from '../../database/parsers/metrics.parser';
 import type { CommandAnalysis } from '@betterdb/shared';
 
 export interface CommandLogSample {
@@ -60,6 +62,33 @@ export async function collectCommandAnalysis(
     .slice(0, 50);
 
   return { analysis: result, entries };
+}
+
+export async function collectNodeCommandEntries(
+  clients: Valkey[],
+  hasCommandLog: boolean,
+): Promise<CommandLogSample[]> {
+  const perNode = await Promise.all(clients.map(async (client) => {
+    if (hasCommandLog) {
+      try {
+        const raw = await client.call('COMMANDLOG', 'GET', 200, 'slow');
+        return toSamples(MetricsParser.parseCommandLog(raw as unknown[]));
+      } catch {
+        return readSlowLog(client);
+      }
+    }
+    return readSlowLog(client);
+  }));
+  return perNode.flat();
+}
+
+async function readSlowLog(client: Valkey): Promise<CommandLogSample[]> {
+  try {
+    const raw = await client.call('SLOWLOG', 'GET', 128);
+    return toSamples(MetricsParser.parseSlowLog(raw as unknown[]));
+  } catch {
+    return [];
+  }
 }
 
 function toSamples(entries: Array<{ command?: string[]; clientName?: string }>): CommandLogSample[] {

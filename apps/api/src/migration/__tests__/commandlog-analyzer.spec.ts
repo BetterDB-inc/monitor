@@ -1,4 +1,4 @@
-import { analyzeCommands, collectCommandAnalysis } from '../analysis/commandlog-analyzer';
+import { analyzeCommands, collectCommandAnalysis, collectNodeCommandEntries } from '../analysis/commandlog-analyzer';
 import type { DatabasePort, DatabaseCapabilities } from '../../common/interfaces/database-port.interface';
 
 function createMockAdapter(options: {
@@ -173,5 +173,45 @@ describe('collectCommandAnalysis', () => {
 
     expect(analysis.sourceUsed).toBe('unavailable');
     expect(entries).toEqual([]);
+  });
+});
+
+describe('collectNodeCommandEntries', () => {
+  function logEntry(command: string[], clientName: string): unknown[] {
+    return [1, 1700000000, 10, command, '10.0.0.9:5000', clientName];
+  }
+
+  it('reads COMMANDLOG from every node and merges the entries', async () => {
+    const a = { call: jest.fn().mockResolvedValue([logEntry(['KEYS', '*'], 'app')]) };
+    const b = { call: jest.fn().mockResolvedValue([logEntry(['OBJECT', 'FREQ', 'k'], 'app')]) };
+
+    const entries = await collectNodeCommandEntries([a, b] as any, true);
+
+    expect(entries).toEqual([
+      { command: ['KEYS', '*'], clientName: 'app' },
+      { command: ['OBJECT', 'FREQ', 'k'], clientName: 'app' },
+    ]);
+    expect(a.call).toHaveBeenCalledWith('COMMANDLOG', 'GET', 200, 'slow');
+  });
+
+  it('falls back to SLOWLOG per node when COMMANDLOG fails or is unsupported', async () => {
+    const a = {
+      call: jest.fn().mockImplementation(async (cmd: string) => {
+        if (cmd === 'COMMANDLOG') throw new Error('unknown command');
+        return [logEntry(['CLIENT', 'KILL', 'ID', '1'], 'app')];
+      }),
+    };
+
+    const entries = await collectNodeCommandEntries([a] as any, true);
+
+    expect(entries).toEqual([{ command: ['CLIENT', 'KILL', 'ID', '1'], clientName: 'app' }]);
+    expect(a.call).toHaveBeenCalledWith('SLOWLOG', 'GET', 128);
+  });
+
+  it('skips a node whose logs cannot be read', async () => {
+    const a = { call: jest.fn().mockRejectedValue(new Error('NOPERM')) };
+    const b = { call: jest.fn().mockResolvedValue([logEntry(['KEYS', '*'], 'app')]) };
+
+    expect(await collectNodeCommandEntries([a, b] as any, false)).toEqual([{ command: ['KEYS', '*'], clientName: 'app' }]);
   });
 });

@@ -7,7 +7,7 @@ import type { AnalysisJob } from './analysis/analysis-job';
 import { sampleKeyTypes } from './analysis/type-sampler';
 import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
-import { collectCommandAnalysis } from './analysis/commandlog-analyzer';
+import { collectCommandAnalysis, collectNodeCommandEntries } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
 import {
   checkServerlessReadiness,
@@ -552,6 +552,9 @@ export class MigrationService {
       }
 
       if (checkServerless) {
+        const commandEntries = isCluster && scanClients.length > 0
+          ? await collectNodeCommandEntries(scanClients, capabilities.hasCommandLog)
+          : commandLog.entries;
         const probes = await probeServerlessFacts(
           scanClients.length > 0 ? scanClients : [adapter.getClient()],
           masterMemorySections,
@@ -566,7 +569,7 @@ export class MigrationService {
           databasesBeyondZero,
           functionPresence,
           clusterMasters,
-          commandEntries: commandLog.entries,
+          commandEntries,
           ...probes,
         }));
       }
