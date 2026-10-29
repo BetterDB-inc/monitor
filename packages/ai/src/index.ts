@@ -47,6 +47,9 @@ export type {
   DescribedEmbedFn,
   EmbedderDescriptor,
   EmbeddingModelChangeAction,
+  EntryAnalyticsOptions,
+  EntryAnalyticsResult,
+  EntrySummary,
   IndexInfo,
   InvalidateResult,
   JudgeOptions,
@@ -54,6 +57,7 @@ export type {
   SemanticCacheLogger,
   SemanticCacheOptions,
   ThresholdEffectivenessResult,
+  UsageTrackingOptions,
 } from '@betterdb/semantic-cache';
 
 export {

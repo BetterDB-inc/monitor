@@ -25,11 +25,13 @@ function getMasterNodes(client: Valkey): Valkey[] {
  *
  * This is the single place in the codebase that handles the cluster vs
  * standalone SCAN divergence.
+ *
+ * Return false from onKeys to stop scanning (remaining cursors and nodes are skipped).
  */
 export async function clusterScan(
   client: Valkey,
   pattern: string,
-  onKeys: (keys: string[], nodeClient: Valkey) => Promise<void>,
+  onKeys: (keys: string[], nodeClient: Valkey) => Promise<void | boolean> | void | boolean,
   count: number = 100,
 ): Promise<void> {
   const nodes = getMasterNodes(client);
@@ -38,7 +40,9 @@ export async function clusterScan(
     throw new ValkeyCommandError('SCAN', new Error('cluster has no master nodes visible'));
   }
 
+  let stopped = false;
   for (const nodeClient of nodes) {
+    if (stopped) break;
     let cursor = '0';
     do {
       let scanResult: [string, string[]];
@@ -51,7 +55,10 @@ export async function clusterScan(
       const keys = scanResult[1];
 
       if (keys.length > 0) {
-        await onKeys(keys, nodeClient);
+        if ((await onKeys(keys, nodeClient)) === false) {
+          stopped = true;
+          break;
+        }
       }
     } while (cursor !== '0');
   }

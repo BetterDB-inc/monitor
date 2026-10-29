@@ -184,6 +184,7 @@ Forward `signal` to your LLM client so a slow judge call is cancelled on timeout
 | `normalizer` | `BinaryNormalizer` | `defaultNormalizer` | Binary content normalizer |
 | `embeddingCache.enabled` | `boolean` | `true` | Cache computed embeddings in Valkey |
 | `embeddingCache.ttl` | `number` | `86400` | Embedding cache TTL (seconds) |
+| `usageTracking.enabled` | `boolean` | `true` | Record per-entry hit counters on each hit. Set `false` for pure-read hits (replicas, blocked scripting, write-sensitive deployments) |
 | `telemetry.tracerName` | `string` | `'@betterdb/semantic-cache'` | OTel tracer name |
 | `telemetry.metricsPrefix` | `string` | `'semantic_cache'` | Prometheus prefix |
 | `telemetry.registry` | `Registry` | default | prom-client Registry |
@@ -364,6 +365,123 @@ Stops the analytics client, cancels the stats snapshot timer, and disposes the d
 ### `cache.dispose()`
 
 Graceful shutdown of the discovery layer for in-process caches without destroying data. Stops the discovery heartbeat and deletes the heartbeat key; does not touch the index or entries.
+
+### `cache.entryAnalytics(options?)`
+
+Per-entry usage analytics: how many stored entries have ever been returned as a hit, which entries are hottest, and how many are cold (never hit, or not accessed within `coldAfterDays`). Use this to find dead-weight entries when sizing TTLs and keeping the HNSW index lean.
+
+```typescript
+const a = await cache.entryAnalytics({ topN: 5, coldAfterDays: 14 });
+console.log(`${a.neverHitCount} of ${a.totalEntries} entries have never been hit`);
+console.log('hottest:', a.topEntries.map((e) => `${e.key} (${e.hitCount})`));
+```
+
+Returns `totalEntries`, `neverHitCount`, `hitAtLeastOnceCount`, `coldEntryCount`,
+`topEntries` (entries hit at least once, sorted by `hitCount` descending, capped
+at `topN`), the `coldAfterDays` value applied, and `sampled`.
+
+When the FT index was created with the `hit_count` / `last_accessed_at` sortable
+fields, counts use server-side `FT.SEARCH` range queries with `LIMIT 0 0` (exact,
+no materialization) and `topEntries` uses `@hit_count:[1 +inf]` with
+`SORTBY hit_count DESC LIMIT 0 topN`. Valkey Search rejects a bare `*` query, so
+the total is counted as `@inserted_at:[-inf +inf]` — every writer sets
+`inserted_at`. `sampled` is `false`.
+
+Older indexes fall back to `SCAN` + pipelined `HMGET` (fetching only the 5
+analytics fields). The scan stops at 10,000 entries; when it does, `sampled` is
+`true` and the counts describe the entries scanned first (the first master on a
+cluster), not the whole cache. Rebuild the index to enable exact counts — see
+below.
+
+Entries written or hit only through the Python SDK (`betterdb-semantic-cache`)
+do not record `hit_count` / `last_accessed_at` yet, so they count as never-hit
+and cold. Parity is tracked in
+[#541](https://github.com/BetterDB-inc/monitor/issues/541).
+
+#### Upgrading an index created before 0.14.0
+
+Drop the index **without** `DD` and re-initialize. Valkey Search does not
+delete documents on `FT.DROPINDEX`, so every cached entry and embedding stays
+in place; `initialize()` recreates the index with the new schema and Valkey
+Search backfills it from the existing hashes.
+
+```typescript
+await client.call('FT.DROPINDEX', '<indexName>'); // no DD: keeps entries
+await cache.initialize();                        // recreates index, backfills
+```
+
+- Run this on a `SemanticCache` instance that has **not** been initialized
+  yet — `initialize()` is memoized, so calling it again on an initialized
+  instance does nothing. A one-off script or the start of a deploy works.
+- The embedding-model check reads the discovery marker, not the index, so
+  dropping the index does not make `initialize()` treat existing entries as an
+  embedding-model mismatch.
+- Until the index is recreated, `check()` from other processes fails with
+  "index not found"; until the backfill finishes, lookups can miss entries
+  that are still being indexed.
+- Existing entries have no `hit_count` or `last_accessed_at` field until their
+  first hit after the upgrade (the usage script then creates them). Until then
+  they count as never-hit and cold on both analytics paths — the `FT.SEARCH`
+  counts are complements (`total − hit-at-least-once`, `total − warm`), so a
+  hash missing the field is counted exactly as the `SCAN` fallback counts it.
+
+> **Warning:** `flush()` deletes every cached entry and embedding — only use
+> it if you are fine with a cold cache. `flush()` + `initialize()` also
+> rebuilds the schema, but starts from an empty cache.
+
+#### Performance & tradeoffs
+
+Each genuine cache hit runs a small Lua script (sent as `EVALSHA`, falling back
+to `EVAL` once if the server has not cached it) that, only if the entry still
+exists, bumps `hit_count`, sets `last_accessed_at` and refreshes the TTL if
+configured. `check()` and `checkBatch()` do not wait for it: the write is sent
+in the background and adds no round trip to the hit. `shutdown()` waits for
+in-flight writes. A hit on an entry that was deleted or expired in the meantime
+is a no-op, so tracking never recreates it. These writes are best-effort and not
+atomic: failures are logged once per batch via `logger.warn` and never fail the
+hit.
+
+The cost is on the server. Every write to an indexed hash makes Valkey Search
+re-index the document, including its TEXT fields (`prompt`, `response`). On
+valkey-bundle 9.1 one usage write costs roughly 1–2.5 ms of server time,
+versus ~70 µs on an unindexed hash, and a burst of tracked hits delays other
+commands on the same server while it runs.
+
+- **With `defaultTtl` set** this is cost-neutral: before 0.14.0 every hit
+  already sent an `EXPIRE`, which Valkey Search re-indexes the same way. The
+  usage script replaces that `EXPIRE`.
+- **Without `defaultTtl`** a hit used to be a pure read and is now a server-side
+  write. At high hit QPS that is real main-thread time, plus AOF and
+  replication traffic. If that matters for your deployment, set
+  `usageTracking: { enabled: false }` (below).
+
+#### Disabling usage tracking
+
+Usage tracking is on by default. Turn it off to make cache hits pure reads again:
+
+```typescript
+const cache = new SemanticCache({
+  client,
+  embedFn,
+  name: 'my_cache',
+  usageTracking: { enabled: false },
+});
+```
+
+With tracking disabled, a hit sends no usage script. If `defaultTtl` is set, the
+sliding TTL is still refreshed with a plain `EXPIRE` (the pre-0.14.0
+behaviour). Otherwise a hit performs no write at all. `entryAnalytics()` still
+works, but counters stop advancing.
+
+Disable it when:
+
+- **You read from replicas.** The usage script is a write and fails with
+  `READONLY` on a replica. The hit is still returned, but every batch logs a warning and no
+  counters are recorded. (Note that `EXPIRE` with `defaultTtl` is also a write
+  and fails on a replica the same way it did before 0.14.0.)
+- **Scripting is blocked** by your server, proxy, or ACL.
+- **You have no `defaultTtl` and high hit QPS**, and the per-hit re-index cost
+  described above is unacceptable.
 
 ### `cache.thresholdEffectiveness(options?)`
 
