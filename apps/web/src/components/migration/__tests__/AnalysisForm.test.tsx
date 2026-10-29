@@ -234,6 +234,92 @@ describe('AnalysisForm', () => {
     expect(onStart).toHaveBeenCalledWith('analysis-1');
   });
 
+  it('offers a check against ElastiCache Serverless in the target picker', async () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+
+    expect(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    ).toBeEnabled();
+  });
+
+  it('starts a standalone ElastiCache Serverless check without a target connection', async () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    const onStart = vi.fn();
+    vi.mocked(fetchApi).mockResolvedValue({ id: 'analysis-2' });
+
+    renderForm(onStart);
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+
+    expect(await screen.findByText('ElastiCache Serverless')).toBeInTheDocument();
+    expect(screen.getByText(/readiness check/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+    await waitFor(() => {
+      expect(fetchApi).toHaveBeenCalledWith('/migration/analysis', {
+        method: 'POST',
+        body: JSON.stringify({
+          sourceConnectionId: 'src',
+          targetProfile: 'elasticache_serverless',
+          scanSampleSize: 10000,
+        }),
+      });
+    });
+    expect(onStart).toHaveBeenCalledWith('analysis-2');
+  });
+
+  it('replaces the Serverless check when a target connection is picked', async () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /change target/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /valkey-prod-01/i }));
+
+    expect(await screen.findByText('Redis 7.2 → Valkey 8.1')).toBeInTheDocument();
+    expect(screen.queryByText('ElastiCache Serverless')).not.toBeInTheDocument();
+  });
+
+  it('clears the Serverless check back to an empty target slot', async () => {
+    setConnections([SOURCE, TARGET], SOURCE);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /clear target/i }));
+
+    expect(screen.queryByText('ElastiCache Serverless')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+  });
+
+  it('blocks a Serverless check on a source that cannot be analysed', async () => {
+    const tunneled = conn({
+      id: 'tun',
+      name: 'tunneled-cache',
+      sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+    } as Partial<Connection> & Pick<Connection, 'id' | 'name'>);
+    setConnections([tunneled, TARGET], tunneled);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/ssh tunnel/i);
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+  });
+
   it('rewrites an offline-connection failure into something actionable', async () => {
     setConnections([SOURCE, TARGET], SOURCE);
     vi.mocked(fetchApi).mockRejectedValue(new Error('Stream isnt writeable'));

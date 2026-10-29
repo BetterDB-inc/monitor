@@ -17,6 +17,8 @@ import {
   isPlanComplete,
   planBlock,
   preflightNotes,
+  serverlessCheckBlock,
+  serverlessCheckNotes,
   usesSshTunnel,
 } from './analysis-form/preflight';
 
@@ -36,10 +38,12 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
   const {
     sourceId,
     targetId,
+    targetProfile,
     sourceChosen,
     scanSampleSize,
     chooseSource,
     chooseTarget,
+    chooseTargetProfile,
     clearSource,
     clearTarget,
     setScanSampleSize,
@@ -65,10 +69,11 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
 
   const source = findConnection(sourceId);
   const target = findConnection(targetId);
+  const serverlessCheck = targetProfile !== null;
   const direction = describeDirection(source, target);
-  const block = planBlock(source, target);
-  const notes = preflightNotes(source, target);
-  const complete = isPlanComplete(source, target);
+  const block = serverlessCheck ? serverlessCheckBlock(source) : planBlock(source, target);
+  const notes = serverlessCheck ? serverlessCheckNotes(source) : preflightNotes(source, target);
+  const complete = serverlessCheck ? source !== null : isPlanComplete(source, target);
   const isPrefilled =
     source !== null && source.id === currentConnection?.id && sourceChosen === false;
 
@@ -108,7 +113,7 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
   };
 
   const handleSubmit = async () => {
-    if (source === null || target === null || block !== null) {
+    if (source === null || complete === false || block !== null) {
       return;
     }
     setLoading(true);
@@ -116,18 +121,18 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
     try {
       const res = await fetchApi<StartAnalysisResponse>('/migration/analysis', {
         method: 'POST',
-        body: JSON.stringify({
-          sourceConnectionId: source.id,
-          targetConnectionId: target.id,
-          scanSampleSize,
-        }),
+        body: JSON.stringify(
+          target === null
+            ? { sourceConnectionId: source.id, targetProfile, scanSampleSize }
+            : { sourceConnectionId: source.id, targetConnectionId: target.id, scanSampleSize },
+        ),
       });
       onStart(res.id);
     } catch (err) {
       const raw = err instanceof Error ? err.message : 'Failed to start analysis';
       if (/writeable|enableOfflineQueue|offline/i.test(raw)) {
         setError(
-          `Could not connect to ${target.name} — the instance appears to be offline. Check the connection before running analysis.`,
+          `Could not connect to ${(target ?? source).name} — the instance appears to be offline. Check the connection before running analysis.`,
         );
       } else {
         setError(raw);
@@ -152,10 +157,15 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
           }}
           onClear={clearSource}
         />
-        <MigrationPath direction={direction} endpointsChosen={source !== null && target !== null} />
+        <MigrationPath
+          direction={direction}
+          endpointsChosen={source !== null && (target !== null || serverlessCheck)}
+          serverlessCheck={serverlessCheck}
+        />
         <EndpointPanel
           role="target"
           connection={target}
+          serverlessCheck={serverlessCheck}
           isPrefilled={false}
           selectableCount={countSelectable('target', sourceId)}
           offlineCount={offlineCount}
@@ -237,6 +247,10 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
         selectedId={picking === 'source' ? sourceId : targetId}
         excludeId={picking === 'source' ? targetId : sourceId}
         onSelect={handleSelect}
+        onSelectServerless={() => {
+          chooseTargetProfile('elasticache_serverless');
+        }}
+        serverlessSelected={serverlessCheck}
         onOpenChange={(open) => {
           if (open === false) {
             setPicking(null);

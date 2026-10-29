@@ -146,19 +146,38 @@ export function planBlock(source: Connection | null, target: Connection | null):
     return 'Source and target must be different connections.';
   }
 
-  if (from.connectionType === 'agent' || to.connectionType === 'agent') {
+  return endpointsBlock([from, to]);
+}
+
+export function serverlessCheckBlock(source: Connection | null): string | null {
+  if (source === null) {
+    return null;
+  }
+  return endpointsBlock([source]);
+}
+
+function endpointsBlock(endpoints: Connection[]): string | null {
+  if (
+    endpoints.some((endpoint) => {
+      return endpoint.connectionType === 'agent';
+    })
+  ) {
     return AGENT_BLOCK_MESSAGE;
   }
 
-  if (from.connectionType === 'external' || to.connectionType === 'external') {
+  if (
+    endpoints.some((endpoint) => {
+      return endpoint.connectionType === 'external';
+    })
+  ) {
     return EXTERNAL_BLOCK_MESSAGE;
   }
 
-  if (isClusterChild(from) || isClusterChild(to)) {
+  if (endpoints.some(isClusterChild)) {
     return CLUSTER_MEMBER_BLOCK_MESSAGE;
   }
 
-  if (usesSshTunnel(from) || usesSshTunnel(to)) {
+  if (endpoints.some(usesSshTunnel)) {
     return SSH_TUNNEL_BLOCK_MESSAGE;
   }
 
@@ -246,6 +265,37 @@ export function preflightNotes(
     id: 'read-only',
     tone: 'info',
     message: 'Analysis samples keys with SCAN. Neither instance is modified at this step.',
+  });
+
+  return notes;
+}
+
+export function serverlessCheckNotes(source: Connection | null): PreflightNote[] {
+  if (source === null) {
+    return [];
+  }
+
+  const notes: PreflightNote[] = [];
+
+  if (source.isConnected === false) {
+    notes.push({
+      id: 'source-offline',
+      tone: 'warning',
+      message: `${source.name} appears to be offline and may refuse the connection.`,
+    });
+  }
+
+  notes.push({
+    id: 'serverless-check',
+    tone: 'info',
+    message:
+      'Checks the source against ElastiCache Serverless limits. No target connection is needed, and the result does not unlock a migration.',
+  });
+
+  notes.push({
+    id: 'read-only',
+    tone: 'info',
+    message: 'Analysis samples keys with SCAN. The source is not modified at this step.',
   });
 
   return notes;

@@ -3,6 +3,7 @@ import type { MigrationDirection } from './preflight';
 interface Props {
   direction: MigrationDirection | null;
   endpointsChosen: boolean;
+  serverlessCheck?: boolean;
 }
 
 const QUALIFIER: Record<MigrationDirection['kind'], string> = {
@@ -13,7 +14,7 @@ const QUALIFIER: Record<MigrationDirection['kind'], string> = {
   identical: 'same engine and version',
 };
 
-export function MigrationPath({ direction, endpointsChosen }: Props) {
+export function MigrationPath({ direction, endpointsChosen, serverlessCheck = false }: Props) {
   if (direction === null && endpointsChosen === false) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 px-4">
@@ -26,7 +27,7 @@ export function MigrationPath({ direction, endpointsChosen }: Props) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 px-4">
       <span className="text-center text-xs font-semibold">
-        {direction === null ? 'Migration path' : direction.label}
+        {serverlessCheck ? 'Serverless limits' : direction === null ? 'Migration path' : direction.label}
       </span>
       <div className="relative h-px w-full bg-gradient-to-r from-border via-primary to-border">
         <span
@@ -35,7 +36,11 @@ export function MigrationPath({ direction, endpointsChosen }: Props) {
         />
       </div>
       <span className="text-center text-xs text-muted-foreground">
-        {direction === null ? 'engine details unavailable' : QUALIFIER[direction.kind]}
+        {serverlessCheck
+          ? 'source checked only'
+          : direction === null
+            ? 'engine details unavailable'
+            : QUALIFIER[direction.kind]}
       </span>
     </div>
   );
