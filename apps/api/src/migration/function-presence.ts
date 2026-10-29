@@ -25,6 +25,13 @@ interface ClusterProbeConfig {
   tls?: boolean;
 }
 
+const UNREACHABLE_FLAGS = ['fail', 'noaddr', 'handshake'];
+
+export function isScannableMaster(node: { flags: string[]; slots: number[][] }): boolean {
+  if (node.slots.length > 0) return true;
+  return !node.flags.some((flag) => UNREACHABLE_FLAGS.includes(flag));
+}
+
 /** Parse a cluster-bus address ("host:port@bus", IPv6-aware) into host/port. */
 export function parseNodeAddress(address: string | undefined): { host: string; port: number } {
   const addrPart = address?.split('@')[0] ?? '';

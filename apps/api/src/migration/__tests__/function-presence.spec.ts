@@ -1,4 +1,4 @@
-import { probeSourceFunctionsClusterAware } from '../function-presence';
+import { isScannableMaster, probeSourceFunctionsClusterAware } from '../function-presence';
 
 // Capture constructed clients so each master can be given its own FUNCTION LIST reply.
 const constructed: Array<{ host: string; port: number; call: jest.Mock; connect: jest.Mock; quit: jest.Mock }> = [];
@@ -90,5 +90,25 @@ describe('probeSourceFunctionsClusterAware', () => {
       getClusterNodes: jest.fn().mockResolvedValue([]), // no masters discovered
     };
     expect(await probeSourceFunctionsClusterAware(adapter, {}, true)).toBe('present');
+  });
+});
+
+describe('isScannableMaster', () => {
+  const slots = [[0, 100]];
+
+  it('scans a healthy master', () => {
+    expect(isScannableMaster({ flags: ['master'], slots })).toBe(true);
+  });
+
+  it.each(['fail', 'noaddr', 'handshake'])('skips a %s master that owns no slots', (flag) => {
+    expect(isScannableMaster({ flags: ['master', flag], slots: [] })).toBe(false);
+  });
+
+  it('still scans a fail master that owns slots', () => {
+    expect(isScannableMaster({ flags: ['master', 'fail'], slots })).toBe(true);
+  });
+
+  it('scans a fail? master without slots', () => {
+    expect(isScannableMaster({ flags: ['master', 'fail?'], slots: [] })).toBe(true);
   });
 });

@@ -17,7 +17,7 @@ import {
   saveAnalysisVerdict,
 } from './analysis/analysis-verdict-store';
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
-import { parseNodeAddress } from './function-presence';
+import { isScannableMaster, parseNodeAddress } from './function-presence';
 import { assertLiveMigrationPair } from './live-connections';
 
 @Injectable()
@@ -231,7 +231,7 @@ export class MigrationService {
           importingSlots: m.importingSlots?.length ?? 0,
         }));
 
-        for (const master of masters) {
+        for (const master of masters.filter(isScannableMaster)) {
           // Parse 'host:port@clusterport' (IPv6-aware) via the shared helper.
           const { host, port } = parseNodeAddress(master.address);
           if (!host || isNaN(port)) continue;
