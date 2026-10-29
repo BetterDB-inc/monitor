@@ -128,6 +128,7 @@ export interface SessionDetail {
   truncated: boolean;
   failedNodes: number;
   missingKeys: number;
+  erroredKeys: number;
   touchesKeys: boolean;
 }
 

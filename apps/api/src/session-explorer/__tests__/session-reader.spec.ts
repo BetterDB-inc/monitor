@@ -617,7 +617,7 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(fakeDb(client), ['k1', 'k2']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['k2']);
-    expect(result.missingKeys).toBe(1);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
   });
 
   it('records memory usage as bytes', async () => {
@@ -789,7 +789,7 @@ describe('readSessionKeys', () => {
 
     expect(result.keys.map((k) => k.key)).toEqual(['a']);
     expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 2, goneKeys: 1 });
-    expect(result.missingKeys).toBe(1);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
   });
 
   it('still measures the keys left unread once the byte budget is spent', async () => {

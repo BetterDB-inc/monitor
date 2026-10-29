@@ -33,6 +33,7 @@ export interface SessionKeysRead {
   truncated: boolean;
   failed: Set<PrimaryRoute>;
   missingKeys: number;
+  erroredKeys: number;
   touchesKeys: boolean;
   totals: SessionTotals;
 }
@@ -604,6 +605,7 @@ interface ReadState {
   remaining: number;
   exhausted: boolean;
   missing: number;
+  errored: number;
   moved: Set<PrimaryRoute>;
   captured: Map<string, CapturedKey>;
 }
@@ -667,7 +669,7 @@ async function readNode(
         });
       } catch (err) {
         if (isMoved(err)) state.moved.add(route);
-        else state.missing++;
+        else state.errored++;
       }
     }
   }
@@ -692,6 +694,7 @@ export async function readSessionKeysOn(
     remaining: opts.totalByteCap,
     exhausted: false,
     missing: 0,
+    errored: 0,
     moved: new Set(),
     captured: new Map(),
   };
@@ -720,7 +723,8 @@ export async function readSessionKeysOn(
         errored.length +
         moved.length +
         located.filter((at) => at.memory === null).length;
-      state.missing += missingSelected + erroredSelected;
+      state.missing += missingSelected;
+      state.errored += erroredSelected;
       if (moved.some(isSelected)) state.moved.add(route);
       if (!state.exhausted) {
         await readNode(route, located.filter((at) => isSelected(at.key)), opts, state);
@@ -743,6 +747,7 @@ export async function readSessionKeysOn(
     truncated: state.exhausted,
     failed: union(failed, state.moved),
     missingKeys: state.missing,
+    erroredKeys: state.errored,
     touchesKeys: primaries.touchesKeys,
     totals: {
       memoryBytes: totals.memoryBytes,

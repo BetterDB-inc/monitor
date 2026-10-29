@@ -21,6 +21,9 @@ function incompleteReasons(detail: SessionDetail): string[] {
   if (detail.missingKeys > 0) {
     reasons.push(`${plural(detail.missingKeys, 'key')} vanished before it could be read`);
   }
+  if (detail.erroredKeys > 0) {
+    reasons.push(`${plural(detail.erroredKeys, 'key')} could not be read`);
+  }
   return reasons;
 }
 

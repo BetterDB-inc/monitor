@@ -63,6 +63,7 @@ const readOf = (overrides: Partial<SessionKeysRead> = {}): SessionKeysRead => ({
   truncated: false,
   failed: failedRoutes(0),
   missingKeys: 0,
+  erroredKeys: 0,
   touchesKeys: false,
   totals: { memoryBytes: 64, unmeasuredKeys: 0, goneKeys: 0, ttlMs: 5000 },
   ...overrides,
@@ -151,6 +152,15 @@ describe('SessionExplorerService.getSession', () => {
       skippedKeys: 1,
       totalMemoryBytes: 300,
       unmeasuredKeys: 0,
+    });
+  });
+
+  it('reports keys whose read failed apart from keys that vanished', async () => {
+    read.mockResolvedValue(readOf({ erroredKeys: 1 }));
+    expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
+      complete: false,
+      missingKeys: 0,
+      erroredKeys: 1,
     });
   });
 

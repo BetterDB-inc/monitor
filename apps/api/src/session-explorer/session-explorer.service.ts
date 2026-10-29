@@ -225,6 +225,7 @@ export class SessionExplorerService {
       !truncated &&
       failedNodes === 0 &&
       read.missingKeys === 0 &&
+      read.erroredKeys === 0 &&
       read.keys.every((k) => !k.truncated);
 
     return {
@@ -249,6 +250,7 @@ export class SessionExplorerService {
         truncated,
         failedNodes,
         missingKeys: read.missingKeys,
+        erroredKeys: read.erroredKeys,
         touchesKeys: read.touchesKeys,
       },
     };

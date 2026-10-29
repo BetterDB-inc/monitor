@@ -89,6 +89,18 @@ describe('SessionDetailPanel', () => {
     expect(screen.queryByText(/latest checkpoint/)).toBeNull();
   });
 
+  it('says keys could not be read apart from keys that vanished', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ erroredKeys: 2, missingKeys: 1, complete: false })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/2 keys could not be read/)).toBeTruthy();
+    expect(screen.getByText(/1 key vanished before it could be read/)).toBeTruthy();
+  });
+
   it('shows pending interrupts as requests for input after the messages', () => {
     render(
       <SessionDetailPanel
