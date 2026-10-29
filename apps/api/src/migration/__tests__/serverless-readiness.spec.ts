@@ -24,6 +24,7 @@ function facts(overrides: Partial<ServerlessReadinessFacts> = {}): ServerlessRea
     clusterMasterCount: 2,
     masterUsedMemory: [1 * GIB, 1 * GIB],
     sampledKeyBytes: [6, 6],
+    databasesBeyondZero: [],
     missingReplicationCommands: [],
     clusterMasters: fullCoverage(),
     cachedScripts: 0,
@@ -63,6 +64,16 @@ describe('checkServerlessReadiness', () => {
       expect(issues[0].detail).toMatch(/\b1\b/);
     });
 
+  });
+
+  describe('databases beyond 0', () => {
+    it('blocks when keys live outside db0', () => {
+      const issues = checkServerlessReadiness(facts({ databasesBeyondZero: ['db3', 'db7'] }));
+      expect(issues).toHaveLength(1);
+      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].awsToolOnly).toBeUndefined();
+      expect(issues[0].detail).toContain('db3, db7');
+    });
   });
 
   describe('memory per master', () => {

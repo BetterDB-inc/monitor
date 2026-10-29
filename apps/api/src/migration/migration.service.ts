@@ -169,10 +169,12 @@ export class MigrationService {
 
       // Parse total keys from keyspace section
       let totalKeys = 0;
+      const databasesBeyondZero: string[] = [];
       for (const [key, val] of Object.entries(keyspaceSection)) {
         if (key.startsWith('db') && typeof val === 'string') {
           const match = val.match(/keys=(\d+)/);
           if (match) totalKeys += parseInt(match[1], 10);
+          if (match && key !== 'db0' && parseInt(match[1], 10) > 0) databasesBeyondZero.push(key);
         }
       }
       job.result.totalKeys = totalKeys;
@@ -538,6 +540,7 @@ export class MigrationService {
           clusterMasterCount: slotOwningMasterCount,
           masterUsedMemory,
           sampledKeyBytes: sampledKeys.map(k => k.keyBytes),
+          databasesBeyondZero,
           clusterMasters,
           commandEntries: commandLog.entries,
           ...probes,

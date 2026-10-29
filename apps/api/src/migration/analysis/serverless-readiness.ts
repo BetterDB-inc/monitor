@@ -98,6 +98,7 @@ export interface ServerlessReadinessFacts {
   clusterMasterCount: number;
   masterUsedMemory: number[];
   sampledKeyBytes: number[];
+  databasesBeyondZero: string[];
   missingReplicationCommands: string[] | null;
   clusterMasters: ServerlessClusterMaster[] | null;
   cachedScripts: number | null;
@@ -209,6 +210,17 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
         `${longKeys.length} key name${longKeys.length === 1 ? '' : 's'} in the sample exceed${longKeys.length === 1 ? 's' : ''} ` +
         'the 4 KiB ElastiCache Serverless key name limit. AWS migration fails on the initial load and cannot be restarted. ' +
         'Rename these keys before migrating; the full keyspace may hold more than the sample found.',
+    });
+  }
+
+  if (facts.databasesBeyondZero.length > 0) {
+    issues.push({
+      severity: 'blocking',
+      category: CATEGORY,
+      title: 'Keys outside database 0',
+      detail:
+        `The source holds keys in ${facts.databasesBeyondZero.join(', ')}. ElastiCache Serverless runs in cluster mode and serves db0 only, ` +
+        'so these keys cannot be migrated as they are.',
     });
   }
 

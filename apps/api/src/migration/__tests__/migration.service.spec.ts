@@ -260,6 +260,27 @@ describe('MigrationService ElastiCache Serverless readiness', () => {
     expect(job.targetProfile).toBe('elasticache_serverless');
   });
 
+  it('flags keys outside db0 in a profile-only Serverless check', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0', db3: 'keys=5,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '0' },
+      server: {},
+      persistence: {},
+    });
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({
+      sourceConnectionId: 'conn-1',
+      targetProfile: 'elasticache_serverless',
+    });
+    const job = await waitForTerminal(service, id);
+
+    expect(serverlessCategory(job).map(i => i.title)).toContain('Keys outside database 0');
+  });
+
   it('adds no serverless readiness issues for an ordinary target', async () => {
     const registry = createMockRegistry();
     readyReplicationCommands(registry);
