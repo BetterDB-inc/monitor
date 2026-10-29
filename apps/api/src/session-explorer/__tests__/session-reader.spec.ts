@@ -669,7 +669,7 @@ describe('readSessionKeys', () => {
   it('is not truncated when everything fits the budget', async () => {
     const client = new FakeValkey(storeOf({ k: { type: 'string', value: 'v' } }));
     const result = await readSessionKeys(fakeDb(client), ['k']);
-    expect(result).toMatchObject({ truncated: false, failedNodes: 0, missingKeys: 0 });
+    expect(result).toMatchObject({ truncated: false, failed: new Set(), missingKeys: 0 });
   });
 
   it('routes each key to the primary that owns its slot', async () => {
@@ -702,7 +702,7 @@ describe('readSessionKeys', () => {
 
     expect(result.keys.map((k) => k.key)).toEqual(['b']);
     expect(result.missingKeys).toBe(0);
-    expect(result.failedNodes).toBe(1);
+    expect(result.failed.size).toBe(1);
   });
 
   it('reports a key that turns MOVED while its value is read as a node issue', async () => {
@@ -717,7 +717,7 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'b']);
 
     expect(result.missingKeys).toBe(0);
-    expect(result.failedNodes).toBe(1);
+    expect(result.failed.size).toBe(1);
   });
 
   it('reports keys owned by an unreachable primary', async () => {
@@ -732,7 +732,8 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'b']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['a']);
-    expect(result).toMatchObject({ failedNodes: 1, missingKeys: 0 });
+    expect(result.failed.size).toBe(1);
+    expect(result.missingKeys).toBe(0);
   });
 
   it('does not count an unreachable primary that owns none of the keys', async () => {
@@ -742,7 +743,10 @@ describe('readSessionKeys', () => {
     const db = clusterOf(
       { 7001: nodeA, 7002: nodeB },
       {
-        7001: [[calculateSlot('a'), calculateSlot('a')]],
+        7001: [
+          [calculateSlot('a'), calculateSlot('a')],
+          [calculateSlot('gone'), calculateSlot('gone')],
+        ],
         7002: [[calculateSlot('b'), calculateSlot('b')]],
       },
     );
@@ -750,6 +754,18 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'gone']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['a']);
-    expect(result).toMatchObject({ failedNodes: 0, missingKeys: 1 });
+    expect(result.failed.size).toBe(0);
+    expect(result.missingKeys).toBe(1);
+  });
+
+  it('reports a key whose slot no primary owns as a failure, not a missing key', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1' } }));
+    const db = clusterOf({ 7001: nodeA }, { 7001: [[calculateSlot('a'), calculateSlot('a')]] });
+
+    const result = await readSessionKeys(db, ['a', 'gone']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.failed.size).toBe(1);
+    expect(result.missingKeys).toBe(0);
   });
 });

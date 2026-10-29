@@ -21,7 +21,14 @@ import { validateNamespaceInput } from './namespace-validation';
 import { getPreset, parseSessionKeys } from './presets/registry';
 import { estimateTokens } from './presets/text';
 import type { PresetDefinition } from './presets/types';
-import { PrimaryClients, withPrimaries } from './primary-nodes';
+import {
+  PrimaryClients,
+  PrimaryRoute,
+  readable,
+  union,
+  unreadable,
+  withPrimaries,
+} from './primary-nodes';
 import { keysForSessionOn, scanSessions } from './session-scanner';
 import { readSessionKeysOn } from './session-reader';
 
@@ -45,16 +52,17 @@ const minPositive = (values: number[]): number | null => {
 };
 
 async function sampleSessionKey(
-  { clients, failed }: PrimaryClients,
+  primaries: PrimaryClients,
   pattern: string,
   preset: PresetDefinition,
-): Promise<{ sampleKey: string | null; exhausted: boolean; failedNodes: number }> {
+): Promise<{ sampleKey: string | null; exhausted: boolean; failed: Set<PrimaryRoute> }> {
   let fallback: string | null = null;
-  let failedNodes = failed;
-  let searchedAll = failed === 0;
+  const failed = unreadable(primaries);
+  let searchedAll = failed.size === 0;
   let lastError: unknown;
   let succeeded = 0;
-  for (const client of clients) {
+  for (const route of readable(primaries)) {
+    const { client } = route;
     let cursor = '0';
     let pages = 0;
     try {
@@ -69,19 +77,19 @@ async function sampleSessionKey(
         cursor = next;
         pages++;
         const accepted = page.find((k) => preset.sessionIdOf(k) !== null);
-        if (accepted !== undefined) return { sampleKey: accepted, exhausted: false, failedNodes };
+        if (accepted !== undefined) return { sampleKey: accepted, exhausted: false, failed };
         fallback ??= page[0] ?? null;
       } while (cursor !== '0' && pages < PREVIEW_SCAN_PAGES);
       succeeded++;
     } catch (err) {
       lastError = err;
-      failedNodes++;
+      failed.add(route);
       cursor = '';
     }
     if (cursor !== '0') searchedAll = false;
   }
   if (succeeded === 0 && fallback === null && lastError !== undefined) throw lastError;
-  return { sampleKey: fallback, exhausted: searchedAll, failedNodes };
+  return { sampleKey: fallback, exhausted: searchedAll, failed };
 }
 
 @Injectable()
@@ -107,7 +115,11 @@ export class SessionExplorerService {
     });
   }
 
-  async updateNamespace(connectionId: string, id: string, body: unknown): Promise<SessionNamespace> {
+  async updateNamespace(
+    connectionId: string,
+    id: string,
+    body: unknown,
+  ): Promise<SessionNamespace> {
     const input = this.validate(body);
     const existing = await this.namespace(connectionId, id);
     return this.storage.saveSessionNamespace({
@@ -127,13 +139,19 @@ export class SessionExplorerService {
     const input = this.validate(body);
     const preset = this.presetOf(input);
     return withPrimaries(this.registry.get(connectionId), async (primaries) => {
-      const { sampleKey, exhausted, failedNodes } = await sampleSessionKey(
+      const { sampleKey, exhausted, failed } = await sampleSessionKey(
         primaries,
         input.pattern,
         preset,
       );
       if (sampleKey === null) {
-        return { sampleKey: null, view: null, exhausted, failedNodes, touchesKeys: false };
+        return {
+          sampleKey: null,
+          view: null,
+          exhausted,
+          failedNodes: failed.size,
+          touchesKeys: false,
+        };
       }
       const read = await readSessionKeysOn(primaries, [sampleKey]);
       const captured = read.keys[0];
@@ -141,7 +159,7 @@ export class SessionExplorerService {
         sampleKey,
         view: captured ? preset.parseKey(captured) : null,
         exhausted,
-        failedNodes: Math.max(failedNodes, read.failedNodes),
+        failedNodes: union(failed, read.failed).size,
         touchesKeys: read.touchesKeys,
       };
     });
@@ -149,7 +167,11 @@ export class SessionExplorerService {
 
   async listSessions(connectionId: string, id: string): Promise<SessionListResponse> {
     const namespace = await this.namespace(connectionId, id);
-    return scanSessions(this.registry.get(connectionId), namespace.pattern, this.presetOf(namespace));
+    return scanSessions(
+      this.registry.get(connectionId),
+      namespace.pattern,
+      this.presetOf(namespace),
+    );
   }
 
   async oversizeSessions(connectionId: string, id: string): Promise<SessionOversizeResponse> {
@@ -177,17 +199,21 @@ export class SessionExplorerService {
     return (await this.captureSession(connectionId, id, sessionId)).detail;
   }
 
-  async captureSession(connectionId: string, id: string, sessionId: string): Promise<SessionCapture> {
+  async captureSession(
+    connectionId: string,
+    id: string,
+    sessionId: string,
+  ): Promise<SessionCapture> {
     const namespace = await this.namespace(connectionId, id);
     const preset = this.presetOf(namespace);
     const { scan, read } = await withPrimaries(
       this.registry.get(connectionId),
       async (primaries) => {
         const scan = await keysForSessionOn(primaries, namespace.pattern, preset, sessionId);
-        if (scan.keys.length === 0) throw sessionMissing(scan.failedNodes);
+        if (scan.keys.length === 0) throw sessionMissing(scan.failed.size);
         const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
         const read = await readSessionKeysOn(primaries, selected);
-        if (read.keys.length === 0) throw sessionMissing(read.failedNodes);
+        if (read.keys.length === 0) throw sessionMissing(union(scan.failed, read.failed).size);
         return { scan, read };
       },
     );
@@ -196,7 +222,7 @@ export class SessionExplorerService {
     const messages = preset.mergeSession(views);
     const unparsedKeys = views.filter((v) => !v.parsed).length;
     const truncated = scan.truncated || read.truncated;
-    const failedNodes = Math.max(scan.failedNodes, read.failedNodes);
+    const failedNodes = union(scan.failed, read.failed).size;
     const complete =
       unparsedKeys === 0 &&
       !truncated &&

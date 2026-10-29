@@ -21,18 +21,21 @@ function warnOnce(label: string, message: string): void {
 }
 
 export interface PrimaryRoute {
-  client: Valkey;
   slots: number[][];
+  client: Valkey | null;
 }
 
+export type ReadableRoute = PrimaryRoute & { client: Valkey };
+
 export interface PrimaryClients {
-  clients: Valkey[];
-  failed: number;
-  routes: PrimaryRoute[] | null;
-  failedRoutes: number[][][];
+  routes: PrimaryRoute[];
   touchesKeys: boolean;
   release: () => Promise<void>;
 }
+
+const ALL_SLOTS = [[0, 16383]];
+
+export const UNCOVERED: PrimaryRoute = { slots: [], client: null };
 
 const READER_OPTIONS = {
   lazyConnect: true,
@@ -46,20 +49,23 @@ const READER_OPTIONS = {
 
 const readerTimeout = (parent: Valkey): number => parent.options.commandTimeout ?? NODE_TIMEOUT_MS;
 
-export function routeOf(primaries: PrimaryClients, key: string): Valkey | null {
-  if (!primaries.routes) return primaries.clients[0] ?? null;
-  const slot = calculateSlot(key);
-  const route = primaries.routes.find((r) => inSlots(r.slots, slot));
-  return route?.client ?? null;
-}
+export const isReadable = (route: PrimaryRoute): route is ReadableRoute => route.client !== null;
+
+export const readable = (primaries: PrimaryClients): ReadableRoute[] =>
+  primaries.routes.filter(isReadable);
+
+export const unreadable = (primaries: PrimaryClients): Set<PrimaryRoute> =>
+  new Set(primaries.routes.filter((route) => !isReadable(route)));
+
+export const union = (...sets: Set<PrimaryRoute>[]): Set<PrimaryRoute> =>
+  new Set(sets.flatMap((set) => [...set]));
 
 const inSlots = (slots: number[][], slot: number) =>
   slots.some(([start, end]) => slot >= start && slot <= end);
 
-export function failedNodeOf(primaries: PrimaryClients, key: string): number | null {
+export function ownerOf(primaries: PrimaryClients, key: string): PrimaryRoute {
   const slot = calculateSlot(key);
-  const index = primaries.failedRoutes.findIndex((slots) => inSlots(slots, slot));
-  return index === -1 ? null : index;
+  return primaries.routes.find((route) => inSlots(route.slots, slot)) ?? UNCOVERED;
 }
 
 const isServingPrimary = (node: ClusterNode) =>
@@ -124,14 +130,15 @@ const ownReader = (parent: Valkey, dbIndex: number) =>
     parent.duplicate({ ...READER_OPTIONS, db: dbIndex, commandTimeout: readerTimeout(parent) }),
   );
 
-const unavailable = (failed: number): PrimaryClients => ({
-  clients: [],
-  failed,
-  routes: null,
-  failedRoutes: [],
-  touchesKeys: false,
-  release: async () => undefined,
+const routesOf = (routes: PrimaryRoute[], touchesKeys: boolean): PrimaryClients => ({
+  routes,
+  touchesKeys,
+  release: async () => {
+    for (const { client } of routes) client?.disconnect();
+  },
 });
+
+const unavailable = () => routesOf([{ slots: ALL_SLOTS, client: null }], false);
 
 async function clusterNodes(seed: Reader): Promise<ClusterNode[] | null> {
   try {
@@ -147,24 +154,13 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
   const { clusterEnabled } = db.getCapabilities();
   const dbIndex = db.getActiveDbIndex?.() ?? parent.options.db ?? 0;
   const seed = await ownReader(parent, dbIndex);
-  if (!seed) return unavailable(1);
-  if (!clusterEnabled) {
-    return {
-      clients: [seed.client],
-      failed: 0,
-      routes: null,
-      failedRoutes: [],
-      touchesKeys: !seed.noTouch,
-      release: async () => {
-        seed.client.disconnect();
-      },
-    };
-  }
+  if (!seed) return unavailable();
+  if (!clusterEnabled) return routesOf([{ slots: ALL_SLOTS, client: seed.client }], !seed.noTouch);
 
   const nodes = await clusterNodes(seed);
   if (!nodes) {
     seed.client.disconnect();
-    return unavailable(1);
+    return unavailable();
   }
   const primaries = nodes.filter(isServingPrimary);
   const connected = await Promise.all(
@@ -174,30 +170,10 @@ export async function primaryClients(db: DatabasePort): Promise<PrimaryClients> 
   );
   if (!connected.includes(seed)) seed.client.disconnect();
 
-  const clients: Valkey[] = [];
-  const routes: PrimaryRoute[] = [];
-  const failedRoutes: number[][][] = [];
-  let touchesKeys = false;
-  connected.forEach((reader, i) => {
-    if (!reader) {
-      failedRoutes.push(primaries[i].slots);
-      return;
-    }
-    if (!reader.noTouch) touchesKeys = true;
-    clients.push(reader.client);
-    routes.push({ client: reader.client, slots: primaries[i].slots });
-  });
-
-  return {
-    clients,
-    failed: failedRoutes.length,
-    routes,
-    failedRoutes,
-    touchesKeys,
-    release: async () => {
-      for (const client of clients) client.disconnect();
-    },
-  };
+  return routesOf(
+    primaries.map((node, i) => ({ slots: node.slots, client: connected[i]?.client ?? null })),
+    connected.some((reader) => reader !== null && !reader.noTouch),
+  );
 }
 
 export async function withPrimaries<T>(
@@ -205,7 +181,7 @@ export async function withPrimaries<T>(
   run: (primaries: PrimaryClients) => Promise<T>,
 ): Promise<T> {
   const primaries = await primaryClients(db);
-  if (primaries.clients.length === 0) {
+  if (readable(primaries).length === 0) {
     throw new ServiceUnavailableException('Could not open a read connection to the server');
   }
   try {

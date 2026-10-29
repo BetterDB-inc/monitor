@@ -3,8 +3,8 @@ import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
 import { primaryClients } from '../primary-nodes';
-import { keysForSession, scanSessions } from '../session-scanner';
-import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
+import { keysForSession, scanSessions, type SessionKeysResult } from '../session-scanner';
+import { clientsOf, FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
@@ -22,6 +22,8 @@ const preset: PresetDefinition = {
 
 const keyRange = (from: number, count: number, session = 'a') =>
   Array.from({ length: count }, (_, i) => `s:${session}:${from + i}`);
+
+const counted = (result: SessionKeysResult) => ({ ...result, failed: result.failed.size });
 
 const storeOf = (entries: Record<string, FakeEntry>) => new Map(Object.entries(entries));
 
@@ -337,8 +339,7 @@ describe('primaryClients', () => {
     const reader = new FakeValkey();
     parent.duplicateWith = reader;
     const result = await primaryClients(fakeDb(parent));
-    expect(result.clients).toEqual([reader]);
-    expect(result.failed).toBe(0);
+    expect(result.routes).toEqual([{ slots: [[0, 16383]], client: reader }]);
     await result.release();
     expect(reader.disconnected).toBe(true);
     expect(parent.disconnected).toBe(false);
@@ -364,7 +365,7 @@ describe('primaryClients', () => {
 
     const result = await primaryClients(db);
 
-    expect(result.clients).toEqual([nodeA, nodeB]);
+    expect(clientsOf(result)).toEqual([nodeA, nodeB]);
     expect(ValkeyMock).toHaveBeenCalledTimes(1);
     expect(ValkeyMock).toHaveBeenCalledWith(
       expect.objectContaining({ host: '10.0.0.2', port: 7002, lazyConnect: true }),
@@ -396,7 +397,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(db, 's:*', preset, 'x');
 
     expect(result.keys.sort()).toEqual(['s:x:1', 's:x:2']);
-    expect(result).toMatchObject({ truncated: false, failedNodes: 0 });
+    expect(counted(result)).toMatchObject({ truncated: false, failed: 0 });
     expect(nodeA.disconnected && nodeB.disconnected).toBe(true);
   });
 
@@ -436,7 +437,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(db, 's:*', preset, 'x');
 
-    expect(result).toEqual({ keys: ['s:x:1'], truncated: false, failedNodes: 2 });
+    expect(counted(result)).toEqual({ keys: ['s:x:1'], truncated: false, failed: 2 });
   });
 
   const byKey: PresetDefinition = {
@@ -450,7 +451,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: ['chat:1'], truncated: false, failedNodes: 0 });
+    expect(counted(result)).toEqual({ keys: ['chat:1'], truncated: false, failed: 0 });
     expect(client.callsOf('scan')).toHaveLength(0);
   });
 
@@ -469,7 +470,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 0 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 0 });
   });
 
   it('looks a session key up on the primary that owns its slot', async () => {
@@ -514,7 +515,7 @@ describe('keysForSession', () => {
       'chat:1',
     );
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 0 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 0 });
   });
 
   it('counts the owner once when it is the primary that is down', async () => {
@@ -528,7 +529,7 @@ describe('keysForSession', () => {
       'chat:1',
     );
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 1 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
   });
 
   it('reports the owning primary as failed when the lookup errors', async () => {
@@ -537,7 +538,21 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 1 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
+  });
+
+  it('reports a session key whose slot no primary owns as a failure', async () => {
+    const node = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
+    ValkeyMock.mockImplementation(() => node);
+    const slot = calculateSlot('chat:1');
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [masterNode('a', '10.0.0.1:7001', [], [[(slot + 1) % 16384, (slot + 1) % 16384]])],
+    });
+
+    const result = await keysForSession(db, 'chat:*', byKey, 'chat:1');
+
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
+    expect(node.callsOf('exists')).toHaveLength(0);
   });
 
   const byMatch: PresetDefinition = {
@@ -574,7 +589,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 10_000, 2);
 
     expect(client.callsOf('scan')).toHaveLength(2);
-    expect(result).toEqual({ keys: [], truncated: true, failedNodes: 0 });
+    expect(counted(result)).toEqual({ keys: [], truncated: true, failed: 0 });
   });
 
   it('lists a key seen on two primaries during slot migration once', async () => {

@@ -1,6 +1,7 @@
 import type Valkey from 'iovalkey';
 import type { DatabasePort } from '../../common/interfaces/database-port.interface';
 import type { ClusterNode } from '../../common/types/metrics.types';
+import { type PrimaryClients, readable } from '../primary-nodes';
 
 export interface FakeEntry {
   type: string;
@@ -396,3 +397,6 @@ export function fakeDb(parent: FakeValkey, cluster?: { nodes: ClusterNode[] }): 
     getClusterNodes: async () => cluster?.nodes ?? [],
   } as unknown as DatabasePort;
 }
+
+export const clientsOf = (primaries: PrimaryClients) =>
+  readable(primaries).map(({ client }) => client);

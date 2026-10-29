@@ -1,7 +1,7 @@
 import { Logger, ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { withPrimaries } from '../primary-nodes';
-import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
+import { clientsOf, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
@@ -20,7 +20,7 @@ const otherPrimaryOptions = async (parentOptions: Record<string, unknown>) => {
       masterNode('b', '10.0.0.2:7001', [], [[8192, 16383]]),
     ],
   });
-  await withPrimaries(db, async ({ clients }) => clients);
+  await withPrimaries(db, async (p) => clientsOf(p));
   return ValkeyMock.mock.calls[0][0] as Record<string, unknown>;
 };
 
@@ -32,7 +32,7 @@ describe('withPrimaries', () => {
     const reader = new FakeValkey();
     parent.duplicateWith = reader;
 
-    const used = await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+    const used = await withPrimaries(fakeDb(parent), async (p) => clientsOf(p));
 
     expect(used).toEqual([reader]);
     expect(noTouchCalls(reader)).toHaveLength(1);
@@ -45,7 +45,7 @@ describe('withPrimaries', () => {
     const parent = new FakeValkey(new Map(), { host: 'seed', port: 7000, commandTimeout: 30_000 });
     parent.duplicateWith = new FakeValkey();
 
-    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+    await withPrimaries(fakeDb(parent), async (p) => clientsOf(p));
 
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 30_000 });
   });
@@ -54,7 +54,7 @@ describe('withPrimaries', () => {
     const parent = new FakeValkey();
     parent.duplicateWith = new FakeValkey();
 
-    await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+    await withPrimaries(fakeDb(parent), async (p) => clientsOf(p));
 
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ commandTimeout: 5000 });
   });
@@ -104,7 +104,7 @@ describe('withPrimaries', () => {
     reader.noTouchError = new Error('ERR unknown subcommand');
     parent.duplicateWith = reader;
 
-    const used = await withPrimaries(fakeDb(parent), async ({ clients }) => clients);
+    const used = await withPrimaries(fakeDb(parent), async (p) => clientsOf(p));
 
     expect(used).toEqual([reader]);
   });
@@ -119,7 +119,7 @@ describe('withPrimaries', () => {
 
     const result = await withPrimaries(fakeDb(parent), async (p) => p);
 
-    expect(result.clients).toEqual([reader]);
+    expect(clientsOf(result)).toEqual([reader]);
     expect(result.touchesKeys).toBe(true);
   });
 
@@ -131,7 +131,7 @@ describe('withPrimaries', () => {
 
     const result = await withPrimaries(fakeDb(parent), async (p) => p);
 
-    expect(result.clients).toEqual([reader]);
+    expect(clientsOf(result)).toEqual([reader]);
     expect(result.touchesKeys).toBe(true);
   });
 
@@ -162,7 +162,7 @@ describe('withPrimaries', () => {
       ],
     });
 
-    const used = await withPrimaries(db, async ({ clients }) => clients);
+    const used = await withPrimaries(db, async (p) => clientsOf(p));
 
     expect(used).toEqual([self, other]);
     expect(noTouchCalls(self)).toHaveLength(1);
@@ -178,7 +178,7 @@ describe('withPrimaries', () => {
       nodes: [masterNode('a', '10.0.0.1:7000', ['myself'], [[0, 16383]])],
     });
 
-    const used = await withPrimaries(db, async ({ clients }) => clients);
+    const used = await withPrimaries(db, async (p) => clientsOf(p));
 
     expect(used).toEqual([seed]);
     expect(seed.callsOf('call').some((c) => c.args[0] === 'CLUSTER')).toBe(true);
@@ -192,7 +192,7 @@ describe('withPrimaries', () => {
     parent.duplicateWith = seed;
     const db = fakeDb(parent, { nodes: [masterNode('a', ':7000', ['myself'], [[0, 16383]])] });
 
-    const used = await withPrimaries(db, async ({ clients }) => clients);
+    const used = await withPrimaries(db, async (p) => clientsOf(p));
 
     expect(used).toEqual([seed]);
   });
@@ -213,9 +213,10 @@ describe('withPrimaries', () => {
 
     const result = await withPrimaries(db, async (p) => p);
 
-    expect(result.clients).toEqual([seed]);
-    expect(result.failed).toBe(1);
-    expect(result.failedRoutes).toEqual([[[8192, 16383]]]);
+    expect(result.routes).toEqual([
+      { slots: [[0, 8191]], client: seed },
+      { slots: [[8192, 16383]], client: null },
+    ]);
   });
 
   it('reports the cluster unavailable when it lists no serving primary', async () => {
@@ -306,7 +307,7 @@ describe('withPrimaries', () => {
       getActiveDbIndex: () => 2,
     };
 
-    await withPrimaries(db, async ({ clients }) => clients);
+    await withPrimaries(db, async (p) => clientsOf(p));
 
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ db: 2 });
     expect(ValkeyMock.mock.calls[0][0]).toMatchObject({ db: 2 });
@@ -317,7 +318,7 @@ describe('withPrimaries', () => {
     parent.duplicateWith = new FakeValkey();
     const db = { ...fakeDb(parent), getActiveDbIndex: () => 0 };
 
-    await withPrimaries(db, async ({ clients }) => clients);
+    await withPrimaries(db, async (p) => clientsOf(p));
 
     expect(parent.callsOf('duplicate')[0].args[0]).toMatchObject({ db: 0 });
   });
