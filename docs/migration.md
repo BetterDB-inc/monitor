@@ -367,12 +367,18 @@ reported. If the source has custom ACL users missing from the target, analysis
 issues a warning. If the source uses modules not loaded on the target, analysis
 flags a blocking incompatibility.
 
-### Key counts in cluster mode
+### Key counts and samples in cluster mode
 
 Validation sums `DBSIZE` over every master of a cluster source or target, so
-the key count comparison covers the whole dataset. The sample spot-check still
-reads keys from the source connection's node; on a cluster source that is one
-shard's keys.
+the key count comparison covers the whole dataset. The sample spot-check also
+covers every master of a cluster source: the ~500-key budget is split across
+masters in proportion to their `DBSIZE`, and every master that holds keys gets
+at least one sample as long as the budget is at least the number of non-empty
+masters (above ~500 masters, the smallest shards may get none). A shard whose
+keys never reached the target therefore shows up as missing keys rather than
+passing unnoticed. Keys are found with a per-master `SCAN`, but `TYPE` and
+values are read through the cluster client, so a slot migration or failover
+during validation is followed rather than reported as missing keys.
 
 ### Concurrent writes on the source
 
