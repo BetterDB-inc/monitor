@@ -9,7 +9,7 @@ import { sampleTtls } from './analysis/ttl-sampler';
 import { detectHfe } from './analysis/hfe-detector';
 import { collectCommandAnalysis } from './analysis/commandlog-analyzer';
 import { buildInstanceMeta, checkCompatibility } from './analysis/compatibility-checker';
-import { checkServerlessReadiness, countServingMasters, isElastiCacheServerlessHost } from './analysis/serverless-readiness';
+import { checkServerlessReadiness, countSlotOwningMasters, isElastiCacheServerlessHost } from './analysis/serverless-readiness';
 import type { ServerlessClusterMaster, ServerlessReadinessFacts } from './analysis/serverless-readiness';
 import {
   loadAnalysisVerdict,
@@ -213,7 +213,7 @@ export class MigrationService {
       // Step 3: Cluster check (source)
       let isCluster = false;
       let clusterMasterCount = 0;
-      let servingMasterCount = 0;
+      let slotOwningMasterCount = 0;
       let clusterMasters: ServerlessClusterMaster[] | null = null;
       let masterUsedMemory = [usedMemory];
       const scanClients: Valkey[] = [];
@@ -224,7 +224,7 @@ export class MigrationService {
         const nodes = await adapter.getClusterNodes();
         const masters = nodes.filter(n => n.flags.includes('master'));
         clusterMasterCount = masters.length;
-        servingMasterCount = countServingMasters(nodes);
+        slotOwningMasterCount = countSlotOwningMasters(nodes);
         clusterMasters = masters.map(m => ({
           slots: m.slots,
           migratingSlots: m.migratingSlots?.length ?? 0,
@@ -535,7 +535,7 @@ export class MigrationService {
           dbType: capabilities.dbType,
           version: capabilities.version,
           isCluster,
-          clusterMasterCount: servingMasterCount,
+          clusterMasterCount: slotOwningMasterCount,
           masterUsedMemory,
           sampledKeyBytes: sampledKeys.map(k => k.keyBytes),
           clusterMasters,

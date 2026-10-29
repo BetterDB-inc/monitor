@@ -129,11 +129,9 @@ function isInternalClient(clientName: string | undefined): boolean {
   return INTERNAL_CLIENT_NAMES.has(clientName.toLowerCase()) || INTERNAL_NODE_CLIENT_PATTERN.test(clientName);
 }
 
-const NON_SERVING_FLAGS = ['fail', 'handshake', 'noaddr'];
-
-export function countServingMasters(nodes: ReadonlyArray<{ flags: string[] }>): number {
+export function countSlotOwningMasters(nodes: ReadonlyArray<{ flags: string[]; slots: number[][] }>): number {
   return nodes.filter((node) => {
-    return node.flags.includes('master') && node.flags.every((flag) => !NON_SERVING_FLAGS.includes(flag));
+    return node.flags.includes('master') && node.slots.length > 0;
   }).length;
 }
 

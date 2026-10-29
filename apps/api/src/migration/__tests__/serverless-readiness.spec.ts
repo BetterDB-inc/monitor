@@ -1,6 +1,6 @@
 import {
   checkServerlessReadiness,
-  countServingMasters,
+  countSlotOwningMasters,
   findRestrictedCommands,
   isElastiCacheServerlessHost,
   SERVERLESS_RESTRICTED_COMMANDS,
@@ -360,34 +360,53 @@ describe('isElastiCacheServerlessHost', () => {
   });
 });
 
-describe('countServingMasters', () => {
-  it('counts masters that are serving', () => {
-    expect(countServingMasters([
-      { flags: ['master'] },
-      { flags: ['myself', 'master'] },
-      { flags: ['slave'] },
+describe('countSlotOwningMasters', () => {
+  const slots = [[0, 100]];
+
+  it('counts masters that own slots and skips replicas', () => {
+    expect(countSlotOwningMasters([
+      { flags: ['master'], slots },
+      { flags: ['myself', 'master'], slots: [[101, 200]] },
+      { flags: ['slave'], slots: [] },
     ])).toBe(2);
   });
 
-  it('counts a master only suspected of failing (fail?)', () => {
-    expect(countServingMasters([
-      { flags: ['master'] },
-      { flags: ['master', 'fail?'] },
-    ])).toBe(2);
+  it('counts a fail master that still owns slots', () => {
+    expect(countSlotOwningMasters([{ flags: ['master', 'fail'], slots }])).toBe(1);
   });
 
-  it.each(['fail', 'handshake', 'noaddr'])('excludes a master flagged %s', (flag) => {
-    expect(countServingMasters([
-      { flags: ['master'] },
-      { flags: ['master', flag] },
+  it('skips a fail master that no longer owns slots', () => {
+    expect(countSlotOwningMasters([
+      { flags: ['master'], slots },
+      { flags: ['master', 'fail'], slots: [] },
     ])).toBe(1);
   });
 
-  it('keeps a 166-shard source under the limit when a failed master is listed', () => {
+  it.each(['handshake', 'noaddr'])('skips a %s master without slots', (flag) => {
+    expect(countSlotOwningMasters([
+      { flags: ['master'], slots },
+      { flags: ['master', flag], slots: [] },
+    ])).toBe(1);
+  });
+
+  it('counts a fail? master that owns slots', () => {
+    expect(countSlotOwningMasters([{ flags: ['master', 'fail?'], slots }])).toBe(1);
+  });
+
+  it('keeps 166 slot owners under the limit when a failed-over master is still listed', () => {
     const nodes = [
-      ...Array.from({ length: 166 }, () => ({ flags: ['master'] })),
-      { flags: ['master', 'fail'] },
+      ...Array.from({ length: 166 }, (_, i) => ({ flags: ['master'], slots: [[i, i]] })),
+      { flags: ['master', 'fail'], slots: [] },
     ];
-    expect(checkServerlessReadiness(facts({ clusterMasterCount: countServingMasters(nodes) }))).toEqual([]);
+    expect(checkServerlessReadiness(facts({ clusterMasterCount: countSlotOwningMasters(nodes) }))).toEqual([]);
+  });
+
+  it('flags 167 slot owners when one of them is a fail master that has not failed over', () => {
+    const nodes = [
+      ...Array.from({ length: 166 }, (_, i) => ({ flags: ['master'], slots: [[i, i]] })),
+      { flags: ['master', 'fail'], slots: [[166, 166]] },
+    ];
+    const issues = checkServerlessReadiness(facts({ clusterMasterCount: countSlotOwningMasters(nodes) }));
+    expect(issues.map(i => i.title)).toEqual(['More than 166 masters']);
   });
 });
