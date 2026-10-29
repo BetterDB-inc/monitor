@@ -31,7 +31,7 @@ export function neymanAllocation(remaining: number, strata: AllocationInput[]): 
 export function evenAllocation(remaining: number, strata: AllocationInput[]): Map<string, number> {
   const result = new Map(strata.map((stratum) => [stratum.type, 0]));
   const open = strata
-    .map((stratum) => ({ type: stratum.type, room: Math.max(0, Math.floor(stratum.estimatedKeys) - stratum.sampled) }))
+    .map((stratum) => ({ type: stratum.type, room: Math.max(0, Math.ceil(stratum.estimatedKeys) - stratum.sampled) }))
     .filter((stratum) => stratum.room > 0)
     .sort((a, b) => a.room - b.room);
   let left = remaining;

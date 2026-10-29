@@ -89,4 +89,9 @@ describe('evenAllocation', () => {
     expect(result.get('a')).toBe(0);
     expect(result.get('b')).toBe(100);
   });
+
+  it('leaves room in a stratum whose fractional estimate exceeds its sample', () => {
+    const result = evenAllocation(100, [{ type: 'a', estimatedKeys: 1.2, std: 0, sampled: 1 }]);
+    expect(result.get('a')).toBe(1);
+  });
 });
