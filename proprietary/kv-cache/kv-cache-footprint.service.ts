@@ -139,6 +139,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
   private readonly lastEvicted = new Map<string, { timestamp: number; counts: Map<string, number> }>();
   private readonly sampleKeys = new Map<string, string>();
   private readonly lastAttempts = new Map<string, ScanAttempt>();
+  private readonly disconnectedFailures = new Set<string>();
   private readonly undetectedUntil = new Map<string, number>();
   private readonly undetected = new Set<string>();
   private readonly partialMisses = new Map<string, number>();
@@ -197,9 +198,10 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     if (!this.license.hasFeature(Feature.KV_CACHE_MONITORING)) return;
     const target = this.target(ctx.connectionId);
     if (target?.connection && !target.connection.isConnected) {
-      if (!target.rejection) this.recordFailure(ctx.connectionId, this.notConnected(ctx.connectionId));
+      if (!target.rejection) this.recordFailure(ctx.connectionId, this.notConnected(ctx.connectionId), true);
       return;
     }
+    if (this.disconnectedFailures.has(ctx.connectionId)) this.clearFailure(ctx.connectionId);
     if (Date.now() < (this.undetectedUntil.get(ctx.connectionId) ?? 0)) return;
     await this.collect(ctx);
   }
@@ -211,7 +213,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.generations.set(connectionId, generation);
     this.lastEvicted.delete(connectionId);
     this.sampleKeys.delete(connectionId);
-    this.lastAttempts.delete(connectionId);
+    this.clearFailure(connectionId);
     this.undetectedUntil.delete(connectionId);
     this.undetected.delete(connectionId);
     this.partialMisses.delete(connectionId);
@@ -316,13 +318,18 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     return this.lastAttempts.get(connectionId) ?? null;
   }
 
+  getScanCooldownUntil(connectionId: string): number | null {
+    const until = this.undetectedUntil.get(connectionId);
+    return until !== undefined && until > Date.now() ? until : null;
+  }
+
   async triggerCollection(connectionId: string): Promise<KvCacheFootprintSnapshot | null> {
     const target = this.target(connectionId);
     if (!target) throw new NotFoundException(`Connection '${connectionId}' not found`);
     if (target.rejection) throw new BadRequestException(target.rejection);
     if (target.connection && !target.connection.isConnected) {
       const message = this.notConnected(connectionId);
-      this.recordFailure(connectionId, message);
+      this.recordFailure(connectionId, message, true);
       throw new ServiceUnavailableException(message);
     }
     const running = this.running.get(connectionId);
@@ -387,7 +394,7 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     this.running.set(ctx.connectionId, run);
     try {
       const snapshot = await run;
-      if (snapshot) this.lastAttempts.delete(ctx.connectionId);
+      if (snapshot) this.clearFailure(ctx.connectionId);
       return snapshot;
     } catch (error) {
       if (this.generationOf(ctx.connectionId) === generation) this.recordFailure(ctx.connectionId, errorMessage(error));
@@ -401,8 +408,15 @@ export class KvCacheFootprintService extends MultiConnectionPoller implements On
     return `Connection '${connectionId}' is not connected`;
   }
 
-  private recordFailure(connectionId: string, error: string): void {
+  private recordFailure(connectionId: string, error: string, disconnected = false): void {
     this.lastAttempts.set(connectionId, { at: Date.now(), error });
+    if (disconnected) this.disconnectedFailures.add(connectionId);
+    else this.disconnectedFailures.delete(connectionId);
+  }
+
+  private clearFailure(connectionId: string): void {
+    this.lastAttempts.delete(connectionId);
+    this.disconnectedFailures.delete(connectionId);
   }
 
   private generationOf(connectionId: string): number {

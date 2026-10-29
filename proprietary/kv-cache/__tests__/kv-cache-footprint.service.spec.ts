@@ -832,6 +832,35 @@ describe('KvCacheFootprintService', () => {
     expect(service.getLastScanAttempt('c1')).toBeNull();
   });
 
+  it('clears a not-connected failure once the poller sees the connection back during the recheck cooldown', async () => {
+    const { service, registry, client } = setup([]);
+    const ctx = { connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 };
+    const poll = () => (service as any).pollConnection(ctx);
+    await poll();
+    expect(service.getScanCooldownUntil('c1')).toBeGreaterThan(Date.now());
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]);
+    await poll();
+    expect(service.getLastScanAttempt('c1')?.error).toBe("Connection 'c1' is not connected");
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }]);
+    await poll();
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
+  it('keeps a scan failure that is not about the connection when the poller sees it connected', async () => {
+    const { service, client } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM'));
+    await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+    (service as any).undetectedUntil.set('c1', Date.now() + 60_000);
+    await (service as any).pollConnection({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    expect(service.getLastScanAttempt('c1')?.error).toBe('NOPERM');
+  });
+
+  it('reports no scan cooldown once LMCache is detected', async () => {
+    const { service } = setup();
+    await service.triggerCollection('c1');
+    expect(service.getScanCooldownUntil('c1')).toBeNull();
+  });
+
   it('forgets a failed scan when the connection is removed', async () => {
     const { service, client, registry } = setup();
     client.call.mockRejectedValueOnce(new Error('NOPERM'));
