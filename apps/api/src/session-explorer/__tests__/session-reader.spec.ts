@@ -55,8 +55,8 @@ describe('readSessionKeys', () => {
     expect(key.truncated).toBe(true);
     expect((key.value as string).length).toBeGreaterThanOrEqual(2 * MB - 4);
     expect((key.value as string).length).toBeLessThanOrEqual(2 * MB);
-    expect(client.callsOf('pipeline.getBuffer')).toHaveLength(0);
-    expect(client.callsOf('pipeline.getrangeBuffer')[0].args).toEqual(['k', 0, 2 * MB - 1]);
+    expect(client.reader.callsOf('pipeline.getBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.getrangeBuffer')[0].args).toEqual(['k', 0, 2 * MB - 1]);
   });
 
   it('keeps a multibyte character split by the cap out of the truncated string', async () => {
@@ -94,8 +94,8 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(fakeDb(client), keys, { batch: 1000 });
 
     expect(result.keys).toHaveLength(2500);
-    expect(client.pipelineExecs).toBe(6);
-    expect(client.directReads).toHaveLength(0);
+    expect(client.reader.pipelineExecs).toBe(6);
+    expect(client.reader.directReads).toHaveLength(0);
   });
 
   it('reads a list over 500 items in windows', async () => {
@@ -104,7 +104,7 @@ describe('readSessionKeys', () => {
 
     const key = await readOne(client, 'l');
 
-    expect(client.callsOf('lrangeBuffer').map((c) => c.args.slice(1))).toEqual([
+    expect(client.reader.callsOf('lrangeBuffer').map((c) => c.args.slice(1))).toEqual([
       [0, 0],
       [1, 2],
       [3, 6],
@@ -129,7 +129,7 @@ describe('readSessionKeys', () => {
 
     expect(key.truncated).toBe(true);
     expect((key.value as string[]).length).toBe(9);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(1000 + 100);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(1000 + 100);
   });
 
   it('measures small collections over every element and samples large ones', async () => {
@@ -144,7 +144,7 @@ describe('readSessionKeys', () => {
 
     await readSessionKeys(fakeDb(client), ['small', 'large']);
 
-    expect(client.callsOf('pipeline.memory').map((c) => c.args)).toEqual([
+    expect(client.reader.callsOf('pipeline.memory').map((c) => c.args)).toEqual([
       ['USAGE', 'small'],
       ['USAGE', 'large'],
       ['USAGE', 'small', 'SAMPLES', 0],
@@ -159,7 +159,7 @@ describe('readSessionKeys', () => {
 
     expect(key.truncated).toBe(true);
     expect((key.value as string[]).length).toBe(1);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024);
   });
 
   it('fetches about one cap from a list whose large items follow a small one', async () => {
@@ -170,7 +170,7 @@ describe('readSessionKeys', () => {
 
     expect(key.truncated).toBe(true);
     expect((key.value as string[]).length).toBe(4);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024);
   });
 
   it('fetches about one cap from a sorted set of large members', async () => {
@@ -180,7 +180,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'z', { byteCap: 128 * 1024 });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(128 * 1024 + 64 * 1024 + 1024);
   });
 
   it('fetches about one cap from a stream whose large entries follow a small one', async () => {
@@ -193,7 +193,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 's', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
   });
 
   it('scans a hash over the cap in windows sized from its unread bytes', async () => {
@@ -203,9 +203,9 @@ describe('readSessionKeys', () => {
 
     const key = await readOne(client, 'h', { byteCap: 256 * 1024 });
 
-    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
   it('grows windows gradually when MEMORY USAGE is unavailable', async () => {
@@ -215,7 +215,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 2);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 2);
   });
 
   it('scans an unmeasured hash from one field and grows by the largest seen', async () => {
@@ -225,9 +225,9 @@ describe('readSessionKeys', () => {
 
     const key = await readOne(client, 'h', { byteCap: 256 * 1024 });
 
-    expect(client.callsOf('hscanBuffer')[0].args[3]).toBe(1);
+    expect(client.reader.callsOf('hscanBuffer')[0].args[3]).toBe(1);
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
   it.each(['list', 'zset', 'stream'])(
@@ -248,7 +248,7 @@ describe('readSessionKeys', () => {
       const key = await readOne(client, 'k', { byteCap: 2 * MB });
 
       expect(key.truncated).toBe(true);
-      expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
+      expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 512 * 1024 + 1024);
     },
   );
 
@@ -259,7 +259,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 4 * MB);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 4 * MB);
   });
 
   it('does not trust MEMORY USAGE far below the real size of a list', async () => {
@@ -269,7 +269,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + 64 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + 64 * 1024 + 1024);
   });
 
   it('measures a list exactly when large elements follow many small ones', async () => {
@@ -284,7 +284,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(2 * MB + MB);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(2 * MB + MB);
   });
 
   it('skips a list whose elements are each larger than the byte cap', async () => {
@@ -295,7 +295,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'l', { byteCap: 2 * MB });
 
     expect(key).toMatchObject({ value: [], truncated: true });
-    expect(client.callsOf('lrangeBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('lrangeBuffer')).toHaveLength(0);
   });
 
   it.each([
@@ -311,8 +311,8 @@ describe('readSessionKeys', () => {
       const key = await readOne(client, 'k', { byteCap: 2 * MB });
 
       expect(key).toMatchObject({ value: [], truncated: true });
-      expect(client.callsOf(read)).toHaveLength(0);
-      expect(client.fetchedBytes).toBeLessThan(MB);
+      expect(client.reader.callsOf(read)).toHaveLength(0);
+      expect(client.reader.fetchedBytes).toBeLessThan(MB);
     },
   );
 
@@ -327,8 +327,8 @@ describe('readSessionKeys', () => {
     expect(key.truncated).toBe(true);
     expect(key.value).not.toHaveProperty('huge');
     expect(Object.keys(key.value as object).length).toBe(200);
-    expect(client.fetchedBytes).toBeLessThan(MB);
-    expect(client.callsOf('hscanBuffer')[0].args).toContain('NOVALUES');
+    expect(client.reader.fetchedBytes).toBeLessThan(MB);
+    expect(client.reader.callsOf('hscanBuffer')[0].args).toContain('NOVALUES');
   });
 
   it('keeps smaller hash fields scanned after one over the cap', async () => {
@@ -340,7 +340,7 @@ describe('readSessionKeys', () => {
 
     expect(key.truncated).toBe(true);
     expect(Object.keys(key.value as object)).toHaveLength(10);
-    expect(client.fetchedBytes).toBeLessThan(MB);
+    expect(client.reader.fetchedBytes).toBeLessThan(MB);
   });
 
   it('reads the small fields of a hash whose average field is over the cap', async () => {
@@ -350,7 +350,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'h', { byteCap: 2 * MB });
 
     expect(key).toMatchObject({ value: { small: 'x' }, truncated: true });
-    expect(client.fetchedBytes).toBeLessThan(MB);
+    expect(client.reader.fetchedBytes).toBeLessThan(MB);
   });
 
   it('skips a hash whose average field is over the cap when the server has no NOVALUES', async () => {
@@ -361,7 +361,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'h', { byteCap: 2 * MB });
 
     expect(key).toMatchObject({ value: {}, truncated: true });
-    expect(client.fetchedBytes).toBeLessThan(MB);
+    expect(client.reader.fetchedBytes).toBeLessThan(MB);
   });
 
   it('leaves hash fields unread when their size probe fails', async () => {
@@ -372,7 +372,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 'h', { byteCap: 2 * MB });
 
     expect(key).toMatchObject({ value: {}, truncated: true });
-    expect(client.callsOf('hmgetBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('hmgetBuffer')).toHaveLength(0);
   });
 
   it('reads hash fields with HSCAN when the server has no NOVALUES', async () => {
@@ -429,7 +429,7 @@ describe('readSessionKeys', () => {
     const key = await readOne(client, 's');
 
     expect((key.value as unknown[]).length).toBe(1200);
-    expect(client.callsOf('xrangeBuffer').every((c) => !String(c.args[1]).startsWith('('))).toBe(
+    expect(client.reader.callsOf('xrangeBuffer').every((c) => !String(c.args[1]).startsWith('('))).toBe(
       true,
     );
   });
@@ -445,7 +445,7 @@ describe('readSessionKeys', () => {
 
     expect(key.truncated).toBe(true);
     expect((key.value as unknown[]).length).toBeLessThan(1200);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(600_000 + 2_000);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(600_000 + 2_000);
   });
 
   it('reads a hash as a record of strings', async () => {
@@ -454,7 +454,7 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'h');
     expect(key.value).toEqual({ a: '1', b: '2' });
-    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(1);
+    expect(client.reader.callsOf('pipeline.hgetallBuffer')).toHaveLength(1);
   });
 
   it('reads a hash larger than the cap with a bounded HSCAN', async () => {
@@ -464,8 +464,8 @@ describe('readSessionKeys', () => {
       }),
     );
     const key = await readOne(client, 'h', { byteCap: 100 });
-    expect(client.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
-    expect(client.callsOf('hscanBuffer').map((c) => c.args[3])).toEqual([1, 1]);
+    expect(client.reader.callsOf('pipeline.hgetallBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('hscanBuffer').map((c) => c.args[3])).toEqual([1, 1]);
     expect(key.truncated).toBe(true);
     expect(Object.keys(key.value as object)).toEqual(['a']);
   });
@@ -485,9 +485,9 @@ describe('readSessionKeys', () => {
 
     const key = await readOne(client, 's', { byteCap: 256 * 1024 });
 
-    expect(client.callsOf('pipeline.smembersBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.smembersBuffer')).toHaveLength(0);
     expect(key.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(256 * 1024 + 64 * 1024 + 1024);
   });
 
   it('marks a module type it cannot read as truncated', async () => {
@@ -511,7 +511,7 @@ describe('readSessionKeys', () => {
     const client = new FakeValkey(storeOf({ j: { type: 'ReJSON-RL', value: '{"a":[1,2]}' } }));
     const key = await readOne(client, 'j');
     expect(key.value).toBe('{"a":[1,2]}');
-    expect(client.callsOf('callBuffer')[0].args).toEqual(['JSON.GET', 'j']);
+    expect(client.reader.callsOf('callBuffer')[0].args).toEqual(['JSON.GET', 'j']);
   });
 
   it('applies the byte cap to JSON values', async () => {
@@ -528,8 +528,8 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'j', { byteCap: MB });
     expect(key).toMatchObject({ value: '', truncated: true });
-    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
-    expect(client.callsOf('callBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('callBuffer')).toHaveLength(0);
   });
 
   it('reserves the full fetch for JSON documents read whole above the cap', async () => {
@@ -547,7 +547,7 @@ describe('readSessionKeys', () => {
       totalByteCap: 32 * MB,
     });
 
-    expect(client.fetchedBytes).toBeLessThanOrEqual(32 * MB + 8 * MB + MB);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(32 * MB + 8 * MB + MB);
   });
 
   it('reads JSON one document at a time against the fetched bytes', async () => {
@@ -563,8 +563,8 @@ describe('readSessionKeys', () => {
     });
 
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(8 * MB + doc.length + MB);
+    expect(client.reader.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(8 * MB + doc.length + MB);
   });
 
   it('measures JSON exactly before trusting a sampled size', async () => {
@@ -573,8 +573,8 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'j', { byteCap: MB });
     expect(key).toMatchObject({ value: '', truncated: true });
-    expect(client.callsOf('pipeline.callBuffer')).toHaveLength(0);
-    expect(client.callsOf('callBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.callBuffer')).toHaveLength(0);
+    expect(client.reader.callsOf('callBuffer')).toHaveLength(0);
   });
 
   it('sizes JSON with JSON.DEBUG MEMORY when MEMORY USAGE is unavailable', async () => {
@@ -582,7 +582,7 @@ describe('readSessionKeys', () => {
       storeOf({ j: { type: 'ReJSON-RL', value: '{"a":1}', memory: null, jsonMemory: 40 } }),
     );
     const key = await readOne(client, 'j');
-    expect(client.callsOf('pipeline.call')[0].args).toEqual(['JSON.DEBUG', 'MEMORY', 'j']);
+    expect(client.reader.callsOf('pipeline.call')[0].args).toEqual(['JSON.DEBUG', 'MEMORY', 'j']);
     expect(key).toMatchObject({ value: '{"a":1}' });
     expect(key.truncated).toBeFalsy();
   });
@@ -593,7 +593,7 @@ describe('readSessionKeys', () => {
     );
     const key = await readOne(client, 'j');
     expect(key).toMatchObject({ value: '', truncated: true });
-    expect(client.calls.some((c) => c.args[0] === 'JSON.GET')).toBe(false);
+    expect(client.reader.calls.some((c) => c.args[0] === 'JSON.GET')).toBe(false);
   });
 
   it('omits a missing key and counts it as missing', async () => {
@@ -647,7 +647,7 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(fakeDb(client), keys);
 
     expect(result.truncated).toBe(true);
-    expect(client.fetchedBytes).toBeLessThanOrEqual(32 * MB + 6 * MB);
+    expect(client.reader.fetchedBytes).toBeLessThanOrEqual(32 * MB + 6 * MB);
   });
 
   it('reads a key larger than the remaining budget up to the budget', async () => {

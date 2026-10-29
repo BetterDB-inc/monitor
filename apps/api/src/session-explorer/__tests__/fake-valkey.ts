@@ -100,11 +100,22 @@ export class FakeValkey {
       };
     }
     for (const name of READ_COMMANDS) {
-      (this as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => {
+      (this as unknown as Record<string, unknown>)[name] = async function (
+        this: FakeValkey,
+        ...args: unknown[]
+      ) {
         this.record(name, args);
         return this.run(name, args);
       };
     }
+  }
+
+  readers: FakeValkey[] = [];
+
+  get reader(): FakeValkey {
+    const reader = this.readers.at(-1);
+    if (!reader) throw new Error('no reader was opened');
+    return reader;
   }
 
   private record(name: string, args: unknown[]) {
@@ -141,19 +152,27 @@ export class FakeValkey {
       this.duplicateWith.clusterNodes ??= this.clusterNodes;
       return this.duplicateWith;
     }
-    let disconnected = false;
-    return new Proxy(this, {
-      get: (target, prop, receiver) => {
-        if (prop === 'disconnected') return disconnected;
-        if (prop === 'disconnect') {
-          return () => {
-            disconnected = true;
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
+    const own: Record<string | symbol, unknown> = {
+      calls: [],
+      fetchedBytes: 0,
+      pipelineExecs: 0,
+      disconnected: false,
+      readers: [],
+    };
+    const reader: FakeValkey = new Proxy(this, {
+      get: (target, prop) => {
+        if (prop in own) return own[prop];
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(reader) : value;
+      },
+      set: (target, prop, value) => {
+        if (prop in own) own[prop] = value;
+        else Reflect.set(target, prop, value);
+        return true;
       },
     });
+    this.readers.push(reader);
+    return reader;
   }
 
   async quit() {

@@ -41,7 +41,7 @@ describe('scanSessions', () => {
 
     expect(result.scannedKeys).toBe(10000);
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('scan')).toHaveLength(3);
+    expect(client.reader.callsOf('scan')).toHaveLength(3);
     expect(result.sessions).toEqual([expect.objectContaining({ sessionId: 'a', keyCount: 10000 })]);
   });
 
@@ -133,14 +133,14 @@ describe('scanSessions', () => {
   it('never calls KEYS', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     await scanSessions(fakeDb(client), 's:*', preset);
-    expect(client.callsOf('keys')).toHaveLength(0);
-    expect(client.calls.some((c) => c.name.toLowerCase().includes('keys'))).toBe(false);
+    expect(client.reader.callsOf('keys')).toHaveLength(0);
+    expect(client.reader.calls.some((c) => c.name.toLowerCase().includes('keys'))).toBe(false);
   });
 
   it('uses MATCH and COUNT 1000', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     await scanSessions(fakeDb(client), 's:*', preset);
-    expect(client.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:*', 'COUNT', 1000]);
+    expect(client.reader.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:*', 'COUNT', 1000]);
   });
 
   it('pipelines metadata', async () => {
@@ -150,12 +150,12 @@ describe('scanSessions', () => {
 
     const result = await scanSessions(fakeDb(client), 's:*', preset, { batch: 1000 });
 
-    expect(client.pipelineExecs).toBe(3);
-    expect(client.callsOf('type')).toHaveLength(0);
-    expect(client.callsOf('pipeline.type')).toHaveLength(2500);
-    expect(client.callsOf('pipeline.pttl')).toHaveLength(2500);
-    expect(client.callsOf('pipeline.memory')[0].args).toEqual(['USAGE', 's:a:0']);
-    expect(client.callsOf('pipeline.object')[0].args).toEqual(['IDLETIME', 's:a:0']);
+    expect(client.reader.pipelineExecs).toBe(3);
+    expect(client.reader.callsOf('type')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.type')).toHaveLength(2500);
+    expect(client.reader.callsOf('pipeline.pttl')).toHaveLength(2500);
+    expect(client.reader.callsOf('pipeline.memory')[0].args).toEqual(['USAGE', 's:a:0']);
+    expect(client.reader.callsOf('pipeline.object')[0].args).toEqual(['IDLETIME', 's:a:0']);
     expect(result.sessions[0].keyCount).toBe(2500);
   });
 
@@ -183,7 +183,7 @@ describe('scanSessions', () => {
     );
     const result = await scanSessions(fakeDb(client), '*', preset);
     expect(result.sessions).toHaveLength(1);
-    expect(client.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['s:a:1']);
+    expect(client.reader.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['s:a:1']);
   });
 
   it('aggregates memory as sum and idle as min', async () => {
@@ -407,7 +407,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 3000);
     expect(result.keys).toHaveLength(3000);
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('scan')).toHaveLength(1);
+    expect(client.reader.callsOf('scan')).toHaveLength(1);
   });
 
   it('finds session keys past the cap of non-matching keys', async () => {
@@ -452,7 +452,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
     expect(counted(result)).toEqual({ keys: ['chat:1'], truncated: false, failed: 0 });
-    expect(client.callsOf('scan')).toHaveLength(0);
+    expect(client.reader.callsOf('scan')).toHaveLength(0);
   });
 
   it('finds no session for a key outside the namespace pattern', async () => {
@@ -461,8 +461,8 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'other:1');
 
     expect(result.keys).toEqual([]);
-    expect(client.callsOf('exists')).toHaveLength(0);
-    expect(client.callsOf('scan')).toHaveLength(0);
+    expect(client.reader.callsOf('exists')).toHaveLength(0);
+    expect(client.reader.callsOf('scan')).toHaveLength(0);
   });
 
   it('finds no session for a key that does not exist', async () => {
@@ -565,7 +565,7 @@ describe('keysForSession', () => {
 
     await keysForSession(fakeDb(client), 's:*', byMatch, 'x');
 
-    expect(client.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:x:*', 'COUNT', 1000]);
+    expect(client.reader.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:x:*', 'COUNT', 1000]);
   });
 
   it('keeps only session keys inside the namespace pattern', async () => {
@@ -588,7 +588,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 10_000, 2);
 
-    expect(client.callsOf('scan')).toHaveLength(2);
+    expect(client.reader.callsOf('scan')).toHaveLength(2);
     expect(counted(result)).toEqual({ keys: [], truncated: true, failed: 0 });
   });
 
