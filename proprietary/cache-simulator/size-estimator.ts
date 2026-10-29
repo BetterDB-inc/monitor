@@ -5,13 +5,16 @@ import type { NodeSample } from './sample-types';
 const Z95 = 1.96;
 export const DICT_ENTRY_BYTES = 24;
 export const MISSED_GAP_SHARE = 0.15;
+export const MISSED_GAP_KEY_BYTES = 32;
+export const MISSED_GAP_BASE_BYTES = 1024 * 1024;
 
 export function keyMemoryCeiling(datasetBytes: number, keys: number): number {
   return datasetBytes + keys * DICT_ENTRY_BYTES;
 }
 
-export function likelyMissed(totalBytes: number, statisticalBytes: number, ceiling: number): boolean {
-  return ceiling - totalBytes > Math.max(statisticalBytes, MISSED_GAP_SHARE * ceiling);
+export function likelyMissed(totalBytes: number, statisticalBytes: number, ceiling: number, keys: number): boolean {
+  const overhead = MISSED_GAP_BASE_BYTES + keys * MISSED_GAP_KEY_BYTES;
+  return ceiling - totalBytes > Math.max(statisticalBytes, MISSED_GAP_SHARE * ceiling, overhead);
 }
 
 function measuredOf(node: NodeSample): number {
@@ -25,7 +28,7 @@ function unsampled(node: NodeSample): boolean {
 function missesLargeKeys(node: NodeSample): boolean {
   if (node.ceiling === undefined || node.otherDbKeys || measuredOf(node) === 0 || !unsampled(node)) return false;
   const { totalBytes, ci95Bytes } = estimate([{ ...node, ceiling: undefined }], 0);
-  return likelyMissed(totalBytes, ci95Bytes, node.ceiling);
+  return likelyMissed(totalBytes, ci95Bytes, node.ceiling, node.dbSize);
 }
 
 interface TypeTotals {

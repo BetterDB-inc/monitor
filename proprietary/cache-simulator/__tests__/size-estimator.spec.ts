@@ -153,7 +153,7 @@ describe('estimate', () => {
     });
 
     it('flags a sample that falls well below the memory ceiling', () => {
-      expect(estimate([strings([100, 100, 100], 200_000)], 0).likelyMissedLargeKeys).toBe(true);
+      expect(estimate([strings([100, 100, 100], 2_000_000)], 0).likelyMissedLargeKeys).toBe(true);
     });
 
     it('does not flag a sample within the ceiling margin', () => {
@@ -176,8 +176,8 @@ describe('estimate', () => {
 
     it('flags a node that misses large keys even when another node covers the gap', () => {
       const over = strings([1000, 1000, 1000], 100_000);
-      const under = strings([100, 100, 100], 200_000);
-      expect(likelyMissed(estimate([over, under], 0).totalBytes, 0, 300_000)).toBe(false);
+      const under = strings([100, 100, 100], 2_000_000);
+      expect(likelyMissed(estimate([over, under], 0).totalBytes, 0, 2_100_000, 2000)).toBe(false);
       expect(estimate([over, under], 0).likelyMissedLargeKeys).toBe(true);
     });
 
@@ -189,24 +189,34 @@ describe('estimate', () => {
     });
 
     it('does not flag a node whose ceiling also covers keys in other databases, but still widens the range', () => {
-      const result = estimate([{ ...strings([100, 100, 100], 200_000), otherDbKeys: true }], 0);
+      const result = estimate([{ ...strings([100, 100, 100], 2_000_000), otherDbKeys: true }], 0);
       expect(result.likelyMissedLargeKeys).toBe(false);
-      expect(result.ci95Bytes).toBe(100_000);
+      expect(result.ci95Bytes).toBe(1_900_000);
     });
 
     it('widens the range by the nodes with a known ceiling when another node has none', () => {
-      const result = estimate([strings([100, 100, 100], 200_000), strings([100, 100, 100])], 0);
+      const result = estimate([strings([100, 100, 100], 2_000_000), strings([100, 100, 100])], 0);
       expect(result.likelyMissedLargeKeys).toBe(true);
-      expect(result.ci95Bytes).toBe(100_000);
+      expect(result.ci95Bytes).toBe(1_900_000);
     });
   });
 
   describe('likelyMissed', () => {
     it('needs the gap to exceed both the interval and the margin share of the ceiling', () => {
-      expect(likelyMissed(100_000, 1000, 200_000)).toBe(true);
-      expect(likelyMissed(100_000, 150_000, 200_000)).toBe(false);
-      expect(likelyMissed(100_000, 1000, 110_000)).toBe(false);
-      expect(likelyMissed(300_000, 0, 200_000)).toBe(false);
+      expect(likelyMissed(10_000_000, 1000, 20_000_000, 1000)).toBe(true);
+      expect(likelyMissed(10_000_000, 15_000_000, 20_000_000, 1000)).toBe(false);
+      expect(likelyMissed(10_000_000, 1000, 11_000_000, 1000)).toBe(false);
+      expect(likelyMissed(30_000_000, 0, 20_000_000, 1000)).toBe(false);
+    });
+
+    it('allows the per-key table overhead a small-value keyspace leaves outside MEMORY USAGE', () => {
+      expect(likelyMissed(32_000_000, 0, 40_240_528, 1_000_000)).toBe(false);
+      expect(likelyMissed(312_000, 0, 678_032, 10_000)).toBe(false);
+      expect(likelyMissed(43_888_890, 0, 62_024_064, 1_000_000)).toBe(false);
+    });
+
+    it('still flags a few megabyte-sized keys missing from a small-value keyspace', () => {
+      expect(likelyMissed(6_392_000, 0, 8_240_528 + 5 * 2 * 1024 * 1024, 200_000)).toBe(true);
     });
   });
 

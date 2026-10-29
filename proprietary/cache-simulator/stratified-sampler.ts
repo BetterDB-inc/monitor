@@ -126,7 +126,7 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const heavyShort = new Set(
       sample.strata.filter((stratum) => isHeavyTailed(stratum) && stratum.sizes.length < Math.min(stratum.estimatedKeys, HEAVY_TAIL_MIN_SAMPLES)).map((stratum) => stratum.type),
     );
-    const missed = state.ceiling !== undefined && !state.otherDbKeys && likelyMissed(totalBytes, ci95Bytes, state.ceiling);
+    const missed = state.ceiling !== undefined && !state.otherDbKeys && likelyMissed(totalBytes, ci95Bytes, state.ceiling, state.dbSize);
     if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0 && !missed)) return;
     const extra = Math.min(measured, cap - measured);
     const inputs = allocationInputs(state);
