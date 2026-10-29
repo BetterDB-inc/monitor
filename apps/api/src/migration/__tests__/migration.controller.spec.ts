@@ -142,6 +142,32 @@ describe('MigrationController', () => {
         targetProfile: 'elasticache_serverless',
       });
     });
+
+    it('should drop an empty targetConnectionId sent alongside a target profile', async () => {
+      await controller.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: '',
+        targetProfile: 'elasticache_serverless',
+      });
+
+      expect(migrationService.startAnalysis).toHaveBeenCalledWith({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+    });
+
+    it('should drop a null targetProfile sent alongside a target connection', async () => {
+      await controller.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        targetProfile: null as never,
+      });
+
+      expect(migrationService.startAnalysis).toHaveBeenCalledWith({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+      });
+    });
   });
 
   describe('GET /analysis/:id', () => {

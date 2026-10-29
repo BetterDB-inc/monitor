@@ -21,7 +21,13 @@ export class MigrationController {
   // ── Analysis endpoints (community-tier) ──
 
   @Post('analysis')
-  async startAnalysis(@Body() body: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
+  async startAnalysis(@Body() rawBody: MigrationAnalysisRequest): Promise<StartAnalysisResponse> {
+    const { targetConnectionId, targetProfile, ...rest } = rawBody;
+    const body: MigrationAnalysisRequest = {
+      ...rest,
+      ...(targetConnectionId ? { targetConnectionId } : {}),
+      ...(targetProfile ? { targetProfile } : {}),
+    };
     if (!body.sourceConnectionId) {
       throw new BadRequestException('sourceConnectionId is required');
     }
