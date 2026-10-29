@@ -87,13 +87,11 @@ const pending = {
     { source: 'loop', step, parents: {} },
     { messages: step },
   );
+  await saver.putWrites(config, [['messages', [await lcMessage(pending.written)]]], 'agent');
   await saver.putWrites(
     config,
-    [
-      ['messages', [await lcMessage(pending.written)]],
-      ['__interrupt__', [{ value: 'Confirm the booking?', resumable: true }]],
-    ],
-    'agent',
+    [['__interrupt__', [{ value: 'Confirm the booking?', resumable: true }]]],
+    'approval',
   );
   sessions[PENDING_SESSION] = {
     messages: [...pending.checkpointed, pending.written],

@@ -609,7 +609,7 @@ describe('presets with content blocks beyond text', () => {
       str(`${p}:writes:1f0-b|task-3|messages|0`, JSON.stringify(lc('AIMessage', 'second'))),
       str(`${p}:writes:1f0-b|task-2|messages|1`, JSON.stringify([lc('AIMessage', 'first b')])),
       str(`${p}:writes:1f0-b|task-2|messages|0`, JSON.stringify([lc('AIMessage', 'first a')])),
-      str(`${p}:writes:1f0-b|task-2|__interrupt__|0`, JSON.stringify([{ value: 'ask' }])),
+      str(`${p}:writes:1f0-b|task-2i|__interrupt__|0`, JSON.stringify([{ value: 'ask' }])),
       str(`${p}:last_intent`, 'book a flight'),
     ];
     const preset = getPreset('agent-cache');
@@ -620,7 +620,7 @@ describe('presets with content blocks beyond text', () => {
         `${p}:writes:1f0-b|task-3|messages|0`,
         `${p}:writes:1f0-b|task-2|messages|1`,
         `${p}:writes:1f0-b|task-2|messages|0`,
-        `${p}:writes:1f0-b|task-2|__interrupt__|0`,
+        `${p}:writes:1f0-b|task-2i|__interrupt__|0`,
         `${p}:last_intent`,
       ]);
       const withoutLatest = keys.map((k) => k.key).filter((k) => !k.endsWith('__checkpoint_latest'));
@@ -726,6 +726,26 @@ describe('presets with content blocks beyond text', () => {
       expect(preset.pendingInterrupts!(parseSessionKeys(preset, reraised))).toEqual([
         { value: 'second?' },
       ]);
+    });
+
+    it('drops the interrupt of a task that finished while a parallel task still waits', () => {
+      const answeredX = (finished: CapturedKey) => [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-x|__interrupt__|0`, [{ id: 'i-x', value: 'x?' }]),
+        write(`${p}:writes:1f0-b|task-y|__interrupt__|0`, [{ id: 'i-y', value: 'y?' }]),
+        write(`${p}:writes:1f0-b|i-x|__resume__|0`, ['X']),
+        write(`${p}:writes:1f0-b|task-x|__resume__|0`, ['X']),
+        finished,
+      ];
+      for (const finished of [
+        write(`${p}:writes:1f0-b|task-x|branch%3Ato%3Az|1`, '__start__'),
+        write(`${p}:writes:1f0-b|task-x|log|1`, ['x:X']),
+      ]) {
+        expect(preset.pendingInterrupts!(parseSessionKeys(preset, answeredX(finished)))).toEqual([
+          { value: 'ask' },
+          { value: 'y?' },
+        ]);
+      }
     });
 
     it('keeps a re-raised interrupt even when a resume is keyed by its interrupt id', () => {

@@ -27,6 +27,7 @@ const WRITES_MARKER = ':writes:';
 const MESSAGES_CHANNEL = 'messages';
 const INTERRUPT_CHANNEL = '__interrupt__';
 const RESUME_CHANNEL = '__resume__';
+const ERROR_CHANNEL = '__error__';
 const NULL_TASK_ID = '00000000-0000-0000-0000-000000000000';
 
 const ROLE_BY_CONSTRUCTOR = new Map([
@@ -247,9 +248,15 @@ const assertInterrupts = (value: string): void => {
 
 function pendingInterrupts(writes: PendingWrite[]): PendingInterrupt[] {
   const resumed = new Set(onChannel(writes, RESUME_CHANNEL).map(({ write }) => write.taskId));
+  const finished = new Set(
+    writes
+      .filter(({ write }) => ![INTERRUPT_CHANNEL, RESUME_CHANNEL, ERROR_CHANNEL].includes(write.channel))
+      .map(({ write }) => write.taskId),
+  );
   const answered = ({ id }: RaisedInterrupt) =>
     resumed.has(NULL_TASK_ID) || (id !== undefined && resumed.has(id));
   return onChannel(writes, INTERRUPT_CHANNEL)
+    .filter(({ write }) => !finished.has(write.taskId))
     .flatMap(({ view, write }) =>
       view.parsed && typeof view.raw === 'string'
         ? interruptsOf(view.raw).filter((raised) => resumed.has(write.taskId) || !answered(raised))
