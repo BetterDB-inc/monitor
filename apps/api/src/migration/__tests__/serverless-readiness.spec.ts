@@ -292,6 +292,18 @@ describe('findRestrictedCommands', () => {
     ]);
   });
 
+  it('matches the real CLUSTER ADDSLOTS and CLUSTER DELSLOTS command names', () => {
+    expect(findRestrictedCommands([
+      { command: ['CLUSTER', 'ADDSLOTS', '1', '2'] },
+      { command: ['cluster', 'delslots', '3'] },
+    ])).toEqual([
+      { command: 'CLUSTER ADDSLOTS', count: 1 },
+      { command: 'CLUSTER DELSLOTS', count: 1 },
+    ]);
+    expect(SERVERLESS_RESTRICTED_COMMANDS).not.toContain('CLUSTER ADDSLOT');
+    expect(SERVERLESS_RESTRICTED_COMMANDS).not.toContain('CLUSTER DELSLOT');
+  });
+
   it("ignores entries issued by BetterDB's own clients", () => {
     expect(findRestrictedCommands([
       { command: ['CONFIG', 'GET', 'save'], clientName: 'BetterDB-Migration-Analysis' },
