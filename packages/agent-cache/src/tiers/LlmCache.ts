@@ -24,6 +24,7 @@ interface StoredLlmEntry {
   storedAt: number;
   tokens?: { input: number; output: number };
   cost?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export class LlmCache {
@@ -129,6 +130,7 @@ export class LlmCache {
             hit: true,
             response: entry.response,
             contentBlocks: entry.contentBlocks,
+            ...(entry.metadata !== undefined ? { metadata: entry.metadata } : {}),
             key,
             tier: 'llm' as const,
           };
@@ -178,6 +180,7 @@ export class LlmCache {
           model: params.model,
           storedAt: Date.now(),
           tokens: options?.tokens,
+          metadata: options?.metadata,
         };
 
         // Calculate and store cost if costTable and tokens are provided
@@ -251,6 +254,7 @@ export class LlmCache {
           model: params.model,
           storedAt: Date.now(),
           tokens: options?.tokens,
+          metadata: options?.metadata,
         };
 
         if (this.costTable && options?.tokens) {

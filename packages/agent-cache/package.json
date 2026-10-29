@@ -92,14 +92,15 @@
     "iovalkey": ">=0.3.0",
     "openai": "^6.34.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "zod": "^4.3.6"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "peerDependencies": {
     "iovalkey": ">=0.3.0",
-    "@langchain/core": ">=0.3.0",
+    "@langchain/core": ">=1.1.35",
     "@langchain/langgraph-checkpoint": ">=0.1.0",
     "ai": "^6.0.135",
     "openai": ">=6.0.0",

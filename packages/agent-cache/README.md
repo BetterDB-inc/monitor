@@ -297,6 +297,8 @@ const effectiveness = await cache.toolEffectiveness();
 
 ### LangChain
 
+**Zero-config caching** — plug into LangChain's native `cache` option:
+
 ```typescript
 import { ChatOpenAI } from '@langchain/openai';
 import { BetterDBLlmCache } from '@betterdb/agent-cache/langchain';
@@ -306,6 +308,46 @@ const model = new ChatOpenAI({
   cache: new BetterDBLlmCache({ cache }),
 });
 ```
+
+**Tool-schema-aware caching (`CachedChatModel`)** — when your model uses `.bindTools(...)`,
+wrap the chat model so bound tool schemas are included in the cache key (unlike
+`BetterDBLlmCache`, which only sees `(prompt, llm_string)` via LangChain's `BaseCache`):
+
+```typescript
+import { ChatOpenAI } from '@langchain/openai';
+import { CachedChatModel } from '@betterdb/agent-cache/langchain';
+
+const base = new ChatOpenAI({ model: 'gpt-4o-mini' });
+const model = new CachedChatModel({ model: base, cache });
+const withTools = model.bindTools([/* tool definitions */]);
+await withTools.invoke(messages); // keys on messages + bound tools
+```
+
+`CachedChatModel` implements `bindTools` via `withConfig()` — the same mechanism
+`ChatOpenAI` uses internally. What it keys on and what it replays:
+
+- **Key.** Messages, bound tools (normalized via `convertToOpenAITool`, so Zod tools
+  key on JSON Schema; Anthropic-native `{ name, input_schema }` tools are accepted;
+  `strict` is keyed), `tool_choice`, and the wrapped model's full `invocationParams()`
+  minus transport/runtime keys (`stream`, `stream_options`, `signal`, `timeout`).
+  `response_format`, `reasoning_effort`, `stop` / `stop_sequences` and `prompt_cache_key`
+  map onto the same fields the OpenAI and Anthropic adapters use; everything else
+  (`parallel_tool_calls`, `top_k`, `thinking`, `max_completion_tokens`, …) is keyed
+  under `providerParams`.
+- **Replay.** Responses are stored as content blocks (text, `reasoning` with its
+  signature, tool calls) plus the message's `additional_kwargs`, `response_metadata`
+  and `invalid_tool_calls`. A hit rebuilds the same content shape the provider
+  returned, so Anthropic extended-thinking tool loops can send a replayed turn back.
+  The original message `id` is not replayed: each hit gets a fresh id from LangChain
+  (`run-<runId>`), so LangGraph's `messagesStateReducer` appends repeated hits instead
+  of merging them. Cached streams replay as a single chunk that carries `tool_call_chunks`.
+- **Structured output.** `withStructuredOutput()` binds the schema as one tool forced
+  with `tool_choice: "any"` (mapped per provider), and leaves it unforced under
+  Anthropic extended thinking, which rejects a forced tool.
+- **Tracing and callbacks.** The wrapped model's run is a child of the wrapper's run,
+  and the wrapper reports the wrapped model's LangSmith params. Every token handler sees
+  each token exactly once, on a hit or a miss, including handlers passed to the
+  `CachedChatModel` constructor.
 
 See [`examples/langchain`](./examples/langchain) for a full working example. Sample output:
 
@@ -504,6 +546,10 @@ Awaits the in-flight discovery registration. Rejects with `AgentCacheUsageError`
 
 ## Known limitations
 
+- **LangChain `BetterDBLlmCache` (`cache=`):** tool-schema drift is not reflected in the cache key — LangChain's `BaseCache` interface only exposes `(prompt, llm_string)` to the cache layer. Use `CachedChatModel` (model-level wrapper) when bound tools must be keyed; see the LangChain section above.
+- **`CachedChatModel` cache hits carry no token usage.** `LlmCacheResult` does not expose stored token counts, so a rebuilt `AIMessage` has no `usage_metadata`. Cost accounting on hits is handled by the cache's own stats, not by the message.
+- **`CachedChatModel` unconvertible tools:** if any bound tool cannot be converted to a JSON-schema cache key (e.g. provider built-in or server tools), caching is skipped for that call (it goes straight to the wrapped model) rather than keying on fewer tools than the model receives. A warning is logged once per process.
+- **`CachedChatModel` content it cannot replay faithfully is not cached.** Responses whose content holds parts other than text, thinking and tool use (e.g. citations, server-tool results) are returned normally but not stored, since a lossy replay could break the next turn.
 - **LangGraph `list()` memory usage:** The `list()` method loads all checkpoint data for a thread into memory before filtering and applying the limit. For typical agent deployments with hundreds of checkpoints per thread, this is acceptable. For threads with thousands of large checkpoints, this causes memory pressure even when requesting `limit: 1`. If you have millions of checkpoints per thread, consider using `langgraph-checkpoint-redis` with Redis 8+ instead.
 - **Session `getAll()`:** SCAN-based. Fine for dozens of fields, consider Redis HASH if you have thousands per thread.
 - **`active_sessions` gauge:** Approximate and does not survive process restarts.

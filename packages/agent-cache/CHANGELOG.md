@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`CachedChatModel` — tool-schema-aware LangChain caching.** A `BaseChatModel`
+  wrapper (`@betterdb/agent-cache/langchain`) that caches at the model level
+  instead of through LangChain's `BaseCache`, so bound tool schemas
+  (`.bindTools(...)`), `tool_choice`, and the wrapped model's sampling params are
+  all included in the cache key. Wrap any chat model:
+  `new CachedChatModel({ model, cache })`. Tool schemas are normalized with
+  LangChain's `convertToOpenAITool`, so Zod-based tools key on canonical JSON
+  Schema rather than on Zod internals. Streaming is supported: on a miss the
+  upstream chunks pass through untouched and the aggregate is stored on
+  completion; on a hit the stored response replays as a single chunk (with
+  `tool_call_chunks`). The key also covers the wrapped model's full
+  `invocationParams()` (e.g. `response_format`, `parallel_tool_calls`,
+  `reasoning_effort`, `stop_sequences`, `top_k`, `thinking`), and hits rebuild
+  thinking blocks with their signatures, the provider's content shape, and the
+  message `additional_kwargs`, `response_metadata` and `invalid_tool_calls`, so
+  Anthropic extended-thinking tool loops keep working across hits. Hits get a
+  fresh message id rather than the cached response's, so LangGraph appends
+  repeated hits instead of merging them. `withStructuredOutput()` forces the
+  schema tool, the wrapped model's run is traced as a child run (handlers passed
+  to the wrapper's constructor still receive every token once), and `bindTools`
+  kwargs (e.g. `strict`) reach the wrapped model.
+- **`LlmCacheParams.providerParams`** (optional): provider request params with no
+  first-class field. Included in the LLM cache key only when set.
+- **`LlmStoreOptions.metadata` / `LlmCacheResult.metadata`** (optional):
+  adapter-owned data stored with an entry and returned on a hit. Not part of the
+  key.
+
+  Resolves the tool-schema-drift limitation documented under v0.7.0 for callers
+  who opt into the wrapper; the existing `BetterDBLlmCache` (`cache=`) path is
+  unchanged and retains the `(prompt, llm_string)` limitation by design.
+
+### Changed
+- **`@langchain/core` peer range is now `>=1.1.35`** (was `>=0.3.0`). The
+  `@betterdb/agent-cache/langchain` entry point imports `toJsonSchema`,
+  `isInteropZodSchema` and `getSchemaDescription`, which older `0.3.x`
+  releases do not export, so importing it on those versions failed at load
+  time. `1.1.35` matches the version the adapter is built and tested against.
+
+### Behavior
+
+- No cache keys change for existing `BetterDBLlmCache` users or any other
+  adapter: `providerParams` is dropped from the canonical JSON when undefined,
+  and entries stored without `metadata` are byte-identical to before.
+  `CachedChatModel` is a separate, opt-in integration.
+
 ## [0.11.1] - 2026-07-09
 
 ### Fixed

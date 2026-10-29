@@ -559,6 +559,9 @@ importers:
       vitest:
         specifier: ^4.1.11
         version: 4.1.11(@opentelemetry/api@1.9.0)(@types/node@22.19.15)(happy-dom@21.0.4)(msw@2.12.14(@types/node@22.19.15)(typescript@5.9.3))(vite@8.1.6(@types/node@22.19.15)(esbuild@0.28.1)(jiti@2.6.1)(terser@5.44.1)(tsx@4.21.0)(yaml@2.9.0))
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.7
 
   packages/agent-memory:
     dependencies:
