@@ -313,6 +313,8 @@ describe('createBetterAuth', () => {
     db.exec(
       'CREATE UNIQUE INDEX "account_issuer_accountId_uidx" ON "account" ("issuer", "accountId")',
     );
+    db.exec(`INSERT INTO "account" ("id", "accountId", "issuer", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES ('legacy-account', 'legacy-subject', 'legacy-issuer', 'credential', 'legacy-user', 0, 0)`);
     const handle: RawDatabaseHandle = { kind: 'sqlite', db };
     const auth = await build(handle);
     await runBetterAuthMigrations(auth, handle);
@@ -321,7 +323,10 @@ describe('createBetterAuth', () => {
     expect(response.status).toBe(200);
     const columns = db.prepare("PRAGMA table_info('account')").all() as { name: string }[];
     expect(columns.map((column) => column.name)).not.toContain('issuer');
-    expect(db.prepare('SELECT COUNT(*) AS n FROM account').get()).toEqual({ n: 1 });
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM account WHERE id = 'legacy-account'").get(),
+    ).toEqual({ n: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM account').get()).toEqual({ n: 2 });
     db.close();
     unlinkSync(path);
   });

@@ -44,8 +44,15 @@ describe('MemoryAdapter.getClientSnapshots addr filter', () => {
 
   it('matches regex metacharacters literally', async () => {
     await expect(storage.getClientSnapshots({ addr: '%(' })).resolves.toEqual([]);
-    const started = Date.now();
     await expect(storage.getClientSnapshots({ addr: '%(a+)+$' })).resolves.toEqual([]);
-    expect(Date.now() - started).toBeLessThan(1000);
+    await expect(storage.getClientSnapshots({ addr: '10.0.0.*%' })).resolves.toEqual([]);
+  });
+
+  it('keeps substring semantics around the wildcard', async () => {
+    const rows = await storage.getClientSnapshots({ addr: '0.0.%:5' });
+    expect(rows).toHaveLength(2);
+    await expect(
+      storage.getClientSnapshots({ addr: `${'%1'.repeat(40)}%!` }),
+    ).resolves.toEqual([]);
   });
 });

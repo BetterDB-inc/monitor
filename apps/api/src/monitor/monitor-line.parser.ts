@@ -107,7 +107,8 @@ export function matchesFilters(line: ParsedMonitorLine, filters: MonitorLineFilt
     if (line.key === null) return false;
     // Linear-time matcher: a compiled `.*` regex backtracks catastrophically on
     // user-supplied patterns like `*a*a*a*a*!` and would stall the event loop.
-    if (!globMatches(filters.key, line.key)) return false;
+    // Only `*` and `?` are operators here, so `\` and `[` are escaped to stay literal.
+    if (!globMatches(filters.key.replace(/[\\[]/g, '\\$&'), line.key)) return false;
   }
   if (filters.afterTs !== undefined && line.ts < filters.afterTs) return false;
   if (filters.beforeTs !== undefined && line.ts > filters.beforeTs) return false;

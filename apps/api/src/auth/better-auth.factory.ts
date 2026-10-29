@@ -178,12 +178,20 @@ export async function relaxLegacyAccountIssuer(handle: RawDatabaseHandle): Promi
     }
     return;
   }
-  const columns = handle.db.prepare("PRAGMA table_info('account')").all() as { name: string }[];
-  if (columns.some((column) => column.name === 'issuer') === false) {
-    return;
+  // BEGIN IMMEDIATE takes the write lock before the check, so a second process
+  // migrating the same file waits and then sees the column already gone.
+  handle.db.exec('BEGIN IMMEDIATE');
+  try {
+    const columns = handle.db.prepare("PRAGMA table_info('account')").all() as { name: string }[];
+    if (columns.some((column) => column.name === 'issuer')) {
+      handle.db.exec(`DROP INDEX IF EXISTS "${LEGACY_ISSUER_INDEX}"`);
+      handle.db.exec('ALTER TABLE "account" DROP COLUMN "issuer"');
+    }
+    handle.db.exec('COMMIT');
+  } catch (error) {
+    handle.db.exec('ROLLBACK');
+    throw error;
   }
-  handle.db.exec(`DROP INDEX IF EXISTS "${LEGACY_ISSUER_INDEX}"`);
-  handle.db.exec('ALTER TABLE "account" DROP COLUMN "issuer"');
 }
 
 export async function countUsers(auth: BetterAuthInstance): Promise<number> {
