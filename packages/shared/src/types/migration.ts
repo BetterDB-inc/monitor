@@ -12,6 +12,7 @@ export interface Incompatibility {
   category: string;
   title: string;
   detail: string;
+  awsToolOnly?: boolean;
 }
 
 export interface MigrationAnalysisRequest {
