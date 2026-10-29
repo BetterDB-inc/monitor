@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { PREVIEW_CHARS } from '../../../ui/collapsible-text';
 import { SessionDetailPanel } from '../SessionDetailPanel';
 import { detail, failedKey, parsedKey } from './fixtures';
 
@@ -61,5 +62,17 @@ describe('SessionDetailPanel', () => {
     render(<SessionDetailPanel detail={detail()} onExport={onExport} exporting={false} />);
     fireEvent.click(screen.getByRole('button', { name: /Export JSON/ }));
     expect(onExport).toHaveBeenCalled();
+  });
+
+  it('collapses an expanded message when switching to another session', () => {
+    const messages = [{ role: 'system', content: 'a'.repeat(PREVIEW_CHARS * 2) + 'TAIL' }];
+    const props = { onExport: vi.fn(), exporting: false };
+    const { rerender } = render(
+      <SessionDetailPanel detail={detail({ sessionId: 'chat:1', messages })} {...props} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /show more/i }));
+    expect(screen.getByText(/TAIL/)).toBeInTheDocument();
+    rerender(<SessionDetailPanel detail={detail({ sessionId: 'chat:2', messages })} {...props} />);
+    expect(screen.queryByText(/TAIL/)).not.toBeInTheDocument();
   });
 });

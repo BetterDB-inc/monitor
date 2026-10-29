@@ -1,6 +1,6 @@
 import type { ParsedMessage } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
-import { CollapsibleText } from './CollapsibleText';
+import { CollapsibleText } from '../../ui/collapsible-text';
 import { prettyArgs } from './format';
 
 function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }) {
@@ -15,11 +15,13 @@ function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }
           <div className="text-xs font-medium">
             Tool call: <span className="font-mono">{call.name}</span>
           </div>
-          <CollapsibleText
-            as="pre"
-            text={prettyArgs(call.args)}
-            className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs"
-          />
+          {call.args !== undefined && (
+            <CollapsibleText
+              as="pre"
+              text={prettyArgs(call.args)}
+              className="mt-1 overflow-x-auto whitespace-pre-wrap text-xs"
+            />
+          )}
         </div>
       ))}
     </div>
