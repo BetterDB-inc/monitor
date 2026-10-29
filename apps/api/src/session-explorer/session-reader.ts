@@ -1,7 +1,6 @@
 import type Valkey from 'iovalkey';
 import type { ChainableCommander } from 'iovalkey';
 import type { CapturedKey, ValkeyElement, ValkeyValue } from '@betterdb/shared';
-import type { DatabasePort } from '../common/interfaces/database-port.interface';
 import { decodeValue } from './presets/text';
 import {
   isReadable,
@@ -10,7 +9,6 @@ import {
   PrimaryRoute,
   ReadableRoute,
   union,
-  withPrimaries,
 } from './primary-nodes';
 
 export const DEFAULT_BYTE_CAP = 2 * 1024 * 1024;
@@ -647,14 +645,6 @@ async function readNode(
       }
     }
   }
-}
-
-export function readSessionKeys(
-  db: DatabasePort,
-  keys: string[],
-  options: ReadOptions = {},
-): Promise<SessionKeysRead> {
-  return withPrimaries(db, (primaries) => readSessionKeysOn(primaries, keys, options));
 }
 
 export async function readSessionKeysOn(

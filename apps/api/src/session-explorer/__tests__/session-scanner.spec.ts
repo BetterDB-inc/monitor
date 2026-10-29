@@ -2,8 +2,9 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
-import { primaryClients } from '../primary-nodes';
-import { keysForSession, scanSessions, type SessionKeysResult } from '../session-scanner';
+import { primaryClients, withPrimaries } from '../primary-nodes';
+import type { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { keysForSessionOn, scanSessions, type SessionKeysResult } from '../session-scanner';
 import { clientsOf, FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
@@ -22,6 +23,18 @@ const preset: PresetDefinition = {
 
 const keyRange = (from: number, count: number, session = 'a') =>
   Array.from({ length: count }, (_, i) => `s:${session}:${from + i}`);
+
+const keysForSession = (
+  db: DatabasePort,
+  pattern: string,
+  sessionPreset: PresetDefinition,
+  sessionId: string,
+  keyCap?: number,
+  pages?: number,
+) =>
+  withPrimaries(db, (primaries) =>
+    keysForSessionOn(primaries, pattern, sessionPreset, sessionId, keyCap, pages),
+  );
 
 const counted = (result: SessionKeysResult) => ({ ...result, failed: result.failed.size });
 

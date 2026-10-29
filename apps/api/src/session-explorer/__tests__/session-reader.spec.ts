@@ -1,12 +1,17 @@
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
-import { readSessionKeys } from '../session-reader';
+import type { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { withPrimaries } from '../primary-nodes';
+import { type ReadOptions, readSessionKeysOn } from '../session-reader';
 import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
 const ValkeyMock = Valkey as unknown as jest.Mock;
 const MB = 1024 * 1024;
+
+const readSessionKeys = (db: DatabasePort, keys: string[], options?: ReadOptions) =>
+  withPrimaries(db, (primaries) => readSessionKeysOn(primaries, keys, options));
 
 const storeOf = (entries: Record<string, FakeEntry>) => new Map(Object.entries(entries));
 

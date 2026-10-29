@@ -255,19 +255,6 @@ async function lookupKey(
   }
 }
 
-export function keysForSession(
-  db: DatabasePort,
-  pattern: string,
-  preset: PresetDefinition,
-  sessionId: string,
-  keyCap: number = DEFAULT_KEY_CAP,
-  pages: number = DEFAULT_SESSION_SCAN_PAGES,
-): Promise<SessionKeysResult> {
-  return withPrimaries(db, (primaries) =>
-    keysForSessionOn(primaries, pattern, preset, sessionId, keyCap, pages),
-  );
-}
-
 export async function keysForSessionOn(
   primaries: PrimaryClients,
   pattern: string,
