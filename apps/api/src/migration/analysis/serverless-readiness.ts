@@ -215,12 +215,13 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
   const largestMaster = facts.masterUsedMemory.reduce((max, bytes) => Math.max(max, bytes), 0);
   if (largestMaster > MAX_MASTER_MEMORY_BYTES) {
     issues.push({
-      severity: 'blocking',
+      severity: 'warning',
       category: CATEGORY,
+      awsToolOnly: true,
       title: 'Source master over 32 GB',
       detail:
-        `A source master uses ${formatGiB(largestMaster)}. ElastiCache Serverless migration accepts at most 32 GB per source node. ` +
-        'Reshard the source across more masters before migrating.',
+        `A source master uses ${formatGiB(largestMaster)}. The AWS migration tool accepts at most 32 GB per source node; ` +
+        'reshard the source across more masters to use it. BetterDB migration has no per-node limit.',
     });
   }
 
@@ -237,11 +238,13 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
 
   if (facts.isCluster && facts.clusterMasterCount > MAX_MASTERS) {
     issues.push({
-      severity: 'blocking',
+      severity: 'warning',
       category: CATEGORY,
+      awsToolOnly: true,
       title: 'More than 166 masters',
       detail:
-        `The source has ${facts.clusterMasterCount} masters. ElastiCache Serverless migration supports at most ${MAX_MASTERS}.`,
+        `The source has ${facts.clusterMasterCount} masters. The AWS migration tool supports at most ${MAX_MASTERS}. ` +
+        'BetterDB migration has no master limit.',
     });
   }
 
@@ -286,11 +289,12 @@ export function checkServerlessReadiness(facts: ServerlessReadinessFacts): Incom
     const problems = slotProblems(facts.clusterMasters);
     if (problems.length > 0) {
       issues.push({
-        severity: 'blocking',
+        severity: 'warning',
         category: CATEGORY,
+        awsToolOnly: true,
         title: 'Slot coverage incomplete or changing',
         detail:
-          `The source cluster has ${problems.join(', ')}. AWS migration needs every slot owned by exactly one master and no resharding in progress.`,
+          `The source cluster has ${problems.join(', ')}. The AWS migration tool needs every slot owned by exactly one master and no resharding in progress.`,
       });
     }
   }

@@ -70,10 +70,11 @@ describe('checkServerlessReadiness', () => {
       expect(checkServerlessReadiness(facts({ masterUsedMemory: [32 * GIB, 1 * GIB] }))).toEqual([]);
     });
 
-    it('blocks when a master holds more than 32 GB', () => {
+    it('warns for the AWS tool only when a master holds more than 32 GB', () => {
       const issues = checkServerlessReadiness(facts({ masterUsedMemory: [32 * GIB + 1, 1 * GIB] }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].severity).toBe('warning');
+      expect(issues[0].awsToolOnly).toBe(true);
       expect(issues[0].title).toMatch(/32 GB/);
     });
   });
@@ -96,6 +97,7 @@ describe('checkServerlessReadiness', () => {
       ] }));
       expect(issues).toHaveLength(1);
       expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].awsToolOnly).toBeUndefined();
       expect(issues[0].title).toMatch(/5,000 GiB/);
     });
   });
@@ -105,10 +107,11 @@ describe('checkServerlessReadiness', () => {
       expect(titles(facts({ clusterMasterCount: 166 }))).toEqual([]);
     });
 
-    it('blocks at 167 masters', () => {
+    it('warns for the AWS tool only at 167 masters', () => {
       const issues = checkServerlessReadiness(facts({ clusterMasterCount: 167 }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].severity).toBe('warning');
+      expect(issues[0].awsToolOnly).toBe(true);
       expect(issues[0].detail).toMatch(/167/);
     });
   });
@@ -184,7 +187,8 @@ describe('checkServerlessReadiness', () => {
         ],
       }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].severity).toBe('warning');
+      expect(issues[0].awsToolOnly).toBe(true);
       expect(issues[0].detail).toMatch(/191 slots? unassigned/);
     });
 
@@ -205,7 +209,8 @@ describe('checkServerlessReadiness', () => {
       masters[1].importingSlots = 1;
       const issues = checkServerlessReadiness(facts({ clusterMasters: masters }));
       expect(issues).toHaveLength(1);
-      expect(issues[0].severity).toBe('blocking');
+      expect(issues[0].severity).toBe('warning');
+      expect(issues[0].awsToolOnly).toBe(true);
       expect(issues[0].detail).toMatch(/migrat/i);
     });
 
