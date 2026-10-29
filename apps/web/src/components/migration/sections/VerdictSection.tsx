@@ -81,6 +81,11 @@ export function VerdictSection({ job }: Props) {
                     <span className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded">
                       {item.category}
                     </span>
+                    {item.awsToolOnly && (
+                      <span className="px-2 py-0.5 text-xs bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 rounded">
+                        Blocks AWS migration
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-muted-foreground mt-1">{item.detail}</p>
                 </div>

@@ -49,11 +49,15 @@ export function SummarySection({ job }: Props) {
           connectionName={job.sourceConnectionName}
         />
         <span className="text-muted-foreground font-medium">&rarr;</span>
-        <DbBadge
-          dbType={job.targetDbType}
-          dbVersion={job.targetDbVersion}
-          connectionName={job.targetConnectionName}
-        />
+        {job.targetProfile === 'elasticache_serverless' ? (
+          <span className="text-sm font-medium">ElastiCache Serverless</span>
+        ) : (
+          <DbBadge
+            dbType={job.targetDbType}
+            dbVersion={job.targetDbVersion}
+            connectionName={job.targetConnectionName}
+          />
+        )}
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
