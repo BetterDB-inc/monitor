@@ -101,6 +101,73 @@ describe('MigrationController', () => {
         }),
       ).rejects.toThrow(BadRequestException);
     });
+
+    it('should reject a request with neither a target connection nor a target profile', async () => {
+      await expect(
+        controller.startAnalysis({ sourceConnectionId: 'conn-1' }),
+      ).rejects.toThrow('Exactly one of targetConnectionId or targetProfile is required');
+      expect(migrationService.startAnalysis).not.toHaveBeenCalled();
+    });
+
+    it('should reject a request with both a target connection and a target profile', async () => {
+      await expect(
+        controller.startAnalysis({
+          sourceConnectionId: 'conn-1',
+          targetConnectionId: 'conn-2',
+          targetProfile: 'elasticache_serverless',
+        }),
+      ).rejects.toThrow('Exactly one of targetConnectionId or targetProfile is required');
+      expect(migrationService.startAnalysis).not.toHaveBeenCalled();
+    });
+
+    it('should reject an unknown target profile', async () => {
+      await expect(
+        controller.startAnalysis({
+          sourceConnectionId: 'conn-1',
+          targetProfile: 'memorystore' as never,
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(migrationService.startAnalysis).not.toHaveBeenCalled();
+    });
+
+    it('should accept a standalone ElastiCache Serverless check', async () => {
+      const result = await controller.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+
+      expect(result).toEqual({ id: 'job-1', status: 'pending' });
+      expect(migrationService.startAnalysis).toHaveBeenCalledWith({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+    });
+
+    it('should drop an empty targetConnectionId sent alongside a target profile', async () => {
+      await controller.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: '',
+        targetProfile: 'elasticache_serverless',
+      });
+
+      expect(migrationService.startAnalysis).toHaveBeenCalledWith({
+        sourceConnectionId: 'conn-1',
+        targetProfile: 'elasticache_serverless',
+      });
+    });
+
+    it('should drop a null targetProfile sent alongside a target connection', async () => {
+      await controller.startAnalysis({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+        targetProfile: null as never,
+      });
+
+      expect(migrationService.startAnalysis).toHaveBeenCalledWith({
+        sourceConnectionId: 'conn-1',
+        targetConnectionId: 'conn-2',
+      });
+    });
   });
 
   describe('GET /analysis/:id', () => {

@@ -25,13 +25,13 @@ export function AuditTrail() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedUser, setSelectedUser] = useState<string>('');
   const ipFilter = searchParams.get('ip');
+  const userParam = searchParams.get('user');
 
   useEffect(() => {
-    const user = searchParams.get('user');
-    if (user) {
-      setSelectedUser(user);
+    if (userParam) {
+      setSelectedUser(userParam);
     }
-  }, [searchParams]);
+  }, [userParam]);
 
   const clearIpFilter = () => {
     searchParams.delete('ip');

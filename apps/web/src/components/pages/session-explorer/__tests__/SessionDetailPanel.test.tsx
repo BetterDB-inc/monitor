@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { PREVIEW_CHARS } from '../../../ui/collapsible-text';
 import { SessionDetailPanel } from '../SessionDetailPanel';
 import { detail, failedKey, parsedKey } from './fixtures';
 
@@ -9,6 +10,31 @@ describe('SessionDetailPanel', () => {
     const block = screen.getByTestId('tool-call-call-1');
     expect(block.textContent).toContain('get_weather');
     expect(block.querySelector('pre')?.textContent).toBe(JSON.stringify({ city: 'Sofia' }, null, 2));
+  });
+
+  it('titles the session by its id without the namespace prefix', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ sessionId: 'message_store:support-0296' })}
+        onExport={vi.fn()}
+        exporting={false}
+        idPrefix="message_store:"
+      />,
+    );
+    expect(screen.getByText('support-0296')).toHaveAttribute('title', 'message_store:support-0296');
+    expect(screen.getByText('message_store:support-0296')).toBeInTheDocument();
+  });
+
+  it('does not repeat the id when nothing was stripped', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ sessionId: 'support-0296' })}
+        onExport={vi.fn()}
+        exporting={false}
+        idPrefix="message_store:"
+      />,
+    );
+    expect(screen.getAllByText('support-0296')).toHaveLength(1);
   });
 
   it('shows the token estimate', () => {
@@ -149,5 +175,17 @@ describe('SessionDetailPanel', () => {
     render(<SessionDetailPanel detail={detail()} onExport={onExport} exporting={false} />);
     fireEvent.click(screen.getByRole('button', { name: /Export JSON/ }));
     expect(onExport).toHaveBeenCalled();
+  });
+
+  it('collapses an expanded message when switching to another session', () => {
+    const messages = [{ role: 'system', content: 'a'.repeat(PREVIEW_CHARS * 2) + 'TAIL' }];
+    const props = { onExport: vi.fn(), exporting: false };
+    const { rerender } = render(
+      <SessionDetailPanel detail={detail({ sessionId: 'chat:1', messages })} {...props} />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /show more/i }));
+    expect(screen.getByText(/TAIL/)).toBeInTheDocument();
+    rerender(<SessionDetailPanel detail={detail({ sessionId: 'chat:2', messages })} {...props} />);
+    expect(screen.queryByText(/TAIL/)).not.toBeInTheDocument();
   });
 });

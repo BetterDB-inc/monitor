@@ -129,7 +129,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   protected start(): void {
     if (this.stopped) {
       // onModuleDestroy already latched this poller shut. A start() deferred
-      // past teardown (e.g. a subclass's ensureValidated().finally(start)
+      // past teardown (e.g. a startAfter() gate
       // resolving after app.close() within its validation window) must NOT
       // re-arm the timer chain — an unstoppable tick loop holds the event loop
       // open and blocks a clean shutdown.
@@ -158,6 +158,14 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       }, this.getIntervalMs());
     };
     scheduleNext();
+  }
+
+  protected startAfter(gate: Promise<unknown>): void {
+    void gate
+      .finally(() => this.start())
+      .catch((error) => {
+        this.logger.error(`Deferred start failed: ${error instanceof Error ? error.message : error}`);
+      });
   }
 
   /**

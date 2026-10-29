@@ -1,9 +1,31 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type { TopologyMembership } from '@betterdb/shared';
+import type { SshTunnelStatus, TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 import { isUnavailableMember } from '../utils/connectionType';
+import { CONNECTION_PARAM } from '../lib/connectionParam';
 
 export const CONNECTIONS_REFRESH_MS = 30_000;
+export const CONNECTION_STORAGE_KEY = 'betterdb:connectionId';
+
+function urlConnectionId(): string | null {
+  return new URLSearchParams(window.location.search).get(CONNECTION_PARAM);
+}
+
+function storedConnectionId(): string | null {
+  try {
+    return window.localStorage.getItem(CONNECTION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function rememberConnectionId(id: string): void {
+  try {
+    window.localStorage.setItem(CONNECTION_STORAGE_KEY, id);
+  } catch (err) {
+    console.debug('[connection] failed to remember the selected connection:', err);
+  }
+}
 
 export interface Connection {
   id: string;
@@ -20,6 +42,8 @@ export interface Connection {
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
+  /** Redacted tunnel summary; present when the connection is reached through SSH. */
+  sshTunnel?: SshTunnelStatus;
 }
 
 export interface ConnectionContextValue {
@@ -63,6 +87,8 @@ export function useConnectionState(): ConnectionContextValue {
   const [autoRegisterNodesDefault, setAutoRegisterNodesDefault] = useState(false);
   const [autoRegisterSentinelNodesDefault, setAutoRegisterSentinelNodesDefault] = useState(false);
   const initialLoadDone = useRef(false);
+  const initialPickDone = useRef(false);
+  const [requestedId] = useState(urlConnectionId);
   const selected = useRef<Connection | null>(null);
   selected.current = currentConnection;
 
@@ -96,7 +122,13 @@ export function useConnectionState(): ConnectionContextValue {
         }
       } else {
         const selectable = data.filter((c) => !isUnavailableMember(c));
+        const preferred = initialPickDone.current
+          ? undefined
+          : [requestedId, storedConnectionId()]
+              .map((id) => selectable.find((c) => c.id === id))
+              .find((c) => c !== undefined);
         const defaultConnection =
+          preferred ||
           (responseData.currentId && selectable.find((c) => c.id === responseData.currentId)) ||
           selectable.find((c) => c.isConnected) ||
           selectable[0] ||
@@ -104,6 +136,7 @@ export function useConnectionState(): ConnectionContextValue {
         setCurrentConnection(defaultConnection);
         setCurrentConnectionId(defaultConnection?.id ?? null);
       }
+      initialPickDone.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch connections');
       console.error('Failed to fetch connections:', err);
@@ -111,7 +144,7 @@ export function useConnectionState(): ConnectionContextValue {
       setLoading(false);
       initialLoadDone.current = true;
     }
-  }, []);
+  }, [requestedId]);
 
   const setConnection = useCallback((connectionId: string) => {
     const connection = connections.find(c => c.id === connectionId);
@@ -119,6 +152,7 @@ export function useConnectionState(): ConnectionContextValue {
       selected.current = connection;
       setCurrentConnection(connection);
       setCurrentConnectionId(connection.id);
+      rememberConnectionId(connection.id);
       fetchApi('/telemetry/event', {
         method: 'POST',
         body: JSON.stringify({

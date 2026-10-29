@@ -243,6 +243,9 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_keyspace_misses_total` | `valkey.keyspace.misses` | `{miss}` |
 | `betterdb_evicted_keys_total` | `valkey.keys.evicted` | `{key}` |
 | `betterdb_expired_keys_total` | `valkey.keys.expired` | `{event}` |
+| `betterdb_rejected_connections_total` | `valkey.connections.rejected` | `{connection}` |
+| `betterdb_net_input_bytes_total` | `valkey.net.input` | `By` |
+| `betterdb_net_output_bytes_total` | `valkey.net.output` | `By` |
 | `betterdb_db_keys` | `valkey.db.keys` | `{key}` |
 | `betterdb_db_keys_expiring` | `valkey.db.expires` | `{key}` |
 | `betterdb_db_avg_ttl_seconds` | `valkey.db.avg_ttl` | `ms` |
@@ -269,6 +272,10 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_instantaneous_output_kbps` | `betterdb.net.output_rate` | `KiBy/s` |
 | `betterdb_pubsub_channels` | `betterdb.pubsub.channels` | `{channel}` |
 | `betterdb_pubsub_patterns` | `betterdb.pubsub.patterns` | `{pattern}` |
+| `betterdb_sync_full_total` | `betterdb.replication.sync.full` | `{sync}` |
+| `betterdb_sync_partial_ok_total` | `betterdb.replication.sync.partial_ok` | `{sync}` |
+| `betterdb_sync_partial_err_total` | `betterdb.replication.sync.partial_err` | `{sync}` |
+| `betterdb_error_replies_total` | `betterdb.error_replies` | `{reply}` |
 | `betterdb_key_pattern_memory_bytes` | `betterdb.key_pattern.memory.total` | `By` |
 | `betterdb_key_pattern_avg_memory_bytes` | `betterdb.key_pattern.memory.avg` | `By` |
 | `betterdb_key_pattern_max_memory_bytes` | `betterdb.key_pattern.memory.max` | `By` |

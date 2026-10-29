@@ -574,6 +574,19 @@ describe('LicenseService', () => {
     });
   });
 
+  describe('ensureValidated', () => {
+    it('clears its timeout once validation settles', async () => {
+      jest.useFakeTimers();
+      try {
+        (service as any).validationPromise = Promise.resolve({ valid: true, tier: Tier.pro, expiresAt: null });
+        await service.ensureValidated();
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
   describe('hasFeature tier safety', () => {
     let dataDir: string;
     let safetyService: LicenseService;

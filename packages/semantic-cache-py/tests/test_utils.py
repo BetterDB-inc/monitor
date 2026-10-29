@@ -8,6 +8,7 @@ import pytest
 from betterdb_semantic_cache.utils import (
     decode_float32,
     encode_float32,
+    escape_glob_pattern,
     extract_binary_refs,
     extract_text,
     parse_ft_search_response,
@@ -19,6 +20,20 @@ def test_sha256_deterministic():
     assert sha256("hello") == sha256("hello")
     assert sha256("hello") != sha256("world")
     assert len(sha256("")) == 64  # hex digest is 64 chars
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("plain", "plain"),
+        ("app?", "app\\?"),
+        ("a*", "a\\*"),
+        ("a[b]", "a\\[b\\]"),
+        ("a\\b", "a\\\\b"),
+    ],
+)
+def test_escape_glob_pattern(raw: str, expected: str) -> None:
+    assert escape_glob_pattern(raw) == expected
 
 
 def test_encode_decode_float32_roundtrip():

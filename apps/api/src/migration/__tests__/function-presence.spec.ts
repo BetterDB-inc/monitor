@@ -1,4 +1,4 @@
-import { probeSourceFunctionsClusterAware } from '../function-presence';
+import { isScannableMaster, probeSourceFunctionsClusterAware } from '../function-presence';
 
 // Capture constructed clients so each master can be given its own FUNCTION LIST reply.
 const constructed: Array<{ host: string; port: number; call: jest.Mock; connect: jest.Mock; quit: jest.Mock }> = [];
@@ -19,10 +19,10 @@ jest.mock('iovalkey', () => {
   });
 });
 
-function makeAdapter(nodes: Array<{ flags: string[]; address?: string }>, seedReply: unknown[] = []) {
+function makeAdapter(nodes: Array<{ flags: string[]; address?: string; slots?: number[][] }>, seedReply: unknown[] = []) {
   return {
     getClient: jest.fn().mockReturnValue({ call: jest.fn().mockResolvedValue(seedReply) }),
-    getClusterNodes: jest.fn().mockResolvedValue(nodes),
+    getClusterNodes: jest.fn().mockResolvedValue(nodes.map((n) => ({ slots: [], ...n }))),
   };
 }
 
@@ -84,11 +84,61 @@ describe('probeSourceFunctionsClusterAware', () => {
     expect(await probeSourceFunctionsClusterAware(adapter, {}, true)).toBe('unknown');
   });
 
+  it('applies the shared scannable-master rule before probing', async () => {
+    const nodes = [
+      { flags: ['master'], address: '10.0.0.1:6379@16379', slots: [[0, 100]] },
+      { flags: ['master', 'fail'], address: '10.0.0.2:6379@16379' },
+      { flags: ['master', 'fail'], address: '10.0.0.3:6379@16379', slots: [[101, 200]] },
+    ];
+    expect(await probeSourceFunctionsClusterAware(makeAdapter(nodes), {}, true)).toBe('absent');
+    expect(constructed.map((c) => c.host)).toEqual(['10.0.0.1', '10.0.0.3']);
+  });
+
+  it("is 'unknown' when a master's connect never settles", async () => {
+    jest.useFakeTimers();
+    try {
+      const nodes = [{ flags: ['master'], address: '10.0.0.9:6379@16379' }];
+      const iovalkey = jest.requireMock('iovalkey') as jest.Mock;
+      const disconnect = jest.fn();
+      iovalkey.mockImplementationOnce((opts: { host: string; port: number }) => {
+        const client = { host: opts.host, port: opts.port, connect: jest.fn(() => new Promise<void>(() => undefined)), quit: jest.fn(), disconnect, call: jest.fn() };
+        constructed.push(client);
+        return client;
+      });
+      const pending = probeSourceFunctionsClusterAware(makeAdapter(nodes), {}, true);
+      await jest.advanceTimersByTimeAsync(60_000);
+      expect(await pending).toBe('unknown');
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('falls back to the seed when masters cannot be enumerated', async () => {
     const adapter = {
       getClient: jest.fn().mockReturnValue({ call: jest.fn().mockResolvedValue([['library_name', 'lib']]) }),
       getClusterNodes: jest.fn().mockResolvedValue([]), // no masters discovered
     };
     expect(await probeSourceFunctionsClusterAware(adapter, {}, true)).toBe('present');
+  });
+});
+
+describe('isScannableMaster', () => {
+  const slots = [[0, 100]];
+
+  it('scans a healthy master', () => {
+    expect(isScannableMaster({ flags: ['master'], slots })).toBe(true);
+  });
+
+  it.each(['fail', 'noaddr', 'handshake'])('skips a %s master that owns no slots', (flag) => {
+    expect(isScannableMaster({ flags: ['master', flag], slots: [] })).toBe(false);
+  });
+
+  it('still scans a fail master that owns slots', () => {
+    expect(isScannableMaster({ flags: ['master', 'fail'], slots })).toBe(true);
+  });
+
+  it('scans a fail? master without slots', () => {
+    expect(isScannableMaster({ flags: ['master', 'fail?'], slots: [] })).toBe(true);
   });
 });

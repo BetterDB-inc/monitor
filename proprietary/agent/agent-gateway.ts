@@ -139,6 +139,7 @@ export class AgentGateway {
         agent.id,
         agent.name,
         agent.adapter,
+        { serverless: hello.valkey.serverless === true },
       );
       this.logger.log(`Agent ${agent.id} registered as connection`);
     } catch (err: any) {

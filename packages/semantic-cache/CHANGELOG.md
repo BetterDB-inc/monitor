@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `judgeFn` directly (e.g. custom tests) must now supply `signal`, since the
   type field is required.
 
+### Fixed
+
+- **`flush()` could delete another cache's keys.** The cache name was put into
+  the `SCAN MATCH` pattern unescaped, so a cache named e.g. `app?` also matched
+  and deleted `appX:*` keys, and a name containing `[` could miss its own keys.
+  The name is now glob-escaped in the pattern; key names and the index prefix
+  are unchanged.
+
 ## [0.11.0] - 2026-07-12
 
 ### Added

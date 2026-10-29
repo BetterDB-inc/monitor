@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { formatBytes } from '../../../lib/utils';
 import { KeyPanel } from './KeyPanel';
 import { MessageTimeline } from './MessageTimeline';
-import { formatTtl } from './format';
+import { displaySessionId, formatTtl } from './format';
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -28,15 +28,24 @@ interface Props {
   detail: SessionDetail;
   onExport: () => void;
   exporting: boolean;
+  idPrefix?: string;
 }
 
-export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
+export function SessionDetailPanel({ detail, onExport, exporting, idPrefix = '' }: Props) {
   const reasons = detail.complete ? [] : incompleteReasons(detail);
+  const shownId = displaySessionId(detail.sessionId, idPrefix);
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <CardTitle className="break-all font-mono text-base">{detail.sessionId}</CardTitle>
+          <CardTitle className="break-all font-mono text-base" title={detail.sessionId}>
+            {shownId}
+          </CardTitle>
+          {shownId !== detail.sessionId && (
+            <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+              {detail.sessionId}
+            </p>
+          )}
           <p className="mt-1 text-sm text-muted-foreground">
             ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
             {detail.unmeasuredKeys > 0 ? (
@@ -77,7 +86,11 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         )}
         <section>
           <h3 className="mb-2 text-sm font-medium">Timeline</h3>
-          <MessageTimeline messages={detail.messages} interrupts={detail.interrupts} />
+          <MessageTimeline
+            key={detail.sessionId}
+            messages={detail.messages}
+            interrupts={detail.interrupts}
+          />
         </section>
         <section className="space-y-2">
           <h3 className="text-sm font-medium">Keys</h3>

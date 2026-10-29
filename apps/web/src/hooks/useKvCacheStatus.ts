@@ -5,6 +5,8 @@ import { useConnection } from './useConnection';
 import { useLicense } from './useLicense';
 import { hasKvCacheFootprint } from '../utils/connectionType';
 
+const FIRST_SCAN_FAST_POLLS = 24;
+
 export function useKvCacheStatus() {
   const { currentConnection } = useConnection();
   const { hasFeature } = useLicense();
@@ -17,9 +19,15 @@ export function useKvCacheStatus() {
       hasFeature(Feature.KV_CACHE_MONITORING) &&
       connectionId !== null &&
       hasKvCacheFootprint(currentConnection),
-    refetchInterval: 60_000,
+    refetchInterval: (query) =>
+      awaitingFirstScan(query.state.data) && query.state.dataUpdateCount < FIRST_SCAN_FAST_POLLS
+        ? 5_000
+        : 60_000,
   });
 }
 
 export const kvCacheInUse = (status: KvCacheStatus | undefined) =>
   !!status && (status.hasLmcache || status.engines.length > 0);
+
+export const awaitingFirstScan = (status: KvCacheStatus | undefined) =>
+  !!status && status.latest === null && !status.lastScanError && !kvCacheInUse(status);

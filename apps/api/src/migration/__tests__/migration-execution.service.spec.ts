@@ -1016,6 +1016,14 @@ describe('MigrationExecutionService', () => {
         service.stopExecution(id); // Mark as cancelled (terminal)
       }
 
+      // A cancelled job is evictable only once its run has settled and its
+      // RedisShake has exited, so let the stopped runs finish first.
+      const runs = (service as unknown as { runs: Map<string, Promise<void>> }).runs;
+      for (let i = 0; i < 200 && runs.size > 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(runs.size).toBe(0);
+
       // One more should trigger eviction
       const { id: newId } = await service.startExecution({
         sourceConnectionId: 'conn-1',
@@ -1081,6 +1089,57 @@ describe('MigrationExecutionService with external connections', () => {
     expect(registry.mockSourceAdapter.getInfo).not.toHaveBeenCalled();
     expect(registry.mockTargetAdapter.getInfo).not.toHaveBeenCalled();
     expect(registry.mockSourceAdapter.getClient).not.toHaveBeenCalled();
+    expect(runCommandMigration).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+});
+
+describe('MigrationExecutionService with SSH-tunneled connections', () => {
+  const TUNNEL_MESSAGE =
+    'One or more selected instances is reached through an SSH tunnel. Migration connects to both instances directly and cannot use the tunnel yet.';
+
+  it.each([
+    ['source', 'conn-1'],
+    ['target', 'conn-2'],
+  ])('rejects a tunneled %s before flushing, probing or starting a worker', async (_side, tunneledId) => {
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: '10.0.0.5',
+      port: 6379,
+      createdAt: Date.now(),
+      connectionType: 'direct',
+      ...(id === tunneledId
+        ? { sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' } }
+        : {}),
+    }));
+    const service = new MigrationExecutionService(
+      registry as any,
+      { findLatestCompletedAnalysis: () => undefined } as any,
+    );
+    const { runCommandMigration } = require('../execution/command-migration-worker');
+    const { spawn } = require('child_process');
+    runCommandMigration.mockClear();
+    spawn.mockClear();
+
+    for (const mode of ['command', 'redis_shake', 'redis_shake_sync'] as const) {
+      const error = await service
+        .startExecution({
+          sourceConnectionId: 'conn-1',
+          targetConnectionId: 'conn-2',
+          mode,
+          redisShakeOptions: { emptyDbBeforeSync: true },
+        })
+        .catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(BadRequestException);
+      expect((error as Error).message).toBe(TUNNEL_MESSAGE);
+    }
+    await flushProbe();
+
+    expect(registry.mockTargetAdapter.getClient).not.toHaveBeenCalled();
+    expect(registry.mockSourceAdapter.getInfo).not.toHaveBeenCalled();
     expect(runCommandMigration).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);

@@ -1,4 +1,5 @@
 import { createContext, useContext, useState } from 'react';
+import type { MigrationTargetProfile } from '@betterdb/shared';
 import { useConnection } from './useConnection';
 import { isExternalConnection } from '../utils/connectionType';
 
@@ -9,12 +10,14 @@ export interface MigrationPlanContextValue {
   sourceId: string | null;
   /** Connection the data is copied into */
   targetId: string | null;
+  targetProfile: MigrationTargetProfile | null;
   /** Whether the source was picked deliberately rather than seeded from the current connection */
   sourceChosen: boolean;
   /** How many keys the analysis samples with SCAN */
   scanSampleSize: number;
   chooseSource: (connectionId: string) => void;
   chooseTarget: (connectionId: string) => void;
+  chooseTargetProfile: (profile: MigrationTargetProfile) => void;
   clearSource: () => void;
   clearTarget: () => void;
   setScanSampleSize: (size: number) => void;
@@ -40,6 +43,7 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
     isExternalConnection(currentConnection) ? null : (currentConnection?.id ?? null),
   );
   const [targetId, setTargetId] = useState<string | null>(null);
+  const [targetProfile, setTargetProfile] = useState<MigrationTargetProfile | null>(null);
   const [sourceChosen, setSourceChosen] = useState(false);
   const [scanSampleSize, setScanSampleSize] = useState(DEFAULT_SCAN_SAMPLE_SIZE);
 
@@ -50,6 +54,12 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
 
   const chooseTarget = (connectionId: string) => {
     setTargetId(connectionId);
+    setTargetProfile(null);
+  };
+
+  const chooseTargetProfile = (profile: MigrationTargetProfile) => {
+    setTargetProfile(profile);
+    setTargetId(null);
   };
 
   const clearSource = () => {
@@ -59,15 +69,18 @@ export function useMigrationPlanState(): MigrationPlanContextValue {
 
   const clearTarget = () => {
     setTargetId(null);
+    setTargetProfile(null);
   };
 
   return {
     sourceId,
     targetId,
+    targetProfile,
     sourceChosen,
     scanSampleSize,
     chooseSource,
     chooseTarget,
+    chooseTargetProfile,
     clearSource,
     clearTarget,
     setScanSampleSize,

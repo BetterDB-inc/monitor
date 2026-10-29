@@ -44,7 +44,7 @@ async function main(): Promise<void> {
         await seed(client, scenario.generate(run));
         const truth = await groundTruth(client);
         const ceiling = await memoryCeiling(client);
-        const result = estimate(await sampleNodes([{ name: 'validate', client: adapter(client) }], { budget: SAMPLE_BUDGET, deadlineMs: SAMPLE_DEADLINE_MS, hardCap: SAMPLE_HARD_CAP }), Date.now(), ceiling);
+        const result = estimate(await sampleNodes([{ name: 'validate', client: adapter(client), ceiling }], { budget: SAMPLE_BUDGET, deadlineMs: SAMPLE_DEADLINE_MS, hardCap: SAMPLE_HARD_CAP }), Date.now());
         const error = Math.abs(result.totalBytes - truth) / truth;
         worst = Math.max(worst, error);
         widest = Math.max(widest, result.ci95Bytes / truth);

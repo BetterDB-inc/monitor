@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { KvCacheFootprintSnapshot } from '@betterdb/shared';
 import { useCanEditKvCache } from '../../../hooks/useCanEditKvCache';
 import { useRescanKvCache } from '../../../hooks/useRescanKvCache';
@@ -11,19 +12,70 @@ const MP_KEY_SHAPE = '[<key_prefix>@]<model>@<kv_rank:08x>@<group_hex>@<chunk_ha
 interface Props {
   latest: KvCacheFootprintSnapshot | null;
   onLinkEngine: () => void;
+  pending?: boolean;
+  scanError?: string | null;
+  intervalMs?: number;
+  cooldownUntil?: number | null;
 }
 
-export function KvCacheNotDetected({ latest, onLinkEngine }: Props) {
+function formatInterval(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 60 || minutes % 60 !== 0) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = minutes / 60;
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+export function KvCacheNotDetected({
+  latest,
+  onLinkEngine,
+  pending = false,
+  scanError = null,
+  intervalMs,
+  cooldownUntil = null,
+}: Props) {
   const rescan = useRescanKvCache();
   const canMutate = useCanEditKvCache();
+  const { mutate } = rescan;
+  const triggered = useRef(false);
+
+  useEffect(() => {
+    if (!pending || !canMutate || triggered.current) return;
+    triggered.current = true;
+    mutate();
+  }, [pending, canMutate, mutate]);
+
+  const rescanMessage = rescan.error instanceof Error ? rescan.error.message : '';
+  const showRescanError = rescan.isError && !(scanError && rescanMessage === scanError);
+  const title = pending
+    ? 'Scanning for LMCache keys'
+    : scanError && !latest
+      ? 'Could not scan for LMCache keys'
+      : 'No LMCache KV cache detected';
 
   return (
     <div className="flex items-center justify-center py-8">
       <Card className="max-w-2xl shadow-lg">
         <CardHeader>
-          <CardTitle>No LMCache KV cache detected</CardTitle>
+          <CardTitle>{title}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          {scanError && (
+            <p className="text-destructive">
+              The last scan failed: {scanError}
+              <span className="block text-muted-foreground">
+                BetterDB retries within{' '}
+                {intervalMs
+                  ? formatInterval(intervalMs + Math.max(0, (cooldownUntil ?? 0) - Date.now()))
+                  : 'the footprint interval'}
+                .
+              </span>
+            </p>
+          )}
+          {pending && !scanError && (
+            <p className="text-muted-foreground">
+              The first scan of this connection has not finished yet. This page updates when it does.
+            </p>
+          )}
           <p className="text-muted-foreground">
             BetterDB looks for LMCache chunk keys in this connection&apos;s database. Keys have
             the shape{' '}
@@ -81,10 +133,10 @@ export function KvCacheNotDetected({ latest, onLinkEngine }: Props) {
               Read the docs
             </a>
           </div>
-          {rescan.isError && (
+          {showRescanError && (
             <p className="text-destructive">
               Could not rescan
-              {rescan.error instanceof Error && rescan.error.message ? `: ${rescan.error.message}` : ''}
+              {rescanMessage ? `: ${rescanMessage}` : ''}
             </p>
           )}
         </CardContent>

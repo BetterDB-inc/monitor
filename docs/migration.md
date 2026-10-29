@@ -175,6 +175,21 @@ The binary is found in this order:
 2. `/usr/local/bin/redis-shake` (Docker image)
 3. `~/.betterdb/bin/redis-shake` (npx install)
 
+#### Shutdown and restarts (all modes)
+
+Stopping BetterDB (SIGTERM, `docker stop`, Ctrl-C on the CLI) stops every running
+migration the way **Stop Migration** does: RedisShake gets SIGTERM, then SIGKILL if
+it is still running 3 seconds later, and command-mode migrations stop at their next
+batch. Migrations do not resume after a restart; start them again.
+
+Each RedisShake run writes its configuration, including the source and target
+credentials, to `<tmpdir>/<job id>.toml` (mode `0600`) and removes it when the run
+ends. If BetterDB is killed before it can clean up (SIGKILL, out of memory), the
+next start removes those files once their RedisShake process is gone, and logs a
+warning for any whose process is still running. Because that check relies on the
+PID file, a RedisShake run whose PID file cannot be written is stopped straight
+away and the migration fails with an error, rather than running untracked.
+
 ### 3. Validation (Pro tier)
 
 Spot-checks the target after migration to verify data integrity.
@@ -367,12 +382,18 @@ reported. If the source has custom ACL users missing from the target, analysis
 issues a warning. If the source uses modules not loaded on the target, analysis
 flags a blocking incompatibility.
 
-### Key counts in cluster mode
+### Key counts and samples in cluster mode
 
 Validation sums `DBSIZE` over every master of a cluster source or target, so
-the key count comparison covers the whole dataset. The sample spot-check still
-reads keys from the source connection's node; on a cluster source that is one
-shard's keys.
+the key count comparison covers the whole dataset. The sample spot-check also
+covers every master of a cluster source: the ~500-key budget is split across
+masters in proportion to their `DBSIZE`, and every master that holds keys gets
+at least one sample as long as the budget is at least the number of non-empty
+masters (above ~500 masters, the smallest shards may get none). A shard whose
+keys never reached the target therefore shows up as missing keys rather than
+passing unnoticed. Keys are found with a per-master `SCAN`, but `TYPE` and
+values are read through the cluster client, so a slot migration or failover
+during validation is followed rather than reported as missing keys.
 
 ### Concurrent writes on the source
 
@@ -410,6 +431,17 @@ version it does not understand.
 `redis_shake_sync` is not affected because RedisShake parses the RDB stream
 internally and writes to the target using application-level commands, bypassing
 the `RESTORE` compatibility constraint entirely.
+
+### SSH tunnels
+
+Connections reached through an SSH tunnel cannot be migrated yet. Analysis,
+execution and validation reject them with a 400 before doing anything, and the
+connection picker marks them as unavailable. Execution and validation open their
+own connections to `host:port` (and RedisShake runs as a separate process), so
+they would bypass the tunnel and fail partway through — in the worst case after
+an `emptyDbBeforeSync` flush has already emptied the target. To migrate such an
+instance, register a connection BetterDB can reach directly, for example through
+a VPN or a port-forward you run yourself.
 
 ## Batching and concurrency
 

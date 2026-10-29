@@ -2,16 +2,16 @@ import { NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import type { CapturedKey, SessionNamespace } from '@betterdb/shared';
 import Valkey from 'iovalkey';
 import { SessionExplorerService } from '../session-explorer.service';
-import { keysForSession, scanSessions } from '../session-scanner';
-import { readSessionKeys, type SessionKeysRead } from '../session-reader';
-import { withPrimaries } from '../primary-nodes';
+import { keysForSessionOn, scanSessions } from '../session-scanner';
+import { readSessionKeysOn, type SessionKeysRead } from '../session-reader';
+import { type PrimaryClients, type PrimaryRoute, withPrimaries } from '../primary-nodes';
 import { FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
 jest.mock('../session-scanner', () => ({
   ...jest.requireActual('../session-scanner'),
-  keysForSession: jest.fn(),
+  keysForSessionOn: jest.fn(),
   scanSessions: jest.fn(),
 }));
 jest.mock('../primary-nodes', () => {
@@ -20,11 +20,19 @@ jest.mock('../primary-nodes', () => {
 });
 jest.mock('../session-reader', () => ({
   ...jest.requireActual('../session-reader'),
-  readSessionKeys: jest.fn(),
+  readSessionKeysOn: jest.fn(),
 }));
 
-const keysFor = keysForSession as jest.MockedFunction<typeof keysForSession>;
-const read = readSessionKeys as jest.MockedFunction<typeof readSessionKeys>;
+const keysFor = keysForSessionOn as jest.MockedFunction<typeof keysForSessionOn>;
+const read = readSessionKeysOn as jest.MockedFunction<typeof readSessionKeysOn>;
+const actualWithPrimaries = jest.requireActual('../primary-nodes').withPrimaries;
+const stubPrimaries: PrimaryClients = {
+  routes: [],
+  touchesKeys: false,
+  release: async () => undefined,
+};
+const route = (): PrimaryRoute => ({ slots: [], client: null });
+const failedRoutes = (count: number) => new Set(Array.from({ length: count }, route));
 const ValkeyMock = Valkey as unknown as jest.Mock;
 
 const ns: SessionNamespace = {
@@ -53,12 +61,14 @@ const captured = (overrides: Partial<CapturedKey> = {}): CapturedKey => ({
 const readOf = (overrides: Partial<SessionKeysRead> = {}): SessionKeysRead => ({
   keys: [captured()],
   truncated: false,
-  failedNodes: 0,
+  failed: failedRoutes(0),
   missingKeys: 0,
   touchesKeys: false,
   totals: { memoryBytes: 64, unmeasuredKeys: 0, goneKeys: 0, ttlMs: 5000 },
   ...overrides,
 });
+
+afterEach(() => jest.mocked(withPrimaries).mockImplementation(actualWithPrimaries));
 
 describe('SessionExplorerService.getSession', () => {
   const storage = { getSessionNamespace: jest.fn(async () => ns) };
@@ -66,7 +76,8 @@ describe('SessionExplorerService.getSession', () => {
   const service = new SessionExplorerService(registry as never, storage as never);
 
   beforeEach(() => {
-    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 0 });
+    jest.mocked(withPrimaries).mockImplementation(async (_db, fn) => fn(stubPrimaries));
+    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failed: failedRoutes(0) });
     read.mockResolvedValue(readOf());
   });
 
@@ -103,7 +114,7 @@ describe('SessionExplorerService.getSession', () => {
   it('measures every session key but reads only the keys the preset selects', async () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
     const p = 'ac:session:t1';
-    keysFor.mockResolvedValue({ keys: agentCacheKeys(p), truncated: false, failedNodes: 0 });
+    keysFor.mockResolvedValue({ keys: agentCacheKeys(p), truncated: false, failed: failedRoutes(0) });
     await service.getSession('conn-1', 'ns-1', 't1');
     expect(read).toHaveBeenLastCalledWith(expect.anything(), agentCacheKeys(p), {
       selected: [`${p}:__checkpoint_latest`, `${p}:writes:1f0-b|task-2|messages|0`],
@@ -112,7 +123,7 @@ describe('SessionExplorerService.getSession', () => {
 
   it('totals the whole session when it reads only the selected keys', async () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
-    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failedNodes: 0 });
+    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failed: failedRoutes(0) });
     read.mockResolvedValueOnce(
       readOf({ totals: { memoryBytes: 364, unmeasuredKeys: 2, goneKeys: 0, ttlMs: 1200 } }),
     );
@@ -130,7 +141,7 @@ describe('SessionExplorerService.getSession', () => {
 
   it('leaves skipped keys that expired before the read out of the totals', async () => {
     storage.getSessionNamespace.mockResolvedValueOnce({ ...ns, preset: 'agent-cache' });
-    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failedNodes: 0 });
+    keysFor.mockResolvedValue({ keys: agentCacheKeys('ac:session:t1'), truncated: false, failed: failedRoutes(0) });
     read.mockResolvedValueOnce(
       readOf({ totals: { memoryBytes: 300, unmeasuredKeys: 0, goneKeys: 2, ttlMs: 1200 } }),
     );
@@ -160,7 +171,7 @@ describe('SessionExplorerService.getSession', () => {
     const p = 'ac:session:t1';
     const latest = `${p}:__checkpoint_latest`;
     const interrupt = `${p}:writes:1f0-b|task-2|__interrupt__|0`;
-    keysFor.mockResolvedValue({ keys: [latest, interrupt], truncated: false, failedNodes: 0 });
+    keysFor.mockResolvedValue({ keys: [latest, interrupt], truncated: false, failed: failedRoutes(0) });
     const str = (key: string, value: unknown): CapturedKey =>
       captured({ key, type: 'string', value: JSON.stringify(value) });
     read.mockResolvedValueOnce(
@@ -182,7 +193,7 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('is incomplete when the key scan was capped', async () => {
-    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: true, failedNodes: 0 });
+    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: true, failed: failedRoutes(0) });
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
       complete: false,
       truncated: true,
@@ -203,8 +214,13 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('is incomplete when nodes failed or keys vanished', async () => {
-    keysFor.mockResolvedValue({ keys: ['lc:1', 'lc:2'], truncated: false, failedNodes: 1 });
-    read.mockResolvedValue(readOf({ failedNodes: 1, missingKeys: 1 }));
+    const down = route();
+    keysFor.mockResolvedValue({
+      keys: ['lc:1', 'lc:2'],
+      truncated: false,
+      failed: new Set([down]),
+    });
+    read.mockResolvedValue(readOf({ failed: new Set([down]), missingKeys: 1 }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({
       complete: false,
       failedNodes: 1,
@@ -213,8 +229,15 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('counts a node that failed both the scan and the read once', async () => {
-    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failedNodes: 2 });
-    read.mockResolvedValue(readOf({ failedNodes: 1 }));
+    const [b, c] = [route(), route()];
+    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failed: new Set([b, c]) });
+    read.mockResolvedValue(readOf({ failed: new Set([b]) }));
+    expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({ failedNodes: 2 });
+  });
+
+  it('counts a node that failed the scan and another that failed the read', async () => {
+    keysFor.mockResolvedValue({ keys: ['lc:1'], truncated: false, failed: new Set([route()]) });
+    read.mockResolvedValue(readOf({ failed: new Set([route()]) }));
     expect(await service.getSession('conn-1', 'ns-1', 'lc:1')).toMatchObject({ failedNodes: 2 });
   });
 
@@ -226,14 +249,14 @@ describe('SessionExplorerService.getSession', () => {
   });
 
   it('answers unavailable when no keys were found and a primary failed', async () => {
-    keysFor.mockResolvedValue({ keys: [], truncated: false, failedNodes: 1 });
+    keysFor.mockResolvedValue({ keys: [], truncated: false, failed: failedRoutes(1) });
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
   });
 
   it('answers unavailable when no key was read and a primary failed', async () => {
-    read.mockResolvedValue(readOf({ keys: [], failedNodes: 1, missingKeys: 1 }));
+    read.mockResolvedValue(readOf({ keys: [], failed: failedRoutes(1), missingKeys: 1 }));
     await expect(service.getSession('conn-1', 'ns-1', 'lc:1')).rejects.toBeInstanceOf(
       ServiceUnavailableException,
     );
@@ -355,13 +378,24 @@ describe('SessionExplorerService.preview', () => {
   });
 
   it('counts a primary that failed while reading the sample', async () => {
-    read.mockResolvedValueOnce(readOf({ keys: [], failedNodes: 1 }));
+    read.mockResolvedValueOnce(readOf({ keys: [], failed: failedRoutes(1) }));
     const service = serviceOver({ 7001: new FakeValkey(new Map([['lc:1', { type: 'list' }]])) });
 
     expect(await service.preview('conn-1', input)).toMatchObject({
       sampleKey: 'lc:1',
       view: null,
       failedNodes: 1,
+    });
+  });
+
+  it('counts a primary that failed the search and another that failed the read', async () => {
+    read.mockResolvedValueOnce(readOf({ failed: new Set([route()]) }));
+    const healthy = new FakeValkey(new Map([['lc:1', { type: 'list' }]]));
+    const service = serviceOver({ 7001: failing('LOADING'), 7002: healthy });
+
+    expect(await service.preview('conn-1', input)).toMatchObject({
+      sampleKey: 'lc:1',
+      failedNodes: 2,
     });
   });
 
@@ -423,9 +457,10 @@ describe('SessionExplorerService.preview', () => {
     const client = { scan: jest.fn(async () => ['0', []]) };
     jest.mocked(withPrimaries).mockImplementationOnce(async (_db, fn) =>
       fn({
-        clients: [client as never],
-        failed: 1,
-        routes: null,
+        routes: [
+          { slots: [[0, 16383]], client: client as never },
+          { slots: [], client: null },
+        ],
         touchesKeys: false,
         release: async () => undefined,
       }),

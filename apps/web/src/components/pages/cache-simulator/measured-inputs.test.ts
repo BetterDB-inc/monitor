@@ -6,7 +6,7 @@ const snapshot: CacheSimulatorSnapshot = {
   status: 'ready',
   progress: null,
   instant: { usedMemory: 1_000_000, maxmemory: 2_000_000, maxmemoryPolicy: 'allkeys-lru', totalKeys: 1000 },
-  estimate: { totalBytes: 500_000, ci95Bytes: 1000, avgKeyBytes: 500, stdKeyBytes: 40, sampleCount: 400, byType: [], sampledAt: 1, partial: false },
+  estimate: { totalBytes: 500_000, ci95Bytes: 1000, avgKeyBytes: 500, stdKeyBytes: 40, sampleCount: 400, byType: [], sampledAt: 1, partial: false, likelyMissedLargeKeys: false },
   growth: { keysPerDay: 25, bytesPerDay: 12_000, days: 30 },
 };
 

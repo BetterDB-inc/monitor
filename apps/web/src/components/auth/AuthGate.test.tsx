@@ -25,9 +25,17 @@ vi.mock('../../contexts/AuthContext', () => ({
 vi.mock('../../pages/AcceptInvite', () => ({
   AcceptInvite: () => <div>ACCEPT INVITE</div>,
 }));
-vi.mock('../../pages/Login', () => ({
-  Login: () => <div>LOGIN</div>,
-}));
+vi.mock('../../pages/Login', async () => {
+  const router = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    Login: () => (
+      <>
+        <div>LOGIN</div>
+        <div data-testid="login-search">{router.useLocation().search}</div>
+      </>
+    ),
+  };
+});
 vi.mock('../../pages/Register', async () => {
   const router = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
   return {
@@ -127,6 +135,19 @@ describe('AuthGate', () => {
       </MemoryRouter>,
     );
     expect(screen.getByText('LOGIN')).toBeInTheDocument();
+  });
+
+  it('sends signed-out visitors to a bare login page from /', () => {
+    authState.user = null;
+    renderAt('/');
+    expect(screen.getByTestId('login-search').textContent).toBe('');
+  });
+
+  it('keeps the dashboard query string through login', () => {
+    authState.user = null;
+    renderAt('/?connection=conn-2');
+    const next = new URLSearchParams(screen.getByTestId('login-search').textContent ?? '').get('next');
+    expect(next).toBe('/?connection=conn-2');
   });
 
   it('sends signed-in users from /invite/:token into the app', () => {

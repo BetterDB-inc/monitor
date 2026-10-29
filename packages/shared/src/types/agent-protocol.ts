@@ -40,6 +40,7 @@ export interface AgentHelloMessage {
     version: string;
     tls: boolean;
     cluster: boolean;
+    serverless?: boolean;
   };
   /**
    * Optional. Older agent versions do not send this field; the cloud should
