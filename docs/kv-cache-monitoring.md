@@ -114,7 +114,11 @@ The three LMCache remote connectors write different key layouts:
 | `resp://` (native C++)   | 1              | none                                    | never                                                              | none sent                |
 | MP mode Valkey L2        | 1              | none                                    | never                                                              | not matched              |
 
-BetterDB reports the layout as `two_key`, `single_key` or `mixed`.
+BetterDB reports the layout as `two_key`, `single_key` or `mixed`. The
+connection is `mixed` when its models use different layouts. The Models table
+shows each model and dtype with its own layout. Snapshots stored before
+per-model layouts existed show the connection layout there when it is
+`two_key` or `single_key`, and a dash when it is `mixed`.
 
 LMCache is considered present on a connection when either of these holds:
 
