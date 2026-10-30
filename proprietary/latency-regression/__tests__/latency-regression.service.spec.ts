@@ -182,6 +182,18 @@ describe('LatencyRegressionService', () => {
     expect(sink.ingestExternalAnomaly.mock.calls[0][0]).toBe(storage.saveAnomalyEvent.mock.calls[0][0]);
   });
 
+  it('still dispatches the webhook when the anomaly event sink throws', async () => {
+    const sink = {
+      ingestExternalAnomaly: jest.fn(() => {
+        throw new Error('sink failed');
+      }),
+    };
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
+  });
+
   it('does not hand an unpersisted event to the anomaly event sink', async () => {
     storage.saveAnomalyEvent.mockRejectedValue(new Error('db down'));
     const sink = { ingestExternalAnomaly: jest.fn() };
