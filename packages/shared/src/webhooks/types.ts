@@ -308,10 +308,20 @@ function hostMatches(host: string, domain: string): boolean {
   return host === domain || host.endsWith('.' + domain);
 }
 
-/** True when the URL's hostname is PagerDuty's US or EU Events API host. */
-export function isPagerDutyEventsUrl(url: string): boolean {
+/** True when the URL's hostname is PagerDuty's US or EU Events API host, whatever the scheme. */
+export function hasPagerDutyEventsHost(url: string): boolean {
   try {
     return PAGERDUTY_EVENTS_HOSTS.includes(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** True for an https URL on PagerDuty's US or EU Events API host. */
+export function isPagerDutyEventsUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && PAGERDUTY_EVENTS_HOSTS.includes(u.hostname.toLowerCase());
   } catch {
     return false;
   }

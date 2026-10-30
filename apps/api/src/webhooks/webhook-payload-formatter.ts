@@ -224,14 +224,14 @@ export function toPagerDuty(
     event_action: 'trigger',
     dedup_key: dedupKey,
     payload: {
-      summary: titleFor(payload).slice(0, PAGERDUTY_SUMMARY_MAX),
+      summary: (str(payload.data?.['message']) ?? titleFor(payload)).slice(0, PAGERDUTY_SUMMARY_MAX),
       source: instanceLabel(payload),
       severity: incidentSeverity(payload),
       timestamp: new Date(payload.timestamp).toISOString(),
       component: payload.instance?.connectionId ?? 'betterdb-monitor',
       group: 'betterdb',
       class: payload.event,
-      custom_details: { event: payload.event, instance: payload.instance, ...(payload.data ?? {}) },
+      custom_details: { event: payload.event, ...(payload.data ?? {}), instance: payload.instance },
     },
     client: 'BetterDB Monitor',
   };
@@ -252,10 +252,10 @@ export function toPagerDutyChange(
   return {
     routing_key: routingKey,
     payload: {
-      summary: titleFor(payload).slice(0, PAGERDUTY_SUMMARY_MAX),
+      summary: (str(payload.data?.['message']) ?? titleFor(payload)).slice(0, PAGERDUTY_SUMMARY_MAX),
       timestamp: new Date(payload.timestamp).toISOString(),
       source: instanceLabel(payload),
-      custom_details: { event: payload.event, instance: payload.instance, ...(payload.data ?? {}) },
+      custom_details: { event: payload.event, ...(payload.data ?? {}), instance: payload.instance },
     },
     ...(link ? { links: [{ href: link, text: 'View in BetterDB' }] } : {}),
   };

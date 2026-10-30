@@ -279,6 +279,15 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
         (prev.url === '' || (suggested !== undefined && OTHER_VENDOR_FORMATS.has(suggested)))
           ? PAGERDUTY_EVENTS_URL
           : prev.url;
+      if (payloadFormat !== WebhookPayloadFormat.PAGERDUTY) {
+        // Leaving PagerDuty: don't keep its endpoint or integration key.
+        return {
+          ...prev,
+          payloadFormat,
+          url: isPagerDutyEventsUrl(prev.url) ? '' : prev.url,
+          routingKey: undefined,
+        };
+      }
       return { ...prev, payloadFormat, url };
     });
   };

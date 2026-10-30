@@ -10,6 +10,7 @@ import {
 } from '@betterdb/shared';
 import { WebhookDispatcherService } from '../webhook-dispatcher.service';
 import type { WebhooksService } from '../webhooks.service';
+import { BlockedAddressError } from '../../common/utils/outbound-url-guard';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
 
 const ROUTING_KEY = 'R0123456789ABCDEFGHIJKLMNOPQRSTU';
@@ -20,7 +21,11 @@ describe('WebhookDispatcherService incident formats', () => {
   let hits: Array<{ url: string; body: Record<string, unknown> }>;
   /** Status to answer per request, consumed in order; defaults to 202. */
   let statuses: number[];
-  let storage: { getDelivery: jest.Mock; updateDelivery: jest.Mock };
+  /** Delay in ms before answering each request, consumed in order; defaults to none. */
+  let delays: number[];
+  /** Retry-After header for 429 responses, if any. */
+  let retryAfter: string | undefined;
+  let storage: { getDelivery: jest.Mock; updateDelivery: jest.Mock; getDeliveriesByWebhook?: jest.Mock };
   let service: WebhookDispatcherService;
 
   const hook = (overrides: Partial<Webhook> = {}): Webhook => ({
@@ -53,7 +58,12 @@ describe('WebhookDispatcherService incident formats', () => {
       req.on('data', (chunk) => (body += chunk));
       req.on('end', () => {
         hits.push({ url: req.url ?? '', body: JSON.parse(body || '{}') });
-        res.writeHead(statuses.shift() ?? 202).end('{"status":"success"}');
+        const status = statuses.shift() ?? 202;
+        setTimeout(() => {
+          res
+            .writeHead(status, status === 429 && retryAfter ? { 'Retry-After': retryAfter } : {})
+            .end('{"status":"success"}');
+        }, delays.shift() ?? 0);
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -65,6 +75,8 @@ describe('WebhookDispatcherService incident formats', () => {
   beforeEach(() => {
     hits = [];
     statuses = [];
+    delays = [];
+    retryAfter = undefined;
     storage = {
       getDelivery: jest.fn().mockResolvedValue({ id: 'd1', attempts: 0 }),
       updateDelivery: jest.fn().mockResolvedValue(undefined),
@@ -108,6 +120,46 @@ describe('WebhookDispatcherService incident formats', () => {
       'd1',
       expect.objectContaining({ status: DeliveryStatus.RETRYING, statusCode: 429, nextRetryAt: expect.any(Number) }),
     );
+  });
+
+  describe('429 scheduling', () => {
+    it('429 with Retry-After: 30 schedules no earlier than 30 s', async () => {
+      statuses = [429];
+      retryAfter = '30';
+      await service.sendWebhook(hook(), 'd1', payload);
+      const update = storage.updateDelivery.mock.calls[0][1];
+      expect(update.nextRetryAt).toBeGreaterThanOrEqual(Date.now() + 29_000);
+    });
+
+    it('429 does not consume maxRetries', async () => {
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 3, createdAt: Date.now() });
+      statuses = [429];
+      await expect(service.sendWebhook(hook(), 'd1', payload)).resolves.toBe(DeliveryStatus.RETRYING);
+      expect(storage.updateDelivery).toHaveBeenCalledWith(
+        'd1',
+        expect.objectContaining({ status: DeliveryStatus.RETRYING, attempts: 3, nextRetryAt: expect.any(Number) }),
+      );
+    });
+
+    it('a 500 at maxRetries still dead-letters', async () => {
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 2, createdAt: Date.now() });
+      statuses = [500];
+      await service.sendWebhook(hook(), 'd1', payload);
+      expect(storage.updateDelivery.mock.calls[0][1]).toMatchObject({
+        status: DeliveryStatus.DEAD_LETTER,
+        attempts: 3,
+      });
+    });
+
+    it('429 past the 1 h window fails the delivery', async () => {
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 1, createdAt: Date.now() - 2 * 60 * 60_000 });
+      statuses = [429];
+      await service.sendWebhook(hook(), 'd1', payload);
+      expect(storage.updateDelivery.mock.calls[0][1]).toMatchObject({
+        status: DeliveryStatus.FAILED,
+        responseBody: 'Rate limited (HTTP 429) for over 1 h; giving up',
+      });
+    });
   });
 
   it('still fails other 4xx responses without retrying', async () => {
@@ -202,10 +254,29 @@ describe('WebhookDispatcherService incident formats', () => {
       expect(result).toMatchObject({ success: false, testIncidentResolved: true });
     });
 
-    it('resolves after a 429', async () => {
-      statuses = [429, 202];
-      await service.testWebhook(hook());
-      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
+    it('does not resolve after a 429', async () => {
+      statuses = [429];
+      const result = await service.testWebhook(hook());
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger']);
+      expect('testIncidentResolved' in result).toBe(false);
+    });
+
+    it('does not resolve when the connection is refused', async () => {
+      const post = jest
+        .spyOn(service as unknown as Poster, 'post')
+        .mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+      const result = await service.testWebhook(hook());
+      expect(post).toHaveBeenCalledTimes(1);
+      expect('testIncidentResolved' in result).toBe(false);
+    });
+
+    it('does not resolve when the address is blocked', async () => {
+      const post = jest
+        .spyOn(service as unknown as Poster, 'post')
+        .mockRejectedValue(new BlockedAddressError('blocked address'));
+      const result = await service.testWebhook(hook());
+      expect(post).toHaveBeenCalledTimes(1);
+      expect('testIncidentResolved' in result).toBe(false);
     });
 
     it('sends nothing, and reports no resolve, when the request is never sent', async () => {
@@ -292,12 +363,134 @@ describe('WebhookDispatcherService incident formats', () => {
       expect(hits).toHaveLength(0);
     });
 
+    it('a trigger retry and a resolve due together do not race', async () => {
+      delays = [50];
+      await Promise.all([deliver(0, up), deliver(1, payload)]);
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['resolve']);
+    });
+
+    it('a resolve queued after a trigger retry still goes out after it', async () => {
+      delays = [50];
+      await Promise.all([deliver(1, payload), deliver(0, up)]);
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
+    });
+
+    it('different dedup keys are not serialized against each other', async () => {
+      delays = [100];
+      const conn2 = {
+        ...payload,
+        id: 'p2',
+        instance: { host: 'localhost', port: 6379, connectionId: 'conn-2' },
+      };
+      let firstDone = false;
+      const first = service.sendWebhook(hook(), 'd1', payload, 0).then(() => (firstDone = true));
+      const second = service.sendWebhook(hook(), 'd2', conn2, 0);
+      await second;
+      expect(firstDone).toBe(false);
+      await first;
+      expect(hits.map((hit) => hit.body['dedup_key'])).toEqual([
+        'betterdb:conn-1:instance.down',
+        'betterdb:conn-2:instance.down',
+      ]);
+    });
+
+    it('first attempt does not read the delivery before sending', async () => {
+      await service.sendWebhook(hook(), 'd1', payload, 0);
+      expect(hits).toHaveLength(1);
+      // only updateDelivery's own read remains
+      expect(storage.getDelivery).toHaveBeenCalledTimes(1);
+    });
+
+    it('restart fallback finds a resolve older than 50 rows', async () => {
+      const filler = { status: DeliveryStatus.SUCCESS, payload: { ...payload, id: 'other' } };
+      const rows = Array.from({ length: 120 }, (_, i) =>
+        i === 110 ? { status: DeliveryStatus.SUCCESS, payload: up } : filler,
+      );
+      const getDeliveriesByWebhook = jest
+        .fn()
+        .mockImplementation((_id: string, limit: number, offset: number) =>
+          Promise.resolve(rows.slice(offset, offset + limit)),
+        );
+      storage.getDeliveriesByWebhook = getDeliveriesByWebhook;
+      await deliver(1, payload);
+      expect(hits).toHaveLength(0);
+      expect(getDeliveriesByWebhook).toHaveBeenCalledWith('wh-1', 100, 0);
+      expect(getDeliveriesByWebhook).toHaveBeenCalledWith('wh-1', 100, 100);
+    });
+
     it('never blocks a delivery when the check fails', async () => {
       (storage as unknown as { getDeliveriesByWebhook: jest.Mock }).getDeliveriesByWebhook = jest
         .fn()
         .mockRejectedValue(new Error('db down'));
       await deliver(1, payload);
       expect(hits).toHaveLength(1);
+    });
+  });
+
+  describe('shared send helpers', () => {
+    type Poster = { post: (...args: unknown[]) => Promise<Response> };
+
+    it('postWithTimeout aborts and clears its timer', async () => {
+      jest.useFakeTimers();
+      try {
+        jest.spyOn(service as unknown as Poster, 'post').mockImplementation(
+          (...args: unknown[]) =>
+            new Promise<Response>((_resolve, reject) => {
+              (args[3] as AbortSignal).addEventListener('abort', () =>
+                reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+              );
+            }),
+        );
+        const pending = (
+          service as unknown as {
+            postWithTimeout: (url: string, headers: Record<string, string>, body: string, ms: number) => Promise<Response>;
+          }
+        ).postWithTimeout('http://127.0.0.1/x', {}, '{}', 1000);
+        const assertion = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+        jest.advanceTimersByTime(1000);
+        await assertion;
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('trigger, resolve and delivery send identical header sets', async () => {
+      const signing = new WebhookDispatcherService(
+        storage as unknown as StoragePort,
+        { generateSignature: jest.fn((content: string) => `sig:${content}`) } as unknown as WebhooksService,
+        { get: jest.fn((key: string, fallback?: unknown) => fallback) } as unknown as ConfigService,
+      );
+      const post = jest
+        .spyOn(signing as unknown as Poster, 'post')
+        .mockImplementation(() => Promise.resolve(new Response('{}', { status: 202 })));
+      const custom = hook({ headers: { 'X-Custom': '1' } });
+
+      await signing.sendWebhook(custom, 'd1', payload);
+      await signing.testWebhook(custom);
+
+      expect(post).toHaveBeenCalledTimes(3);
+      const [delivery, trigger, resolve] = post.mock.calls.map((call) => call[1] as Record<string, string>);
+      // Trigger and resolve of a test are the same request apart from the body signature.
+      expect(Object.entries(resolve).filter(([k]) => k !== 'X-Webhook-Signature')).toEqual(
+        Object.entries(trigger).filter(([k]) => k !== 'X-Webhook-Signature'),
+      );
+      for (const headers of [delivery, trigger, resolve]) {
+        expect(Object.keys(headers)).toEqual(
+          expect.arrayContaining([
+            'Content-Type',
+            'User-Agent',
+            'X-Webhook-Signature',
+            'X-Webhook-Timestamp',
+            'X-Webhook-Id',
+            'X-Webhook-Event',
+            'X-Custom',
+          ]),
+        );
+      }
+      expect(delivery['X-Webhook-Delivery-Id']).toBe('d1');
+      expect(trigger['X-Webhook-Test']).toBe('true');
+      expect(new Set([delivery, trigger, resolve].map((h) => h['X-Webhook-Signature'])).size).toBe(3);
     });
   });
 

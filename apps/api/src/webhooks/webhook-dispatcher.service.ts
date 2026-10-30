@@ -27,6 +27,7 @@ import {
   incidentDedupKey,
   redactRoutingKey,
 } from './webhook-incident';
+import { RATE_LIMIT_MAX_WINDOW_MS, parseRetryAfterMs } from './retry-after';
 import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
 
@@ -57,9 +58,14 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   private readonly STORAGE_RETRY_MAX_DELAY_MS = 60_000;
   private readonly UNCONFIRMED_DELIVERY_LOOKBACK = 100;
   private readonly PAGERDUTY_RESOLVED_MAX_ENTRIES = 10_000;
-  private readonly PAGERDUTY_RESOLVED_LOOKBACK = 50;
+  private readonly PAGERDUTY_RESOLVED_SCAN_PAGE = 100;
+  // 2000 rows covers a burst far larger than the retry window (retries are
+  // dead-lettered within the policy's max delay).
+  private readonly PAGERDUTY_RESOLVED_SCAN_MAX = 2000;
   // `${webhookId}|${dedupKey}` -> payload.timestamp of the latest delivered resolving event
   private readonly pagerDutyResolvedAt = new Map<string, number>();
+  // `${webhookId}|${dedupKey}` -> tail of the serialized send chain for that incident
+  private readonly pagerDutyChains = new Map<string, Promise<unknown>>();
   private storageRetryBuffer: PendingEvent[] = [];
   private inFlightEvent: PendingEvent | null = null;
   private readonly inFlightDirectDispatches = new Set<Promise<boolean>>();
@@ -700,25 +706,105 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   }
 
   /**
+   * Headers for one outbound webhook request: JSON content type, user agent,
+   * HMAC signature over `body` at `timestamp`, `extra` per-call headers, then
+   * the webhook's sanitized custom headers. Throws before anything is sent if
+   * a custom header is rejected (callers rely on that to know the request
+   * never left).
+   */
+  private buildRequestHeaders(
+    webhook: Webhook,
+    body: string,
+    timestamp: number,
+    extra: Record<string, string>,
+  ): Record<string, string> {
+    const signature = this.generateSignatureWithTimestamp(body, webhook.secret || '', timestamp);
+    const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
+    return {
+      'Content-Type': 'application/json',
+      'User-Agent': 'BetterDB-Monitor/1.0',
+      'X-Webhook-Signature': signature,
+      'X-Webhook-Timestamp': timestamp.toString(),
+      ...extra,
+      ...sanitizedCustomHeaders,
+    };
+  }
+
+  /**
+   * POST `body` to `url` with a timeout. Resolves with the Response for any
+   * HTTP status; rejects on timeout (`AbortError`), blocked address, DNS or
+   * connection errors. The timer is always cleared.
+   */
+  private async postWithTimeout(
+    url: string,
+    headers: Record<string, string>,
+    body: string,
+    timeoutMs: number,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await this.post(url, headers, body, controller.signal);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * Run PagerDuty sends for one webhook + incident one at a time, in arrival
+   * order. A trigger retry and its resolve that are due in the same poll can
+   * otherwise race; serialized, the trigger's supersede check always sees a
+   * resolve that was queued before it, and a resolve queued after a trigger
+   * closes what that trigger opened.
+   */
+  private serializePagerDuty<T>(webhook: Webhook, payload: WebhookPayload, task: () => Promise<T>): Promise<T> {
+    if (webhook.payloadFormat !== WebhookPayloadFormat.PAGERDUTY) return task();
+    const key = `${webhook.id}|${incidentDedupKey(payload)}`;
+    const previous = this.pagerDutyChains.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(task);
+    const tail = run.catch(() => undefined);
+    this.pagerDutyChains.set(key, tail);
+    void tail.then(() => {
+      if (this.pagerDutyChains.get(key) === tail) this.pagerDutyChains.delete(key);
+    });
+    return run;
+  }
+
+  /**
    * Send webhook HTTP request
+   * @param attempt Attempts already made, when the caller knows it (the retry
+   * processor does); saves a storage read on first attempts.
    * @returns The status for this attempt (SUCCESS only on 2xx).
    */
-  async sendWebhook(
+  sendWebhook(
     webhook: Webhook,
     deliveryId: string,
     payload: WebhookPayload,
+    attempt?: number,
+  ): Promise<DeliveryStatus> {
+    return this.serializePagerDuty(webhook, payload, () =>
+      this.sendWebhookNow(webhook, deliveryId, payload, attempt),
+    );
+  }
+
+  private async sendWebhookNow(
+    webhook: Webhook,
+    deliveryId: string,
+    payload: WebhookPayload,
+    attempt?: number,
   ): Promise<DeliveryStatus> {
     const startTime = Date.now();
     let status: DeliveryStatus;
     let statusCode: number | undefined;
     let responseBody: string | undefined;
+    let retryAfterMs: number | undefined;
 
     // Get per-webhook delivery config
     const deliveryConfig = getDeliveryConfig(webhook);
     const timeoutMs = deliveryConfig.timeoutMs;
     const maxResponseBodyBytes = deliveryConfig.maxResponseBodyBytes;
 
-    if (await this.isSupersededPagerDutyRetry(webhook, deliveryId, payload)) {
+    if (await this.isSupersededPagerDutyRetry(webhook, deliveryId, payload, attempt)) {
       const dedupKey = incidentDedupKey(payload);
       this.logger.log(`PagerDuty retry for ${webhook.id} skipped: ${dedupKey} was resolved after this trigger`);
       await this.updateDelivery(deliveryId, webhook, DeliveryStatus.SUCCESS, {
@@ -733,35 +819,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       // change events go to the Change Events endpoint of the same region)
       const rendered = renderWebhookRequest(webhook, payload, this.appBaseUrl);
       const payloadString = rendered.body;
-      const timestamp = payload.timestamp;
-      const signature = this.generateSignatureWithTimestamp(
-        payloadString,
-        webhook.secret || '',
-        timestamp,
-      );
 
-      // Sanitize custom headers
-      const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'BetterDB-Monitor/1.0',
-        'X-Webhook-Signature': signature,
-        'X-Webhook-Timestamp': timestamp.toString(),
+      const headers = this.buildRequestHeaders(webhook, payloadString, payload.timestamp, {
         'X-Webhook-Id': webhook.id,
         'X-Webhook-Delivery-Id': deliveryId,
         'X-Webhook-Event': payload.event,
-        ...sanitizedCustomHeaders,
-      };
+      });
 
       // Send request with timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
       try {
-        const response = await this.post(rendered.url, headers, payloadString, controller.signal);
-
-        clearTimeout(timeoutId);
+        const response = await this.postWithTimeout(rendered.url, headers, payloadString, timeoutMs);
 
         statusCode = response.status;
         responseBody = await response.text().catch(() => '');
@@ -781,6 +848,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           // burst): the event is valid, so retry with backoff instead of
           // dropping it like other 4xx responses.
           status = DeliveryStatus.RETRYING;
+          retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'));
           this.logger.warn(`Webhook delivery rate limited (HTTP 429): ${webhook.id} -> ${webhook.url}`);
         } else if (statusCode >= 400 && statusCode < 500) {
           // 4xx errors are client errors - don't retry
@@ -796,8 +864,6 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           );
         }
       } catch (fetchError) {
-        clearTimeout(timeoutId);
-
         // Handle specific errors
         if (fetchError instanceof BlockedAddressError) {
           status = DeliveryStatus.FAILED;
@@ -829,6 +895,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       statusCode,
       responseBody: responseBody?.substring(0, maxResponseBodyBytes),
       durationMs,
+      retryAfterMs,
     });
 
     return status;
@@ -857,6 +924,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     webhook: Webhook,
     deliveryId: string,
     payload: WebhookPayload,
+    attempt?: number,
   ): Promise<boolean> {
     if (
       webhook.payloadFormat !== WebhookPayloadFormat.PAGERDUTY ||
@@ -866,8 +934,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       return false;
     }
     try {
-      const delivery = await this.storageClient.getDelivery(deliveryId);
-      if (!delivery || delivery.attempts <= 0) return false;
+      if (attempt === undefined) {
+        const delivery = await this.storageClient.getDelivery(deliveryId);
+        if (!delivery) return false;
+        attempt = delivery.attempts;
+      }
+      if (attempt <= 0) return false;
       return await this.resolvedAfter(webhook, incidentDedupKey(payload), payload.timestamp);
     } catch (error) {
       this.logger.warn(
@@ -880,24 +952,29 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   /**
    * Whether a resolve for this webhook and dedup key was delivered at or after
    * `since`. The in-memory map is empty after a restart, so it falls back to
-   * the most recent stored deliveries.
+   * the stored deliveries, newest first, until one is older than `since`
+   * (nothing older can be newer than the trigger) or SCAN_MAX rows are read.
    */
   private async resolvedAfter(webhook: Webhook, dedupKey: string, since: number): Promise<boolean> {
     const seen = this.pagerDutyResolvedAt.get(`${webhook.id}|${dedupKey}`);
     if (seen !== undefined && seen >= since) return true;
     try {
-      const recent = await this.storageClient.getDeliveriesByWebhook(
-        webhook.id,
-        this.PAGERDUTY_RESOLVED_LOOKBACK,
-      );
-      return recent.some(
-        (row) =>
-          row.status === DeliveryStatus.SUCCESS &&
-          row.payload !== undefined &&
-          incidentAction(row.payload.event) === 'resolve' &&
-          incidentDedupKey(row.payload) === dedupKey &&
-          row.payload.timestamp >= since,
-      );
+      const pageSize = this.PAGERDUTY_RESOLVED_SCAN_PAGE;
+      for (let offset = 0; offset < this.PAGERDUTY_RESOLVED_SCAN_MAX; offset += pageSize) {
+        const page = await this.storageClient.getDeliveriesByWebhook(webhook.id, pageSize, offset);
+        const found = page.some(
+          (row) =>
+            row.status === DeliveryStatus.SUCCESS &&
+            row.payload !== undefined &&
+            incidentAction(row.payload.event) === 'resolve' &&
+            incidentDedupKey(row.payload) === dedupKey &&
+            row.payload.timestamp >= since,
+        );
+        if (found) return true;
+        const oldest = page[page.length - 1]?.payload?.timestamp;
+        if (page.length < pageSize || (oldest !== undefined && oldest < since)) return false;
+      }
+      return false;
     } catch {
       return false;
     }
@@ -914,6 +991,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       statusCode?: number;
       responseBody?: string;
       durationMs: number;
+      retryAfterMs?: number;
     },
   ): Promise<void> {
     try {
@@ -923,9 +1001,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         return;
       }
 
+      // A 429 is the receiver asking us to slow down, not a failed attempt: it
+      // does not count toward maxRetries (RATE_LIMIT_MAX_WINDOW_MS bounds it).
+      const rateLimited = status === DeliveryStatus.RETRYING && details.statusCode === 429;
       const attempts = delivery.attempts + 1;
       const updates: Partial<Omit<WebhookDelivery, 'id' | 'webhookId' | 'createdAt'>> = {
-        attempts,
+        attempts: rateLimited ? delivery.attempts : attempts,
         status,
         statusCode: details.statusCode,
         responseBody: details.responseBody,
@@ -938,13 +1019,21 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       }
 
       // If retrying, calculate next retry time
-      if (status === DeliveryStatus.RETRYING && attempts < webhook.retryPolicy.maxRetries) {
-        const delay = Math.min(
+      if (rateLimited && Date.now() - delivery.createdAt > RATE_LIMIT_MAX_WINDOW_MS) {
+        updates.status = DeliveryStatus.FAILED;
+        updates.responseBody = 'Rate limited (HTTP 429) for over 1 h; giving up';
+        updates.completedAt = Date.now();
+        this.logger.warn(`Delivery ${deliveryId} failed: rate limited for over 1 h`);
+      } else if (
+        status === DeliveryStatus.RETRYING &&
+        (rateLimited || attempts < webhook.retryPolicy.maxRetries)
+      ) {
+        const policyBackoffMs = Math.min(
           webhook.retryPolicy.initialDelayMs *
             Math.pow(webhook.retryPolicy.backoffMultiplier, attempts - 1),
           webhook.retryPolicy.maxDelayMs,
         );
-        updates.nextRetryAt = Date.now() + delay;
+        updates.nextRetryAt = Date.now() + Math.max(policyBackoffMs, details.retryAfterMs ?? 0);
       } else if (status === DeliveryStatus.RETRYING) {
         // Max retries reached - mark as dead letter for manual investigation
         updates.status = DeliveryStatus.DEAD_LETTER;
@@ -966,22 +1055,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
    */
   private async resolvePagerDutyTest(
     webhook: Webhook,
-    headers: Record<string, string>,
     testPayload: WebhookPayload,
     timeoutMs: number,
   ): Promise<boolean> {
     const body = JSON.stringify(
       pagerDutyTestEvent(webhook.routingKey ?? '', webhook.id, 'resolve', testPayload),
     );
-    // Same headers as the trigger, re-signed for this body.
-    const signedHeaders = {
-      ...headers,
-      'X-Webhook-Signature': this.generateSignatureWithTimestamp(body, webhook.secret || '', testPayload.timestamp),
-    };
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await this.post(webhook.url, signedHeaders, body, controller.signal);
+      // Same headers as the trigger, signed for this body.
+      const headers = this.buildRequestHeaders(webhook, body, testPayload.timestamp, this.testHeaders(webhook, testPayload));
+      const response = await this.postWithTimeout(webhook.url, headers, body, timeoutMs);
       await response.text().catch(() => '');
       return response.ok;
     } catch (error) {
@@ -989,21 +1072,29 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         `Failed to resolve PagerDuty test incident for webhook ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return false;
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
+  /** Per-call headers shared by the test trigger and its resolve. */
+  private testHeaders(webhook: Webhook, testPayload: WebhookPayload): Record<string, string> {
+    return {
+      'X-Webhook-Id': webhook.id,
+      'X-Webhook-Event': testPayload.event,
+      'X-Webhook-Test': 'true',
+    };
+  }
+
   /**
-   * Resolve the PagerDuty test incident unless the trigger was definitively
-   * rejected (4xx other than 429). A resolve on a key with no open incident is
-   * a no-op, so resolving after a lost response is harmless.
+   * Resolve the PagerDuty test incident only when the trigger may have been
+   * accepted: it was sent and not rejected with a 4xx (429 included). A resolve
+   * on a key with no open incident is a no-op, so resolving after a lost
+   * response is harmless.
    */
   private shouldResolvePagerDutyTest(triggerSent: boolean, triggerStatus: number | undefined): boolean {
     if (!triggerSent) return false;
     if (triggerStatus === undefined) return true; // timeout / network error after send
-    if (triggerStatus === 429) return true;
-    return !(triggerStatus >= 400 && triggerStatus < 500); // 2xx, 3xx, 5xx -> resolve
+    if (triggerStatus >= 400 && triggerStatus < 500) return false; // includes 429: not accepted
+    return true; // 2xx, 3xx, 5xx
   }
 
   /**
@@ -1026,7 +1117,6 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const timeoutMs = deliveryConfig.timeoutMs;
 
     let renderedPayload: Record<string, unknown> | undefined;
-    let headers: Record<string, string> | undefined;
     let testPayload: WebhookPayload | undefined;
     let triggerSent = false;
     let triggerStatus: number | undefined;
@@ -1066,43 +1156,29 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       if (isPagerDuty && typeof renderedPayload['routing_key'] === 'string' && renderedPayload['routing_key'] !== '') {
         renderedPayload = { ...renderedPayload, routing_key: redactRoutingKey(renderedPayload['routing_key']) };
       }
-      const timestamp = testPayload.timestamp;
-      const signature = this.generateSignatureWithTimestamp(
+      // Throws before the post if a custom header is rejected, so triggerSent stays false.
+      const headers = this.buildRequestHeaders(
+        webhook,
         payloadString,
-        webhook.secret || '',
-        timestamp,
+        testPayload.timestamp,
+        this.testHeaders(webhook, testPayload),
       );
-
-      // Sanitize custom headers
-      const sanitizedCustomHeaders = this.sanitizeHeaders(webhook.headers || {});
-
-      headers = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'BetterDB-Monitor/1.0',
-        'X-Webhook-Signature': signature,
-        'X-Webhook-Timestamp': timestamp.toString(),
-        'X-Webhook-Id': webhook.id,
-        'X-Webhook-Event': testPayload.event,
-        'X-Webhook-Test': 'true',
-        ...sanitizedCustomHeaders,
-      };
-
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       let response: Response;
       try {
+        response = await this.postWithTimeout(webhook.url, headers, payloadString, timeoutMs);
         triggerSent = true;
-        response = await this.post(webhook.url, headers, payloadString, controller.signal);
         triggerStatus = response.status;
-      } finally {
-        clearTimeout(timeoutId);
+      } catch (error) {
+        // A timeout means the request went out and only the response was lost.
+        if (error instanceof Error && error.name === 'AbortError') triggerSent = true;
+        throw error;
       }
 
       const responseBody = await response.text().catch(() => '');
 
       if (isPagerDuty && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
-        testIncidentResolved = await this.resolvePagerDutyTest(webhook, headers, testPayload, timeoutMs);
+        testIncidentResolved = await this.resolvePagerDutyTest(webhook, testPayload, timeoutMs);
       }
       const durationMs = Date.now() - startTime;
 
@@ -1116,8 +1192,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         ...(testIncidentResolved === undefined ? {} : { testIncidentResolved }),
       };
     } catch (error) {
-      if (isPagerDuty && headers && testPayload && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
-        testIncidentResolved = await this.resolvePagerDutyTest(webhook, headers, testPayload, timeoutMs);
+      if (isPagerDuty && testPayload && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
+        testIncidentResolved = await this.resolvePagerDutyTest(webhook, testPayload, timeoutMs);
       }
       const durationMs = Date.now() - startTime;
       return {

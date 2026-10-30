@@ -2,19 +2,13 @@ import { Injectable, Inject, Logger, BadRequestException, NotFoundException, For
 import { randomBytes, createHmac } from 'crypto';
 import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY } from '@betterdb/shared';
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
-import { WebhookPayloadFormat, isValidPagerDutyRoutingKey } from '@betterdb/shared';
+import { WebhookPayloadFormat, hasPagerDutyEventsHost, isValidPagerDutyRoutingKey } from '@betterdb/shared';
 import { assertSafeOutboundUrl } from '../common/utils/outbound-url-guard';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { redactRoutingKey } from './webhook-incident';
 import { LicenseService } from '@proprietary/licenses';
-
-/** Matches the forms redactSecret / redactRoutingKey produce, for any stored value. */
-const REDACTED_PLACEHOLDER = /^(whsec_)?[^*]{0,4}\*\*\*$/;
-function isRedactedPlaceholder(value: string): boolean {
-  return REDACTED_PLACEHOLDER.test(value);
-}
 
 @Injectable()
 export class WebhooksService {
@@ -94,11 +88,7 @@ export class WebhooksService {
 
     const payloadFormat = dto.payloadFormat ?? WebhookPayloadFormat.GENERIC;
     this.validateRoutingKey(payloadFormat, dto.routingKey);
-    if (typeof dto.secret === 'string' && isRedactedPlaceholder(dto.secret)) {
-      throw new BadRequestException(
-        'secret looks like a redacted value; send the real secret or omit it to generate one',
-      );
-    }
+    this.validatePagerDutyUrl(payloadFormat, dto.url);
 
     // Generate secret if not provided
     const secret = dto.secret || this.generateSecret();
@@ -123,7 +113,7 @@ export class WebhooksService {
       alertConfig: dto.alertConfig,
       thresholds: dto.thresholds,
       payloadFormat,
-      routingKey: dto.routingKey || undefined,
+      routingKey: payloadFormat === WebhookPayloadFormat.PAGERDUTY ? dto.routingKey || undefined : undefined,
       connectionId: this.resolveConnectionId(dto.connectionId),
     });
 
@@ -197,17 +187,24 @@ export class WebhooksService {
     // GET responses carry redacted credentials. A client that edits a webhook
     // and sends the object back (the web UI does) must not overwrite the real
     // secret / routing key with the redacted placeholder.
-    const updates: UpdateWebhookDto = { ...dto };
-    // Any redacted placeholder, '' or null means "keep the stored value".
-    if (typeof updates.secret === 'string' && isRedactedPlaceholder(updates.secret)) delete updates.secret;
-    if (typeof updates.routingKey === 'string' && isRedactedPlaceholder(updates.routingKey)) delete updates.routingKey;
-    if (updates.routingKey === '' || (updates.routingKey as unknown) === null) delete updates.routingKey;
-    if (updates.secret === '' || (updates.secret as unknown) === null) delete updates.secret;
+    const updates: Omit<UpdateWebhookDto, 'routingKey'> & { routingKey?: string | null } = { ...dto };
+    // '', null or the redacted form of the stored value means "keep the stored value".
+    const redacted = this.redactSecret(existing);
+    if (updates.secret === undefined || updates.secret === null || updates.secret === '' ||
+        updates.secret === redacted.secret) delete updates.secret;
+    if (updates.routingKey === undefined || updates.routingKey === null || updates.routingKey === '' ||
+        (existing.routingKey !== undefined && updates.routingKey === redactRoutingKey(existing.routingKey))) {
+      delete updates.routingKey;
+    }
 
-    this.validateRoutingKey(
-      updates.payloadFormat ?? existing.payloadFormat ?? WebhookPayloadFormat.GENERIC,
-      updates.routingKey ?? existing.routingKey,
-    );
+    const effectiveFormat = updates.payloadFormat ?? existing.payloadFormat ?? WebhookPayloadFormat.GENERIC;
+    this.validateRoutingKey(effectiveFormat, updates.routingKey ?? existing.routingKey);
+    this.validatePagerDutyUrl(effectiveFormat, updates.url ?? existing.url);
+    if (effectiveFormat !== WebhookPayloadFormat.PAGERDUTY) {
+      // A key only means something to PagerDuty: drop a sent one, clear a stored one.
+      delete updates.routingKey;
+      if (existing.routingKey) updates.routingKey = null;
+    }
 
     const updated = await this.storageClient.updateWebhook(id, updates);
     if (!updated) {
@@ -265,6 +262,17 @@ export class WebhooksService {
       allowedEvents,
       lockedEvents,
     };
+  }
+
+  /** PagerDuty's own Events hosts are https only; other hosts (relays, proxies) are left alone. */
+  private validatePagerDutyUrl(payloadFormat: WebhookPayloadFormat, url: string): void {
+    if (
+      payloadFormat === WebhookPayloadFormat.PAGERDUTY &&
+      hasPagerDutyEventsHost(url) &&
+      new URL(url).protocol !== 'https:'
+    ) {
+      throw new BadRequestException('PagerDuty webhooks must use https://');
+    }
   }
 
   /**

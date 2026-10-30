@@ -183,7 +183,7 @@ export class WebhookProcessorService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Send webhook
-      await this.dispatcherService.sendWebhook(webhook, delivery.id, delivery.payload);
+      await this.dispatcherService.sendWebhook(webhook, delivery.id, delivery.payload, delivery.attempts);
 
     } catch (error: any) {
       this.logger.error(`Failed to retry delivery ${delivery.id}:`, error);

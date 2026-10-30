@@ -97,6 +97,20 @@ function describeAdapter(
       await storage.updateWebhook(created.id, { routingKey: OTHER_KEY });
       expect((await storage.getWebhook(created.id))?.routingKey).toBe(OTHER_KEY);
     });
+
+    it('clears the routing key when updated to null', async () => {
+      const created = await storage.createWebhook({
+        ...baseWebhook,
+        payloadFormat: WebhookPayloadFormat.PAGERDUTY,
+        routingKey: ROUTING_KEY,
+      });
+      const updated = await storage.updateWebhook(created.id, {
+        payloadFormat: WebhookPayloadFormat.SLACK,
+        routingKey: null,
+      });
+      expect(updated?.routingKey).toBeUndefined();
+      expect((await storage.getWebhook(created.id))?.routingKey).toBeUndefined();
+    });
   });
 }
 

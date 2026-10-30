@@ -5,6 +5,7 @@ import {
   openingEventFor,
   resolvingEventFor,
   suggestPayloadFormatForUrl,
+  isPagerDutyEventsUrl,
   isValidPagerDutyRoutingKey,
   type WebhookPayload,
 } from '@betterdb/shared';
@@ -115,6 +116,17 @@ describe('incident helpers', () => {
   });
 });
 
+describe('isPagerDutyEventsUrl', () => {
+  it('accepts the https US and EU endpoints', () => {
+    expect(isPagerDutyEventsUrl('https://events.pagerduty.com/v2/enqueue')).toBe(true);
+    expect(isPagerDutyEventsUrl('https://events.eu.pagerduty.com/v2/enqueue')).toBe(true);
+  });
+
+  it('rejects http on the PagerDuty host', () => {
+    expect(isPagerDutyEventsUrl('http://events.pagerduty.com/v2/enqueue')).toBe(false);
+  });
+});
+
 describe('PagerDuty format', () => {
   it('triggers with the Events API v2 shape', () => {
     const body = toPagerDuty(payload(), ROUTING_KEY, APP);
@@ -159,6 +171,28 @@ describe('PagerDuty format', () => {
     expect(body.links).toBeUndefined();
     expect(body.client_url).toBeUndefined();
     expect(body.payload.summary.length).toBeLessThanOrEqual(1024);
+  });
+
+  it('keeps the full message in the summary beyond 120 characters', () => {
+    const message = 'm'.repeat(300);
+    const body = toPagerDuty(payload({ data: { message } }), ROUTING_KEY) as { payload: { summary: string } };
+    expect(body.payload.summary.length).toBeGreaterThan(120);
+    expect(body.payload.summary).toContain(message);
+  });
+
+  it('caps a 2000-character message at exactly 1024 characters', () => {
+    const body = toPagerDuty(payload({ data: { message: 'm'.repeat(2000) } }), ROUTING_KEY) as {
+      payload: { summary: string };
+    };
+    expect(body.payload.summary.length).toBe(1024);
+  });
+
+  it('keeps the instance in custom_details when data has an instance key', () => {
+    const body = toPagerDuty(payload({ data: { instance: 'x', foo: 1 } }), ROUTING_KEY) as {
+      payload: { custom_details: { instance: { connectionId: string }; foo: number } };
+    };
+    expect(body.payload.custom_details.instance.connectionId).toBe('conn-1');
+    expect(body.payload.custom_details.foo).toBe(1);
   });
 
   it('is selected by formatWebhookBody and carries the stored routing key', () => {

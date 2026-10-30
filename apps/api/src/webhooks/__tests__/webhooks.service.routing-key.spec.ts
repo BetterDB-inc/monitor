@@ -82,10 +82,31 @@ describe('WebhooksService routing key and credential handling', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('rejects a redacted placeholder as the secret', async () => {
-      await expect(create({ secret: 'whsec_abcd***' })).rejects.toThrow(BadRequestException);
-      await expect(create({ secret: 'whsec_abcd***' })).rejects.toThrow(/redacted value/);
+    it('accepts a real secret that looks like a placeholder on create', async () => {
+      for (const secret of ['ab***', 'whsec_x***']) {
+        storage.createWebhook.mockClear();
+        await create({ secret });
+        expect(storage.createWebhook).toHaveBeenCalledWith(expect.objectContaining({ secret }));
+      }
+    });
+
+    it('drops the routing key for a non-PagerDuty format', async () => {
+      await create({ payloadFormat: WebhookPayloadFormat.TEAMS, routingKey: ROUTING_KEY });
+      expect(storage.createWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({ payloadFormat: WebhookPayloadFormat.TEAMS, routingKey: undefined }),
+      );
+    });
+
+    it('rejects an http PagerDuty Events URL for the pagerduty format', async () => {
+      await expect(create({ url: 'http://events.pagerduty.com/v2/enqueue' })).rejects.toThrow(
+        'PagerDuty webhooks must use https://',
+      );
       expect(storage.createWebhook).not.toHaveBeenCalled();
+    });
+
+    it('still allows an http relay URL for the pagerduty format', async () => {
+      await create({ url: 'http://relay.internal.example.com/pd' });
+      expect(storage.createWebhook).toHaveBeenCalledTimes(1);
     });
 
     it('does not need a routing key for other formats', async () => {
@@ -125,14 +146,37 @@ describe('WebhooksService routing key and credential handling', () => {
       expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
     });
 
-    it('drops a stale routing key placeholder instead of failing', async () => {
-      await service.updateWebhook('wh-1', { name: 'x', routingKey: 'Z987***' } as never);
+    it('rejects a routing key that is neither the redacted stored key nor a valid key', async () => {
+      await expect(service.updateWebhook('wh-1', { name: 'x', routingKey: 'Z987***' } as never)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(storage.updateWebhook).not.toHaveBeenCalled();
+    });
+
+    it("stores a secret that is not the stored value's redacted form", async () => {
+      await service.updateWebhook('wh-1', { name: 'x', secret: 'whsec_zzzz***' } as never);
+      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x', secret: 'whsec_zzzz***' });
+    });
+
+    it('clears the stored routing key when a PagerDuty webhook is switched to another format', async () => {
+      await service.updateWebhook('wh-1', { payloadFormat: WebhookPayloadFormat.SLACK } as never);
+      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({
+        payloadFormat: WebhookPayloadFormat.SLACK,
+        routingKey: null,
+      });
+    });
+
+    it('drops a routing key sent for a non-PagerDuty format', async () => {
+      storage.getWebhook.mockResolvedValue(stored({ payloadFormat: WebhookPayloadFormat.SLACK, routingKey: undefined }));
+      await service.updateWebhook('wh-1', { name: 'x', routingKey: ROUTING_KEY } as never);
       expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
     });
 
-    it('drops a stale secret placeholder instead of storing it', async () => {
-      await service.updateWebhook('wh-1', { name: 'x', secret: 'whsec_zzzz***' } as never);
-      expect(storage.updateWebhook.mock.calls[0][1]).toEqual({ name: 'x' });
+    it('rejects switching an existing webhook to an http PagerDuty Events URL', async () => {
+      await expect(
+        service.updateWebhook('wh-1', { url: 'http://events.pagerduty.com/v2/enqueue' } as never),
+      ).rejects.toThrow('PagerDuty webhooks must use https://');
+      expect(storage.updateWebhook).not.toHaveBeenCalled();
     });
 
     it('treats null routingKey and secret as "unchanged"', async () => {

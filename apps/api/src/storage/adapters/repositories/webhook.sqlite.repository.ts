@@ -5,6 +5,7 @@ import {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
+  WebhookUpdate,
 } from '../../../common/interfaces/storage-port.interface';
 import { WebhookPayloadFormat } from '@betterdb/shared';
 import { RowMappers } from '../base-sql.adapter';
@@ -110,7 +111,7 @@ export class WebhookSqliteRepository {
 
   async updateWebhook(
     id: string,
-    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+    updates: WebhookUpdate,
   ): Promise<Webhook | null> {
     const setClauses: string[] = [];
     const params: unknown[] = [];

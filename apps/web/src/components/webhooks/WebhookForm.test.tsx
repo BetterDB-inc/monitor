@@ -111,6 +111,45 @@ describe('WebhookForm incident formats', () => {
     expect(screen.getByLabelText('Payload format')).toHaveValue('teams');
   });
 
+  describe('switching away from PagerDuty', () => {
+    const SLACK_PLACEHOLDER = 'https://hooks.slack.com/services/...';
+
+    it('switching from PagerDuty to Slack clears the PagerDuty URL and integration key', async () => {
+      const onSubmit = vi.fn().mockResolvedValue(undefined);
+      render(<WebhookForm onSubmit={onSubmit} onCancel={vi.fn()} />);
+      await waitFor(() => expect(screen.getByText('Instance Down')).toBeInTheDocument());
+
+      fireEvent.change(screen.getByPlaceholderText('Production Alerts'), { target: { value: 'Pager' } });
+      fireEvent.change(screen.getByLabelText('Payload format'), { target: { value: 'pagerduty' } });
+      fireEvent.change(screen.getByLabelText(/Integration key/), { target: { value: ROUTING_KEY } });
+      fireEvent.change(screen.getByLabelText('Payload format'), { target: { value: 'slack' } });
+
+      expect(screen.getByPlaceholderText(SLACK_PLACEHOLDER)).toHaveValue('');
+      expect(screen.queryByLabelText(/Integration key/)).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByPlaceholderText(SLACK_PLACEHOLDER), {
+        target: { value: 'https://hooks.slack.com/services/T/B/x' },
+      });
+      fireEvent.click(screen.getByText('Instance Down'));
+      fireEvent.submit(screen.getByRole('button', { name: 'Create Webhook' }).closest('form')!);
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      expect(onSubmit.mock.calls[0][0].routingKey).toBeUndefined();
+    });
+
+    it('switching away keeps a URL the user typed', () => {
+      render(
+        <WebhookForm
+          webhook={existing({ url: 'https://hooks.slack.com/services/T/B/x', payloadFormat: WebhookPayloadFormat.PAGERDUTY })}
+          onSubmit={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText('Payload format'), { target: { value: 'slack' } });
+      expect(screen.getByPlaceholderText(SLACK_PLACEHOLDER)).toHaveValue('https://hooks.slack.com/services/T/B/x');
+    });
+  });
+
   describe('switching an existing webhook to PagerDuty', () => {
     const switchToPagerDuty = (url: string, format: WebhookPayloadFormat) => {
       render(<WebhookForm webhook={existing({ url, payloadFormat: format, routingKey: undefined })} onSubmit={vi.fn()} onCancel={vi.fn()} />);

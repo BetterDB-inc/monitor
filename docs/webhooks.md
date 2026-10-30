@@ -800,7 +800,9 @@ A webhook delivery is considered successful when:
 
 Server errors (5xx), `429 Too Many Requests`, timeouts and network errors are retried with the policy above. Other client errors (4xx) and redirects (3xx) fail immediately: the receiver rejected the request, so sending it again would fail the same way.
 
-A retried PagerDuty trigger is skipped if the recovery event for its condition (for example `instance.up` for `instance.down`) was already delivered to the same webhook, so a recovered condition never reopens an incident.
+A `429` waits at least as long as the receiver's `Retry-After` header (capped at 10 minutes) and does not count toward `maxRetries`. A delivery still rate-limited after 1 hour fails.
+
+A retried PagerDuty trigger is skipped if the recovery event for its condition (for example `instance.up` for `instance.down`) was already delivered to the same webhook. PagerDuty sends for one webhook and incident are sent one at a time, so a trigger retry and its recovery cannot race, and when both are pending the recovery is always the last event PagerDuty receives.
 
 ## Per-Webhook Configuration
 
@@ -1357,7 +1359,7 @@ How events map to incidents:
 - `summary` is the event message, `source` is `host:port`, `custom_details` holds the full event data, and the incident links back to BetterDB when `FRONTEND_URL` is set.
 - `config.changed` and `acl.modified` (Enterprise) are sent to PagerDuty's [Change Events API](https://developer.pagerduty.com/docs/events-api-v2/send-change-events/) instead (`/v2/change/enqueue` on the same host). They appear on the service's timeline next to the incidents they may explain, and never page anyone. When the webhook URL is not PagerDuty's own `/v2/enqueue` (for example a relay), they are sent as `info` alerts.
 
-`POST /webhooks/:id/test` on a PagerDuty webhook sends an `info` event on a separate test key (`betterdb:test:<webhookId>`) and resolves it straight away, so a test never touches a real incident. The response reports `testIncidentResolved`. The test incident is resolved even if the trigger response times out or fails with a 5xx or 429; only a definite 4xx rejection skips the resolve.
+`POST /webhooks/:id/test` on a PagerDuty webhook sends an `info` event on a separate test key (`betterdb:test:<webhookId>`) and then attempts to resolve it, so a test never touches a real incident. `testIncidentResolved` reports whether that resolve was accepted. The resolve is attempted after a 2xx, a 5xx or a timeout. It is skipped when the request never reached PagerDuty or was rejected with a 4xx (including 429). If `testIncidentResolved` is `false`, the test incident may still be open on the test key; the next successful test closes it.
 
 When editing a webhook, redacted values (`whsec_abcd***`, `R012***`), `''` and `null` for `secret` and `routingKey` all mean "keep the stored value". Switching a webhook to the PagerDuty format replaces a Slack, Discord, Teams or Google Chat URL with the PagerDuty endpoint; a custom relay URL is kept, with a warning that the integration key is sent to it.
 

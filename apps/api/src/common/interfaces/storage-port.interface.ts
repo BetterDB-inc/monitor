@@ -490,6 +490,11 @@ export function toSlowLogEntry(entry: StoredLogEntryBase): {
   };
 }
 
+/** Webhook update; `routingKey: null` clears the stored key. */
+export type WebhookUpdate = Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt' | 'routingKey'>> & {
+  routingKey?: string | null;
+};
+
 export interface StoragePort {
   initialize(): Promise<void>;
   close(): Promise<void>;
@@ -646,7 +651,7 @@ export interface StoragePort {
   getWebhooksByEvent(event: WebhookEventType, connectionId?: string): Promise<Webhook[]>;
   updateWebhook(
     id: string,
-    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+    updates: WebhookUpdate,
   ): Promise<Webhook | null>;
   deleteWebhook(id: string): Promise<boolean>;
 

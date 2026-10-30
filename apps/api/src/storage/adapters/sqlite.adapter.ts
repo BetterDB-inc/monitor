@@ -85,6 +85,7 @@ import {
   ScheduledCapturePatch,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  WebhookUpdate,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -3536,7 +3537,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async updateWebhook(
     id: string,
-    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+    updates: WebhookUpdate,
   ): Promise<Webhook | null> {
     if (!this.db) throw new Error('Database not initialized');
     return this.webhookRepo.updateWebhook(id, updates);
