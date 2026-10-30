@@ -94,6 +94,17 @@ describe('Correlator', () => {
       expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
     });
 
+    it('keeps the failover diagnosis when divergence shares the window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.REPLICATION_DIVERGENCE, timestamp: now }),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+
     it('matches on CLUSTER_STATE metric', () => {
       const anomaly = makeAnomaly({
         metricType: MetricType.CLUSTER_STATE,

@@ -94,7 +94,8 @@ export class Correlator {
         pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
         requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
         check: (anomalies) =>
-          anomalies.some((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE),
+          anomalies.some((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE) &&
+          !anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE),
         diagnosis:
           'Replica falling behind the primary during a write burst — watching whether it catches up',
         recommendations: [

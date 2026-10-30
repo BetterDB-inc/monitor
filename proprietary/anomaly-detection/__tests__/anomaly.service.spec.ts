@@ -7148,6 +7148,26 @@ describe('AnomalyService', () => {
       expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
     });
 
+    it('evaluates divergence after the poll, even when a later detector fails', async () => {
+      const sample = { role: 'primary' };
+      const detect = jest.fn().mockResolvedValue(undefined);
+      const order: string[] = [];
+      (service as any).replicationStream = { observe: () => sample, forget: jest.fn() };
+      (service as any).detectReplicationDivergence = (...args: unknown[]) => {
+        order.push('divergence');
+        return detect(...args);
+      };
+      (service as any).detectLargeReplyPressure = async () => {
+        order.push('pressure');
+        throw new Error('boom');
+      };
+
+      await expect((service as any).pollConnection(mockCtx)).rejects.toThrow('boom');
+
+      expect(order).toEqual(['pressure', 'divergence']);
+      expect(detect).toHaveBeenCalledWith(sample, mockCtx);
+    });
+
     it('retries resolving a superseded warning that storage could not resolve', async () => {
       const divergenceHook = jest.fn().mockResolvedValue(undefined);
       (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;

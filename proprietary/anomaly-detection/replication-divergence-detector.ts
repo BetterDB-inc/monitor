@@ -67,6 +67,8 @@ export interface ClosedDivergenceWindow extends DivergenceWindow {
 export interface DivergenceConnectionState {
   windowStart: number | null;
   closedWindows: ClosedDivergenceWindow[];
+  windowSamples: number;
+  lastSampleAt: number | null;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
   rateHistory: number[];
@@ -121,6 +123,8 @@ export function createDivergenceState(): DivergenceConnectionState {
   return {
     windowStart: null,
     closedWindows: [],
+    windowSamples: 0,
+    lastSampleAt: null,
     accumulators: new Map(),
     staleGaps: new Map(),
     rateHistory: [],
@@ -399,6 +403,8 @@ export function observeDivergence(
 ): DivergenceOutcome[] {
   if (sample.role !== 'primary') {
     state.windowStart = null;
+    state.windowSamples = 0;
+    state.lastSampleAt = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
     state.observed = new Set();
@@ -406,12 +412,22 @@ export function observeDivergence(
   }
   const outcomes: DivergenceOutcome[] = [];
 
-  if (state.windowStart === null) {
+  const resumed = state.lastSampleAt !== null && sample.timestamp - state.lastSampleAt > windowMs;
+  state.lastSampleAt = sample.timestamp;
+  if (state.windowStart === null || resumed) {
     state.windowStart = sample.timestamp;
-  } else if (sample.timestamp - state.windowStart >= windowMs) {
+    state.windowSamples = 0;
+    state.accumulators = new Map();
+    state.staleGaps = new Map();
+  } else if (
+    sample.timestamp - state.windowStart >= windowMs &&
+    state.windowSamples >= DIVERGENCE_MIN_SAMPLES
+  ) {
     outcomes.push(...closeWindow(state, state.windowStart, sample.timestamp, sample.bytesPerSecEwma));
     state.windowStart = sample.timestamp;
+    state.windowSamples = 0;
   }
+  state.windowSamples++;
 
   state.observed = new Set(sample.replicas.filter((line) => line.state === 'online').map((line) => line.addr));
   for (const line of sample.replicas) {
