@@ -5,6 +5,7 @@ import {
   StoragePort,
   AnomalyEventCursor,
   AnomalyScopeFilter,
+  StoredIncidentBoundary,
   StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '@app/common/interfaces/storage-port.interface';
@@ -312,6 +313,8 @@ export class AnomalyService
   private liveIncidents: IncidentTimeline[] = [];
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
+  private incidentBoundarySeed: Promise<boolean> | null = null;
+  private liveBoundaries: StoredIncidentBoundary[] = [];
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
@@ -5831,6 +5834,39 @@ export class AnomalyService
     }
   }
 
+  private async seedIncidentBoundaries(startTime: number): Promise<boolean> {
+    try {
+      this.liveBoundaries = await this.storage.getIncidentBoundaries({ startTime });
+      return true;
+    } catch (err) {
+      this.logger.warn(`Failed to read incident boundaries: ${err}`);
+      return false;
+    }
+  }
+
+  private async storeIncidentBoundaries(windowStart: number): Promise<void> {
+    const key = (scope: string, startedAt: number) => `${scope}\u0000${startedAt}`;
+    const known = new Set(this.liveBoundaries.map((b) => key(b.scopeId, b.startedAt)));
+    const kept = this.liveBoundaries.filter(
+      (b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+    );
+    const fresh = this.liveIncidents
+      .filter((incident) => !known.has(key(incident.scope, incident.startedAt)))
+      .map((incident) => ({
+        scopeId: incident.scope,
+        startedAt: incident.startedAt,
+        anomalyId: incident.entries[0].anomalyId,
+      }));
+    this.liveBoundaries = kept;
+    if (fresh.length === 0) return;
+    try {
+      await this.storage.saveIncidentBoundaries(fresh);
+      this.liveBoundaries = [...kept, ...fresh];
+    } catch (err) {
+      this.logger.error('Failed to save incident boundaries:', err);
+    }
+  }
+
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
@@ -5838,7 +5874,17 @@ export class AnomalyService
       [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies].map((a) => [a.id, a]),
     );
     const live = [...known.values()].filter((a) => a.timestamp >= now - windowMs);
-    this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
+    const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
+      now - windowMs,
+    ));
+    this.liveIncidents = this.incidentTimelineBuilder.build(
+      live,
+      now,
+      this.incidentRecoveryProbe,
+      this.liveBoundaries,
+    );
+    if (boundariesSeeded) await this.storeIncidentBoundaries(now - windowMs);
+    else this.incidentBoundarySeed = null;
     if (!seeded) {
       this.sequenceDedupeSeedFailedAt ??= now;
       if (now - this.sequenceDedupeSeedFailedAt < windowMs) {
@@ -5937,13 +5983,13 @@ export class AnomalyService
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const from = Math.max(startTime ?? now - 24 * 60 * 60_000, now - MAX_INCIDENT_LOOKBACK_MS);
-    const events = await this.loadIncidentEvents(
+    const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
       endTime,
     );
     return this.incidentTimelineBuilder
-      .build(events, Date.now(), this.incidentRecoveryProbe)
+      .build(events, Date.now(), this.incidentRecoveryProbe, boundaries)
       .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
@@ -5966,10 +6012,14 @@ export class AnomalyService
     }
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const windowEnd = startedAt + 2 * maxSpanMs;
-    const events = await this.loadIncidentEvents(connectionId, startedAt, windowEnd);
+    const { events, boundaries } = await this.loadIncidentHistory(
+      connectionId,
+      startedAt,
+      windowEnd,
+    );
     const find = (all: AnomalyEvent[]) =>
       this.incidentTimelineBuilder
-        .build(all, Date.now(), this.incidentRecoveryProbe)
+        .build(all, Date.now(), this.incidentRecoveryProbe, boundaries)
         .find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
@@ -6012,6 +6062,37 @@ export class AnomalyService
       (first, e) => (first === null || e.timestamp < first.timestamp ? e : first),
       null,
     );
+  }
+
+  private async loadIncidentHistory(
+    connectionId: string | undefined,
+    loadFrom: number,
+    endTime: number | undefined,
+  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
+    const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, endTime);
+    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    const earliest = Math.min(
+      loadFrom,
+      ...boundaries.map((b) => b.startedAt).filter((at) => at >= reach),
+    );
+    return { events: await this.loadIncidentEvents(connectionId, earliest, endTime), boundaries };
+  }
+
+  private async readIncidentBoundaries(
+    connectionId: string | undefined,
+    startTime: number,
+    endTime: number | undefined,
+  ): Promise<StoredIncidentBoundary[]> {
+    try {
+      return await this.storage.getIncidentBoundaries({
+        scopeIds: connectionId ? [this.correlationScopeOf(connectionId)] : undefined,
+        startTime,
+        endTime,
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to read incident boundaries: ${err}`);
+      return [];
+    }
   }
 
   private async loadIncidentEvents(

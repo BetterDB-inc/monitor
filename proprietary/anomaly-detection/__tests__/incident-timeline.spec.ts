@@ -47,6 +47,106 @@ describe('IncidentTimelineBuilder', () => {
     seq = 0;
   });
 
+  describe('stored boundaries', () => {
+    const boundary = (startedAt: number, anomalyId: string, scopeId = 'conn-a') => ({
+      scopeId,
+      startedAt,
+      anomalyId,
+    });
+
+    it('splits at a stored boundary inside a continuous chain', () => {
+      const first = event({ timestamp: T0 });
+      const second = event({ timestamp: T0 + MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, second],
+        T0 + 2 * MIN,
+        neverRecovers,
+        [boundary(T0, first.id), boundary(T0 + MIN, second.id)],
+      );
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        [first.id],
+        [second.id],
+      ]);
+    });
+
+    it('keeps the id and start of an incident whose head left the window', () => {
+      const head = event({ timestamp: T0 });
+      const tail = event({ timestamp: T0 + MIN });
+      const builder = new IncidentTimelineBuilder();
+      const boundaries = [boundary(T0, head.id)];
+
+      const [whole] = builder.build([head, tail], T0 + 2 * MIN, neverRecovers, boundaries);
+      const [cut] = builder.build([tail], T0 + 2 * MIN, neverRecovers, boundaries);
+
+      expect(cut.incidentId).toBe(whole.incidentId);
+      expect(cut.startedAt).toBe(T0);
+      expect(cut.entries.map((e) => e.anomalyId)).toEqual([tail.id]);
+    });
+
+    it('counts the span cap from the stored start', () => {
+      const head = event({ timestamp: T0 });
+      const inside = event({ timestamp: T0 + 29 * MIN });
+      const past = event({ timestamp: T0 + 31 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [inside, past],
+        T0 + 32 * MIN,
+        neverRecovers,
+        [boundary(T0, head.id)],
+      );
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        [inside.id],
+        [past.id],
+      ]);
+      expect(incidents[0].startedAt).toBe(T0);
+      expect(incidents[1].startedAt).toBe(T0 + 31 * MIN);
+    });
+
+    it('splits on a boundary whose event is no longer loaded', () => {
+      const before = event({ timestamp: T0 });
+      const after = event({ timestamp: T0 + 2 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [before, after],
+        T0 + 3 * MIN,
+        neverRecovers,
+        [boundary(T0 + MIN, 'evicted')],
+      );
+
+      expect(incidents.map((i) => i.startedAt)).toEqual([T0, T0 + MIN]);
+    });
+
+    it('does not reuse a boundary id after a quiet gap', () => {
+      const head = event({ timestamp: T0 });
+      const tail = event({ timestamp: T0 + 10 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [head, tail],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, head.id)],
+      );
+
+      expect(new Set(incidents.map((i) => i.incidentId)).size).toBe(2);
+      expect(incidents[1].startedAt).toBe(T0 + 10 * MIN);
+    });
+
+    it('ignores a boundary older than the span cap and other scopes', () => {
+      const lone = event({ timestamp: T0 });
+
+      const [incident] = new IncidentTimelineBuilder().build([lone], T0 + MIN, neverRecovers, [
+        boundary(T0 - 31 * MIN, 'stale'),
+        boundary(T0 - MIN, 'foreign', 'conn-b'),
+      ]);
+
+      expect(incident.incidentId).toBe(incidentIdFor('conn-a', lone.id, T0));
+      expect(incident.startedAt).toBe(T0);
+    });
+  });
+
   describe('clustering', () => {
     it('keeps events within the gap in one incident, ordered by time then id', () => {
       const later = event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC });

@@ -43,6 +43,12 @@ export interface IncidentTimeline {
   };
 }
 
+export interface IncidentBoundary {
+  scopeId: string;
+  startedAt: number;
+  anomalyId: string;
+}
+
 export interface IncidentTimelineOptions {
   gapMs: number;
   maxSpanMs: number;
@@ -149,6 +155,18 @@ function signalKey(event: AnomalyEvent): string {
   return `${event.connectionId ?? ''}\u0000${event.metricType}`;
 }
 
+interface IncidentCluster {
+  events: AnomalyEvent[];
+  start?: IncidentBoundary;
+}
+
+function startsByEvent(boundary: IncidentBoundary, event: AnomalyEvent): boolean {
+  return (
+    boundary.startedAt < event.timestamp ||
+    (boundary.startedAt === event.timestamp && boundary.anomalyId <= event.id)
+  );
+}
+
 export class IncidentTimelineBuilder {
   private readonly opts: IncidentTimelineOptions;
 
@@ -160,7 +178,12 @@ export class IncidentTimelineBuilder {
     this.opts = { ...DEFAULT_INCIDENT_TIMELINE_OPTIONS, ...opts };
   }
 
-  build(events: AnomalyEvent[], now: number, probe: RecoveryProbe): IncidentTimeline[] {
+  build(
+    events: AnomalyEvent[],
+    now: number,
+    probe: RecoveryProbe,
+    boundaries: readonly IncidentBoundary[] = [],
+  ): IncidentTimeline[] {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
       const connectionId = event.connectionId ?? '';
@@ -195,7 +218,14 @@ export class IncidentTimelineBuilder {
       const sorted = [...scoped].sort(
         (a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
       );
-      for (const cluster of this.cluster(sorted)) {
+      const scopedBoundaries = boundaries
+        .filter((b) => b.scopeId === scope)
+        .sort(
+          (a, b) =>
+            a.startedAt - b.startedAt ||
+            (a.anomalyId < b.anomalyId ? -1 : a.anomalyId > b.anomalyId ? 1 : 0),
+        );
+      for (const cluster of this.cluster(sorted, scopedBoundaries)) {
         timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
@@ -204,29 +234,48 @@ export class IncidentTimelineBuilder {
     );
   }
 
-  private cluster(sorted: AnomalyEvent[]): AnomalyEvent[][] {
-    const clusters: AnomalyEvent[][] = [];
+  private cluster(
+    sorted: AnomalyEvent[],
+    boundaries: readonly IncidentBoundary[],
+  ): IncidentCluster[] {
+    const clusters: IncidentCluster[] = [];
     let current: AnomalyEvent[] = [];
+    let start: IncidentBoundary | undefined;
+    let latest: IncidentBoundary | undefined;
+    let used: IncidentBoundary | undefined;
+    let next = 0;
     for (const event of sorted) {
+      while (next < boundaries.length && startsByEvent(boundaries[next], event)) {
+        latest = boundaries[next];
+        next += 1;
+      }
+      const stored =
+        latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
       const last = current[current.length - 1];
       if (
         first &&
-        (event.timestamp - last.timestamp > this.opts.gapMs ||
-          event.timestamp - first.timestamp > this.opts.maxSpanMs)
+        ((stored !== undefined && stored !== used) ||
+          event.timestamp - last.timestamp > this.opts.gapMs ||
+          event.timestamp - (start?.startedAt ?? first.timestamp) > this.opts.maxSpanMs)
       ) {
-        clusters.push(current);
+        clusters.push({ events: current, start });
         current = [];
+        start = undefined;
+      }
+      if (current.length === 0 && stored !== undefined && stored !== used) {
+        start = stored;
+        used = stored;
       }
       current.push(event);
     }
-    if (current.length > 0) clusters.push(current);
+    if (current.length > 0) clusters.push({ events: current, start });
     return clusters;
   }
 
   private toTimeline(
     scope: string,
-    events: AnomalyEvent[],
+    { events, start }: IncidentCluster,
     now: number,
     probe: RecoveryProbe,
     nextOccurrence: (event: AnomalyEvent) => number | null,
@@ -290,12 +339,13 @@ export class IncidentTimelineBuilder {
     }
 
     const lastEventAt = events[events.length - 1].timestamp;
+    const startedAt = start?.startedAt ?? events[0].timestamp;
 
     return {
-      incidentId: incidentIdFor(scope, events[0].id, events[0].timestamp),
+      incidentId: incidentIdFor(scope, start?.anomalyId ?? events[0].id, startedAt),
       scope,
       connectionIds: [...new Set(entries.map((e) => e.connectionId))],
-      startedAt: events[0].timestamp,
+      startedAt,
       lastEventAt,
       entries,
       sequence,

@@ -24,6 +24,8 @@ import {
   AnomalyEventCursor,
   AnomalyQueryOptions,
   AnomalyScopeFilter,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
   CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
@@ -155,6 +157,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private anomalyEvents: StoredAnomalyEvent[] = [];
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
+  private incidentBoundaries: StoredIncidentBoundary[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
   private latencySnapshots: StoredLatencySnapshot[] = [];
   private latencyHistograms: StoredLatencyHistogram[] = [];
@@ -857,6 +860,49 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         return seen <= maxPerGroup;
       })
       .reverse();
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    let saved = 0;
+    for (const boundary of boundaries) {
+      const exists = this.incidentBoundaries.some(
+        (b) =>
+          b.scopeId === boundary.scopeId &&
+          b.startedAt === boundary.startedAt &&
+          b.anomalyId === boundary.anomalyId,
+      );
+      if (exists) continue;
+      this.incidentBoundaries.push({ ...boundary });
+      saved += 1;
+    }
+    return saved;
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    const scopes = query.scopeIds && new Set(query.scopeIds);
+    const inScope = this.incidentBoundaries.filter((b) => !scopes || scopes.has(b.scopeId));
+    const latestBefore = new Map<string, number>();
+    for (const b of inScope) {
+      if (b.startedAt >= query.startTime) continue;
+      latestBefore.set(b.scopeId, Math.max(latestBefore.get(b.scopeId) ?? 0, b.startedAt));
+    }
+    return inScope
+      .filter(
+        (b) =>
+          latestBefore.get(b.scopeId) === b.startedAt ||
+          (b.startedAt >= query.startTime && (!query.endTime || b.startedAt <= query.endTime)),
+      )
+      .sort(
+        (a, b) =>
+          a.startedAt - b.startedAt || (a.anomalyId < b.anomalyId ? -1 : a.anomalyId > b.anomalyId ? 1 : 0),
+      )
+      .map((b) => ({ ...b }));
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    const before = this.incidentBoundaries.length;
+    this.incidentBoundaries = this.incidentBoundaries.filter((b) => b.startedAt >= cutoffTimestamp);
+    return before - this.incidentBoundaries.length;
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

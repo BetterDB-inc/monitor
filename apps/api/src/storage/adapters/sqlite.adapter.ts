@@ -42,6 +42,8 @@ import {
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
   AnomalyScopeFilter,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
   CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
@@ -1864,6 +1866,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
+      CREATE TABLE IF NOT EXISTS incident_boundaries (
+        scope_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        anomaly_id TEXT NOT NULL,
+        PRIMARY KEY (scope_id, started_at, anomaly_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
+
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_severity ON correlated_anomaly_groups(severity, timestamp DESC);
@@ -3087,6 +3098,61 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       .all(...correlationIds, ...anomalyIds, maxPerGroup) as any[];
 
     return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (boundaries.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+      VALUES (?, ?, ?)
+      ON CONFLICT DO NOTHING
+    `);
+    const insertMany = this.db.transaction((rows: StoredIncidentBoundary[]) =>
+      rows.reduce(
+        (saved, row) => saved + stmt.run(row.scopeId, row.startedAt, row.anomalyId).changes,
+        0,
+      ),
+    );
+    return insertMany(boundaries);
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (query.scopeIds?.length === 0) return [];
+
+    const scopes = query.scopeIds?.map(() => '?').join(', ');
+    const inScope = scopes ? `b.scope_id IN (${scopes}) AND ` : '';
+    const inWindow = query.endTime ? 'b.started_at <= ?' : '1 = 1';
+    const rows = this.db
+      .prepare(
+        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries b
+         WHERE ${inScope}(
+           (b.started_at >= ? AND ${inWindow})
+           OR b.started_at = (
+             SELECT MAX(p.started_at) FROM incident_boundaries p
+             WHERE p.scope_id = b.scope_id AND p.started_at < ?
+           )
+         )
+         ORDER BY b.started_at ASC, b.anomaly_id ASC`,
+      )
+      .all(
+        ...(query.scopeIds ?? []),
+        query.startTime,
+        ...(query.endTime ? [query.endTime] : []),
+        query.startTime,
+      ) as { scope_id: string; started_at: number; anomaly_id: string }[];
+    return rows.map((row) => ({
+      scopeId: row.scope_id,
+      startedAt: row.started_at,
+      anomalyId: row.anomaly_id,
+    }));
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    return chunkedSqliteDelete(this.db, 'incident_boundaries', 'started_at < ?', [cutoffTimestamp]);
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

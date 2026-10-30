@@ -61,6 +61,8 @@ describe('AnomalyService', () => {
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       getCorrelatedGroupMembers: jest.fn().mockResolvedValue([]),
+      saveIncidentBoundaries: jest.fn().mockResolvedValue(0),
+      getIncidentBoundaries: jest.fn().mockResolvedValue([]),
       resolveAnomaly: jest.fn().mockResolvedValue(true),
       resolveOpenAnomaly: jest.fn().mockResolvedValue(true),
       getAclEntries: jest.fn().mockResolvedValue([]),
@@ -7150,6 +7152,88 @@ describe('AnomalyService', () => {
           recoveredAt: null,
         }),
       );
+    });
+
+    it('splits history where the live view stored its boundaries', async () => {
+      const t = Date.now() - 20 * MIN;
+      const rows = ['a', 'b'].map((id, i) => ({
+        ...anomaly({ id, timestamp: t + i * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t, anomalyId: 'a' },
+        { scopeId: 'conn-1', startedAt: t + MIN, anomalyId: 'b' },
+      ]);
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('widens the history read back to a stored start before the window', async () => {
+      const t = Date.now() - 2 * 60 * MIN;
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t - 40 * MIN, anomalyId: 'head' },
+      ]);
+
+      await service.getIncidentTimelines('conn-1', t);
+
+      const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
+      expect(startTime).toBe(t - 40 * MIN);
+    });
+
+    it('stores each live incident start once and keeps it across a restart', async () => {
+      const now = Date.now();
+      const event = anomaly({ id: 'live', timestamp: now - MIN });
+      await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledWith([
+        { scopeId: 'conn-1', startedAt: now - MIN, anomalyId: 'live' },
+      ]);
+
+      (service as any).incidentBoundarySeed = null;
+      (service as any).liveBoundaries = [];
+      (service as any).incidentEvents.clear();
+      (service as any).recentAnomalies = [];
+      await (service as any).addAnomaly(anomaly({ id: 'tail', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: now - MIN, anomalyId: 'live' },
+      ]);
+
+      await (service as any).tickIncidentTimelines(now + 2000);
+
+      expect((service as any).liveIncidents[0].startedAt).toBe(now - MIN);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the live view when boundaries cannot be read or saved', async () => {
+      const now = Date.now();
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('down'));
+      storage.saveIncidentBoundaries.mockRejectedValue(new Error('down'));
+      await (service as any).addAnomaly(anomaly({ id: 'live', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+
+      await (service as any).tickIncidentTimelines(now);
+      storage.getIncidentBoundaries.mockResolvedValue([]);
+      await (service as any).tickIncidentTimelines(now + 1000);
+      await (service as any).tickIncidentTimelines(now + 2000);
+
+      expect((service as any).liveIncidents).toHaveLength(1);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(2);
     });
 
     it('keeps a removed member in its incident through the stored scope', async () => {

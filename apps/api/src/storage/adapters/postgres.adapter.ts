@@ -26,6 +26,8 @@ import type {
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
   CorrelatedGroupQueryOptions,
   AnomalyStats,
   AppSettings,
@@ -1681,6 +1683,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS anomaly_ids TEXT[];
+      CREATE TABLE IF NOT EXISTS incident_boundaries (
+        scope_id TEXT NOT NULL,
+        started_at BIGINT NOT NULL,
+        anomaly_id TEXT NOT NULL,
+        PRIMARY KEY (scope_id, started_at, anomaly_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
+
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_scope ON anomaly_events(scope_id, timestamp DESC);
@@ -3161,6 +3171,54 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
 
     return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row));
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (boundaries.length === 0) return 0;
+
+    const result = await this.pool.query(
+      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[])
+       ON CONFLICT DO NOTHING`,
+      [
+        boundaries.map((b) => b.scopeId),
+        boundaries.map((b) => b.startedAt),
+        boundaries.map((b) => b.anomalyId),
+      ],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (query.scopeIds?.length === 0) return [];
+
+    const result = await this.pool.query(
+      `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries b
+       WHERE ($1::text[] IS NULL OR b.scope_id = ANY($1))
+         AND (
+           (b.started_at >= $2 AND ($3::bigint IS NULL OR b.started_at <= $3))
+           OR b.started_at = (
+             SELECT MAX(p.started_at) FROM incident_boundaries p
+             WHERE p.scope_id = b.scope_id AND p.started_at < $2
+           )
+         )
+       ORDER BY b.started_at ASC, b.anomaly_id ASC`,
+      [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
+    );
+    return result.rows.map((row) => ({
+      scopeId: row.scope_id,
+      startedAt: Number(row.started_at),
+      anomalyId: row.anomaly_id,
+    }));
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return chunkedPostgresDelete(this.pool, 'incident_boundaries', 'started_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

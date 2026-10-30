@@ -218,6 +218,18 @@ export interface AnomalyEventCursor {
   id: string;
 }
 
+export interface StoredIncidentBoundary {
+  scopeId: string;
+  startedAt: number;
+  anomalyId: string;
+}
+
+export interface IncidentBoundaryQuery {
+  scopeIds?: string[];
+  startTime: number;
+  endTime?: number;
+}
+
 export interface AnomalyScopeFilter {
   id: string;
   connectionIds: string[];
@@ -647,6 +659,12 @@ export interface StoragePort {
     maxPerGroup: number,
   ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number>;
+
+  getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]>;
+
+  pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number>;
 
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
   saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;
