@@ -395,6 +395,7 @@ export class AnomalyService
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
+  private retryAmplificationLastEmit = new Map<string, number>();
   private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -774,6 +775,7 @@ export class AnomalyService
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
     this.retryAmplificationState.delete(connectionId);
+    this.retryAmplificationLastEmit.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
@@ -3139,9 +3141,9 @@ export class AnomalyService
     state.maxPollGapMs = retryAmplificationMaxPollGap(this.getIntervalMs());
 
     const connectionEvents = this.recentAnomalies.filter((a) => {
-      const minorCpuSpike =
-        a.metricType === MetricType.CPU_UTILIZATION && a.severity !== AnomalySeverity.CRITICAL;
-      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !minorCpuSpike;
+      const relativeCpuMove =
+        a.metricType === MetricType.CPU_UTILIZATION && !isControlPlaneSaturationEvent(a);
+      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !relativeCpuMove;
     });
     const recentEvents = connectionEvents
       .filter((a) => {
@@ -3190,6 +3192,9 @@ export class AnomalyService
       activeSaturation: [...activeSaturation],
     });
     if (finding === null) return;
+    const lastEmit = this.retryAmplificationLastEmit.get(ctx.connectionId);
+    if (lastEmit !== undefined && timestamp - lastEmit < RETRY_AMP_WINDOW_MS) return;
+    this.retryAmplificationLastEmit.set(ctx.connectionId, timestamp);
 
     const event: AnomalyEvent = {
       id: randomUUID(),
@@ -3210,6 +3215,7 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     if (event.persisted !== true) return;
+    this.retryAmplificationLastEmit.delete(ctx.connectionId);
     acknowledgeRetryAmplificationFinding(state, finding);
   }
 
