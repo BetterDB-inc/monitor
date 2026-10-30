@@ -131,6 +131,7 @@ export class RegressionDetector {
   private lastVersion?: string;
   private upgrade?: UpgradeWindowState;
   private sustained = new Map<string, SustainedState>();
+  private flaggedRecovered = new Map<string, boolean>();
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
@@ -160,13 +161,24 @@ export class RegressionDetector {
     // empty upgrade window can't silence sustained detection for up to 24h.
     findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
+    for (const command of this.flaggedRecovered.keys()) {
+      const degraded = this.sustained.get(command)?.degraded;
+      if (degraded !== null && degraded !== undefined) {
+        this.flaggedRecovered.set(command, !degraded);
+      }
+    }
+    for (const finding of findings) {
+      for (const { command } of finding.commands) this.flaggedRecovered.set(command, false);
+    }
+
     return findings;
   }
 
   isDegraded(): boolean | null {
     const verdicts = [...this.sustained.values()].map((state) => state.degraded);
     if (verdicts.includes(true)) return true;
-    return verdicts.includes(false) ? false : null;
+    const flagged = [...this.flaggedRecovered.values()];
+    return flagged.length > 0 && flagged.every((recovered) => recovered) ? false : null;
   }
 
   /**

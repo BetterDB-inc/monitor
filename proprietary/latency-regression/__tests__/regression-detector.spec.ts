@@ -359,16 +359,33 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(f.commands[0]).toMatchObject({ command: 'hmget', baselineP99Us: 1000 });
   });
 
-  it('reports whether the latest sample is still degraded', () => {
+  it('reports whether a flagged command is still degraded', () => {
     const sim = new Sim();
     seedBaseline(sim);
-    expect(sim.detector.isDegraded()).toBe(false);
+    expect(sim.detector.isDegraded()).toBeNull();
 
-    sim.tick(2500, '8.1.0');
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
     expect(sim.detector.isDegraded()).toBe(true);
 
     sim.tick(1000, '8.1.0');
     expect(sim.detector.isDegraded()).toBe(false);
+  });
+
+  it('keeps no verdict while the flagged command has none, even if others are healthy', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    sim.now += 5 * MINUTE;
+    sim.addSample(1000, '8.1.0', sim.now, 'get');
+    sim.evaluate();
+
+    expect(sim.detector.isDegraded()).toBeNull();
   });
 
   it('reports no verdict for a command without enough baseline', () => {
