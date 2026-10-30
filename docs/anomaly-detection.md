@@ -330,6 +330,34 @@ Each condition fires once per episode and the tracking state clears when the chi
 
 ---
 
+### REPLICATION_DIVERGENCE
+
+**Triggers**: A connected replica's byte gap to the primary keeps growing, stays far behind, or stops draining
+
+**What it means**: The replica is falling behind even if `lag` still looks healthy, because `lag` measures how recently it acknowledged the stream, not how much it has applied:
+- Slow apply path on the replica (CPU, disk or network)
+- Bulk writes or resharding outrunning the replica
+- Replica that stopped applying or acknowledging the stream
+
+**Detection method**: This is a *window-based* detector, not a z-score spike. It compares each replica's offset with the primary's over windows of 30s or three poll intervals, whichever is longer, and emits:
+- **WARNING** when the gap grows across 4 consecutive windows
+- **WARNING** when the replica stays at least 30s behind for 2 windows, and **CRITICAL** at 120s
+- **CRITICAL** when the write rate is back to baseline but the gap has not closed
+- **CRITICAL** when writes have stopped but the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
+- **WARNING** after 2 windows without acknowledgements while writes continue, and **CRITICAL** after 4
+
+Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
+
+**Recommended actions**:
+- Compare the replica offset gap with the primary write rate over the next few minutes
+- Check replica host CPU, disk and network for a slow apply path
+- Review `client-output-buffer-limit replica` and `repl-backlog-size` against the write rate
+- If bulk writes or resharding are driving it, throttle them until the replica catches up
+
+**Example scenario**: A bulk import writes faster than a replica can apply. The gap grows for four windows while `lag` stays at 0, and a WARNING fires. The import ends and the write rate returns to baseline, but the gap does not close, so the alert escalates to CRITICAL.
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern
@@ -492,6 +520,20 @@ Some metrics have custom thresholds beyond Z-score:
 **Typical baseline**: Idle (no save in progress) most of the time
 **Source**: `INFO persistence` (`rdb_bgsave_in_progress`, `current_save_keys_processed`/`current_save_keys_total`, `rdb_current_bgsave_time_sec`, `rdb_last_bgsave_status`, `aof_rewrite_in_progress`, `aof_current_rewrite_time_sec`, `aof_last_bgrewrite_status`)
 **Detection method**: State-based detector (not z-score based). Emits CRITICAL on frozen key progress, an elapsed-time ceiling, or an `ok` to `err` status transition, and WARNING on a long-running-but-advancing child. See the [PERSISTENCE_STALL pattern](#persistence_stall) for thresholds.
+
+### replication_divergence
+**What it measures**: Bytes each connected replica is behind the primary, and how many seconds that is at the current write rate
+**Why anomalies matter**: A replica can fall behind while `lag` stays low, which risks data loss on failover and full resyncs
+**Typical baseline**: Near zero
+**Source**: `INFO replication` (`master_repl_offset`, `slaveN` offset, state and lag)
+**Detection method**: Window-based detector (not z-score based). See the [REPLICATION_DIVERGENCE pattern](#replication_divergence) for thresholds. The anomaly page shows each replica's status. Divergence sends `replication.divergence` instead of `anomaly.detected`.
+
+### connection_churn
+**What it measures**: New connections per second
+**Why anomalies matter**: Clients reconnecting instead of reusing connections waste CPU on connection setup and TLS handshakes, and the client count doesn't show it
+**Typical baseline**: Low on pooled workloads
+**Source**: `INFO stats.total_connections_received` and `INFO clients.connected_clients`
+**Detection method**: Z-score spike detector (warning 3.0, critical 5.0, 2 consecutive samples, 60s cooldown). Only fires at 10 or more new connections per second while `connected_clients` stays flat, with under 10% of the new connections retained.
 
 ## Configuration
 

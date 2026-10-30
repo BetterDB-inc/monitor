@@ -7290,6 +7290,43 @@ describe('AnomalyService', () => {
       expect(recoveredHook).toHaveBeenCalledWith(expect.objectContaining({ reason: 'caught_up' }));
     });
 
+    it('words recovery above the floor as back under the thresholds, not caught up', async () => {
+      const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+      let t = await feed([2, 4, 6, 8, 10, 12], T0);
+      for (let i = 0; i < 9; i++) {
+        await (service as any).detectReplicationDivergence(
+          { ...sample(t, 120 * MiB), bytesPerSec: 50 * MiB, bytesPerSecEwma: 50 * MiB },
+          mockCtx,
+        );
+        t += 10_000;
+      }
+
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+      expect(recoveredHook.mock.calls[0][0]).toMatchObject({
+        reason: 'caught_up',
+        gapBytes: 120 * MiB,
+        message: 'Replica 10.0.0.2:6379 is back under the alert thresholds.',
+      });
+    });
+
+    it('reports the current gap as latest while a replica is alerted for not acking', async () => {
+      let t = await feed([0, 0], T0);
+      const stale = (timestamp: number) => {
+        const base = sample(timestamp, 9 * MiB);
+        return { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) };
+      };
+      for (let i = 0; i < 16; i++) {
+        await (service as any).detectReplicationDivergence(stale(t), mockCtx);
+        t += 10_000;
+      }
+      jest.spyOn(Date, 'now').mockReturnValue(t);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, t);
+
+      expect(replica.level).toBe('critical');
+      expect(replica.latest?.gapBytes).toBe(9 * MiB);
+    });
+
     describe('polls that stop arriving', () => {
       const staleAfterMs = () => Math.max(30_000, 3 * (service as any).getIntervalMs());
       const quiet = async () => {

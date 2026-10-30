@@ -13,13 +13,14 @@ import {
   divergenceWindowMs,
   drainClosedWindows,
   observeDivergence,
+  staleAckWindow,
   replicaObservedLevel,
   requeueClosedWindows,
   takeUnsavedDivergence,
   trackUnsavedDivergence,
   assessOrphanedReplica,
 } from '../replication-divergence-detector';
-import { ReplicaOffset, ReplicationStreamSample } from '../replication-stream';
+import { ReplicaOffset, ReplicationStreamSample, ReplicationStreamTracker } from '../replication-stream';
 
 const MiB = 1024 * 1024;
 const WINDOW_MS = 30_000;
@@ -567,6 +568,85 @@ describe('observeDivergence', () => {
     expect(Number.isFinite(finding.secondsBehind ?? 0)).toBe(true);
   });
 
+  describe('writes that stop, through the real sample stream', () => {
+    const PING_BYTES = 14;
+
+    class Stream {
+      readonly state = createDivergenceState();
+      private readonly tracker = new ReplicationStreamTracker();
+      private t = 1_700_000_000_000;
+      primary = 1_000_000_000;
+      replica = 1_000_000_000;
+      lag = 0;
+
+      poll(wroteBytes: number, appliedBytes: number): DivergenceOutcome[] {
+        this.t += POLL_MS;
+        this.primary += wroteBytes;
+        this.replica += appliedBytes;
+        const sample = this.tracker.observe(
+          'conn-1',
+          {
+            role: 'master',
+            master_repl_offset: String(this.primary),
+            master_replid: 'a'.repeat(40),
+            slave0: `ip=10.0.0.2,port=6379,state=online,offset=${this.replica},lag=${this.lag}`,
+          },
+          this.t,
+        );
+        const emitted = observeDivergence(this.state, sample as ReplicationStreamSample, WINDOW_MS);
+        for (const o of emitted) {
+          if (o.kind === 'divergence') acknowledgeDivergence(this.state, o, `evt-${o.level}`);
+        }
+        return emitted;
+      }
+
+      writing(polls: number): void {
+        for (let i = 0; i < polls; i++) this.poll(10 * MiB, 10 * MiB);
+      }
+
+      stopped(polls: number): DivergenceOutcome[] {
+        return Array.from({ length: polls }, () => this.poll(PING_BYTES, 0)).flat();
+      }
+    }
+
+    it('reports a replica that applies nothing after writes stop', () => {
+      const s = new Stream();
+      s.writing(9);
+      s.poll(4 * MiB, 0);
+
+      const findings = divergences([s.stopped(60)]);
+
+      expect(findings.map((f) => f.reason)).not.toContain('ceiling');
+      expect(findings[findings.length - 1]).toMatchObject({
+        level: 'critical',
+        reason: 'not_applying',
+        secondsBehind: null,
+      });
+    });
+
+    it('stays quiet on a stale ack once only pings are flowing', () => {
+      const s = new Stream();
+      s.writing(9);
+      s.poll(4 * MiB, 0);
+      s.lag = 30;
+
+      expect(divergences([s.stopped(60)])).toEqual([]);
+    });
+
+    it('still counts occasional writes in a window as writing', () => {
+      const s = new Stream();
+      s.writing(9);
+      s.poll(4 * MiB, 0);
+      s.stopped(30);
+      s.poll(MiB, MiB);
+      s.stopped(2);
+
+      const [window] = s.state.replicas.get(ADDR)?.windows.slice(-1) ?? [];
+      expect(window.bytesPerSec).toBeGreaterThan(0);
+      expect(window.secondsBehind).not.toBeNull();
+    });
+  });
+
   it('reports recovery after two windows below the floor', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 0].map((m) => ({ gap: m * MiB, rate: MiB })));
@@ -624,6 +704,21 @@ describe('observeDivergence', () => {
 
       expect(h.state.replicas.get(ADDR)?.level ?? 'none').toBe('none');
       expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('unobserved');
+    });
+
+    it('gives the current gap of a stale replica, not its last window', () => {
+      const h = new Harness();
+      h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
+
+      h.windows([{ gap: 8 * MiB, rate: MiB, lagSec: 30 }]);
+
+      expect(staleAckWindow(h.state, ADDR)?.gapBytes).toBe(8 * MiB);
+    });
+
+    it('has no stale gap for a replica that is acknowledging', () => {
+      const { h } = quiet();
+
+      expect(staleAckWindow(h.state, ADDR)).toBeNull();
     });
 
     it('is in sync again once acknowledgements resume', () => {

@@ -174,6 +174,7 @@ import {
   divergenceWindowMs,
   drainClosedWindows,
   replicaObservedLevel,
+  staleAckWindow,
   requeueClosedWindows,
   observeDivergence,
   takeUnsavedDivergence,
@@ -5893,7 +5894,10 @@ export class AnomalyService
         return {
           replica,
           level,
-          latest: level === 'unobserved' ? null : (windows[windows.length - 1] ?? null),
+          latest:
+            level === 'unobserved'
+              ? null
+              : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null),
           windows,
         };
       });
@@ -6217,7 +6221,7 @@ export class AnomalyService
       replica: recovery.addr,
       reason: 'caught_up',
       gapBytes: recovery.gapBytes ?? 0,
-      message: `Replica ${recovery.addr} caught up with the primary.`,
+      message: `Replica ${recovery.addr} is back under the alert thresholds.`,
       timestamp,
     });
   }
