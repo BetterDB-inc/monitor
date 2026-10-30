@@ -3,6 +3,7 @@ import { MetricType } from './types';
 export const RETRY_AMP_WINDOW_MS = 60_000;
 export const RETRY_AMP_MIN_COVERAGE = 0.5;
 export const RETRY_AMP_MAX_POLL_GAP_MS = 10_000;
+export const RETRY_AMP_EVENT_GRACE_MS = 15_000;
 export const RETRY_AMP_BASELINE_WINDOWS = 30;
 export const RETRY_AMP_ARM_WINDOWS = 10;
 export const RETRY_AMP_MIN_WINDOWS = 3;
@@ -109,6 +110,7 @@ export interface RetryAmplificationFinding {
 export interface RetryAmplificationState {
   last: LastReading | null;
   window: OpenWindow | null;
+  closing: OpenWindow | null;
   coldWindows: RetryAmplificationWindow[];
   hotRun: RetryAmplificationWindow[];
   coldStreak: number;
@@ -133,6 +135,7 @@ export function createRetryAmplificationState(): RetryAmplificationState {
   return {
     last: null,
     window: null,
+    closing: null,
     coldWindows: [],
     hotRun: [],
     coldStreak: 0,
@@ -349,9 +352,9 @@ function classifyRun(
   const correlation = coMovement(run, base);
   if (correlation === null || correlation < RETRY_AMP_MIN_CORRELATION) return null;
 
-  const level = run.some((w) => w.saturationMetrics.length > 0) ? 'critical' : 'warning';
-  const trigger = findTrigger(run, base);
   const latest = run[run.length - 1];
+  const level = latest.saturationMetrics.length > 0 ? 'critical' : 'warning';
+  const trigger = findTrigger(run, base);
   const loadRatio = latest.cmdsPerClient / base.cmdsPerClient;
   return {
     level,
@@ -455,6 +458,13 @@ function markEvents(open: OpenWindow, events: RetryAmplificationEventRef[]): voi
   }
 }
 
+function finalizeClosing(state: RetryAmplificationState, timestamp: number): void {
+  if (state.closing === null) return;
+  const closed = summarize(state.closing);
+  state.closing = null;
+  if (closed !== null) evaluateWindow(state, closed, timestamp);
+}
+
 export function evaluateRetryAmplification(
   state: RetryAmplificationState,
   sample: RetryAmplificationSample,
@@ -472,10 +482,21 @@ export function evaluateRetryAmplification(
   if (state.window === null) {
     state.window = openWindow(sample.timestamp);
   } else if (sample.timestamp - state.window.start >= RETRY_AMP_WINDOW_MS) {
-    const closed = summarize(state.window);
-    if (closed !== null) evaluateWindow(state, closed, sample.timestamp);
+    finalizeClosing(state, sample.timestamp);
     const elapsed = Math.floor((sample.timestamp - state.window.start) / RETRY_AMP_WINDOW_MS);
+    state.closing = elapsed === 1 ? state.window : null;
+    if (elapsed > 1) {
+      const closed = summarize(state.window);
+      if (closed !== null) evaluateWindow(state, closed, sample.timestamp);
+    }
     state.window = openWindow(state.window.start + elapsed * RETRY_AMP_WINDOW_MS);
+  }
+
+  if (state.closing !== null) {
+    markEvents(state.closing, sample.recentEvents);
+    if (sample.timestamp >= state.closing.start + RETRY_AMP_WINDOW_MS + RETRY_AMP_EVENT_GRACE_MS) {
+      finalizeClosing(state, sample.timestamp);
+    }
   }
 
   const open = state.window;
