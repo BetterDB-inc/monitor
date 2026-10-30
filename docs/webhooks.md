@@ -80,7 +80,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
 | `kv_cache.hit_rate_low` | KV cache hit rate low | An LMCache engine's token hit rate over the last 15 minutes dropped to or below the connection's threshold |
 | `kv_cache.eviction_risk` | KV cache eviction risk | LMCache keys cannot be evicted under a `volatile-*` policy, or Valkey is evicting while LMCache holds most of its memory |
-| `retry_amplification.detected` | Retry amplification detected | Load per client keeps rising together with latency, errors or connection churn while the client count stays flat |
+| `retry_amplification.detected` | Retry amplification detected | Load per client keeps rising, or steps up and holds, together with latency, errors or connection churn while the client count stays flat |
 
 ### Enterprise Tier
 
