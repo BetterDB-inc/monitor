@@ -181,6 +181,16 @@ describe('retry amplification detector', () => {
     expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
   });
 
+  it('keeps following the latest window once the load shape fades', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(hot(1.6, { saturation: MetricType.LOAD_SATURATION }));
+    d.windows(hot(1.6), 2);
+    expect(d.findings.map((f) => f.level)).toEqual(['warning', 'critical']);
+    expect(d.state.ackedLevel).toBe('warning');
+  });
+
   it('counts a P99 event that lands after the window has already rolled over', () => {
     const d = new Driver();
     d.baseline();

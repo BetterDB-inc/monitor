@@ -132,6 +132,7 @@ export interface RetryAmplificationState {
   hotRun: RetryAmplificationWindow[];
   coldStreak: number;
   episodeLevel: RetryAmplificationLevel;
+  episodeMovement: CoMovement | null;
   ackedLevel: RetryAmplificationLevel;
   pending: RetryAmplificationFinding | null;
   lastEpisode: RetryAmplificationEpisode | null;
@@ -171,6 +172,7 @@ export function createRetryAmplificationState(
     hotRun: [],
     coldStreak: 0,
     episodeLevel: 'none',
+    episodeMovement: null,
     ackedLevel: 'none',
     pending: null,
     lastEpisode: null,
@@ -424,8 +426,10 @@ function classifyRun(
 ): RetryAmplificationFinding | null {
   const run = state.hotRun;
   if (run.length < RETRY_AMP_MIN_WINDOWS) return null;
-  const movement = classifyLoad(run, base);
+  const movement =
+    classifyLoad(run, base) ?? (state.episodeLevel !== 'none' ? state.episodeMovement : null);
   if (movement === null) return null;
+  state.episodeMovement = movement;
   const correlation = movement.r;
 
   const latest = run[run.length - 1];
@@ -475,6 +479,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
   state.hotRun = [];
   state.coldStreak = 0;
   state.episodeLevel = 'none';
+  state.episodeMovement = null;
   state.ackedLevel = 'none';
   state.pending = null;
 }
