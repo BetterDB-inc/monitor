@@ -381,9 +381,11 @@ function collectRelatedMetrics(
 ): MetricType[] {
   const related = new Set<MetricType>();
   if (trigger === 'latency') related.add(MetricType.COMMAND_P99);
+  if (trigger === 'errors') related.add(MetricType.ERROR_REPLIES);
   if (trigger === 'churn') related.add(MetricType.CONNECTION_CHURN);
   for (const w of run) {
     if (w.latencyEvent) related.add(MetricType.COMMAND_P99);
+    if (hasErrorStress(w, base)) related.add(MetricType.ERROR_REPLIES);
     if (hasChurnStress(w, base)) related.add(MetricType.CONNECTION_CHURN);
     for (const m of w.saturationMetrics) related.add(m);
   }

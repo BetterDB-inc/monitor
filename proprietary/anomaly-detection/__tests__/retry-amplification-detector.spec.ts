@@ -359,6 +359,29 @@ describe('retry amplification detector', () => {
     expect(d.findings[0].relatedMetrics).toEqual([MetricType.CONNECTION_CHURN]);
   });
 
+  it('links the error replies when errors trigger the episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, errorsPerSec: 5 }));
+    d.window(hot(1.7, { p99: false, errorsPerSec: 10 }));
+    d.window(hot(1.9, { p99: false, errorsPerSec: 20 }));
+    d.window(hot(2.0, { p99: false, errorsPerSec: 30 }));
+    expect(d.findings[0].trigger).toBe('errors');
+    expect(d.findings[0].relatedMetrics).toEqual([MetricType.ERROR_REPLIES]);
+  });
+
+  it('links the error replies when they join a latency episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4, { errorsPerSec: 5 });
+    d.window(hot(2.1, { errorsPerSec: 5 }));
+    expect(d.findings[0].trigger).toBe('latency');
+    expect(d.findings[0].relatedMetrics).toEqual([
+      MetricType.COMMAND_P99,
+      MetricType.ERROR_REPLIES,
+    ]);
+  });
+
   it('still classifies from stress alone when the churn input is absent', () => {
     const d = new Driver();
     const noChurn = { ...BASE, churn: undefined };
