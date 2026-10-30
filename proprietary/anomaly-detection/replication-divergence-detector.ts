@@ -3,7 +3,7 @@ import { MetricType } from './types';
 
 export const DIVERGENCE_MIN_WINDOW_MS = 30_000;
 export const DIVERGENCE_MIN_SAMPLES = 3;
-const DIVERGENCE_SLOW_POLL_TOLERANCE = 2;
+const DIVERGENCE_OUTAGE_GAP_FACTOR = 2;
 export const DIVERGENCE_GROWTH_WINDOWS = 4;
 export const DIVERGENCE_FLOOR_BYTES = 1024 * 1024;
 export const DIVERGENCE_FLOOR_SECONDS = 5;
@@ -60,7 +60,6 @@ export interface DivergenceConnectionState {
   windowStart: number | null;
   windowSamples: number;
   lastSampleAt: number | null;
-  consecutiveGaps: number;
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
@@ -101,7 +100,6 @@ export function createDivergenceState(): DivergenceConnectionState {
     windowStart: null,
     windowSamples: 0,
     lastSampleAt: null,
-    consecutiveGaps: 0,
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
@@ -376,7 +374,6 @@ export function observeDivergence(
     state.windowStart = null;
     state.windowSamples = 0;
     state.lastSampleAt = null;
-    state.consecutiveGaps = 0;
     state.lastGapMs = 0;
     state.accumulators = new Map();
     state.staleGaps = new Map();
@@ -384,34 +381,33 @@ export function observeDivergence(
   }
   const outcomes: DivergenceOutcome[] = [];
 
-  const previousSampleAt = state.lastSampleAt;
-  const gapMs = previousSampleAt === null ? 0 : sample.timestamp - previousSampleAt;
-  const resumed = gapMs > windowMs;
-  const steadyCadence = gapMs <= state.lastGapMs * DIVERGENCE_SLOW_POLL_TOLERANCE;
-  state.consecutiveGaps = !resumed ? 0 : steadyCadence ? state.consecutiveGaps + 1 : 1;
-  state.lastGapMs = gapMs;
-  const outage = resumed && state.consecutiveGaps < DIVERGENCE_MIN_SAMPLES;
+  const previousSampleAt = state.lastSampleAt ?? sample.timestamp;
+  const gapMs = sample.timestamp - previousSampleAt;
+  const outage = gapMs > Math.max(windowMs, state.lastGapMs * DIVERGENCE_OUTAGE_GAP_FACTOR);
+  const windowEnd = outage ? previousSampleAt : sample.timestamp;
   state.lastSampleAt = sample.timestamp;
-  if (state.windowStart === null || outage) {
-    if (
-      state.windowStart !== null &&
-      previousSampleAt !== null &&
-      previousSampleAt - state.windowStart >= windowMs &&
-      state.windowSamples >= DIVERGENCE_MIN_SAMPLES
-    ) {
-      outcomes.push(...closeWindow(state, state.windowStart, previousSampleAt, sample.bytesPerSecEwma));
+  state.lastGapMs = gapMs;
+
+  if (
+    state.windowStart !== null &&
+    windowEnd - state.windowStart >= windowMs &&
+    state.windowSamples >= DIVERGENCE_MIN_SAMPLES
+  ) {
+    outcomes.push(...closeWindow(state, state.windowStart, windowEnd, sample.bytesPerSecEwma));
+    state.windowStart = null;
+  }
+  if (outage) {
+    state.windowStart = null;
+    for (const replica of state.replicas.values()) {
+      replica.staleWindows = 0;
+      replica.staleSince = null;
     }
+  }
+  if (state.windowStart === null) {
     state.windowStart = sample.timestamp;
     state.windowSamples = 0;
     state.accumulators = new Map();
     state.staleGaps = new Map();
-  } else if (
-    sample.timestamp - state.windowStart >= windowMs &&
-    state.windowSamples >= DIVERGENCE_MIN_SAMPLES
-  ) {
-    outcomes.push(...closeWindow(state, state.windowStart, sample.timestamp, sample.bytesPerSecEwma));
-    state.windowStart = sample.timestamp;
-    state.windowSamples = 0;
   }
   state.windowSamples++;
 
