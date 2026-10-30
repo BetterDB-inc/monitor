@@ -5647,18 +5647,30 @@ export class AnomalyService
           startTime,
           endTime,
           pattern: pattern as string,
-          limit,
+          limit: id === connectionId ? limit : Math.max(limit, 1000),
           connectionId: id,
         }),
       ),
     );
-    const stored = [
-      ...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values(),
-    ].sort((a, b) => b.timestamp - a.timestamp);
+    const involved = connectionId
+      ? new Set(
+          (
+            await this.storage.getAnomalyEvents({
+              startTime: startTime - this.correlationIntervalMs,
+              endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+              connectionId,
+              limit: 10_000,
+            })
+          ).map((a) => a.correlationId),
+        )
+      : null;
+    const stored = [...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values()]
+      .filter((s) => !involved || s.connectionId === connectionId || involved.has(s.correlationId))
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, limit);
 
     const groups: CorrelatedAnomalyGroup[] = [];
     for (const s of stored) {
-      if (groups.length >= limit) break;
       const storedAnomalies = await Promise.all(
         connectionIds.map((id) =>
           this.storage.getAnomalyEvents({
@@ -5676,13 +5688,6 @@ export class AnomalyService
             .map((a) => [a.id, this.storedToAnomalyEvent(a)]),
         ).values(),
       ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-      if (
-        connectionId &&
-        s.connectionId !== connectionId &&
-        !anomalies.some((a) => a.connectionId === connectionId)
-      ) {
-        continue;
-      }
 
       groups.push({
         correlationId: s.correlationId,
