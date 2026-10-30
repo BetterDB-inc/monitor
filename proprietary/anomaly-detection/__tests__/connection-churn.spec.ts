@@ -1,10 +1,15 @@
 import {
   computeConnectionChurn,
   isChurnWithFlatPopulation,
+  trimPopulationWindow,
   ConnectionChurnReading,
 } from '../connection-churn';
 
-const reading = (totalReceived: number, connectedClients: number, timestamp: number): ConnectionChurnReading => ({
+const reading = (
+  totalReceived: number,
+  connectedClients: number,
+  timestamp: number,
+): ConnectionChurnReading => ({
   totalReceived,
   connectedClients,
   timestamp,
@@ -38,10 +43,31 @@ describe('computeConnectionChurn', () => {
     expect(sample.clientsDeltaRatio).toBeCloseTo(0.1);
   });
 
+  it('measures the population change against a given baseline', () => {
+    const sample = computeConnectionChurn(
+      reading(1_000, 1_100, 0),
+      reading(1_400, 1_150, 1_000),
+      1_000,
+    );
+
+    expect(sample.clientsDeltaRatio).toBeCloseTo(0.15);
+  });
+
   it('measures the population ratio against at least one client', () => {
     const sample = computeConnectionChurn(reading(0, 0, 0), reading(10, 0, 1_000));
 
     expect(sample.clientsDeltaRatio).toBe(0);
+  });
+});
+
+describe('trimPopulationWindow', () => {
+  it('keeps readings from the last minute', () => {
+    const kept = trimPopulationWindow(
+      [reading(0, 10, 0), reading(0, 20, 50_000), reading(0, 30, 70_000)],
+      100_000,
+    );
+
+    expect(kept.map((r) => r.connectedClients)).toEqual([20, 30]);
   });
 });
 
@@ -65,6 +91,8 @@ describe('isChurnWithFlatPopulation', () => {
   });
 
   it('ignores a sample without a rate', () => {
-    expect(isChurnWithFlatPopulation(computeConnectionChurn(undefined, reading(5, 100, 0)))).toBe(false);
+    expect(isChurnWithFlatPopulation(computeConnectionChurn(undefined, reading(5, 100, 0)))).toBe(
+      false,
+    );
   });
 });

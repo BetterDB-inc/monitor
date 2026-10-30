@@ -28,6 +28,7 @@ import { Correlator } from './correlator';
 import {
   computeConnectionChurn,
   isChurnWithFlatPopulation,
+  trimPopulationWindow,
   ConnectionChurnReading,
   ConnectionChurnSample,
 } from './connection-churn';
@@ -242,6 +243,7 @@ export class AnomalyService
   // connection; the sample is exposed for other detectors to read.
   private lastChurnReading = new Map<string, ConnectionChurnReading>();
   private connectionChurnSamples = new Map<string, ConnectionChurnSample>();
+  private churnPopulationWindow = new Map<string, ConnectionChurnReading[]>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
   // config value (fetched once) so the alert can say whether eviction is even
@@ -686,6 +688,7 @@ export class AnomalyService
     this.lastRejectedConnections.delete(connectionId);
     this.lastChurnReading.delete(connectionId);
     this.connectionChurnSamples.delete(connectionId);
+    this.churnPopulationWindow.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
@@ -1534,7 +1537,16 @@ export class AnomalyService
     if (totalReceived === null || connectedClients === null) return;
 
     const reading = { totalReceived, connectedClients, timestamp };
-    const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
+    const population = trimPopulationWindow(
+      this.churnPopulationWindow.get(ctx.connectionId) ?? [],
+      timestamp,
+    );
+    const sample = computeConnectionChurn(
+      this.lastChurnReading.get(ctx.connectionId),
+      reading,
+      population[0]?.connectedClients,
+    );
+    this.churnPopulationWindow.set(ctx.connectionId, [...population, reading]);
     this.lastChurnReading.set(ctx.connectionId, reading);
     this.connectionChurnSamples.set(ctx.connectionId, sample);
     if (sample.connectsPerSec === null) return;

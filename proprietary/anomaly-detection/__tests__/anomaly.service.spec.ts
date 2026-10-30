@@ -3288,6 +3288,17 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
+    it('does not alert on a pool that grows a little on every poll', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 105 },
+        { connectsPerSec: 420, clients: 110 },
+        { connectsPerSec: 410, clients: 115 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
     it('does not alert on two flat spikes separated by a gated sample', async () => {
       const { recorded } = await runChurn([
         ...baseline,
