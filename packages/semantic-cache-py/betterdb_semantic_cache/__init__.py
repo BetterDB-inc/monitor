@@ -34,6 +34,10 @@ from .types import (
     SemanticCacheOptions,
     TelemetryOptions,
     ThresholdEffectivenessResult,
+    UsageTrackingOptions,
+    EntryAnalyticsOptions,
+    EntrySummary,
+    EntryAnalyticsResult,
 )
 from .utils import (
     BinaryBlock,
@@ -56,6 +60,10 @@ __all__ = [
     "SemanticCacheOptions",
     "ConfigRefreshOptions",
     "DiscoveryOptions",
+    "UsageTrackingOptions",
+    "EntryAnalyticsOptions",
+    "EntrySummary",
+    "EntryAnalyticsResult",
     "CacheCheckOptions",
     "CacheStoreOptions",
     "CacheCheckResult",
