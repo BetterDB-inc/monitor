@@ -6,6 +6,7 @@ import { SqliteAdapter } from '../sqlite.adapter';
 import { PostgresAdapter } from '../postgres.adapter';
 import type {
   StoragePort,
+  StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '../../../common/interfaces/storage-port.interface';
 
@@ -69,53 +70,122 @@ const postgresAdapters: Array<[string, AdapterFactory]> = isReachable(POSTGRES_D
     ]
   : [];
 
-describe.each<[string, AdapterFactory]>([
+const adapters: Array<[string, AdapterFactory]> = [
   ['MemoryAdapter', inProcess(() => new MemoryAdapter() as unknown as StoragePort)],
   [
     'SqliteAdapter',
     inProcess(() => new SqliteAdapter({ filepath: ':memory:' }) as unknown as StoragePort),
   ],
   ...postgresAdapters,
-])('getCorrelatedGroups by correlation id (%s)', (_name, makeAdapter) => {
-  let storage: StoragePort;
-  let cleanup: () => Promise<void>;
-  const CONN = 'conn-a';
-  const [ID1, ID2, ID3] = [randomUUID(), randomUUID(), randomUUID()];
+];
 
-  const group = (correlationId: string, timestamp: number): StoredCorrelatedGroup => ({
-    correlationId,
-    timestamp,
-    pattern: 'memory_pressure',
-    severity: 'warning',
-    diagnosis: 'd',
-    recommendations: [],
-    anomalyCount: 1,
-    metricTypes: ['connections'],
-  });
+describe.each<[string, AdapterFactory]>(adapters)(
+  'anomaly event upsert (%s)',
+  (_name, makeAdapter) => {
+    let storage: StoragePort;
+    let cleanup: () => Promise<void>;
+    const CONN = 'conn-a';
+    const ID = randomUUID();
+    const CORRELATION_ID = randomUUID();
 
-  beforeEach(async () => {
-    ({ storage, cleanup } = await makeAdapter());
-    await storage.saveCorrelatedGroup(group(ID1, 1000), CONN);
-    await storage.saveCorrelatedGroup(group(ID2, 2000), CONN);
-    await storage.saveCorrelatedGroup(group(ID3, 3000), CONN);
-  });
-
-  afterEach(async () => {
-    await cleanup();
-  });
-
-  it('returns only the requested groups', async () => {
-    const rows = await storage.getCorrelatedGroups({
-      connectionId: CONN,
-      correlationIds: [ID1, ID3],
+    const event = (overrides: Partial<StoredAnomalyEvent> = {}): StoredAnomalyEvent => ({
+      id: ID,
+      timestamp: 1_700_000_000_000,
+      metricType: 'command_p99',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 900,
+      baseline: 300,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 3,
+      message: 'P99 regression',
+      resolved: false,
+      ...overrides,
     });
 
-    expect(rows.map((g) => g.correlationId)).toEqual([ID3, ID1]);
-  });
+    const correlated = event({
+      correlationId: CORRELATION_ID,
+      relatedMetrics: ['cluster_state'],
+    });
+    const preserved = expect.objectContaining({
+      correlationId: CORRELATION_ID,
+      relatedMetrics: ['cluster_state'],
+    });
 
-  it('returns nothing for an empty id list', async () => {
-    const rows = await storage.getCorrelatedGroups({ connectionId: CONN, correlationIds: [] });
+    beforeEach(async () => {
+      ({ storage, cleanup } = await makeAdapter());
+    });
 
-    expect(rows).toEqual([]);
-  });
-});
+    afterEach(async () => {
+      await cleanup();
+    });
+
+    it('keeps correlation fields when saved again without them', async () => {
+      await storage.saveAnomalyEvent(correlated, CONN);
+      await storage.saveAnomalyEvent(event(), CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(preserved);
+    });
+
+    it('keeps correlation fields when batch saved again without them', async () => {
+      await storage.saveAnomalyEvents([correlated], CONN);
+      await storage.saveAnomalyEvents([event()], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(preserved);
+    });
+  },
+);
+
+describe.each<[string, AdapterFactory]>(adapters)(
+  'getCorrelatedGroups by correlation id (%s)',
+  (_name, makeAdapter) => {
+    let storage: StoragePort;
+    let cleanup: () => Promise<void>;
+    const CONN = 'conn-a';
+    const [ID1, ID2, ID3] = [randomUUID(), randomUUID(), randomUUID()];
+
+    const group = (correlationId: string, timestamp: number): StoredCorrelatedGroup => ({
+      correlationId,
+      timestamp,
+      pattern: 'memory_pressure',
+      severity: 'warning',
+      diagnosis: 'd',
+      recommendations: [],
+      anomalyCount: 1,
+      metricTypes: ['connections'],
+    });
+
+    beforeEach(async () => {
+      ({ storage, cleanup } = await makeAdapter());
+      await storage.saveCorrelatedGroup(group(ID1, 1000), CONN);
+      await storage.saveCorrelatedGroup(group(ID2, 2000), CONN);
+      await storage.saveCorrelatedGroup(group(ID3, 3000), CONN);
+    });
+
+    afterEach(async () => {
+      await cleanup();
+    });
+
+    it('returns only the requested groups', async () => {
+      const rows = await storage.getCorrelatedGroups({
+        connectionId: CONN,
+        correlationIds: [ID1, ID3],
+      });
+
+      expect(rows.map((g) => g.correlationId)).toEqual([ID3, ID1]);
+    });
+
+    it('returns nothing for an empty id list', async () => {
+      const rows = await storage.getCorrelatedGroups({ connectionId: CONN, correlationIds: [] });
+
+      expect(rows).toEqual([]);
+    });
+  },
+);
