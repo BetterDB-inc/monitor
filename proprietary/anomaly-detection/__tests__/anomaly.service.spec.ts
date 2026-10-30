@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder } from '../incident-timeline';
 import { MetricBuffer } from '../metric-buffer';
@@ -1639,6 +1640,38 @@ describe('AnomalyService', () => {
       await pollCluster(18_000, false);
 
       expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('closes the window when the marker set has not changed for thirty minutes', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      clock += RESHARD_MARKER_STALL_MS;
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('keeps the window open while the marker set keeps changing', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 2; i <= 4; i += 1) {
+        clock += RESHARD_MARKER_STALL_MS - 2000;
+        const ctx = shardCtx('a', 18_000, true);
+        const [nodeA, ...others] = shardNodes('a', true);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue([
+            { ...nodeA, migratingSlots: [{ slot: i, targetNodeId: 'b0000000' }] },
+            ...others,
+          ]);
+        clock += 1000;
+        await poll(ctx);
+        await poll(shardCtx('b', 6000, false));
+        await poll(shardCtx('c', 6000, false));
+      }
+
+      expect(skewEvents()[0].resolved).toBe(false);
     });
 
     it('keeps the alert open while too few primaries are visible to judge it', async () => {

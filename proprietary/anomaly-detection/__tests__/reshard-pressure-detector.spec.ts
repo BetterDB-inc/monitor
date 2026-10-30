@@ -1,7 +1,10 @@
 import {
+  RESHARD_MARKER_STALL_MS,
   ReshardShardSnapshot,
   evaluateReshardSkew,
+  isMarkerStalled,
   isReshardActive,
+  reshardMarkerSignature,
   reshardRole,
 } from '../reshard-pressure-detector';
 
@@ -16,6 +19,8 @@ function shard(id: string, over: Partial<ReshardShardSnapshot> = {}): ReshardSha
     shardId: `${id}0000000`,
     migratingSlots: 0,
     importingSlots: 0,
+    markerSignature: '|',
+    markerChangedAt: NOW,
     lastMarkerAt: null,
     opsPerSec: 10_000,
     cpuUtilization: 40,
@@ -49,6 +54,25 @@ describe('isReshardActive', () => {
 
   it('is inactive when no shard ever carried a marker', () => {
     expect(isReshardActive([shard('a'), shard('b')], NOW, QUIET_MS)).toBe(false);
+  });
+});
+
+describe('reshard marker progress', () => {
+  it('signs the marker set regardless of order', () => {
+    expect(reshardMarkerSignature([{ slot: 9 }, { slot: 3 }], [{ slot: 5 }])).toBe(
+      reshardMarkerSignature([{ slot: 3 }, { slot: 9 }], [{ slot: 5 }]),
+    );
+  });
+
+  it('tells a migrating slot from an importing one', () => {
+    expect(reshardMarkerSignature([{ slot: 3 }], [])).not.toBe(
+      reshardMarkerSignature([], [{ slot: 3 }]),
+    );
+  });
+
+  it('calls a marker stalled after thirty unchanged minutes', () => {
+    expect(isMarkerStalled(NOW - RESHARD_MARKER_STALL_MS + 1, NOW)).toBe(false);
+    expect(isMarkerStalled(NOW - RESHARD_MARKER_STALL_MS, NOW)).toBe(true);
   });
 });
 

@@ -54,7 +54,9 @@ import {
   ReshardShardSnapshot,
   ReshardSkewFinding,
   evaluateReshardSkew,
+  isMarkerStalled,
   isReshardActive,
+  reshardMarkerSignature,
   reshardSkewSignature,
 } from './reshard-pressure-detector';
 import {
@@ -4497,14 +4499,23 @@ export class AnomalyService
     const migratingSlots = self.migratingSlots?.length ?? 0;
     const importingSlots = self.importingSlots?.length ?? 0;
     const previous = this.reshardSnapshot.get(ctx.connectionId);
+    const markerSignature = reshardMarkerSignature(
+      self.migratingSlots ?? [],
+      self.importingSlots ?? [],
+    );
+    const markerChangedAt =
+      previous?.markerSignature === markerSignature ? previous.markerChangedAt : timestamp;
+    const carriesMovingMarker =
+      migratingSlots + importingSlots > 0 && !isMarkerStalled(markerChangedAt, timestamp);
     const snapshot: ReshardShardSnapshot = {
       connectionId: ctx.connectionId,
       clusterKey,
       shardId: self.id,
       migratingSlots,
       importingSlots,
-      lastMarkerAt:
-        migratingSlots + importingSlots > 0 ? timestamp : (previous?.lastMarkerAt ?? null),
+      markerSignature,
+      markerChangedAt,
+      lastMarkerAt: carriesMovingMarker ? timestamp : (previous?.lastMarkerAt ?? null),
       opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec) ?? 0,
       cpuUtilization,
       usedMemory: this.parseNumber(info.used_memory) ?? 0,

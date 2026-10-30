@@ -3,6 +3,7 @@ export const RESHARD_MIN_CLUSTER_OPS = 1000;
 export const RESHARD_QUIET_POLLS = 2;
 export const RESHARD_PERSIST_POLLS = 3;
 export const RESHARD_STALE_POLLS = 5;
+export const RESHARD_MARKER_STALL_MS = 30 * 60_000;
 
 export interface ReshardShardSnapshot {
   connectionId: string;
@@ -10,6 +11,8 @@ export interface ReshardShardSnapshot {
   shardId: string;
   migratingSlots: number;
   importingSlots: number;
+  markerSignature: string;
+  markerChangedAt: number;
   lastMarkerAt: number | null;
   opsPerSec: number;
   cpuUtilization: number | null;
@@ -51,6 +54,22 @@ function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+export function reshardMarkerSignature(
+  migrating: readonly { slot: number }[],
+  importing: readonly { slot: number }[],
+): string {
+  const slots = (entries: readonly { slot: number }[]) =>
+    entries
+      .map((entry) => entry.slot)
+      .sort((a, b) => a - b)
+      .join(',');
+  return `${slots(migrating)}|${slots(importing)}`;
+}
+
+export function isMarkerStalled(markerChangedAt: number, now: number): boolean {
+  return now - markerChangedAt >= RESHARD_MARKER_STALL_MS;
 }
 
 export function isReshardActive(
