@@ -1,5 +1,7 @@
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
+export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
+export const RETRY_AMP_ATTRIBUTION_MIN_WINDOWS = 2;
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
@@ -169,18 +171,31 @@ export function rankRetryAmplificationContributors(
     };
   });
 
-  return contributors
+  const byGrowth = contributors
     .filter(
-      (c) => (c.commandRateGrowth !== null && c.commandRateGrowth > 1) || c.newConnections > 0,
+      (c) => c.commandRateGrowth !== null && c.commandRateGrowth >= RETRY_AMP_CONTRIBUTOR_GROWTH,
     )
     .sort((a, b) => {
-      const growthA = a.commandRateGrowth ?? 0;
-      const growthB = b.commandRateGrowth ?? 0;
-      if (growthA !== growthB) return growthB - growthA;
-      if (a.newConnections !== b.newConnections) return b.newConnections - a.newConnections;
-      return a.key.localeCompare(b.key);
-    })
-    .slice(0, input.limit ?? RETRY_AMP_TOP_CONTRIBUTORS);
+      const diff = (b.commandRateGrowth ?? 0) - (a.commandRateGrowth ?? 0);
+      return diff !== 0 ? diff : a.key.localeCompare(b.key);
+    });
+  const byReconnects = contributors
+    .filter((c) => c.newConnections > 0)
+    .sort((a, b) => {
+      const diff = b.newConnections - a.newConnections;
+      return diff !== 0 ? diff : a.key.localeCompare(b.key);
+    });
+
+  const limit = input.limit ?? RETRY_AMP_TOP_CONTRIBUTORS;
+  const ranked: RetryAmplificationContributor[] = [];
+  for (let i = 0; ranked.length < limit && (i < byGrowth.length || i < byReconnects.length); i++) {
+    for (const candidate of [byGrowth[i], byReconnects[i]]) {
+      if (candidate !== undefined && !ranked.includes(candidate) && ranked.length < limit) {
+        ranked.push(candidate);
+      }
+    }
+  }
+  return ranked;
 }
 
 export function describeRetryAmplificationContributors(

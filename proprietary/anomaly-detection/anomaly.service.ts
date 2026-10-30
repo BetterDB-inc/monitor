@@ -175,6 +175,7 @@ import {
   RETRY_AMP_STRESS_HOLD_MS,
   RETRY_AMP_STRESS_METRICS,
   RETRY_AMP_WINDOW_MS,
+  RetryAmplificationFinding,
   RetryAmplificationState,
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
@@ -186,6 +187,7 @@ import {
 } from './retry-amplification-detector';
 import {
   ClientCommandSnapshot,
+  RETRY_AMP_ATTRIBUTION_MIN_WINDOWS,
   RETRY_AMP_SNAPSHOT_LIMIT,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
@@ -405,6 +407,7 @@ export class AnomalyService
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
   private retryAmplificationFirstClients = new Map<string, ClientCommandSnapshot | null>();
   private retryAmplificationContributors = new Map<string, RetryAmplificationContributor[] | null>();
+  private retryAmplificationAttributed = new Map<string, RetryAmplificationFinding>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -785,6 +788,7 @@ export class AnomalyService
     this.retryAmplificationState.delete(connectionId);
     this.retryAmplificationFirstClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
+    this.retryAmplificationAttributed.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.activeLargeReplyOffenders.delete(connectionId);
@@ -3183,7 +3187,10 @@ export class AnomalyService
     const episodeStart = retryAmplificationEpisodeStart(state);
     if (episodeStart === null) {
       this.retryAmplificationFirstClients.delete(ctx.connectionId);
-    } else if (!this.retryAmplificationFirstClients.has(ctx.connectionId)) {
+    } else if (
+      state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS &&
+      !this.retryAmplificationFirstClients.has(ctx.connectionId)
+    ) {
       this.retryAmplificationFirstClients.set(
         ctx.connectionId,
         await this.readClientCommandCounts(ctx, timestamp),
@@ -3191,12 +3198,16 @@ export class AnomalyService
     }
     if (finding === null) return;
 
-    const contributors = await this.attributeRetryAmplification(
-      ctx,
-      timestamp,
-      episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS,
-    );
-    this.retryAmplificationContributors.set(ctx.connectionId, contributors);
+    let contributors = this.retryAmplificationContributors.get(ctx.connectionId) ?? null;
+    if (this.retryAmplificationAttributed.get(ctx.connectionId) !== finding) {
+      contributors = await this.attributeRetryAmplification(
+        ctx,
+        timestamp,
+        episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS,
+      );
+      this.retryAmplificationContributors.set(ctx.connectionId, contributors);
+      this.retryAmplificationAttributed.set(ctx.connectionId, finding);
+    }
 
     const event: AnomalyEvent = {
       id: randomUUID(),

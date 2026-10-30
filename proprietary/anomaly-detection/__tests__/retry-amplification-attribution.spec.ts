@@ -177,6 +177,60 @@ describe('retry amplification attribution', () => {
       expect(ranked.map((c) => c.key)).not.toContain('c7');
     });
 
+    it('keeps reconnecting clients in the top list next to pooled groups', () => {
+      const ids = Array.from({ length: 6 }, (_, i) => String(i));
+      const first = readClientCommandCounts(
+        ids.map((id) => client({ id, name: `pool${id}`, age: 100, 'tot-cmds': '1000' })),
+        0,
+      );
+      const latest = readClientCommandCounts(
+        ids.map((id) =>
+          client({
+            id,
+            name: `pool${id}`,
+            age: 160,
+            'tot-cmds': String(1000 + 600 * (2 + Number(id))),
+          }),
+        ),
+        60_000,
+      );
+      const snapshots = [
+        snap({ clientId: 'r1', name: 'retrier', age: 2, capturedAt: 60_000 }),
+        snap({ clientId: 'r2', name: 'retrier', age: 5, capturedAt: 60_000 }),
+      ];
+
+      const ranked = rankRetryAmplificationContributors({
+        first,
+        latest,
+        snapshots,
+        snapshotIntervalMs: 60_000,
+      });
+
+      expect(ranked).toHaveLength(5);
+      expect(ranked[1]).toEqual(
+        expect.objectContaining({ key: 'retrier', commandRateGrowth: null, newConnections: 2 }),
+      );
+    });
+
+    it('drops clients whose command rate barely moved', () => {
+      const first = readClientCommandCounts(
+        [client({ id: '1', name: 'steady', age: 100, 'tot-cmds': '1000' })],
+        0,
+      );
+      const latest = readClientCommandCounts(
+        [client({ id: '1', name: 'steady', age: 160, 'tot-cmds': '1630' })],
+        60_000,
+      );
+      expect(
+        rankRetryAmplificationContributors({
+          first,
+          latest,
+          snapshots: [],
+          snapshotIntervalMs: 60_000,
+        }),
+      ).toEqual([]);
+    });
+
     it('returns nothing when neither source has data', () => {
       expect(
         rankRetryAmplificationContributors({

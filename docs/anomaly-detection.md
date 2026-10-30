@@ -348,6 +348,12 @@ A run of hot windows is classified once it reaches 3 windows. Load must not be f
 
 **Limitations**: The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
 
+**Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
+- Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting clients at 1.3× or more of their lifetime rate
+- Reconnect counts from the stored client snapshots
+
+`CLIENT LIST` is read once when a run reaches two hot windows, then once per finding. Reconnects come from snapshots taken on the client-analytics interval (60s by default). A client that connects, retries and disconnects between two captures does not appear, so short-lived retry connections can be undercounted. The reconnect rate in the trigger still includes them.
+
 **Recommended actions**:
 - Add exponential backoff with jitter and a retry budget
 - Put a circuit breaker in front of the instance

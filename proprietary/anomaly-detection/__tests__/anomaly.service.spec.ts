@@ -3416,11 +3416,14 @@ describe('AnomalyService', () => {
       expect(recorded[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
     });
 
-    it('retries a failed emit on the next poll', async () => {
+    it('retries a failed emit on the next poll without re-reading CLIENT LIST', async () => {
+      dbClient.getClients = jest.fn().mockResolvedValue([]);
+
       const { recorded, errorsCaught } = await runRetry({ failFirstEmit: true });
 
       expect(errorsCaught).toHaveLength(1);
       expect(recorded).toHaveLength(1);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
     });
 
     it('names the clients whose command rate grew from CLIENT LIST tot-cmds', async () => {
