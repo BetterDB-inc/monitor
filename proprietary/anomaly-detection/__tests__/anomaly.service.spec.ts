@@ -7067,6 +7067,49 @@ describe('AnomalyService', () => {
       expect(restartRecoveries.map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
     });
 
+    it('sends no second recovered webhook for a replica when a failed sweep is retried', async () => {
+      const orphan = (id: string) => ({
+        id,
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+        message: 'WARNING: Replica 10.0.0.9:6379 is 8.0 MiB behind the primary; the gap grew.',
+      });
+      storage.getAnomalyEvents
+        .mockResolvedValueOnce([orphan('a-warn'), orphan('a-crit')])
+        .mockResolvedValueOnce([orphan('a-crit')]);
+      storage.resolveOpenAnomaly.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
+
+      await feed([2], T0);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
+      expect((webhookEventsProService as any).dispatchReplicationRecovered).toHaveBeenCalledTimes(1);
+      expect((service as any).divergenceOrphansNotified.has('conn-1')).toBe(false);
+    });
+
+    it('leaves a superseded event it could not resolve to the retry, not the sweep', async () => {
+      storage.getAnomalyEvents.mockRejectedValue(new Error('db down'));
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
+      storage.resolveAnomaly.mockImplementation(async (id: string) => {
+        if (id === warningId) throw new Error('db down');
+        return true;
+      });
+      const next = await feed([130, 140, 150], t);
+      storage.getAnomalyEvents.mockResolvedValue([
+        {
+          id: warningId,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          resolved: false,
+          message: 'WARNING: Replica 10.0.0.2:6379 is 12.0 MiB behind the primary; the gap grew.',
+        },
+      ]);
+
+      await feed([160], next);
+
+      expect((service as any).divergenceSuperseded.get('conn-1')).toEqual(new Set([warningId]));
+      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalledWith(warningId, expect.any(Number));
+    });
+
     it('retries the orphan sweep on the next poll when storage cannot be read', async () => {
       storage.getAnomalyEvents.mockRejectedValueOnce(new Error('db down'));
 

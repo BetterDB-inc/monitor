@@ -390,6 +390,7 @@ export class AnomalyService
   private replicationStream = new ReplicationStreamTracker();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
+  private divergenceOrphansNotified = new Map<string, Set<string>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
@@ -797,6 +798,7 @@ export class AnomalyService
     this.replicationStream.forget(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
+    this.divergenceOrphansNotified.delete(connectionId);
     this.divergenceSuperseded.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -5875,8 +5877,15 @@ export class AnomalyService
   private async resolveOrphanedDivergenceEvents(ctx: ConnectionContext): Promise<void> {
     try {
       const replicas = [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])];
-      const seen = new Set(replicas.map((r) => r.eventId));
-      const notified = new Set(replicas.filter((r) => r.level !== 'none').map((r) => r.addr));
+      const seen = new Set([
+        ...replicas.map((r) => r.eventId),
+        ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
+      ]);
+      const notified = this.divergenceOrphansNotified.get(ctx.connectionId) ?? new Set<string>();
+      this.divergenceOrphansNotified.set(ctx.connectionId, notified);
+      for (const replica of replicas) {
+        if (replica.level !== 'none') notified.add(replica.addr);
+      }
       for (;;) {
         const open = await this.storage.getAnomalyEvents({
           connectionId: ctx.connectionId,
@@ -5898,6 +5907,7 @@ export class AnomalyService
         if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE || orphans.length === 0) break;
       }
       this.divergenceOrphansSwept.add(ctx.connectionId);
+      this.divergenceOrphansNotified.delete(ctx.connectionId);
     } catch (err) {
       this.logger.warn(
         `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
