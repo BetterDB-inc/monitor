@@ -66,15 +66,6 @@ export class Correlator {
       {
         pattern: AnomalyPattern.RETRY_AMPLIFICATION,
         requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
-        optionalMetrics: [
-          MetricType.COMMAND_P99,
-          MetricType.CONNECTION_CHURN,
-          MetricType.LOAD_SATURATION,
-          MetricType.CPU_UTILIZATION,
-          MetricType.REJECTED_CONNECTIONS,
-          MetricType.CLIENT_SATURATION,
-          MetricType.CLIENT_LOCKOUT_RISK,
-        ],
         diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
         recommendations: [
           'Add exponential backoff with jitter and a retry budget to the client retry policy',
