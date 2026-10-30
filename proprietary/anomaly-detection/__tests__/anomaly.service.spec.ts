@@ -3648,6 +3648,15 @@ describe('AnomalyService', () => {
       expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
     });
 
+    it('reports attribution as unavailable when no client data was read', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Client attribution unavailable.');
+    });
+
     it('drops the per-connection state when the connection is removed', async () => {
       await runRetry();
       expect((service as any).retryAmplificationState.has('conn-1')).toBe(true);

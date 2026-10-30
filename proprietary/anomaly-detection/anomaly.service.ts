@@ -3318,7 +3318,8 @@ export class AnomalyService
     }
     const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
     const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
-    if (!snapshotsLoaded && (firstSnapshot === null || latest === null)) return null;
+    const reconnectsKnown = snapshotsLoaded && snapshots.length > 0;
+    if (!reconnectsKnown && (firstSnapshot === null || latest === null)) return null;
     return rankRetryAmplificationContributors({
       first: firstSnapshot,
       latest,
