@@ -248,6 +248,7 @@ export class AnomalyService
   );
   private liveIncidents: IncidentTimeline[] = [];
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
+  private sequenceDedupeSeed: Promise<void> | null = null;
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5475,6 +5476,7 @@ export class AnomalyService
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
     const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
 
@@ -5840,6 +5842,25 @@ export class AnomalyService
     }
 
     return groups.slice(0, limit);
+  }
+
+  private async seedSequenceDedupe(since: number): Promise<void> {
+    const patterns = new Set(getSequenceRules().map((r) => r.pattern));
+    if (patterns.size === 0) return;
+    try {
+      const groups = await this.storage.getCorrelatedGroups({ startTime: since, limit: 1000 });
+      for (const group of groups) {
+        if (!patterns.has(group.pattern as AnomalyPattern)) continue;
+        const members = await this.sequenceGroupMembers(group, group.connectionId ?? undefined);
+        for (const member of members) {
+          this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${member.id}`, member.timestamp);
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Failed to seed sequence group dedupe: ${error instanceof Error ? error.message : error}`,
+      );
+    }
   }
 
   private async sequenceGroupMembers(
