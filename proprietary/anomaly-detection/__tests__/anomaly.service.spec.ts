@@ -7605,6 +7605,22 @@ describe('AnomalyService', () => {
       expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 100000 events');
     });
 
+    it('shares the scan cap across the connections of one read', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      jest.spyOn((service as any).logger, 'warn').mockImplementation();
+      storage.getAnomalyEvents.mockImplementation(
+        async ({ connectionId, offset = 0 }: { connectionId: string; offset?: number }) =>
+          Array.from({ length: 1000 }, (_, i) => ({
+            ...anomaly({ id: `${connectionId}-${offset + i}`, timestamp: t }),
+            anomalyType: 'spike',
+          })),
+      );
+
+      await (service as any).anomaliesInRange(['conn-1', 'conn-2'], t, undefined);
+
+      expect(storage.getAnomalyEvents.mock.calls.length).toBeLessThanOrEqual(101);
+    });
+
     it('binds the next firing to the earliest of many later events', async () => {
       const t = Date.now() - 6 * 60 * MIN;
       pagedStorage([

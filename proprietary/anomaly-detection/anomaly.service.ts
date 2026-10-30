@@ -5856,6 +5856,7 @@ export class AnomalyService
         metricType: entry.metricType,
       });
     }
+    const budget = { rows: MAX_SCANNED_CALLER_EVENTS };
     const later = await Promise.all(
       [...signals.values()].map(async (signal) => {
         const after = await this.anomaliesInRange(
@@ -5863,6 +5864,7 @@ export class AnomalyService
           windowEnd + 1,
           undefined,
           signal.metricType,
+          budget,
         );
         return after.reduce<AnomalyEvent | null>(
           (first, e) =>
@@ -5891,10 +5893,11 @@ export class AnomalyService
     startTime: number,
     endTime: number | undefined,
     metricType?: MetricType,
+    budget = { rows: MAX_SCANNED_CALLER_EVENTS },
   ): Promise<AnomalyEvent[]> {
     const batches = await Promise.all(
       connectionIds.map((connectionId) =>
-        this.storedAnomaliesInRange(connectionId, startTime, endTime, metricType),
+        this.storedAnomaliesInRange(connectionId, startTime, endTime, metricType, budget),
       ),
     );
     const scope = new Set(connectionIds);
@@ -5913,10 +5916,11 @@ export class AnomalyService
     startTime: number,
     endTime: number | undefined,
     metricType: MetricType | undefined,
+    budget: { rows: number },
   ): Promise<AnomalyEvent[]> {
     const pageSize = 1000;
     const events: AnomalyEvent[] = [];
-    for (let offset = 0; offset < MAX_SCANNED_CALLER_EVENTS; offset += pageSize) {
+    for (let offset = 0; budget.rows > 0; offset += pageSize) {
       const page = await this.storage.getAnomalyEvents({
         startTime,
         endTime,
@@ -5926,6 +5930,7 @@ export class AnomalyService
         offset,
       });
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
+      budget.rows -= page.length;
       if (page.length < pageSize) return events;
     }
     this.logger.warn(

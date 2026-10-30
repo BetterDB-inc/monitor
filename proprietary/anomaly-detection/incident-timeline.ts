@@ -174,12 +174,18 @@ export class IncidentTimelineBuilder {
       if (times) times.push(event.timestamp);
       else signalTimes.set(key, [event.timestamp]);
     }
-    const nextOccurrence = (event: AnomalyEvent): number | null =>
-      signalTimes
-        .get(signalKey(event))!
-        .reduce<
-          number | null
-        >((next, t) => (t > event.timestamp && (next === null || t < next) ? t : next), null);
+    for (const times of signalTimes.values()) times.sort((a, b) => a - b);
+    const nextOccurrence = (event: AnomalyEvent): number | null => {
+      const times = signalTimes.get(signalKey(event))!;
+      let low = 0;
+      let high = times.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (times[middle] > event.timestamp) high = middle;
+        else low = middle + 1;
+      }
+      return times[low] ?? null;
+    };
 
     const timelines: IncidentTimeline[] = [];
     for (const [scope, scoped] of byScope) {
