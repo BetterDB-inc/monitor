@@ -73,6 +73,16 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows[0]).toEqual(preserved);
     });
 
+    it('adds correlation fields when batch saved again with them', async () => {
+      await storage.saveAnomalyEvents([event()], CONN);
+      await storage.saveAnomalyEvents([correlated], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(preserved);
+    });
+
     it('keeps correlation fields when batch saved again without them', async () => {
       await storage.saveAnomalyEvents([correlated], CONN);
       await storage.saveAnomalyEvents([event()], CONN);

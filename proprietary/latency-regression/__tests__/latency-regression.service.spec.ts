@@ -191,6 +191,7 @@ describe('LatencyRegressionService', () => {
     const service = await makeService(true, sink);
     await driveUpgradeRegression(service);
 
+    expect(sink.ingestExternalAnomaly).toHaveBeenCalledTimes(1);
     expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
   });
 
