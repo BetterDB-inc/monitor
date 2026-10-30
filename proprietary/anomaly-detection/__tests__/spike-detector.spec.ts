@@ -135,7 +135,7 @@ describe('SpikeDetector', () => {
       expect(result!.severity).toBe(AnomalySeverity.WARNING);
     });
 
-    it('fires the absolute threshold when the value is above it but below the mean', () => {
+    it('ignores a below-mean value over the threshold unless the option is set', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(MetricType.ACL_DENIED, {
         warningThreshold: 10,
@@ -143,6 +143,17 @@ describe('SpikeDetector', () => {
         consecutiveRequired: 1,
         cooldownMs: 0,
       });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      expect(detector.detect(buffer, 60, 50000)).toBeNull();
+    });
+
+    it('fires the absolute threshold when the value is above it but below the mean', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ACL_DENIED,
+        { warningThreshold: 10, criticalThreshold: 50, consecutiveRequired: 1, cooldownMs: 0 },
+        { thresholdOverridesBelowMean: true },
+      );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const result = detector.detect(buffer, 60, 50000);
       expect(result).not.toBeNull();
@@ -154,12 +165,16 @@ describe('SpikeDetector', () => {
 
     it('fires a below-mean value over the critical threshold when warning is disabled', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
-      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
-        warningThreshold: Infinity,
-        criticalThreshold: 50,
-        consecutiveRequired: 1,
-        cooldownMs: 0,
-      });
+      const detector = new SpikeDetector(
+        MetricType.ACL_DENIED,
+        {
+          warningThreshold: Infinity,
+          criticalThreshold: 50,
+          consecutiveRequired: 1,
+          cooldownMs: 0,
+        },
+        { thresholdOverridesBelowMean: true },
+      );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const result = detector.detect(buffer, 60, 50000);
       expect(result).not.toBeNull();
@@ -217,12 +232,11 @@ describe('SpikeDetector', () => {
 
     it('holds a value over the threshold but below the mean to one alert per cooldown', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
-      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
-        warningThreshold: 10,
-        criticalThreshold: 50,
-        consecutiveRequired: 1,
-        cooldownMs: 30000,
-      });
+      const detector = new SpikeDetector(
+        MetricType.ACL_DENIED,
+        { warningThreshold: 10, criticalThreshold: 50, consecutiveRequired: 1, cooldownMs: 30000 },
+        { thresholdOverridesBelowMean: true },
+      );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const fired: number[] = [];
       for (let t = 50000; t < 110000; t += 1000) {
@@ -231,6 +245,25 @@ describe('SpikeDetector', () => {
         }
       }
       expect(fired).toEqual([50000, 80000]);
+    });
+  });
+
+  describe('minimum value gate', () => {
+    it('ignores a z-score spike below minValue and resets the consecutive count', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        { warningZScore: 3, criticalZScore: 5, consecutiveRequired: 2, cooldownMs: 0 },
+        { minValue: 20 },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(i === 29 ? 1 : 0, i * 1000);
+      expect(detector.detect(buffer, 1, 30000)).toBeNull();
+      buffer.addSample(1, 31000);
+      expect(detector.detect(buffer, 1, 31000)).toBeNull();
+      buffer.addSample(50, 32000);
+      expect(detector.detect(buffer, 50, 32000)).toBeNull();
+      buffer.addSample(60, 33000);
+      expect(detector.detect(buffer, 60, 33000)).not.toBeNull();
     });
   });
 
@@ -272,12 +305,12 @@ describe('SpikeDetector', () => {
       // 2 anomalous (above warningThreshold=10), then 1 normal → resets
       expect(detector.detect(buffer, 15, 1000)).toBeNull(); // 1st
       expect(detector.detect(buffer, 15, 2000)).toBeNull(); // 2nd
-      expect(detector.detect(buffer, 5, 3000)).toBeNull();  // normal → resets counter
+      expect(detector.detect(buffer, 5, 3000)).toBeNull(); // normal → resets counter
 
       // Now need 3 more consecutive to fire again
       expect(detector.detect(buffer, 15, 4000)).toBeNull(); // 1st again
       expect(detector.detect(buffer, 15, 5000)).toBeNull(); // 2nd again
-      const result = detector.detect(buffer, 15, 6000);     // 3rd → fires
+      const result = detector.detect(buffer, 15, 6000); // 3rd → fires
       expect(result).not.toBeNull();
     });
   });

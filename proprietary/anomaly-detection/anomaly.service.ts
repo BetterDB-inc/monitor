@@ -117,6 +117,7 @@ import {
 } from '@app/common/types/metrics.types';
 import {
   ERROR_REPLIES_CRITICAL_PER_POLL,
+  ERROR_REPLIES_MIN_PER_POLL,
   ERROR_REPLIES_WARNING_PER_POLL,
   describeErrorstatDeltas,
   readErrorstatCounts,
@@ -3018,14 +3019,18 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       buffers.set(MetricType.ERROR_REPLIES, new MetricBuffer(MetricType.ERROR_REPLIES));
       detectors.set(
         MetricType.ERROR_REPLIES,
-        new SpikeDetector(MetricType.ERROR_REPLIES, {
-          warningZScore: 3,
-          criticalZScore: 5,
-          warningThreshold: ERROR_REPLIES_WARNING_PER_POLL,
-          criticalThreshold: ERROR_REPLIES_CRITICAL_PER_POLL,
-          consecutiveRequired: 2,
-          cooldownMs: 60000,
-        }),
+        new SpikeDetector(
+          MetricType.ERROR_REPLIES,
+          {
+            warningZScore: 3,
+            criticalZScore: 5,
+            warningThreshold: ERROR_REPLIES_WARNING_PER_POLL,
+            criticalThreshold: ERROR_REPLIES_CRITICAL_PER_POLL,
+            consecutiveRequired: 2,
+            cooldownMs: 60000,
+          },
+          { minValue: ERROR_REPLIES_MIN_PER_POLL, thresholdOverridesBelowMean: true },
+        ),
       );
     }
 

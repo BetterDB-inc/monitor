@@ -3265,6 +3265,22 @@ describe('AnomalyService', () => {
       expect(errorEvents()).toHaveLength(0);
     });
 
+    it('stays quiet when a zero-error instance sees a couple of errors', async () => {
+      let total = 1000;
+      for (let i = 0; i < 31; i++) {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      for (let i = 0; i < 3; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      expect(errorBuffer().getLatest()).toBe(1);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
     it('fires on an error burst and names the top error types', async () => {
       let total = 1000;
       const stats = { ERR: 900, TIMEOUT: 100, BUSY: 0 };

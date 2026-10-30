@@ -8,6 +8,11 @@ import {
   SpikeDetectorConfig,
 } from './types';
 
+export interface SpikeDetectorOptions {
+  minValue?: number;
+  thresholdOverridesBelowMean?: boolean;
+}
+
 interface ConsecutiveCounter {
   count: number;
   lastValue: number;
@@ -18,11 +23,17 @@ export class SpikeDetector {
   private config: Required<SpikeDetectorConfig>;
   private consecutiveCounts = new Map<MetricType, ConsecutiveCounter>();
   private lastAlertTime = new Map<MetricType, number>();
+  private readonly options: Required<SpikeDetectorOptions>;
 
   constructor(
     private readonly metricType: MetricType,
     config: SpikeDetectorConfig = {},
+    options: SpikeDetectorOptions = {},
   ) {
+    this.options = {
+      minValue: options.minValue ?? Number.NEGATIVE_INFINITY,
+      thresholdOverridesBelowMean: options.thresholdOverridesBelowMean ?? false,
+    };
     // Set defaults
     this.config = {
       warningZScore: config.warningZScore ?? 2.0,
@@ -53,7 +64,13 @@ export class SpikeDetector {
     // Determine if this is a spike or drop
     const isDrop = zScore < 0;
 
+    if (currentValue < this.options.minValue) {
+      this.consecutiveCounts.delete(this.metricType);
+      return null;
+    }
+
     const exceedsAbsolute =
+      this.options.thresholdOverridesBelowMean &&
       currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
     const countsAsDrop = isDrop && this.config.detectDrops;
 
@@ -141,12 +158,14 @@ export class SpikeDetector {
     zScore: number,
   ): string {
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
-    const change = Math.abs((value - baseline) / baseline * 100).toFixed(1);
+    const change = Math.abs(((value - baseline) / baseline) * 100).toFixed(1);
     const direction = value < baseline ? 'below' : 'above';
 
-    return `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
-           `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
-           `(${change}% ${direction} normal, Z-score: ${zScore.toFixed(2)})`;
+    return (
+      `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
+      `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
+      `(${change}% ${direction} normal, Z-score: ${zScore.toFixed(2)})`
+    );
   }
 
   private formatValue(value: number): string {
