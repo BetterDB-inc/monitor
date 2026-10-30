@@ -3335,9 +3335,11 @@ describe('AnomalyService', () => {
   });
 
   describe('retry amplification', () => {
-    async function runRetry(opts: { failFirstEmit?: boolean; p99Once?: boolean } = {}) {
+    async function runRetry(
+      opts: { failFirstEmit?: boolean; failEmits?: number; p99Once?: boolean; coolWindows?: number } = {},
+    ) {
       const recorded: any[] = [];
-      let failures = opts.failFirstEmit ? 1 : 0;
+      let failures = opts.failEmits ?? (opts.failFirstEmit ? 1 : 0);
       jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
         if (failures > 0) {
           failures -= 1;
@@ -3349,8 +3351,8 @@ describe('AnomalyService', () => {
       let commands = 1_000_000;
       let errors = 0;
       const errorsCaught: unknown[] = [];
-      for (let w = 0; w < 18; w++) {
-        const hot = w >= 12;
+      for (let w = 0; w < 18 + (opts.coolWindows ?? 0); w++) {
+        const hot = w >= 12 && w < 18;
         const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
         if (hot && (!opts.p99Once || w === 12)) {
           (service as any).recentAnomalies.push({
@@ -3479,6 +3481,42 @@ describe('AnomalyService', () => {
       expect(errorsCaught).toHaveLength(1);
       expect(recorded).toHaveLength(1);
       expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+    });
+
+    it('reuses the attribution while an emit keeps failing across windows', async () => {
+      dbClient.getClients = jest.fn().mockResolvedValue([]);
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded, errorsCaught } = await runRetry({ failEmits: 90 });
+
+      expect(errorsCaught).toHaveLength(90);
+      expect(recorded).toHaveLength(1);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops reporting contributors once the episode closes', async () => {
+      dbClient.getClients = jest.fn().mockResolvedValue([]);
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: 1 },
+      ]);
+
+      await runRetry({ coolWindows: 3 });
+
+      expect(service.getRetryAmplificationStatus('conn-1').topContributors).toBeNull();
+    });
+
+    it('replaces a first snapshot left over from an earlier episode', async () => {
+      (service as any).retryAmplificationFirstClients.set('conn-1', {
+        episodeStart: 1,
+        snapshot: { takenAt: 0, clients: new Map() },
+      });
+      dbClient.getClients = jest.fn().mockResolvedValue([]);
+
+      await runRetry();
+
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      expect((service as any).retryAmplificationFirstClients.get('conn-1').episodeStart).not.toBe(1);
     });
 
     it('names the clients whose command rate grew from CLIENT LIST tot-cmds', async () => {

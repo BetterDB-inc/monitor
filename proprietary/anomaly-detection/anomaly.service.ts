@@ -405,9 +405,15 @@ export class AnomalyService
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
-  private retryAmplificationFirstClients = new Map<string, ClientCommandSnapshot | null>();
-  private retryAmplificationContributors = new Map<string, RetryAmplificationContributor[] | null>();
-  private retryAmplificationAttributed = new Map<string, RetryAmplificationFinding>();
+  private retryAmplificationFirstClients = new Map<
+    string,
+    { episodeStart: number; snapshot: ClientCommandSnapshot | null }
+  >();
+  private retryAmplificationContributors = new Map<
+    string,
+    { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
+  >();
+  private retryAmplificationAttributed = new Map<string, string>();
   private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -3202,24 +3208,25 @@ export class AnomalyService
       this.retryAmplificationFirstClients.delete(ctx.connectionId);
     } else if (
       state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS &&
-      !this.retryAmplificationFirstClients.has(ctx.connectionId)
+      this.retryAmplificationFirstClients.get(ctx.connectionId)?.episodeStart !== episodeStart
     ) {
-      this.retryAmplificationFirstClients.set(
-        ctx.connectionId,
-        await this.readClientCommandCounts(ctx, timestamp),
-      );
+      this.retryAmplificationFirstClients.set(ctx.connectionId, {
+        episodeStart,
+        snapshot: await this.readClientCommandCounts(ctx, timestamp),
+      });
     }
     if (finding === null) return;
 
-    let contributors = this.retryAmplificationContributors.get(ctx.connectionId) ?? null;
-    if (this.retryAmplificationAttributed.get(ctx.connectionId) !== finding) {
-      contributors = await this.attributeRetryAmplification(
-        ctx,
-        timestamp,
-        episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS,
-      );
-      this.retryAmplificationContributors.set(ctx.connectionId, contributors);
-      this.retryAmplificationAttributed.set(ctx.connectionId, finding);
+    const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
+    const attributionKey = `${attributionStart}:${finding.level}`;
+    let contributors = this.retryAmplificationContributors.get(ctx.connectionId)?.contributors ?? null;
+    if (this.retryAmplificationAttributed.get(ctx.connectionId) !== attributionKey) {
+      contributors = await this.attributeRetryAmplification(ctx, timestamp, attributionStart);
+      this.retryAmplificationContributors.set(ctx.connectionId, {
+        episodeStart: attributionStart,
+        contributors,
+      });
+      this.retryAmplificationAttributed.set(ctx.connectionId, attributionKey);
     }
 
     const event: AnomalyEvent = {
@@ -3241,6 +3248,7 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     acknowledgeRetryAmplificationFinding(state, finding);
+    this.retryAmplificationAttributed.delete(ctx.connectionId);
 
     if (this.webhookEventsProService) {
       this.webhookEventsProService
@@ -3293,10 +3301,11 @@ export class AnomalyService
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    const first = this.retryAmplificationFirstClients.get(ctx.connectionId) ?? null;
-    if (!snapshotsLoaded && (first === null || latest === null)) return null;
+    const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
+    const firstSnapshot = first?.episodeStart === episodeStart ? first.snapshot : null;
+    if (!snapshotsLoaded && (firstSnapshot === null || latest === null)) return null;
     return rankRetryAmplificationContributors({
-      first,
+      first: firstSnapshot,
       latest,
       snapshots,
       snapshotIntervalMs:
@@ -3305,7 +3314,12 @@ export class AnomalyService
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
-    return this.retryAmplificationContributors.get(connectionId) ?? null;
+    const state = this.retryAmplificationState.get(connectionId);
+    const cached = this.retryAmplificationContributors.get(connectionId);
+    if (state === undefined || cached === undefined) return null;
+    return retryAmplificationEpisodeStart(state) === cached.episodeStart
+      ? cached.contributors
+      : null;
   }
 
   getRetryAmplificationStatus(
