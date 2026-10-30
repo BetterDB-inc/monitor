@@ -16,6 +16,7 @@ export const DIVERGENCE_RECOVERY_SHRINK_FRACTION = 0.5;
 export const DIVERGENCE_RECOVERED_WINDOWS = 2;
 export const DIVERGENCE_HISTORY_WINDOWS = 120;
 export const DIVERGENCE_STALE_ACK_SEC = 10;
+export const DIVERGENCE_PERSIST_BACKLOG = 1000;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying';
@@ -321,6 +322,13 @@ export function drainClosedWindows(state: DivergenceConnectionState): ClosedDive
   const drained = state.closedWindows;
   state.closedWindows = [];
   return drained;
+}
+
+export function requeueClosedWindows(
+  state: DivergenceConnectionState,
+  windows: ClosedDivergenceWindow[],
+): void {
+  state.closedWindows = [...windows, ...state.closedWindows].slice(-DIVERGENCE_PERSIST_BACKLOG);
 }
 
 export function acknowledgeDivergence(

@@ -165,6 +165,7 @@ import {
   describeDivergence,
   divergenceWindowMs,
   drainClosedWindows,
+  requeueClosedWindows,
   observeDivergence,
 } from './replication-divergence-detector';
 import {
@@ -5718,15 +5719,14 @@ export class AnomalyService
           err instanceof Error ? err.message : String(err)
         }`,
       );
-      for (const replica of live?.values() ?? []) {
-        series.set(
-          replica.addr,
-          replica.windows.filter((w) => w.end >= startTime && w.end <= endTime),
-        );
-      }
     }
-    for (const addr of live?.keys() ?? []) {
-      if (!series.has(addr)) series.set(addr, []);
+    for (const replica of live?.values() ?? []) {
+      const windows = series.get(replica.addr) ?? [];
+      const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
+      windows.push(
+        ...replica.windows.filter((w) => w.end > storedEnd && w.end >= startTime && w.end <= endTime),
+      );
+      series.set(replica.addr, windows);
     }
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
@@ -5774,6 +5774,7 @@ export class AnomalyService
         ctx.connectionId,
       );
     } catch (err) {
+      requeueClosedWindows(state, closed);
       this.logger.warn(
         `Failed to persist replication divergence windows for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)

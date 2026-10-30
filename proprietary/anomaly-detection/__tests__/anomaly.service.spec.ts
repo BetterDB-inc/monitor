@@ -6533,25 +6533,15 @@ describe('AnomalyService', () => {
       expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('none');
     });
 
-    it('persists each closed window and keeps detecting when the write fails', async () => {
+    it('retries a failed window write on the next poll and keeps detecting', async () => {
       storage.saveReplicationDivergenceWindows.mockRejectedValueOnce(new Error('disk full'));
 
       await feed([2, 4, 6], T0);
 
-      expect(storage.saveReplicationDivergenceWindows).toHaveBeenCalledTimes(2);
-      expect(storage.saveReplicationDivergenceWindows).toHaveBeenLastCalledWith(
-        [
-          {
-            replicaAddr: '10.0.0.2:6379',
-            windowStart: T0 + 30_000,
-            windowEnd: T0 + 60_000,
-            gapBytes: 4 * MiB,
-            bytesPerSec: MiB,
-            secondsBehind: 4,
-          },
-        ],
-        'conn-1',
-      );
+      const saved = storage.saveReplicationDivergenceWindows.mock.calls
+        .slice(1)
+        .flatMap(([rows]: [Array<{ gapBytes: number }>]) => rows.map((r) => r.gapBytes));
+      expect(saved).toEqual([2 * MiB, 4 * MiB]);
       expect(service.getReplicationDivergenceState('conn-1')[0].windows).toHaveLength(2);
     });
 
@@ -6588,16 +6578,38 @@ describe('AnomalyService', () => {
         endTime: T0 + 600_000,
       });
       expect(history.map((h) => [h.replica, h.level, h.windows.length])).toEqual([
-        ['10.0.0.2:6379', 'warning', 1],
+        ['10.0.0.2:6379', 'warning', 5],
         ['10.0.0.9:6379', 'none', 1],
       ]);
-      expect(history[0].latest).toEqual({
+      expect(history[0].windows[0]).toEqual({
         start: T0,
         end: T0 + 30_000,
         gapBytes: 2 * MiB,
         bytesPerSec: MiB,
         secondsBehind: 2,
       });
+      expect(history[0].latest?.gapBytes).toBe(10 * MiB);
+    });
+
+    it('adds live windows that are newer than the stored series', async () => {
+      await feed([2, 4, 6], T0);
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
+        },
+      ]);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
+      expect(replica.latest?.gapBytes).toBe(4 * MiB);
     });
 
     it('falls back to in-memory windows when storage cannot be read', async () => {
