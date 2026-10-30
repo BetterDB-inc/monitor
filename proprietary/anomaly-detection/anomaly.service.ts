@@ -6133,7 +6133,7 @@ export class AnomalyService
     const attempt = retryId ? this.recentAnomalies.find((a) => a.id === retryId) : undefined;
     const event: AnomalyEvent = {
       id: retryId ?? randomUUID(),
-      timestamp,
+      timestamp: attempt?.timestamp ?? timestamp,
       metricType: MetricType.REPLICATION_DIVERGENCE,
       anomalyType: AnomalyType.SPIKE,
       severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,

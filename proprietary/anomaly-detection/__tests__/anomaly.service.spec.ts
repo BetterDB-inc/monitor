@@ -7581,6 +7581,24 @@ describe('AnomalyService', () => {
         expect(replica.unsavedEventIds).toEqual([]);
       });
 
+      it('keeps the first timestamp when a resolved attempt is retried', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const [attempt] = divergenceCopies();
+        const firstSeen = attempt.timestamp;
+        jest.spyOn(Date, 'now').mockReturnValue(firstSeen + 5_000);
+        await service.resolveAnomaly(attempt.id);
+
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([14, 16, 18], t);
+
+        const saved = storage.saveAnomalyEvent.mock.calls
+          .map(([event]) => event)
+          .find((event) => event.id === attempt.id);
+        expect(saved).toMatchObject({ timestamp: firstSeen, resolvedAt: firstSeen + 5_000, durationMs: 5_000 });
+      });
+
       it('counts a retried event once in Prometheus and OTLP', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
 
