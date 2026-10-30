@@ -60,7 +60,7 @@ export function escapeDiscord(text: string): string {
  * block, which these cards never send, so `<at>` text cannot ping anyone.
  */
 export function escapeTeams(text: string): string {
-  return text.replace(/([\[\]])/g, '\\$1');
+  return text.replace(/([[\]])/g, '\\$1');
 }
 
 /**
