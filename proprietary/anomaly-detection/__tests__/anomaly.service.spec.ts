@@ -3424,6 +3424,7 @@ describe('AnomalyService', () => {
         expect.objectContaining({
           level: 'warning',
           trigger: 'latency',
+          pattern: 'rising',
           loadRatio: recorded[0].value,
           message: recorded[0].message,
           topContributors: service.getRetryAmplificationContributors('conn-1'),

@@ -375,7 +375,8 @@ export interface RetryAmplificationDetectedData {
   trigger: 'latency' | 'errors' | 'churn' | 'saturation';
   windows: number;
   loadRatio: number;
-  correlation: number;
+  pattern: 'rising' | 'step';
+  correlation: number | null;
   topContributors: RetryAmplificationContributorData[] | null;
   message: string;
   timestamp: number;

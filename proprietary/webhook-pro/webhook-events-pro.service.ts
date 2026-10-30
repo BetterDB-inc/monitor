@@ -390,6 +390,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         trigger: data.trigger,
         windows: data.windows,
         loadRatio: data.loadRatio,
+        pattern: data.pattern,
         correlation: data.correlation,
         topContributors: data.topContributors,
         message: data.message,

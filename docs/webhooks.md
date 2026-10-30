@@ -487,7 +487,11 @@ Fires once per connection and reason when a footprint collection finds LMCache a
 
 #### retry_amplification.detected (Pro)
 
-Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires when load and stress rise together (`correlation` ≥ 0.5) and load is not decaying. `level` is `critical` when a saturation anomaly (load, CPU, rejected connections, client saturation or lockout risk) lands in the episode, otherwise `warning`. It fires once per level and re-arms after 2 normal windows.
+Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires in one of two shapes, given in `pattern`:
+- `rising`: load rises at least 10% and moves with stress inside the run (`correlation` ≥ 0.5).
+- `step`: the last 3 windows hold at 2× baseline or more with an error-reply or reconnect burst. `correlation` is `null` for this shape.
+
+`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires once per level and re-arms after 2 normal windows.
 
 `trigger` is the stress signal that showed up first: `latency`, `errors`, `churn` or `saturation`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read. The generic `anomaly.detected` event is sent as well.
 
@@ -497,6 +501,7 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
   "trigger": "latency",
   "windows": 3,
   "loadRatio": 1.9,
+  "pattern": "rising",
   "correlation": 0.97,
   "topContributors": [
     { "key": "checkout", "keyKind": "name", "commandRateGrowth": 4.8, "newConnections": 12, "connections": 40 }

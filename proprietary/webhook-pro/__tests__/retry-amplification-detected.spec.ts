@@ -19,6 +19,7 @@ describe('WebhookEventsProService - dispatchRetryAmplificationDetected', () => {
     trigger: 'latency',
     windows: 4,
     loadRatio: 2.1,
+    pattern: 'rising',
     correlation: 0.93,
     topContributors: [
       {

@@ -3263,6 +3263,7 @@ export class AnomalyService
           trigger: finding.trigger,
           windows: finding.windows,
           loadRatio: finding.loadRatio,
+          pattern: finding.pattern,
           correlation: finding.correlation,
           topContributors: contributors,
           message: event.message,
