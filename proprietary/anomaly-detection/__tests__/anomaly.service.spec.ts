@@ -6173,6 +6173,32 @@ describe('AnomalyService', () => {
       expect(saved).toEqual(['a@node-1', 'b@node-2']);
     });
 
+    it('skips groups from other members that do not involve the caller', async () => {
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-1'
+          ? [
+              {
+                correlationId: 'grp-other',
+                timestamp: 1_000_000,
+                pattern: 'memory_pressure',
+                severity: 'warning',
+                diagnosis: '',
+                recommendations: [],
+                anomalyCount: 1,
+                metricTypes: [],
+                connectionId: 'node-1',
+              },
+            ]
+          : [],
+      );
+      storage.getAnomalyEvents.mockResolvedValue([]);
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(groups).toEqual([]);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+    });
+
     it('finds a stored group from any member of the topology', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-1'
@@ -6202,6 +6228,12 @@ describe('AnomalyService', () => {
       const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
 
       expect(groups.map((g) => g.anomalies.map((a) => a.id))).toEqual([['a', 'b']]);
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'node-2', limit: 50 }),
+      );
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'node-1', limit: 1000 }),
+      );
     });
   });
 

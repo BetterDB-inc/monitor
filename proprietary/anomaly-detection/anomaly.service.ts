@@ -5844,14 +5844,33 @@ export class AnomalyService
           startTime,
           endTime,
           pattern: pattern as string,
-          limit,
+          limit: id === connectionId ? limit : Math.max(limit, 1000),
           connectionId: id,
         }),
       ),
     );
-    const stored = [
-      ...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values(),
-    ].sort((a, b) => b.timestamp - a.timestamp);
+    const involved = connectionId
+      ? new Set(
+          (
+            await this.storage.getAnomalyEvents({
+              startTime: startTime - this.correlationIntervalMs,
+              endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+              connectionId,
+              limit: 10_000,
+            })
+          ).map((a) => a.correlationId),
+        )
+      : null;
+    const sequencePatterns = new Set<string>(getSequenceRules().map((r) => r.pattern));
+    const stored = [...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values()]
+      .filter(
+        (s) =>
+          !involved ||
+          s.connectionId === connectionId ||
+          involved.has(s.correlationId) ||
+          sequencePatterns.has(s.pattern),
+      )
+      .sort((a, b) => b.timestamp - a.timestamp);
 
     const groups: CorrelatedAnomalyGroup[] = [];
     for (const s of stored) {
