@@ -5967,6 +5967,52 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('external anomaly ingest', () => {
+    const p99Event = () => ({
+      id: 'p99-1',
+      timestamp: Date.now(),
+      metricType: MetricType.COMMAND_P99,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 6000,
+      baseline: 2000,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 3,
+      message: 'P99 regression',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('adds the event to the correlator input without re-persisting or re-counting it', () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      const recent = (service as any).recentAnomalies;
+      expect(recent).toHaveLength(1);
+      expect(recent[0]).toEqual(expect.objectContaining({ id: 'p99-1', persisted: true }));
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+      expect(prometheusService.incrementAnomalyEvent).not.toHaveBeenCalled();
+      expect(otelEvents.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('ignores the same event delivered twice', () => {
+      service.ingestExternalAnomaly(p99Event());
+      service.ingestExternalAnomaly(p99Event());
+
+      expect((service as any).recentAnomalies).toHaveLength(1);
+    });
+
+    it('correlates the ingested event and saves it under its own id', async () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      await (service as any).correlateAnomalies();
+
+      const saved = (storage.saveAnomalyEvent as jest.Mock).mock.calls.map(([e]: any[]) => e.id);
+      expect(saved).toEqual(['p99-1']);
+      expect((service as any).recentAnomalies[0].correlationId).toBeDefined();
+    });
+  });
+
   describe('correlation scope', () => {
     it('groups cluster members under their seed connection', () => {
       (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>

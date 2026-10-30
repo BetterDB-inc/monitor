@@ -192,6 +192,7 @@ import {
   BufferStats,
   AnomalySummary,
   SpikeDetectorConfig,
+  AnomalyEventSink,
 } from './types';
 
 interface MetricExtractor {
@@ -216,7 +217,10 @@ interface ConnectionPersistenceState {
 }
 
 @Injectable()
-export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
+export class AnomalyService
+  extends MultiConnectionPoller
+  implements OnModuleInit, AnomalyEventSink
+{
   protected readonly logger = new Logger(AnomalyService.name);
 
   // Per-connection state: connectionId -> metricType -> buffer/detector
@@ -5390,6 +5394,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
+    }
+  }
+
+  ingestExternalAnomaly(event: AnomalyEvent): void {
+    if (this.recentAnomalies.some((a) => a.id === event.id)) return;
+    this.recentAnomalies.push({ ...event, persisted: true });
+    if (this.recentAnomalies.length > this.maxRecentEvents) {
+      this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
   }
 

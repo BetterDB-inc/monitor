@@ -215,3 +215,9 @@ export interface AnomalySummary {
   activeEvents: number;
   resolvedEvents: number;
 }
+
+export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
+
+export interface AnomalyEventSink {
+  ingestExternalAnomaly(event: AnomalyEvent): void;
+}
