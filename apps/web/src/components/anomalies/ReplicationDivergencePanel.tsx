@@ -42,9 +42,9 @@ export function ReplicationDivergencePanel({
   replicas: ReplicaDivergenceHistory[] | undefined;
   error?: Error | null;
 }) {
+  if (error instanceof PaymentRequiredError) return null;
   const hasReplicas = !!replicas && replicas.length > 0;
-  const loadFailed = !!error && !(error instanceof PaymentRequiredError);
-  if (!hasReplicas && !loadFailed) return null;
+  if (!hasReplicas && !error) return null;
 
   return (
     <Card>
@@ -55,7 +55,7 @@ export function ReplicationDivergencePanel({
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
-        {loadFailed && (
+        {error && (
           <p role="alert" className="text-sm text-destructive">
             Replication history could not be loaded. This does not mean there are no replicas.
           </p>

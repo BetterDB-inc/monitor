@@ -5978,10 +5978,14 @@ export class AnomalyService
       if (assessment === 'pending') continue;
       try {
         for (const id of orphan.eventIds) {
-          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, Date.now())) || orphan.claimed;
+          const resolvedAt = Date.now();
+          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, resolvedAt)) || orphan.claimed;
           orphan.eventIds.delete(id);
           const cached = this.recentAnomalies.find((a) => a.id === id);
-          if (cached) cached.resolved = true;
+          if (cached) {
+            cached.resolved = true;
+            cached.resolvedAt = resolvedAt;
+          }
         }
       } catch (err) {
         this.logger.warn(
@@ -6390,13 +6394,14 @@ export class AnomalyService
    */
   private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
+    const resolvedAt = Date.now();
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
     // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
-      anomaly.resolvedAt = Date.now();
+      anomaly.resolvedAt = resolvedAt;
       return 'resolved';
     }
 
@@ -6406,7 +6411,7 @@ export class AnomalyService
     // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
     try {
-      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+      persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
       return 'retry';
@@ -6423,6 +6428,7 @@ export class AnomalyService
     // Keep the cached copy in sync with the durable store.
     if (anomaly) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
     }
 
     return 'resolved';
@@ -6453,6 +6459,7 @@ export class AnomalyService
       }
       if (persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
       } else {
         allResolved = false;
       }

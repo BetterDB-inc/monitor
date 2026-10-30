@@ -75,6 +75,25 @@ describe('ReplicationDivergencePanel', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('hides cached replicas when a refresh loses the license', () => {
+    const { container } = render(
+      <ReplicationDivergencePanel
+        replicas={[{ replica: '10.0.0.2:6379', level: 'none', latest: null, windows: [] }]}
+        error={
+          new PaymentRequiredError({
+            message: 'upgrade',
+            feature: 'anomalyDetection',
+            currentTier: 'community',
+            requiredTier: 'pro',
+            upgradeUrl: '/upgrade',
+          })
+        }
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it('keeps the last loaded replicas and flags them when a refresh fails', () => {
     const replicas: ReplicaDivergenceHistory[] = [
       { replica: '10.0.0.2:6379', level: 'none', latest: null, windows: [] },
