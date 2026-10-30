@@ -3,6 +3,7 @@ import { MetricType } from './types';
 
 export const DIVERGENCE_MIN_WINDOW_MS = 30_000;
 export const DIVERGENCE_MIN_SAMPLES = 3;
+const DIVERGENCE_SLOW_POLL_TOLERANCE = 2;
 export const DIVERGENCE_GROWTH_WINDOWS = 4;
 export const DIVERGENCE_FLOOR_BYTES = 1024 * 1024;
 export const DIVERGENCE_FLOOR_SECONDS = 5;
@@ -70,6 +71,7 @@ export interface DivergenceConnectionState {
   windowSamples: number;
   lastSampleAt: number | null;
   consecutiveGaps: number;
+  lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
   rateHistory: number[];
@@ -127,6 +129,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     windowSamples: 0,
     lastSampleAt: null,
     consecutiveGaps: 0,
+    lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
     rateHistory: [],
@@ -408,6 +411,7 @@ export function observeDivergence(
     state.windowSamples = 0;
     state.lastSampleAt = null;
     state.consecutiveGaps = 0;
+    state.lastGapMs = 0;
     state.accumulators = new Map();
     state.staleGaps = new Map();
     state.observed = new Set();
@@ -416,12 +420,20 @@ export function observeDivergence(
   const outcomes: DivergenceOutcome[] = [];
 
   const previousSampleAt = state.lastSampleAt;
-  const resumed = previousSampleAt !== null && sample.timestamp - previousSampleAt > windowMs;
-  state.consecutiveGaps = resumed ? state.consecutiveGaps + 1 : 0;
+  const gapMs = previousSampleAt === null ? 0 : sample.timestamp - previousSampleAt;
+  const resumed = gapMs > windowMs;
+  const steadyCadence = gapMs <= state.lastGapMs * DIVERGENCE_SLOW_POLL_TOLERANCE;
+  state.consecutiveGaps = !resumed ? 0 : steadyCadence ? state.consecutiveGaps + 1 : 1;
+  state.lastGapMs = gapMs;
   const outage = resumed && state.consecutiveGaps < DIVERGENCE_MIN_SAMPLES;
   state.lastSampleAt = sample.timestamp;
   if (state.windowStart === null || outage) {
-    if (state.windowStart !== null && previousSampleAt !== null && state.windowSamples >= DIVERGENCE_MIN_SAMPLES) {
+    if (
+      state.windowStart !== null &&
+      previousSampleAt !== null &&
+      previousSampleAt - state.windowStart >= windowMs &&
+      state.windowSamples >= DIVERGENCE_MIN_SAMPLES
+    ) {
       outcomes.push(...closeWindow(state, state.windowStart, previousSampleAt, sample.bytesPerSecEwma));
     }
     state.windowStart = sample.timestamp;
