@@ -2154,6 +2154,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
         ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
       CREATE INDEX IF NOT EXISTS idx_repl_div_end
         ON replication_divergence_windows(window_end);
 
@@ -5058,7 +5060,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `INSERT INTO replication_divergence_windows
          (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
-       VALUES ${placeholders.join(', ')}`,
+       VALUES ${placeholders.join(', ')}
+       ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
       values,
     );
     return result.rowCount ?? 0;

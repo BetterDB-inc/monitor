@@ -2139,6 +2139,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
         ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
       CREATE INDEX IF NOT EXISTS idx_repl_div_end
         ON replication_divergence_windows(window_end);
 
@@ -4899,7 +4901,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db || windows.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT INTO replication_divergence_windows
+      INSERT OR IGNORE INTO replication_divergence_windows
         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);

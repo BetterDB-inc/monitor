@@ -130,6 +130,20 @@ describe.each<[string, AdapterFactory]>([
     expect(typeof rows[0].id).toBe('string');
   });
 
+  it('ignores a window that was already saved when a batch is retried', async () => {
+    const batch = [win({ replicaAddr: A, windowStart: 1_000, windowEnd: 2_000 })];
+
+    expect(await storage.saveReplicationDivergenceWindows(batch, CONN)).toBe(1);
+    expect(await storage.saveReplicationDivergenceWindows(batch, CONN)).toBe(0);
+
+    const stored = await storage.getReplicationDivergenceWindows({
+      connectionId: CONN,
+      startTime: 0,
+      endTime: 10_000,
+    });
+    expect(stored).toHaveLength(1);
+  });
+
   it('keeps a null write rate and seconds-behind as null', async () => {
     await storage.saveReplicationDivergenceWindows([win({ bytesPerSec: null, secondsBehind: null })], CONN);
 

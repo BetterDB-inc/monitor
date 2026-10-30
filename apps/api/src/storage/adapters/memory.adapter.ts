@@ -1604,10 +1604,20 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number> {
+    let saved = 0;
     for (const w of windows) {
+      const exists = this.replicationDivergenceWindows.some(
+        (stored) =>
+          stored.connectionId === connectionId &&
+          stored.replicaAddr === w.replicaAddr &&
+          stored.windowStart === w.windowStart &&
+          stored.windowEnd === w.windowEnd,
+      );
+      if (exists) continue;
       this.replicationDivergenceWindows.push({ id: randomUUID(), connectionId, ...w });
+      saved++;
     }
-    return windows.length;
+    return saved;
   }
 
   async getReplicationDivergenceWindows(
