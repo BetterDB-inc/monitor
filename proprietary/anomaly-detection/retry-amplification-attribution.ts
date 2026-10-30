@@ -49,6 +49,7 @@ export interface AttributionInput {
   latest: ClientCommandSnapshot | null;
   snapshots: ClientSnapshotEntry[];
   snapshotIntervalMs: number;
+  episodeStart: number;
   limit?: number;
 }
 
@@ -140,13 +141,23 @@ function addReconnects(
   map: Map<string, ContributorAccumulator>,
   snapshots: ClientSnapshotEntry[],
   snapshotIntervalMs: number,
+  episodeStart: number,
 ): void {
   if (snapshots.length === 0) return;
-  const newAgeSec = snapshotIntervalMs / 1000;
-  const latestCapture = Math.max(...snapshots.map((s) => s.capturedAt));
+  const captures = [...new Set(snapshots.map((s) => s.capturedAt))].sort((a, b) => a - b);
+  const latestCapture = captures[captures.length - 1];
+  const previousCapture = new Map(
+    captures.map((capturedAt, i) => [
+      capturedAt,
+      i === 0 ? capturedAt - snapshotIntervalMs : captures[i - 1],
+    ]),
+  );
   for (const snapshot of snapshots) {
     const acc = accumulatorFor(map, contributorKey(snapshot));
-    if (snapshot.age < newAgeSec) acc.newClientIds.add(snapshot.clientId);
+    const connectedAt = snapshot.capturedAt - snapshot.age * 1000;
+    if (connectedAt > previousCapture.get(snapshot.capturedAt)! && connectedAt >= episodeStart) {
+      acc.newClientIds.add(snapshot.clientId);
+    }
     if (snapshot.capturedAt === latestCapture) acc.latestClientIds.add(snapshot.clientId);
   }
 }
@@ -159,7 +170,7 @@ export function rankRetryAmplificationContributors(
     input.first !== null &&
     input.latest !== null &&
     addCommandGrowth(map, input.first, input.latest);
-  addReconnects(map, input.snapshots, input.snapshotIntervalMs);
+  addReconnects(map, input.snapshots, input.snapshotIntervalMs, input.episodeStart);
 
   const contributors = [...map.values()].map((acc) => {
     const growth = hasCommandRates && acc.lifetimeRate > 0 ? acc.commands / acc.lifetimeRate : null;

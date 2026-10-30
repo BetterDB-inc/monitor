@@ -85,6 +85,7 @@ describe('retry amplification attribution', () => {
         latest,
         snapshots: [],
         snapshotIntervalMs: 60_000,
+        episodeStart: 0,
       });
 
       expect(ranked.map((c) => c.key)).toEqual(['checkout', 'search']);
@@ -106,6 +107,7 @@ describe('retry amplification attribution', () => {
         latest: null,
         snapshots,
         snapshotIntervalMs: 60_000,
+        episodeStart: 0,
       });
 
       expect(ranked).toEqual([
@@ -140,11 +142,42 @@ describe('retry amplification attribution', () => {
         latest,
         snapshots: [snap({ clientId: '9', name: 'api', age: 4, capturedAt: 10_000 })],
         snapshotIntervalMs: 60_000,
+        episodeStart: 0,
       });
 
       expect(ranked).toEqual([
         { key: 'api', keyKind: 'name', commandRateGrowth: 30, newConnections: 1, connections: 1 },
       ]);
+    });
+
+    it('counts a client that connected between two late captures as new', () => {
+      const ranked = rankRetryAmplificationContributors({
+        first: null,
+        latest: null,
+        snapshots: [
+          snap({ clientId: '1', name: 'api', age: 500, capturedAt: 100_000 }),
+          snap({ clientId: '2', name: 'api', age: 70, capturedAt: 190_000 }),
+        ],
+        snapshotIntervalMs: 60_000,
+        episodeStart: 0,
+      });
+
+      expect(ranked[0].newConnections).toBe(1);
+    });
+
+    it('does not count a connection opened before the episode as new', () => {
+      const ranked = rankRetryAmplificationContributors({
+        first: null,
+        latest: null,
+        snapshots: [
+          snap({ clientId: '1', name: 'api', age: 30, capturedAt: 100_000 }),
+          snap({ clientId: '2', name: 'api', age: 10, capturedAt: 100_000 }),
+        ],
+        snapshotIntervalMs: 60_000,
+        episodeStart: 80_000,
+      });
+
+      expect(ranked[0].newConnections).toBe(1);
     });
 
     it('ignores clients that reset or vanished between snapshots and caps the list', () => {
@@ -170,6 +203,7 @@ describe('retry amplification attribution', () => {
         latest,
         snapshots: [],
         snapshotIntervalMs: 60_000,
+        episodeStart: 0,
       });
 
       expect(ranked).toHaveLength(5);
@@ -204,6 +238,7 @@ describe('retry amplification attribution', () => {
         latest,
         snapshots,
         snapshotIntervalMs: 60_000,
+        episodeStart: 0,
       });
 
       expect(ranked).toHaveLength(5);
@@ -227,6 +262,7 @@ describe('retry amplification attribution', () => {
           latest,
           snapshots: [],
           snapshotIntervalMs: 60_000,
+          episodeStart: 0,
         }),
       ).toEqual([]);
     });
@@ -238,6 +274,7 @@ describe('retry amplification attribution', () => {
           latest: null,
           snapshots: [],
           snapshotIntervalMs: 60_000,
+          episodeStart: 0,
         }),
       ).toEqual([]);
     });
