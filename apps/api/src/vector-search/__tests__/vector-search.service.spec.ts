@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-function-return-type */
+import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { VectorSearchService } from '../vector-search.service';
 import { StoragePort } from '../../common/interfaces/storage-port.interface';
@@ -226,6 +227,7 @@ describe('VectorSearchService.pollConnection — extended snapshot fields', () =
 describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
   function buildRawClient(prefixes: string[], keysByPattern: Record<string, string[]>) {
     const scanPatterns: Array<string | undefined> = [];
+    const scanCursors: string[] = [];
     const client = {
       getCapabilities: () => ({ hasVectorSearch: true }),
       getVectorIndexInfo: jest.fn().mockResolvedValue(
@@ -238,6 +240,7 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
           const matchIndex = args.indexOf('MATCH');
           const pattern = matchIndex === -1 ? undefined : (args[matchIndex + 1] as string);
           scanPatterns.push(pattern);
+          scanCursors.push(cursor);
           return ['0', pattern ? (keysByPattern[pattern] ?? []) : []];
         }),
         pipeline: () => {
@@ -251,7 +254,17 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
         },
       }),
     };
-    return { client, scanPatterns };
+    return { client, scanPatterns, scanCursors };
+  }
+
+  async function expectInvalidCursor(
+    sample: Promise<unknown>,
+    scanCursors: string[],
+  ): Promise<void> {
+    const error = await sample.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as BadRequestException).getStatus()).toBe(400);
+    expect(scanCursors).toEqual([]);
   }
 
   function buildService(client: any) {
@@ -322,39 +335,63 @@ describe('VectorSearchService.sampleKeys: SCAN MATCH glob escaping', () => {
     expect(keys.map((k) => k.key)).toEqual(['doc:1']);
   });
 
-  it('starts at the first prefix when the cursor index is negative', async () => {
-    const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
+  it('rejects a negative prefix index', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
       'a\\[1\\]:*': ['a[1]:1'],
       'b\\?:*': ['b?:2'],
     });
 
-    const { keys, cursor } = await buildService(client).sampleKeys(
-      'conn-keys',
-      'idx_keys',
-      '-1:0',
-      10,
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '-1:0', 10),
+      scanCursors,
     );
-
-    expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
-    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
-    expect(cursor).toBe('0');
   });
 
-  it('starts at the first prefix when the cursor index is past the last prefix', async () => {
-    const { client, scanPatterns } = buildRawClient(['a[1]:', 'b?:'], {
+  it('rejects a prefix index past the last prefix', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
       'a\\[1\\]:*': ['a[1]:1'],
       'b\\?:*': ['b?:2'],
     });
 
-    const { keys, cursor } = await buildService(client).sampleKeys(
-      'conn-keys',
-      'idx_keys',
-      '5:0',
-      10,
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '5:0', 10),
+      scanCursors,
     );
+  });
 
-    expect(scanPatterns).toEqual(['a\\[1\\]:*', 'b\\?:*']);
-    expect(keys.map((k) => k.key)).toEqual(['a[1]:1', 'b?:2']);
-    expect(cursor).toBe('0');
+  it('rejects an out-of-range prefix without reusing its scan position', async () => {
+    const { client, scanCursors } = buildRawClient(['a[1]:', 'b?:'], {
+      'a\\[1\\]:*': ['a[1]:1'],
+      'b\\?:*': ['b?:2'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '5:1234', 10),
+      scanCursors,
+    );
+    expect(scanCursors).not.toContain('1234');
+  });
+
+  it('rejects a composite cursor on a single-prefix index', async () => {
+    const { client, scanCursors } = buildRawClient(['doc:'], {
+      'doc:*': ['doc:1'],
+    });
+
+    await expectInvalidCursor(
+      buildService(client).sampleKeys('conn-keys', 'idx_keys', '0:1234', 10),
+      scanCursors,
+    );
+  });
+
+  it('returns every key from a SCAN page longer than the requested limit', async () => {
+    const page = ['doc:1', 'doc:2', 'doc:3', 'doc:4', 'doc:5'];
+    const { client, scanCursors } = buildRawClient(['doc:'], {
+      'doc:*': page,
+    });
+
+    const { keys } = await buildService(client).sampleKeys('conn-keys', 'idx_keys', '0', 2);
+
+    expect(scanCursors).toEqual(['0']);
+    expect(keys.map((k) => k.key)).toEqual(page);
   });
 });

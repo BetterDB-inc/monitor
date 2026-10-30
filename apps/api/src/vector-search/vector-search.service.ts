@@ -1,4 +1,4 @@
-import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { CapabilityUnavailableError } from '../common/errors/capability-unavailable.error';
@@ -214,23 +214,35 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       indexInfo.fields.filter((f) => f.type === 'VECTOR').map((f) => f.name),
     );
 
+    const cappedLimit = Math.min(Math.max(limit, 1), 200);
+
+    // Cursor is a SCAN position, or "prefixIdx:scanCursor" when an index has several prefixes.
+    // The server only emits those forms. Anything else is a client error, including a prefix
+    // index this index does not have — falling back would reuse another prefix's SCAN position.
+    if (!/^\d+(:\d+)?$/.test(cursor)) {
+      throw new BadRequestException('Invalid cursor');
+    }
+
+    let prefixIdx = 0;
+    let scanCursor = cursor;
+    const colonPos = cursor.indexOf(':');
+    if (colonPos !== -1) {
+      if (prefixes.length <= 1) {
+        throw new BadRequestException('Invalid cursor');
+      }
+      const parsed = parseInt(cursor.substring(0, colonPos), 10);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed >= prefixes.length) {
+        throw new BadRequestException('Invalid cursor');
+      }
+      prefixIdx = parsed;
+      scanCursor = cursor.substring(colonPos + 1);
+    }
+
     let rawClient: ReturnType<typeof client.getClient>;
     try {
       rawClient = client.getClient();
     } catch {
       throw new CapabilityUnavailableError('Key browsing is not supported on this connection type');
-    }
-    const cappedLimit = Math.min(Math.max(limit, 1), 200);
-
-    // Composite cursor: "prefixIdx:scanCursor" for multi-prefix, plain cursor otherwise
-    let prefixIdx = 0;
-    let scanCursor = cursor;
-    if (prefixes.length > 1 && cursor !== '0' && cursor.includes(':')) {
-      const colonPos = cursor.indexOf(':');
-      const parsed = parseInt(cursor.substring(0, colonPos), 10);
-      prefixIdx =
-        Number.isInteger(parsed) && parsed >= 0 && parsed < prefixes.length ? parsed : 0;
-      scanCursor = cursor.substring(colonPos + 1) || '0';
     }
 
     let allKeys: string[] = [];
@@ -239,7 +251,9 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
 
     if (prefixes.length === 0) {
       const [nc, keys] = await rawClient.scan(scanCursor, 'COUNT', cappedLimit);
-      allKeys = (keys as string[]).slice(0, cappedLimit);
+      // SCAN may return more than COUNT. Dropping the extras skips those keys forever,
+      // because the cursor has already moved past them.
+      allKeys = keys as string[];
       outScanCursor = String(nc);
     } else {
       let currentCursor = scanCursor;
@@ -259,7 +273,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
           'COUNT',
           remaining,
         );
-        allKeys.push(...(keys as string[]).slice(0, remaining));
+        allKeys.push(...(keys as string[]));
 
         const nextCursor = String(nc);
         if (nextCursor === '0') {
@@ -274,8 +288,6 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       }
     }
 
-    const limitedKeys = allKeys.slice(0, cappedLimit);
-
     // Build return cursor
     let returnCursor: string;
     if (prefixes.length <= 1) {
@@ -286,18 +298,18 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
       returnCursor = `${outPrefixIdx}:${outScanCursor}`;
     }
 
-    if (limitedKeys.length === 0) {
+    if (allKeys.length === 0) {
       return { keys: [], cursor: returnCursor };
     }
 
     const pipeline = rawClient.pipeline();
-    for (const key of limitedKeys) {
+    for (const key of allKeys) {
       pipeline.hgetall(key);
     }
     const pipelineResults = await pipeline.exec();
 
     const keys: Array<{ key: string; fields: Record<string, string> }> = [];
-    for (let i = 0; i < limitedKeys.length; i++) {
+    for (let i = 0; i < allKeys.length; i++) {
       const [err, rawFields] = pipelineResults![i];
       if (
         err ||
@@ -317,7 +329,7 @@ export class VectorSearchService extends MultiConnectionPoller implements OnModu
           fields[fieldName] = fieldValue;
         }
       }
-      keys.push({ key: limitedKeys[i], fields });
+      keys.push({ key: allKeys[i], fields });
     }
 
     return { keys, cursor: returnCursor };
