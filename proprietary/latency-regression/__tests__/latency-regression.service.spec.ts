@@ -4,6 +4,7 @@ import { LatencyRegressionService } from '../latency-regression.service';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { WEBHOOK_EVENTS_PRO_SERVICE } from '@betterdb/shared';
+import { ANOMALY_EVENT_SINK } from '../../anomaly-detection/types';
 
 const START = 1_700_000_000_000;
 const MINUTE = 60_000;
@@ -60,7 +61,10 @@ describe('LatencyRegressionService', () => {
     jest.restoreAllMocks();
   });
 
-  async function makeService(withWebhook = true): Promise<LatencyRegressionService> {
+  async function makeService(
+    withWebhook = true,
+    sink?: { ingestExternalAnomaly: jest.Mock },
+  ): Promise<LatencyRegressionService> {
     const providers: any[] = [
       LatencyRegressionService,
       { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -68,6 +72,9 @@ describe('LatencyRegressionService', () => {
     ];
     if (withWebhook) {
       providers.push({ provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhook });
+    }
+    if (sink) {
+      providers.push({ provide: ANOMALY_EVENT_SINK, useValue: sink });
     }
     const module: TestingModule = await Test.createTestingModule({ providers }).compile();
     return module.get(LatencyRegressionService);
@@ -164,6 +171,24 @@ describe('LatencyRegressionService', () => {
 
     expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
     expect(webhook.dispatchLatencyRegressionDetected).not.toHaveBeenCalled();
+  });
+
+  it('hands the persisted event, unchanged, to the anomaly event sink', async () => {
+    const sink = { ingestExternalAnomaly: jest.fn() };
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(sink.ingestExternalAnomaly).toHaveBeenCalledTimes(1);
+    expect(sink.ingestExternalAnomaly.mock.calls[0][0]).toBe(storage.saveAnomalyEvent.mock.calls[0][0]);
+  });
+
+  it('does not hand an unpersisted event to the anomaly event sink', async () => {
+    storage.saveAnomalyEvent.mockRejectedValue(new Error('db down'));
+    const sink = { ingestExternalAnomaly: jest.fn() };
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(sink.ingestExternalAnomaly).not.toHaveBeenCalled();
   });
 
   it('does nothing without stored latencystats samples', async () => {

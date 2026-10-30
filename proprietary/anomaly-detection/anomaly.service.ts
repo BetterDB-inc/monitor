@@ -25,6 +25,12 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
+import {
+  computeConnectionChurn,
+  isChurnWithFlatPopulation,
+  ConnectionChurnReading,
+  ConnectionChurnSample,
+} from './connection-churn';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
@@ -187,6 +193,7 @@ import {
   BufferStats,
   AnomalySummary,
   SpikeDetectorConfig,
+  AnomalyEventSink,
 } from './types';
 
 interface MetricExtractor {
@@ -211,7 +218,10 @@ interface ConnectionPersistenceState {
 }
 
 @Injectable()
-export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
+export class AnomalyService
+  extends MultiConnectionPoller
+  implements OnModuleInit, AnomalyEventSink
+{
   protected readonly logger = new Logger(AnomalyService.name);
 
   // Per-connection state: connectionId -> metricType -> buffer/detector
@@ -229,6 +239,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
   // counter — otherwise a single historical maxclients hit would alert forever.
   private lastRejectedConnections = new Map<string, number>();
+  // Last total_connections_received reading and the derived churn sample per
+  // connection; the sample is exposed for other detectors to read.
+  private lastChurnReading = new Map<string, ConnectionChurnReading>();
+  private connectionChurnSamples = new Map<string, ConnectionChurnSample>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
   // config value (fetched once) so the alert can say whether eviction is even
@@ -480,7 +494,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly clusterDiscovery?: ClusterDiscoveryService,
   ) {
     super(connectionRegistry);
-    this.correlator = new Correlator(this.correlationIntervalMs);
+    this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
+      this.correlationScopeOf(anomaly.connectionId),
+    );
     this.metricExtractors = this.initializeMetricExtractors();
 
     // Validated and defaulted by the Zod env schema (env.schema.ts), so a typo
@@ -670,6 +686,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
+    this.lastChurnReading.delete(connectionId);
+    this.connectionChurnSamples.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
@@ -972,6 +990,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           await this.addAnomaly(rejectedAnomaly, ctx);
         }
       }
+
+      await this.detectConnectionChurn(ctx, info, buffers, detectors, timestamp);
 
       // Client-eviction storm (maxmemory-clients). evicted_clients is a lifetime
       // counter, so we feed the per-poll delta — the count of clients disconnected
@@ -1506,6 +1526,57 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * re-arms when it falls back below the warning threshold — so a busy-but-stable
    * server doesn't spam alerts.
    */
+  private async detectConnectionChurn(
+    ctx: ConnectionContext,
+    info: Record<string, string>,
+    buffers: Map<MetricType, MetricBuffer>,
+    detectors: Map<MetricType, SpikeDetector>,
+    timestamp: number,
+  ): Promise<void> {
+    const totalReceived = this.parseNumber(info.total_connections_received);
+    const connectedClients = this.parseNumber(info.connected_clients);
+    if (totalReceived === null || connectedClients === null) return;
+
+    const reading = { totalReceived, connectedClients, timestamp };
+    const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
+    this.lastChurnReading.set(ctx.connectionId, reading);
+    this.connectionChurnSamples.set(ctx.connectionId, sample);
+    if (sample.connectsPerSec === null) return;
+
+    if (!buffers.has(MetricType.CONNECTION_CHURN)) {
+      buffers.set(MetricType.CONNECTION_CHURN, new MetricBuffer(MetricType.CONNECTION_CHURN));
+      detectors.set(
+        MetricType.CONNECTION_CHURN,
+        new SpikeDetector(MetricType.CONNECTION_CHURN, {
+          warningZScore: 3,
+          criticalZScore: 5,
+          consecutiveRequired: 2,
+          cooldownMs: 60000,
+        }),
+      );
+    }
+
+    const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
+    const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
+    buffer.addSample(sample.connectsPerSec, timestamp);
+    if (!isChurnWithFlatPopulation(sample)) return;
+
+    const anomaly = detector.detect(buffer, sample.connectsPerSec, timestamp);
+    if (!anomaly) return;
+
+    anomaly.connectionId = ctx.connectionId;
+    anomaly.message =
+      `Connection churn: ${sample.connectsPerSec.toFixed(1)} new connections/s ` +
+      `(baseline ${anomaly.baseline.toFixed(1)}/s) while connected_clients stays flat at ` +
+      `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+    await this.addAnomaly(anomaly, ctx);
+  }
+
+  getConnectionChurnSample(connectionId: string): ConnectionChurnSample | undefined {
+    return this.connectionChurnSamples.get(connectionId);
+  }
+
   private async detectClientSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
@@ -5328,6 +5399,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
     }
+  }
+
+  ingestExternalAnomaly(event: AnomalyEvent): void {
+    if (this.recentAnomalies.some((a) => a.id === event.id)) return;
+    this.recentAnomalies.push({ ...event, persisted: true });
+    if (this.recentAnomalies.length > this.maxRecentEvents) {
+      this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
+    }
+  }
+
+  private correlationScopeOf(connectionId: string | undefined): string {
+    if (!connectionId) return '';
+    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
   private async correlateAnomalies(): Promise<void> {

@@ -18,12 +18,21 @@ interface PatternRule {
   check?: (anomalies: AnomalyEvent[]) => boolean;
 }
 
+export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
+
+const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
+
 export class Correlator {
   private readonly correlationWindowMs: number;
   private readonly patternRules: PatternRule[];
+  private readonly scopeOf: CorrelationScopeResolver;
 
-  constructor(correlationWindowMs: number = 5000) {
+  constructor(
+    correlationWindowMs: number = 5000,
+    scopeOf: CorrelationScopeResolver = scopeByConnection,
+  ) {
     this.correlationWindowMs = correlationWindowMs;
+    this.scopeOf = scopeOf;
     this.patternRules = this.initializePatternRules();
   }
 
@@ -299,6 +308,17 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.SLOW_QUERIES,
+        requiredMetrics: [MetricType.COMMAND_P99],
+        diagnosis: 'Per-command P99 latency regression detected',
+        recommendations: [
+          'Compare per-command P99 before and after the regression in latencystats history',
+          'Check for a recent server upgrade or config change on this instance',
+          'Look for concurrent resharding, resync or persistence activity',
+          'Review the commands named in the regression for larger payloads',
+        ],
+      },
+      {
         pattern: AnomalyPattern.CACHE_THRASHING,
         requiredMetrics: [MetricType.KEYSPACE_MISSES],
         diagnosis: 'High cache miss rate detected',
@@ -318,26 +338,22 @@ export class Correlator {
     // Sort by timestamp
     const sorted = [...anomalies].sort((a, b) => a.timestamp - b.timestamp);
 
-    // Group anomalies by time windows
-    const windows: AnomalyEvent[][] = [];
-    let currentWindow: AnomalyEvent[] = [];
-    let windowStart = sorted[0].timestamp;
-
+    // Partition by topology scope first so unrelated instances alerting in the
+    // same few seconds never share a group; nodes of one cluster still do.
+    const partitions = new Map<string, AnomalyEvent[]>();
     for (const anomaly of sorted) {
-      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
-        currentWindow.push(anomaly);
+      const scope = this.scopeOf(anomaly);
+      const partition = partitions.get(scope);
+      if (partition) {
+        partition.push(anomaly);
       } else {
-        if (currentWindow.length > 0) {
-          windows.push(currentWindow);
-        }
-        currentWindow = [anomaly];
-        windowStart = anomaly.timestamp;
+        partitions.set(scope, [anomaly]);
       }
     }
 
-    if (currentWindow.length > 0) {
-      windows.push(currentWindow);
-    }
+    const windows = [...partitions.values()]
+      .flatMap((partition) => this.splitIntoWindows(partition))
+      .sort((a, b) => a[0].timestamp - b[0].timestamp);
 
     // Correlate each window
     const groups: CorrelatedAnomalyGroup[] = [];
@@ -388,6 +404,30 @@ export class Correlator {
     return groups;
   }
 
+  private splitIntoWindows(sorted: AnomalyEvent[]): AnomalyEvent[][] {
+    const windows: AnomalyEvent[][] = [];
+    let currentWindow: AnomalyEvent[] = [];
+    let windowStart = sorted[0].timestamp;
+
+    for (const anomaly of sorted) {
+      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
+        currentWindow.push(anomaly);
+      } else {
+        if (currentWindow.length > 0) {
+          windows.push(currentWindow);
+        }
+        currentWindow = [anomaly];
+        windowStart = anomaly.timestamp;
+      }
+    }
+
+    if (currentWindow.length > 0) {
+      windows.push(currentWindow);
+    }
+
+    return windows;
+  }
+
   private detectPattern(anomalies: AnomalyEvent[]): PatternRule | null {
     const metricTypes = new Set(anomalies.map((a) => a.metricType));
 
@@ -417,9 +457,10 @@ export class Correlator {
     // Update correlation ID on all anomalies
     anomalies.forEach((a) => {
       a.correlationId = correlationId;
-      a.relatedMetrics = anomalies
+      const members = anomalies
         .filter((other) => other.id !== a.id)
         .map((other) => other.metricType);
+      a.relatedMetrics = [...new Set([...(a.relatedMetrics ?? []), ...members])];
     });
 
     // Determine overall severity (highest severity wins)

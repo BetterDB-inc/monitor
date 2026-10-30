@@ -118,6 +118,7 @@ describe('AnomalyService', () => {
           useValue: {
             list: jest.fn().mockReturnValue([]),
             get: jest.fn(),
+            getConfig: jest.fn().mockReturnValue(null),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -3216,6 +3217,74 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('connection churn', () => {
+    function runChurn(steps: Array<{ connectsPerSec: number; clients: number }>) {
+      const buffers = new Map();
+      const detectors = new Map();
+      const recorded: any[] = [];
+      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+        recorded.push(a);
+      });
+      let total = 1_000;
+      let ts = 1_000_000;
+      return (async () => {
+        await (service as any).detectConnectionChurn(
+          mockCtx,
+          { total_connections_received: String(total), connected_clients: '100' },
+          buffers,
+          detectors,
+          ts,
+        );
+        for (const step of steps) {
+          ts += 1_000;
+          total += step.connectsPerSec;
+          await (service as any).detectConnectionChurn(
+            mockCtx,
+            { total_connections_received: String(total), connected_clients: String(step.clients) },
+            buffers,
+            detectors,
+            ts,
+          );
+        }
+        return { recorded, buffers };
+      })();
+    }
+
+    const baseline = Array.from({ length: 40 }, (_, i) => ({ connectsPerSec: 20 + (i % 3), clients: 100 }));
+
+    it('alerts when the connect rate spikes while connected_clients stays flat', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 101 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].metricType).toBe(MetricType.CONNECTION_CHURN);
+      expect(recorded[0].connectionId).toBe('conn-1');
+      expect(recorded[0].message).toContain('connected_clients stays flat at 100');
+    });
+
+    it('does not alert when the spike comes with a population jump', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 160 },
+        { connectsPerSec: 420, clients: 220 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('feeds the per-second rate, not the lifetime counter, and exposes the sample', async () => {
+      const { buffers } = await runChurn([{ connectsPerSec: 30, clients: 100 }]);
+
+      expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
+      expect(service.getConnectionChurnSample('conn-1')).toEqual(
+        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, clientsDeltaRatio: 0 }),
+      );
+    });
+  });
+
   // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
   describe('client-eviction storm detection', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({
@@ -5895,6 +5964,95 @@ describe('AnomalyService', () => {
       expect((service as any).sentinelLastProbe.has('conn-1')).toBe(false);
       expect((service as any).sentinelDriftFirstSeen.has('conn-1')).toBe(false);
       expect((service as any).activeSentinelDrifts.has('conn-1')).toBe(false);
+    });
+  });
+
+  describe('external anomaly ingest', () => {
+    const p99Event = () => ({
+      id: 'p99-1',
+      timestamp: Date.now(),
+      metricType: MetricType.COMMAND_P99,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 6000,
+      baseline: 2000,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 3,
+      message: 'P99 regression',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('adds the event to the correlator input without re-persisting or re-counting it', () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      const recent = (service as any).recentAnomalies;
+      expect(recent).toHaveLength(1);
+      expect(recent[0]).toEqual(expect.objectContaining({ id: 'p99-1', persisted: true }));
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+      expect(prometheusService.incrementAnomalyEvent).not.toHaveBeenCalled();
+      expect(otelEvents.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('ignores the same event delivered twice', () => {
+      service.ingestExternalAnomaly(p99Event());
+      service.ingestExternalAnomaly(p99Event());
+
+      expect((service as any).recentAnomalies).toHaveLength(1);
+    });
+
+    it('correlates the ingested event and saves it under its own id', async () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      await (service as any).correlateAnomalies();
+
+      const saved = (storage.saveAnomalyEvent as jest.Mock).mock.calls.map(([e]: any[]) => e.id);
+      expect(saved).toEqual(['p99-1']);
+      expect((service as any).recentAnomalies[0].correlationId).toBeDefined();
+    });
+  });
+
+  describe('correlation scope', () => {
+    it('groups cluster members under their seed connection', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
+        id === 'node-2' ? { id, membership: { seedId: 'seed-1' } } : { id },
+      );
+
+      expect((service as any).correlationScopeOf('node-2')).toBe('seed-1');
+      expect((service as any).correlationScopeOf('standalone')).toBe('standalone');
+      expect((service as any).correlationScopeOf(undefined)).toBe('');
+    });
+
+    it('keeps a different cluster in its own correlated group', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({
+        id,
+        membership: { seedId: id.startsWith('a-') ? 'seed-a' : 'seed-b' },
+      }));
+      const base = 1_000_000;
+      const event = (id: string, connectionId: string, timestamp: number) => ({
+        id,
+        timestamp,
+        metricType: MetricType.CONNECTIONS,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 0,
+        message: '',
+        resolved: false,
+        connectionId,
+      });
+
+      const groups = (service as any).correlator.correlate([
+        event('1', 'a-node-1', base),
+        event('2', 'a-node-2', base + 1000),
+        event('3', 'b-node-1', base + 2000),
+      ]);
+
+      expect(groups.map((g: { anomalies: unknown[] }) => g.anomalies.length)).toEqual([2, 1]);
     });
   });
 
