@@ -6220,4 +6220,33 @@ describe('AnomalyService', () => {
       );
     });
   });
+
+  describe('replication stream sample', () => {
+    it('exposes the per-replica gap and backlog length from the latest poll', async () => {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        replication: {
+          role: 'master',
+          master_replid: 'a'.repeat(40),
+          master_repl_offset: '5000',
+          repl_backlog_histlen: '4096',
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=4000,lag=0',
+        },
+      });
+
+      expect(service.getReplicationStreamSample('conn-1')).toBeNull();
+      await poll();
+
+      const sample = service.getReplicationStreamSample('conn-1');
+      expect(sample).toMatchObject({
+        role: 'primary',
+        masterReplOffset: 5000,
+        replBacklogHistlen: 4096,
+        bytesPerSec: null,
+      });
+      expect(sample!.replicas).toEqual([
+        expect.objectContaining({ addr: '10.0.0.2:6379', gapBytes: 1000 }),
+      ]);
+    });
+  });
 });

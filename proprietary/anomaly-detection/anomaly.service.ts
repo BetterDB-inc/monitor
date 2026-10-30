@@ -144,6 +144,7 @@ import {
   createForkMemoryState,
   evaluateForkMemoryRisk,
 } from './fork-memory-risk-detector';
+import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -349,6 +350,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // cumulative counter (which never resets on AOF-only deployments).
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
+  private replicationStream = new ReplicationStreamTracker();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -748,6 +750,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // detectConfigDrift call, which rebuilds its node list from what remains.
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
+    this.replicationStream.forget(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -835,6 +838,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
+      this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -5558,6 +5562,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     return groups;
+  }
+
+  getReplicationStreamSample(connectionId: string): ReplicationStreamSample | null {
+    return this.replicationStream.latest(connectionId);
   }
 
   getBufferStats(connectionId?: string): BufferStats[] {
