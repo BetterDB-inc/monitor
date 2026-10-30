@@ -14,6 +14,7 @@ import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import * as os from 'os';
 import Valkey from 'iovalkey';
+import { nodeClientAuthOptions } from './execution/client-factory';
 import type { MigrationExecutionRequest, MigrationExecutionResult, StartExecutionResponse, ExecutionMode, CompleteExecutionResponse } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MigrationService } from './migration.service';
@@ -381,9 +382,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         try {
           client = new Valkey({
             host, port,
-            username: targetConfig.username || undefined,
-            password: targetConfig.password || undefined,
-            tls: targetConfig.tls ? {} : undefined,
+            ...nodeClientAuthOptions(targetConfig),
             lazyConnect: true,
             retryStrategy: () => null,
             maxRetriesPerRequest: 1,

@@ -69,6 +69,90 @@ export interface SshTunnelConfig {
  */
 export type SshTunnelInput = Omit<SshTunnelConfig, 'secretsEncrypted'>;
 
+/**
+ * How the monitor authenticates to the database.
+ * - `password` (default): AUTH with the connection's username/password.
+ * - `certificate`: no AUTH is sent; the server derives the ACL user from the
+ *   client certificate (Valkey `tls-auth-clients-user`). Requires `tls` and a
+ *   client certificate + key in `tlsConfig`.
+ */
+export type DatabaseAuthMode = 'password' | 'certificate';
+
+/**
+ * Where TLS certificate material comes from:
+ * - `inline`: PEM content is supplied by the user and stored with the connection
+ *   (the private key and passphrase encrypted when ENCRYPTION_KEY is set).
+ * - `file`: the files live on the server's filesystem. Paths must resolve inside
+ *   the directory named by `BETTERDB_TLS_CERT_DIR`; disabled when unset.
+ */
+export type TlsMaterialSource = 'inline' | 'file';
+
+/**
+ * Optional TLS material for a direct connection, used only when `tls` is on:
+ * a CA bundle to verify a server issued by a private PKI, and a client
+ * certificate + private key presented to the server (mutual TLS).
+ *
+ * Secret fields (`key`, `passphrase`) are envelope-encrypted at rest when
+ * ENCRYPTION_KEY is configured; `secretsEncrypted` records whether the persisted
+ * values are ciphertext. `ca`, `cert` and the `*Path` fields are not secrets.
+ */
+export interface TlsConfig {
+  /** Where `ca`/`cert`/`key` come from. Defaults to `inline`. */
+  source?: TlsMaterialSource;
+  /** CA bundle (PEM) used to verify the server certificate (`source === 'inline'`). */
+  ca?: string;
+  /** Server-side path to the CA bundle (`source === 'file'`). */
+  caPath?: string;
+  /** Client certificate (PEM) presented to the server (`source === 'inline'`). */
+  cert?: string;
+  /** Server-side path to the client certificate (`source === 'file'`). */
+  certPath?: string;
+  /** Client private key (PEM) matching `cert` (`source === 'inline'`, secret). */
+  key?: string;
+  /** Server-side path to the client private key (`source === 'file'`). */
+  keyPath?: string;
+  /** Optional passphrase protecting the private key (secret). */
+  passphrase?: string;
+  /**
+   * Whether the secret fields above are currently encrypted at rest.
+   * Server-managed only — never accepted from API input (see `TlsConfigInput`).
+   */
+  secretsEncrypted?: boolean;
+}
+
+/** TLS material shape accepted from API requests (see `SshTunnelInput`). */
+export type TlsConfigInput = Omit<TlsConfig, 'secretsEncrypted'>;
+
+/** Redacted TLS material summary safe to return over the API (no PEM content). */
+export interface TlsConfigStatus {
+  source: TlsMaterialSource;
+  /** Whether a custom CA bundle is configured. */
+  hasCa: boolean;
+  /** Whether a client certificate + key is configured (mutual TLS). */
+  hasClientCert: boolean;
+}
+
+/** True when the config carries a client certificate and key (from either source). */
+export function hasClientCertificate(config: TlsConfig | undefined): boolean {
+  if (!config) return false;
+  return config.source === 'file' ? !!config.certPath && !!config.keyPath : !!config.cert && !!config.key;
+}
+
+/** True when the config carries a CA bundle (from either source). */
+export function hasCaBundle(config: TlsConfig | undefined): boolean {
+  if (!config) return false;
+  return config.source === 'file' ? !!config.caPath : !!config.ca;
+}
+
+export function tlsConfigStatus(config: TlsConfig | undefined): TlsConfigStatus | undefined {
+  if (!config) return undefined;
+  return {
+    source: config.source === 'file' ? 'file' : 'inline',
+    hasCa: hasCaBundle(config),
+    hasClientCert: hasClientCertificate(config),
+  };
+}
+
 export type DatabaseConnectionType = 'direct' | 'external';
 
 export type TopologyKind = 'cluster' | 'sentinel';
@@ -108,6 +192,10 @@ export interface DatabaseConnectionConfig {
   nodePasswordEncrypted?: boolean;
   dbIndex?: number;
   tls?: boolean;
+  /** TLS material (custom CA, client certificate) used when `tls` is on. */
+  tlsConfig?: TlsConfig;
+  /** How the monitor authenticates; defaults to `password`. */
+  authMode?: DatabaseAuthMode;
   /** Optional SSH tunnel used to reach the database. */
   sshTunnel?: SshTunnelConfig;
   isDefault?: boolean;
@@ -140,6 +228,25 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
   }
   if (typeof obj !== 'object' || obj === null) return undefined;
   return obj as SshTunnelConfig;
+}
+
+/**
+ * Parse a persisted TLS config value (JSON string or already-parsed object) into
+ * a `TlsConfig`, or `undefined` when absent/invalid.
+ */
+export function parseTlsConfig(value: unknown): TlsConfig | undefined {
+  if (value === null || value === undefined) return undefined;
+  let obj: unknown = value;
+  if (typeof value === 'string') {
+    if (value.trim() === '') return undefined;
+    try {
+      obj = JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof obj !== 'object' || obj === null) return undefined;
+  return obj as TlsConfig;
 }
 
 export function hasOwnKeyAnalytics(membership: TopologyMembership | undefined): boolean {
@@ -214,6 +321,16 @@ export interface ConnectionStatus {
   username?: string;
   dbIndex?: number;
   tls?: boolean;
+  /** Redacted TLS material summary (present when a CA or client certificate is configured). */
+  tlsConfig?: TlsConfigStatus;
+  /** How the monitor authenticates; absent means `password`. */
+  authMode?: DatabaseAuthMode;
+  /**
+   * ACL user the server reports for the live connection (`ACL WHOAMI`), so a
+   * certificate-mapped identity can be confirmed. Absent when disconnected or
+   * when the server does not support ACL.
+   */
+  authenticatedUser?: string;
   /** Redacted SSH tunnel summary (present when the connection uses a tunnel). */
   sshTunnel?: SshTunnelStatus;
   isDefault?: boolean;
@@ -244,6 +361,10 @@ export interface CreateConnectionRequest {
   nodePassword?: string;
   dbIndex?: number;
   tls?: boolean;
+  /** TLS material (custom CA, client certificate) used when `tls` is on. */
+  tlsConfig?: TlsConfigInput;
+  /** How the monitor authenticates; defaults to `password`. */
+  authMode?: DatabaseAuthMode;
   /** Optional SSH tunnel used to reach the database. */
   sshTunnel?: SshTunnelInput;
   setAsDefault?: boolean;
@@ -259,6 +380,8 @@ export interface CreateConnectionRequest {
 export interface TestConnectionResponse {
   success: boolean;
   capabilities?: ConnectionCapabilities;
+  /** ACL user the server reported for the test connection (`ACL WHOAMI`), when available. */
+  authenticatedUser?: string;
   error?: string;
   message?: string;
 }

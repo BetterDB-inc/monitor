@@ -9,7 +9,7 @@ import {
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -5290,6 +5290,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         password_encrypted INTEGER DEFAULT 0,
         db_index INTEGER DEFAULT 0,
         tls INTEGER DEFAULT 0,
+        tls_config TEXT,
+        auth_mode TEXT,
         ssh_tunnel TEXT,
         connection_type TEXT,
         auto_register_nodes INTEGER,
@@ -5330,6 +5332,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!columns.some((c) => c.name === 'node_password_encrypted')) {
       this.db.exec('ALTER TABLE connections ADD COLUMN node_password_encrypted INTEGER');
     }
+    // Migration: custom CA / client certificate material and auth mode (mTLS).
+    if (!columns.some((c) => c.name === 'tls_config')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN tls_config TEXT');
+    }
+    if (!columns.some((c) => c.name === 'auth_mode')) {
+      this.db.exec('ALTER TABLE connections ADD COLUMN auth_mode TEXT');
+    }
   }
 
   async saveConnection(config: DatabaseConnectionConfig): Promise<void> {
@@ -5338,8 +5347,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.ensureConnectionsSchema();
 
     const stmt = this.db.prepare(`
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         host = excluded.host,
@@ -5352,6 +5361,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         node_password_encrypted = excluded.node_password_encrypted,
         db_index = excluded.db_index,
         tls = excluded.tls,
+        tls_config = excluded.tls_config,
+        auth_mode = excluded.auth_mode,
         ssh_tunnel = excluded.ssh_tunnel,
         connection_type = excluded.connection_type,
         auto_register_nodes = excluded.auto_register_nodes,
@@ -5373,6 +5384,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       config.nodePassword ? (config.nodePasswordEncrypted ? 1 : 0) : null,
       config.dbIndex || 0,
       config.tls ? 1 : 0,
+      config.tlsConfig ? JSON.stringify(config.tlsConfig) : null,
+      config.authMode ?? null,
       config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
       config.connectionType ?? null,
       config.autoRegisterNodes === undefined ? null : config.autoRegisterNodes ? 1 : 0,
@@ -5409,6 +5422,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:
@@ -5446,6 +5461,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === 1 ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls === 1,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:

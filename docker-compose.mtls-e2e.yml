@@ -1,0 +1,57 @@
+# Mutual-TLS Valkey for the client-certificate e2e (apps/api/test/mtls.e2e-spec.ts).
+#
+# Deliberately NOT part of docker-compose.test.yml: the default test run must not
+# pay for it. Brought up and torn down by the spec, which only runs when
+# RUN_MTLS_TESTS=true. See `pnpm test:mtls`.
+#
+# The server requires a client certificate (tls-auth-clients yes) and maps the
+# certificate CN to an ACL user (tls-auth-clients-user CN). `monitor-mtls` has no
+# password, so a certificate is the only way to become that user; an unmapped CN
+# falls back to `default`. Certificates come from scripts/mtls-e2e-certs.sh.
+services:
+  mtls-valkey:
+    image: valkey/valkey-bundle:9.1-alpine
+    container_name: betterdb-mtls-valkey
+    command:
+      - valkey-server
+      - --port
+      - '0'
+      - --tls-port
+      - '6379'
+      - --tls-cert-file
+      - /certs/server.crt
+      - --tls-key-file
+      - /certs/server.key
+      - --tls-ca-cert-file
+      - /certs/ca.crt
+      - --tls-auth-clients
+      - 'yes'
+      - --tls-auth-clients-user
+      - CN
+      - --user
+      - monitor-mtls
+      - 'on'
+      - '~*'
+      - '&*'
+      - '+@all'
+      - --appendonly
+      - 'no'
+    ports:
+      - '6395:6379'
+    volumes:
+      - ./apps/api/test/.mtls-certs:/certs:ro
+    healthcheck:
+      test:
+        - CMD
+        - valkey-cli
+        - --tls
+        - --cert
+        - /certs/client.crt
+        - --key
+        - /certs/client.key
+        - --cacert
+        - /certs/ca.crt
+        - ping
+      interval: 2s
+      timeout: 3s
+      retries: 15

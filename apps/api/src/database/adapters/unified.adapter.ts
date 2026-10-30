@@ -54,18 +54,25 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_S
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
+import { assertAuthConfig, clientCredentials, resolveTlsMaterial, type TlsMaterialOptions } from './tls-material';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
-  username: string;
-  password: string;
+  /** ACL username; ignored (no AUTH sent) when `authMode` is `certificate`. */
+  username?: string;
+  password?: string;
   connectionName?: string;
   /** Logical database index the clients SELECT on connect (defaults to 0). */
   dbIndex?: number;
   tls?: boolean;
   /** Hostname the TLS certificate is verified against when `host` is a bare IP. */
   tlsServername?: string;
+  /** Custom CA and client certificate material (secrets already decrypted); used when `tls` is on. */
+  tlsConfig?: TlsConfig;
+  /** `password` (default) sends AUTH; `certificate` sends none and relies on the client cert. */
+  authMode?: DatabaseAuthMode;
   /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
   sshTunnel?: SshTunnelConfig;
   /** Tunnel manager; required when sshTunnel is enabled. */
@@ -148,13 +155,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // the current key-analytics collection. See probeGraphKey.
   private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
   private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
+  // Custom CA / client certificate resolved once at construction (file-sourced
+  // material is read here). A resolution failure is deferred to connect() so it
+  // surfaces as a connection error instead of a constructor throw.
+  private tlsMaterial: TlsMaterialOptions = {};
+  private tlsSetupError: Error | null = null;
+  // ACL user the server reported on the last successful connect (ACL WHOAMI).
+  // Lets the UI confirm which identity a client certificate mapped to.
+  private authenticatedUser: string | undefined;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
+    // In certificate mode both are undefined, so iovalkey sends no AUTH and the
+    // server keeps the ACL user derived from the client certificate.
+    const { username, password } = clientCredentials(this.config);
     return new Valkey({
       host: this.connectHost,
       port: this.connectPort,
-      username: this.config.username,
-      password: this.config.password,
+      username,
+      password,
       // Logical database the client SELECTs on connect. Defaults to the
       // connection's configured dbIndex; key-analytics scans override it to
       // visit sibling databases discovered via INFO keyspace.
@@ -170,7 +188,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // points at localhost, but the certificate is still for the real host.
       // An auto-registered node reached by IP also accepts a certificate
       // issued for the hostname its cluster announces for it.
-      tls: this.config.tls ? tlsIdentityOptions(this.config.host, this.config.tlsServername) : undefined,
+      // Custom CA and client certificate (mutual TLS) ride on the same object.
+      tls: this.config.tls
+        ? { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial }
+        : undefined,
     });
   }
 
@@ -209,6 +230,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     if (this.usesTunnel && !config.sshTunnelService) {
       throw new Error('sshTunnelService is required when an SSH tunnel is configured');
+    }
+
+    try {
+      assertAuthConfig(config);
+      if (config.tls) {
+        this.tlsMaterial = resolveTlsMaterial(config.tlsConfig);
+      }
+    } catch (error) {
+      this.tlsSetupError = error instanceof Error ? error : new Error(String(error));
     }
 
     // Without a tunnel, create the client eagerly (existing behaviour). With a
@@ -296,6 +326,26 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprint;
   }
 
+  /** ACL user the server reported for the current session, when known. */
+  getAuthenticatedUser(): string | undefined {
+    return this.authenticatedUser;
+  }
+
+  /**
+   * Ask the server which ACL user this session runs as. Best effort: servers
+   * without ACL (Redis < 6) or users without the permission simply yield
+   * undefined. In certificate mode this is the only way to see whether the
+   * certificate mapped to the intended user or fell back to `default`.
+   */
+  private async probeAuthenticatedUser(): Promise<string | undefined> {
+    try {
+      const reply = await this.client.call('ACL', 'WHOAMI');
+      return typeof reply === 'string' && reply !== '' ? reply : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private connectPromise: Promise<void> | null = null;
 
   async connect(): Promise<void> {
@@ -312,6 +362,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   private async doConnect(): Promise<void> {
     try {
+      if (this.tlsSetupError) {
+        throw this.tlsSetupError;
+      }
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
       }
@@ -361,6 +414,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.log('Connected successfully');
       await this.detectCapabilities();
       this.logger.log(`Detected ${this.capabilities?.dbType} ${this.capabilities?.version}`);
+      this.authenticatedUser = await this.probeAuthenticatedUser();
+      if (this.authenticatedUser) {
+        this.logger.log(`Authenticated as ACL user '${this.authenticatedUser}'`);
+      }
     } catch (error) {
       this.connected = false;
       await this.teardownTunnel();

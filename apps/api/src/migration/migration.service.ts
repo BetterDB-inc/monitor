@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
+import { nodeClientAuthOptions } from './execution/client-factory';
 import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution, Incompatibility } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { AnalysisJob } from './analysis/analysis-job';
@@ -257,9 +258,7 @@ export class MigrationService {
           const client = new Valkey({
             host,
             port,
-            username: config?.username || undefined,
-            password: config?.password || undefined,
-            tls: config?.tls ? {} : undefined,
+            ...nodeClientAuthOptions(config ?? {}),
             ...NODE_CONNECT_OPTIONS,
             connectionName: 'BetterDB-Migration-Analysis',
           });

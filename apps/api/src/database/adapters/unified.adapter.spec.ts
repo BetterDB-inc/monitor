@@ -705,3 +705,78 @@ describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
     expect(second.keyDetails?.every((d) => d.memoryBytes === 3 * MB)).toBe(true);
   });
 });
+
+describe('UnifiedDatabaseAdapter — TLS material and certificate auth', () => {
+  // lazyConnect means the constructor builds the iovalkey client without
+  // dialing, so the options it was given can be inspected directly.
+  const CA = '-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n';
+  const CERT = '-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+
+  it('sends AUTH credentials in password mode (unchanged behaviour)', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: 'db.example.com', port: 6379, username: 'default', password: '' });
+    const options = adapter.getClient().options;
+    expect(options.username).toBe('default');
+    expect(options.tls).toBeUndefined();
+  });
+
+  it('passes the user-supplied CA, certificate, key and passphrase to the TLS socket unmodified', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'monitor',
+      password: 'pw',
+      tls: true,
+      tlsConfig: { ca: CA, cert: CERT, key: KEY, passphrase: 'secret' },
+    });
+    const tls = adapter.getClient().options.tls!;
+    expect(tls.ca).toBe(CA);
+    expect(tls.cert).toBe(CERT);
+    expect(tls.key).toBe(KEY);
+    expect(tls.passphrase).toBe('secret');
+    // SNI is still applied alongside the material.
+    expect(tls.servername).toBe('db.example.com');
+    // Server verification is never weakened.
+    expect(tls.rejectUnauthorized).toBeUndefined();
+  });
+
+  it('omits username and password entirely in certificate mode so no AUTH is sent', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'default',
+      password: '',
+      tls: true,
+      tlsConfig: { cert: CERT, key: KEY },
+      authMode: 'certificate',
+    });
+    const options = adapter.getClient().options;
+    // iovalkey stores an absent credential as null; what matters is that it is
+    // falsy, which is the condition under which it skips AUTH entirely.
+    expect(options.username).toBeFalsy();
+    expect(options.password).toBeFalsy();
+    expect(options.tls?.cert).toBe(CERT);
+  });
+
+  it('defers an invalid auth/TLS combination to connect() instead of throwing from the constructor', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+    });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('reports the ACL user from ACL WHOAMI after connect, tolerating servers without ACL', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => Promise.resolve('app-monitor'));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+    await expect(probe.call(adapter)).resolves.toBe('app-monitor');
+    expect(call).toHaveBeenCalledWith('ACL', 'WHOAMI');
+
+    call.mockImplementationOnce(() => Promise.reject(new Error("ERR unknown command 'ACL'")));
+    await expect(probe.call(adapter)).resolves.toBeUndefined();
+  });
+});

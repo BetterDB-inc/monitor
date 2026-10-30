@@ -2,7 +2,7 @@ import Valkey from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
-import { createClient, createTargetClient } from './client-factory';
+import { createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
@@ -42,9 +42,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
           const client = new Valkey({
             host,
             port,
-            username: sourceConfig.username || undefined,
-            password: sourceConfig.password || undefined,
-            tls: sourceConfig.tls ? {} : undefined,
+            ...nodeClientAuthOptions(sourceConfig),
             lazyConnect: true,
             connectionName: 'BetterDB-Migration-Source',
           });

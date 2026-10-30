@@ -1,10 +1,12 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, tlsConfigStatus } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
+import { assertAuthConfig } from '../database/adapters/tls-material';
+import { encryptTlsConfig, decryptTlsConfig, sanitizeTlsConfigInput } from './tls-config-secrets';
 import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
@@ -284,7 +286,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private assertValidExternalRequest(request: CreateConnectionRequest): void {
-    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.sshTunnel?.enabled) {
+    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.tlsConfig || request.authMode === 'certificate' || request.sshTunnel?.enabled) {
       throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
     }
     if (this.findIdByHostPort(request.host, request.port)) {
@@ -308,10 +310,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: dbConfig.password,
       dbIndex: 0,
       tls: dbConfig.tls ?? false,
+      tlsConfig: dbConfig.tlsConfig,
+      authMode: dbConfig.authMode,
       isDefault: true,
       createdAt: now,
       updatedAt: now,
     };
+    assertAuthConfig(config);
 
     // Create and test connection BEFORE persisting state
     const adapter = this.createAdapter(config);
@@ -364,6 +369,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       connectionName,
       tls: config.tls,
       tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,
+      tlsConfig: config.tlsConfig,
+      authMode: config.authMode,
       connectionId: config.id,
       sshTunnel: config.sshTunnel,
       sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
@@ -393,7 +400,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    result = { ...result, sshTunnel: this.encryptSshTunnel(result.sshTunnel) };
+    result = {
+      ...result,
+      sshTunnel: this.encryptSshTunnel(result.sshTunnel),
+      tlsConfig: encryptTlsConfig(result.tlsConfig, this.encryption),
+    };
     return result;
   }
 
@@ -528,9 +539,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    */
   private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
+    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, (message) =>
+      this.logger.error(`${config.name}: ${message}`),
+    );
 
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, sshTunnel, credentialStatus: 'unknown' };
+      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown' };
     }
 
     if (!this.encryption) {
@@ -622,12 +636,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
+      tlsConfig: sanitizeTlsConfigInput(request.tlsConfig),
+      authMode: request.authMode,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       connectionType: request.connectionType,
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
     };
+    if (config.connectionType !== 'external') {
+      assertAuthConfig(config);
+    }
 
     // Create and connect adapter BEFORE persisting to storage
     // This ensures we don't end up with config in storage but no working connection
@@ -838,12 +857,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (request.connectionType === 'external') {
       return { success: true, message: 'Waiting for first OTLP sample' };
     }
+    try {
+      assertAuthConfig(request);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Invalid TLS configuration' };
+    }
     const adapter = new UnifiedDatabaseAdapter({
       host: request.host,
       port: request.port,
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      tlsConfig: sanitizeTlsConfigInput(request.tlsConfig),
+      authMode: request.authMode,
       dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
       connectionId: `test:${randomUUID()}`,
@@ -864,6 +890,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         };
       }
       const capabilities = adapter.getCapabilities();
+      const authenticatedUser = adapter.getAuthenticatedUser?.();
       await adapter.disconnect();
 
       this.usageTelemetry?.trackTestConnection({
@@ -877,6 +904,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       return {
         success: true,
+        authenticatedUser,
         capabilities: {
           dbType: capabilities.dbType,
           version: capabilities.version,
@@ -937,6 +965,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         username: config.username,
         dbIndex: config.dbIndex,
         tls: config.tls,
+        tlsConfig: tlsConfigStatus(config.tlsConfig),
+        authMode: config.authMode,
+        authenticatedUser: isConnected ? connection?.getAuthenticatedUser?.() : undefined,
         sshTunnel: config.sshTunnel
           ? {
               enabled: config.sshTunnel.enabled,
@@ -1185,6 +1216,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
       dbIndex: 0,
       tls: seed.tls,
+      // Discovered nodes sit behind the same PKI as the seed: reuse its CA and
+      // client certificate, and keep certificate-only auth if that is how the
+      // seed authenticates.
+      tlsConfig: seed.tlsConfig,
+      authMode: seed.authMode,
       connectionType: 'direct',
       isDefault: false,
       createdAt: now,

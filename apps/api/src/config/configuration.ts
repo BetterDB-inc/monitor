@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import { isTrueFlag } from './env-normalize';
 
 export interface DatabaseConfig {
@@ -7,6 +9,42 @@ export interface DatabaseConfig {
   password: string;
   type: 'valkey' | 'redis' | 'auto';
   tls: boolean;
+  /** Custom CA / client certificate for the env-configured connection (DB_TLS_*_FILE). */
+  tlsConfig?: TlsConfig;
+  /** DB_AUTH_MODE: `password` (default) or `certificate` (no AUTH; identity from the client cert). */
+  authMode?: DatabaseAuthMode;
+}
+
+/**
+ * Read a PEM file named by an env var into inline material. The operator owns
+ * the environment, so these paths are trusted as-is (no allowlist directory);
+ * an unreadable file fails startup loudly rather than silently connecting
+ * without the certificate.
+ */
+function readPemFromEnv(name: string): string | undefined {
+  const filePath = process.env[name]?.trim();
+  if (!filePath) return undefined;
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch (error) {
+    throw new Error(`${name}: cannot read ${filePath}: ${error instanceof Error ? error.message : error}`, { cause: error });
+  }
+}
+
+function envTlsConfig(): TlsConfig | undefined {
+  const ca = readPemFromEnv('DB_TLS_CA_FILE');
+  const cert = readPemFromEnv('DB_TLS_CERT_FILE');
+  const key = readPemFromEnv('DB_TLS_KEY_FILE');
+  const passphrase = process.env.DB_TLS_KEY_PASSPHRASE || undefined;
+  if (!ca && !cert && !key) return undefined;
+  return { source: 'inline', ca, cert, key, passphrase };
+}
+
+function envAuthMode(): DatabaseAuthMode | undefined {
+  const raw = process.env.DB_AUTH_MODE?.trim().toLowerCase();
+  if (!raw) return undefined;
+  if (raw === 'password' || raw === 'certificate') return raw;
+  throw new Error(`DB_AUTH_MODE must be 'password' or 'certificate' (got '${raw}')`);
 }
 
 export interface StorageConfig {
@@ -58,6 +96,10 @@ export default (): AppConfig => ({
     // isTrueFlag trims whitespace so a trailing newline from a secret store does
     // not silently disable TLS.
     tls: isTrueFlag(process.env.DB_TLS),
+    // Custom CA (private PKI) and client certificate (mutual TLS) for the env
+    // connection, read from files so Kubernetes/Docker secrets mount directly.
+    tlsConfig: envTlsConfig(),
+    authMode: envAuthMode(),
   },
   storage: {
     type: 'sqlite',

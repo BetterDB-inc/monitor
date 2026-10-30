@@ -43,6 +43,20 @@ interface SshFormData {
   hostKeyFingerprint: string;
 }
 
+/** TLS material: custom CA for a private PKI and a client certificate for mutual TLS. */
+interface TlsFormData {
+  source: 'inline' | 'file';
+  ca: string;
+  caPath: string;
+  cert: string;
+  certPath: string;
+  key: string;
+  keyPath: string;
+  passphrase: string;
+}
+
+type AuthMode = 'password' | 'certificate';
+
 interface ConnectionFormData {
   name: string;
   host: string;
@@ -54,8 +68,43 @@ interface ConnectionFormData {
   nodePassword: string;
   dbIndex: number;
   tls: boolean;
+  tlsCfg: TlsFormData;
+  authMode: AuthMode;
   ssh: SshFormData;
   autoRegisterNodes: boolean | null;
+}
+
+const defaultTlsFormData: TlsFormData = {
+  source: 'inline',
+  ca: '',
+  caPath: '',
+  cert: '',
+  certPath: '',
+  key: '',
+  keyPath: '',
+  passphrase: '',
+};
+
+/**
+ * Build the TLS material payload (or undefined) from the form. Only the fields
+ * matching the chosen source are sent; nothing is sent when TLS is off or no
+ * material was entered.
+ */
+function buildTlsConfigPayload(tls: boolean, cfg: TlsFormData) {
+  if (!tls) return undefined;
+  const inline = cfg.source === 'inline';
+  const payload = {
+    source: cfg.source,
+    ca: inline ? cfg.ca.trim() || undefined : undefined,
+    cert: inline ? cfg.cert.trim() || undefined : undefined,
+    key: inline ? cfg.key.trim() || undefined : undefined,
+    caPath: !inline ? cfg.caPath.trim() || undefined : undefined,
+    certPath: !inline ? cfg.certPath.trim() || undefined : undefined,
+    keyPath: !inline ? cfg.keyPath.trim() || undefined : undefined,
+    passphrase: cfg.passphrase || undefined,
+  };
+  const hasMaterial = !!(payload.ca || payload.cert || payload.key || payload.caPath || payload.certPath || payload.keyPath);
+  return hasMaterial ? payload : undefined;
 }
 
 const defaultSshFormData: SshFormData = {
@@ -111,6 +160,8 @@ const defaultFormData: ConnectionFormData = {
   nodePassword: '',
   dbIndex: 0,
   tls: false,
+  tlsCfg: defaultTlsFormData,
+  authMode: 'password',
   ssh: defaultSshFormData,
   autoRegisterNodes: null,
 };
@@ -229,6 +280,19 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
     setTestResult(null);
   };
 
+  const handleTlsChange = (field: keyof TlsFormData, value: string) => {
+    setFormData((prev) => ({ ...prev, tlsCfg: { ...prev.tlsCfg, [field]: value } }));
+    setTestResult(null);
+  };
+
+  // Certificate auth only works over TLS, so switching to it turns TLS on.
+  const handleAuthModeChange = (authMode: AuthMode) => {
+    setFormData((prev) => ({ ...prev, authMode, tls: authMode === 'certificate' ? true : prev.tls }));
+    setTestResult(null);
+  };
+
+  const usesCertificateAuth = formData.authMode === 'certificate';
+
   // In cloud mode a loopback host is normally unreachable — but with an SSH
   // tunnel the bastion resolves the host, so localhost/127.* is valid there.
   const cloudLoopbackBlocked =
@@ -273,22 +337,29 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
         message?: string;
         error?: string;
         capabilities?: { clusterEnabled?: boolean; isSentinel?: boolean };
+        authenticatedUser?: string;
       }>('/connections/test', {
         method: 'POST',
         body: JSON.stringify({
           name: formData.name || 'Test',
           host: formData.host,
           port: formData.port,
-          username: formData.username || undefined,
-          password: formData.password || undefined,
+          username: usesCertificateAuth ? undefined : formData.username || undefined,
+          password: usesCertificateAuth ? undefined : formData.password || undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
+          tlsConfig: buildTlsConfigPayload(formData.tls, formData.tlsCfg),
+          authMode: formData.authMode,
           sshTunnel: buildSshTunnelPayload(formData.ssh),
         }),
       });
       setTestResult({
         success: result.success,
-        message: result.success ? 'Connection successful!' : result.error || 'Connection failed',
+        message: result.success
+          ? result.authenticatedUser
+            ? `Connection successful! Authenticated as ACL user "${result.authenticatedUser}".`
+            : 'Connection successful!'
+          : result.error || 'Connection failed',
         clusterEnabled: result.capabilities?.clusterEnabled,
         isSentinel: result.capabilities?.isSentinel,
       });
@@ -327,8 +398,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           name: formData.name,
           host: formData.host,
           port: formData.port,
-          username: formData.username || undefined,
-          password: formData.password || undefined,
+          username: usesCertificateAuth ? undefined : formData.username || undefined,
+          password: usesCertificateAuth ? undefined : formData.password || undefined,
           nodeUsername: testResult?.isSentinel
             ? formData.nodeNoUsername
               ? ''
@@ -337,6 +408,8 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           nodePassword: testResult?.isSentinel ? formData.nodePassword || undefined : undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
+          tlsConfig: buildTlsConfigPayload(formData.tls, formData.tlsCfg),
+          authMode: formData.authMode,
           sshTunnel: buildSshTunnelPayload(formData.ssh),
           setAsDefault: connections.length === 0,
         }),
@@ -697,27 +770,59 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Username</label>
-                    <input
-                      type="text"
-                      value={formData.username}
-                      onChange={(e) => handleInputChange('username', e.target.value)}
-                      placeholder="default"
-                      className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Password</label>
-                    <input
-                      type="password"
-                      value={formData.password}
-                      onChange={(e) => handleInputChange('password', e.target.value)}
-                      className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
-                    />
+                <div>
+                  <label className="block text-sm font-medium mb-1">Authentication</label>
+                  <div className="flex gap-4 text-sm">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="db-auth-mode"
+                        checked={formData.authMode === 'password'}
+                        onChange={() => handleAuthModeChange('password')}
+                      />
+                      <span>Username / password</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="db-auth-mode"
+                        checked={usesCertificateAuth}
+                        onChange={() => handleAuthModeChange('certificate')}
+                      />
+                      <span>Client certificate (mTLS)</span>
+                    </label>
                   </div>
                 </div>
+
+                {usesCertificateAuth ? (
+                  <p className="text-xs text-muted-foreground">
+                    No AUTH is sent. The server maps the client certificate below to an ACL user
+                    (Valkey <code>tls-auth-clients-user</code>). Test the connection to see which
+                    user it resolved to.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Username</label>
+                      <input
+                        type="text"
+                        value={formData.username}
+                        onChange={(e) => handleInputChange('username', e.target.value)}
+                        placeholder="default"
+                        className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Password</label>
+                      <input
+                        type="password"
+                        value={formData.password}
+                        onChange={(e) => handleInputChange('password', e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -736,6 +841,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                       <input
                         type="checkbox"
                         checked={formData.tls}
+                        disabled={usesCertificateAuth}
                         onChange={(e) => handleInputChange('tls', e.target.checked)}
                         className="rounded"
                       />
@@ -743,6 +849,131 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                     </label>
                   </div>
                 </div>
+
+                {formData.tls && (
+                  <div className="border rounded-md px-3 py-3 space-y-3">
+                    <div>
+                      <span className="text-sm font-medium">TLS certificates</span>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Optional. Add a CA bundle when the server certificate is issued by a
+                        private CA, and a client certificate + key when the server requires
+                        mutual TLS. Leave empty for plain TLS against a public CA.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Material source</label>
+                      <div className="flex gap-4 text-sm">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="tls-source"
+                            checked={formData.tlsCfg.source === 'inline'}
+                            onChange={() => handleTlsChange('source', 'inline')}
+                          />
+                          <span>Paste PEM</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="tls-source"
+                            checked={formData.tlsCfg.source === 'file'}
+                            onChange={() => handleTlsChange('source', 'file')}
+                          />
+                          <span>Server file paths</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {formData.tlsCfg.source === 'inline' ? (
+                      <>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">CA bundle (PEM, optional)</label>
+                          <textarea
+                            value={formData.tlsCfg.ca}
+                            onChange={(e) => handleTlsChange('ca', e.target.value)}
+                            rows={3}
+                            placeholder="-----BEGIN CERTIFICATE-----"
+                            className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">
+                            Client certificate (PEM{usesCertificateAuth ? ', required' : ', optional'})
+                          </label>
+                          <textarea
+                            value={formData.tlsCfg.cert}
+                            onChange={(e) => handleTlsChange('cert', e.target.value)}
+                            rows={3}
+                            placeholder="-----BEGIN CERTIFICATE-----"
+                            className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">
+                            Client private key (PEM{usesCertificateAuth ? ', required' : ', optional'})
+                          </label>
+                          <textarea
+                            value={formData.tlsCfg.key}
+                            onChange={(e) => handleTlsChange('key', e.target.value)}
+                            rows={3}
+                            placeholder="-----BEGIN PRIVATE KEY-----"
+                            className="w-full px-3 py-2 border rounded-md bg-background font-mono text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="block text-xs font-medium mb-1">CA bundle path (optional)</label>
+                          <input
+                            type="text"
+                            value={formData.tlsCfg.caPath}
+                            onChange={(e) => handleTlsChange('caPath', e.target.value)}
+                            placeholder="ca.pem"
+                            className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Client certificate path</label>
+                            <input
+                              type="text"
+                              value={formData.tlsCfg.certPath}
+                              onChange={(e) => handleTlsChange('certPath', e.target.value)}
+                              placeholder="client.crt"
+                              className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium mb-1">Client key path</label>
+                            <input
+                              type="text"
+                              value={formData.tlsCfg.keyPath}
+                              onChange={(e) => handleTlsChange('keyPath', e.target.value)}
+                              placeholder="client.key"
+                              className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                            />
+                          </div>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Resolved inside the server's <code>BETTERDB_TLS_CERT_DIR</code> directory.
+                        </p>
+                      </>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Key passphrase (optional)</label>
+                      <input
+                        type="password"
+                        value={formData.tlsCfg.passphrase}
+                        onChange={(e) => handleTlsChange('passphrase', e.target.value)}
+                        autoComplete="new-password"
+                        className="w-full px-3 py-2 border rounded-md bg-background focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="border rounded-md">
                   <label className="flex items-center gap-2 cursor-pointer px-3 py-2">
