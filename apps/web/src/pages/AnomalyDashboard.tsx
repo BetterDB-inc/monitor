@@ -114,6 +114,11 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
   node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
   reshard_pressure: { icon: Database, label: 'Reshard Pressure', color: 'var(--chart-warning)' },
+  recovery_amplification: {
+    icon: Database,
+    label: 'Recovery Amplification',
+    color: 'var(--destructive)',
+  },
   replication_divergence: {
     icon: Database,
     label: 'Replication Divergence',
@@ -165,6 +170,8 @@ const METRIC_LABELS: Record<string, string> = {
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
   reshard_shard_skew: 'Reshard Shard Skew',
+  backlog_coverage_risk: 'Backlog Coverage Risk',
+  resync_escalation: 'Resync Escalation',
   replication_divergence: 'Replication Divergence',
 };
 

@@ -6387,8 +6387,8 @@ describe('AnomalyService', () => {
     });
 
     it('skips groups from other members that do not involve the caller', async () => {
-      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId, pattern }: any) =>
+        connectionId === 'node-1' && !pattern
           ? [
               {
                 correlationId: 'grp-other',
@@ -6608,8 +6608,8 @@ describe('AnomalyService', () => {
     });
 
     it('drops sibling groups that start outside the requested window', async () => {
-      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1' ? [siblingGroup('grp-1', 1_000_000)] : [],
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId, pattern }: any) =>
+        connectionId === 'node-1' && !pattern ? [siblingGroup('grp-1', 1_000_000)] : [],
       );
       storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-2'
@@ -7827,6 +7827,94 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('recovery amplification', () => {
+    const REPLICA = 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0';
+    let clock: number;
+    let offset: number;
+
+    async function pollPrimary(stats: {
+      bytes: number;
+      replica?: boolean;
+      syncFull?: number;
+      histlen?: number;
+    }): Promise<void> {
+      clock += 1000;
+      offset += stats.bytes;
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { redis_version: '8.0.0' },
+        replication: {
+          role: 'master',
+          master_replid: 'r',
+          master_repl_offset: String(offset),
+          repl_backlog_histlen: String(stats.histlen ?? 1_000_000),
+          connected_slaves: stats.replica === false ? '0' : '1',
+          ...(stats.replica === false ? {} : { slave0: REPLICA }),
+        },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { sync_full: String(stats.syncFull ?? 0), sync_partial_ok: '0', sync_partial_err: '0' },
+      });
+      await (service as any).pollConnection(mockCtx);
+    }
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+
+    beforeEach(() => {
+      clock = Date.now();
+      offset = 0;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('warns when the backlog covers under a minute of writes and resolves when it recovers', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        resolved: false,
+      });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].message).toContain('repl-backlog-size');
+
+      for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].resolved).toBe(true);
+    });
+
+    it('emits one escalation when a replica returns through a full resync', async () => {
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1 });
+      await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+      const [escalation, ...rest] = events(MetricType.RESYNC_ESCALATION);
+      expect(rest).toEqual([]);
+      expect(escalation.message).toContain('10.0.0.2:6379');
+      expect(escalation.message).toContain('sync_full +1');
+    });
+
+    it('stays quiet when a short disconnect is covered by the backlog', async () => {
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000 });
+
+      expect(events(MetricType.RESYNC_ESCALATION)).toEqual([]);
+    });
+
+    it('clears its state when a connection is removed', async () => {
+      await pollPrimary({ bytes: 2000 });
+
+      (service as any).onConnectionRemoved(mockCtx.connectionId);
+
+      expect((service as any).resyncEscalation.has(mockCtx.connectionId)).toBe(false);
+      expect((service as any).backlogCoverage.has(mockCtx.connectionId)).toBe(false);
+    });
+  });
+
   describe('replication stream sample', () => {
     it('exposes the per-replica gap and backlog length from the latest poll', async () => {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
@@ -8199,7 +8287,7 @@ describe('AnomalyService', () => {
     });
 
     it('evaluates divergence after the poll, even when a later detector fails', async () => {
-      const sample = { role: 'primary' };
+      const sample = { role: 'primary', replicas: [] };
       const detect = jest.fn().mockResolvedValue(undefined);
       const order: string[] = [];
       (service as any).replicationStream = { observe: () => sample, forget: jest.fn() };

@@ -68,6 +68,8 @@ export enum MetricType {
   CONNECTION_CHURN = 'connection_churn',
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
   REPLICATION_DIVERGENCE = 'replication_divergence',
+  BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
+  RESYNC_ESCALATION = 'resync_escalation',
 }
 
 /**
@@ -111,6 +113,8 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CONNECTION_CHURN,
   MetricType.RESHARD_SHARD_SKEW,
   MetricType.REPLICATION_DIVERGENCE,
+  MetricType.BACKLOG_COVERAGE_RISK,
+  MetricType.RESYNC_ESCALATION,
 ]);
 
 export enum AnomalySeverity {
@@ -138,6 +142,7 @@ export enum AnomalyPattern {
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
   RESHARD_PRESSURE = 'reshard_pressure',
   REPLICATION_DIVERGENCE = 'replication_divergence',
+  RECOVERY_AMPLIFICATION = 'recovery_amplification',
   UNKNOWN = 'unknown',
 }
 

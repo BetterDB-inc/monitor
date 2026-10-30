@@ -57,6 +57,19 @@ import {
   isReshardActive,
   reshardSkewSignature,
 } from './reshard-pressure-detector';
+import {
+  BACKLOG_COVERAGE_CRITICAL_SEC,
+  BACKLOG_COVERAGE_WARNING_SEC,
+  BacklogCoverageLevel,
+  BacklogCoverageState,
+  ResyncEscalation,
+  ResyncEscalationState,
+  backlogCoverageSec,
+  createBacklogCoverageState,
+  createResyncEscalationState,
+  observeResyncEscalation,
+  stepBacklogCoverage,
+} from './recovery-amplification-detector';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
@@ -438,6 +451,9 @@ export class AnomalyService
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
   private replicationStream = new ReplicationStreamTracker();
+  private backlogCoverage = new Map<string, BacklogCoverageState>();
+  private backlogCoverageEventIds = new Map<string, string>();
+  private resyncEscalation = new Map<string, ResyncEscalationState>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
@@ -858,6 +874,9 @@ export class AnomalyService
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
     this.replicationStream.forget(connectionId);
+    this.backlogCoverage.delete(connectionId);
+    this.backlogCoverageEventIds.delete(connectionId);
+    this.resyncEscalation.delete(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
     this.divergenceOrphans.delete(connectionId);
@@ -1548,6 +1567,9 @@ export class AnomalyService
       // Replication output-buffer pressure (valkey-io/valkey#3963): replica
       // omem approaching the slave COB limit, and the resync-loop signal once
       // an overflow already forced a full sync. State-based with hysteresis.
+      if (live && replicationSample) {
+        await this.detectRecoveryAmplification(replicationSample, info, ctx);
+      }
       if (live) await this.detectCobPressure(info, ctx, timestamp);
 
       // Full-resync failure loop (valkey-io/valkey#1836): this replica's link
@@ -6480,6 +6502,121 @@ export class AnomalyService
         latest: windows[windows.length - 1] ?? null,
         windows,
       }));
+  }
+
+  private async detectRecoveryAmplification(
+    sample: ReplicationStreamSample,
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const coverageSec = backlogCoverageSec(sample);
+    const coverage = this.backlogCoverage.get(ctx.connectionId) ?? createBacklogCoverageState();
+    this.backlogCoverage.set(ctx.connectionId, coverage);
+    const levelBefore = coverage.level;
+    const step = stepBacklogCoverage(coverage, coverageSec);
+    if (step.escalatedTo) {
+      try {
+        await this.emitBacklogCoverageRisk(ctx, sample, coverageSec!, step.escalatedTo);
+      } catch (err) {
+        coverage.level = levelBefore;
+        throw err;
+      }
+    }
+    if (step.cleared) await this.settleBacklogCoverageEvent(ctx.connectionId);
+
+    if (sample.role !== 'primary') {
+      this.resyncEscalation.delete(ctx.connectionId);
+      return;
+    }
+    const counters = {
+      full: this.parseNumber(info.sync_full) ?? 0,
+      partialOk: this.parseNumber(info.sync_partial_ok) ?? 0,
+      partialErr: this.parseNumber(info.sync_partial_err) ?? 0,
+    };
+    const state = this.resyncEscalation.get(ctx.connectionId) ?? createResyncEscalationState();
+    this.resyncEscalation.set(ctx.connectionId, state);
+    for (const escalation of observeResyncEscalation(state, sample, counters, coverageSec)) {
+      await this.addAnomaly(this.buildResyncEscalationEvent(ctx, sample, escalation), ctx);
+    }
+  }
+
+  private async emitBacklogCoverageRisk(
+    ctx: ConnectionContext,
+    sample: ReplicationStreamSample,
+    coverageSec: number,
+    level: BacklogCoverageLevel,
+  ): Promise<void> {
+    const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+    const threshold =
+      level === 'critical' ? BACKLOG_COVERAGE_CRITICAL_SEC : BACKLOG_COVERAGE_WARNING_SEC;
+    const rate = Math.max(sample.bytesPerSec ?? 0, sample.bytesPerSecEwma ?? 0);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp: sample.timestamp,
+      metricType: MetricType.BACKLOG_COVERAGE_RISK,
+      anomalyType: AnomalyType.DROP,
+      severity,
+      value: coverageSec,
+      baseline: threshold,
+      stdDev: 0,
+      zScore: 0,
+      threshold,
+      message:
+        `Replication backlog covers only ${coverageSec.toFixed(1)}s of writes at ` +
+        `${Math.round(rate)} bytes/s: a replica disconnected for longer than that needs a full ` +
+        `resync. Raise repl-backlog-size or reduce the write rate.`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
+    await this.addAnomaly(event, ctx);
+    this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
+    if (previous) await this.resolveAnomalyOutcome(previous);
+  }
+
+  private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
+    const id = this.backlogCoverageEventIds.get(connectionId);
+    if (id && (await this.resolveAnomalyOutcome(id)) !== 'retry') {
+      this.backlogCoverageEventIds.delete(connectionId);
+    }
+  }
+
+  private buildResyncEscalationEvent(
+    ctx: ConnectionContext,
+    sample: ReplicationStreamSample,
+    escalation: ResyncEscalation,
+  ): AnomalyEvent {
+    const seconds = escalation.disconnectedForMs / 1000;
+    const coverage =
+      escalation.coverageSec === null || !Number.isFinite(escalation.coverageSec)
+        ? 'unknown'
+        : `${escalation.coverageSec.toFixed(1)}s`;
+    const counters = [
+      escalation.fullSyncs > 0 ? `sync_full +${escalation.fullSyncs}` : null,
+      escalation.partialSyncErrors > 0 ? `sync_partial_err +${escalation.partialSyncErrors}` : null,
+    ]
+      .filter((part) => part !== null)
+      .join(', ');
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp: sample.timestamp,
+      metricType: MetricType.RESYNC_ESCALATION,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: seconds,
+      baseline: 0,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 0,
+      message:
+        `Replica ${escalation.addr} came back after ${seconds.toFixed(0)}s and could not resume ` +
+        `from the backlog (${counters}; backlog coverage at disconnect ${coverage}).`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    return event;
   }
 
   private async detectReplicationDivergence(
