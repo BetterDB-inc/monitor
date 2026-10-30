@@ -356,7 +356,7 @@ An episode ends after 2 cold windows, or when the monitor misses samples for lon
 
 If storage is unavailable, the finding stays as one event in memory and is retried once per window with the same ID. The `retry_amplification.detected` webhook still goes out once per level. A critical finding that falls back to warning sends no second webhook until the critical has been saved.
 
-**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
+**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
 
 **Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
 - Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting clients at 1.3× or more of their lifetime rate
