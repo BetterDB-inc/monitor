@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder } from '../incident-timeline';
+import { MetricBuffer } from '../metric-buffer';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -6534,6 +6535,73 @@ describe('AnomalyService', () => {
       await expect(service.getIncidentTimeline(incident.incidentId, 'conn-1')).resolves.toEqual(
         incident,
       );
+    });
+
+    it('does not emit a second group when the first step ages out and a later one rematches', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'late', timestamp: now - 54 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5.5 * MIN);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+    });
+
+    describe('recovery probe', () => {
+      const probe = () => (service as any).incidentRecoveryProbe;
+      const T = 1_700_000_000_000;
+      const baseline = (start: number): Array<[number, number]> =>
+        Array.from({ length: 30 }, (_, i) => [start + i * 1000, 10 + (i % 2)]);
+      const withBuffer = (samples: Array<[number, number]>) => {
+        const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
+        samples.forEach(([ts, value]) => buffer.addSample(value, ts));
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
+      };
+
+      it('recovers at the first sample back in band after the settle time', () => {
+        withBuffer([
+          ...baseline(T - 30_000),
+          [T + MIN, 500],
+          [T + 2 * MIN, 10],
+          [T + 3 * MIN, 600],
+        ]);
+
+        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBe(T + 2 * MIN);
+      });
+
+      it('stays open while no sample after the settle time is back in band', () => {
+        withBuffer([
+          ...baseline(T - 30_000),
+          [T + MIN, 900],
+        ]);
+
+        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBeNull();
+      });
+
+      it('does not judge an incident older than the buffer by the current samples', () => {
+        withBuffer([
+          ...baseline(T + 60 * MIN),
+          [T + 61 * MIN, 900],
+        ]);
+
+        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBe(T + MIN);
+      });
+    });
+
+    it('includes memory-only events older than the cache TTL in history', async () => {
+      const old = anomaly({ id: 'mem-only', timestamp: Date.now() - 2 * 60 * MIN });
+      (service as any).recentAnomalies.push(old);
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.flatMap((i) => i.entries.map((e) => e.anomalyId))).toContain('mem-only');
     });
 
     it('stamps resolvedAt when an anomaly is resolved', async () => {

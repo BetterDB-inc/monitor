@@ -245,7 +245,7 @@ export class AnomalyService
     getSequenceRules,
   );
   private liveIncidents: IncidentTimeline[] = [];
-  private readonly emittedSequenceGroups = new Map<string, number>();
+  private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5452,15 +5452,19 @@ export class AnomalyService
   }
 
   private incidentRecoveryProbe: RecoveryProbe = (connectionId, metricType, since) => {
-    const recoveredAt = since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
+    const settledAt = since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
     const buffer = this.buffers.get(connectionId)?.get(metricType);
-    const latest = buffer?.getLatest() ?? null;
-    if (buffer && buffer.isReady() && latest !== null) {
+    if (buffer && buffer.isReady()) {
+      const samples = buffer.getSamples();
+      if (samples[0].timestamp > settledAt) return settledAt;
       const warningZ =
         this.detectors.get(connectionId)?.get(metricType)?.getConfig().warningZScore ?? 2;
-      return Math.abs(buffer.getZScore(latest)) < warningZ ? recoveredAt : null;
+      const backInBand = samples.find(
+        (s) => s.timestamp >= settledAt && Math.abs(buffer.getZScore(s.value)) < warningZ,
+      );
+      return backInBand?.timestamp ?? null;
     }
-    return POINT_IN_TIME_METRICS.has(metricType) ? recoveredAt : null;
+    return POINT_IN_TIME_METRICS.has(metricType) ? settledAt : null;
   };
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
@@ -5468,20 +5472,22 @@ export class AnomalyService
     const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
 
-    for (const [key, at] of this.emittedSequenceGroups) {
-      if (at < now - windowMs) this.emittedSequenceGroups.delete(key);
+    for (const [key, at] of this.sequenceGroupedAnomalies) {
+      if (at < now - windowMs) this.sequenceGroupedAnomalies.delete(key);
     }
 
     const byId = new Map(live.map((a) => [a.id, a]));
     for (const incident of this.liveIncidents) {
       for (const match of incident.sequenceMatches) {
-        const key = `${match.pattern}\u0000${match.anomalyIds[0]}`;
-        if (this.emittedSequenceGroups.has(key)) continue;
+        const keys = match.anomalyIds.map((id) => `${match.pattern}\u0000${id}`);
+        if (keys.some((key) => this.sequenceGroupedAnomalies.has(key))) continue;
         const anomalies = match.anomalyIds
           .map((id) => byId.get(id))
           .filter((a): a is AnomalyEvent => a !== undefined);
         if (anomalies.length === 0) continue;
-        this.emittedSequenceGroups.set(key, now);
+        anomalies.forEach((a) =>
+          this.sequenceGroupedAnomalies.set(`${match.pattern}\u0000${a.id}`, a.timestamp),
+        );
         await this.recordSequenceGroup({
           correlationId: randomUUID(),
           timestamp: anomalies[0].timestamp,
@@ -5551,7 +5557,14 @@ export class AnomalyService
         this.getRecentAnomalies(from, endTime, undefined, undefined, 1000, id),
       ),
     );
-    const events = [...new Map(batches.flat().map((e) => [e.id, e])).values()];
+    const scope = new Set(connectionIds);
+    const cached = this.recentAnomalies.filter(
+      (e) =>
+        e.timestamp >= from &&
+        (!endTime || e.timestamp <= endTime) &&
+        (!connectionId || scope.has(e.connectionId)),
+    );
+    const events = [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
     return this.incidentTimelineBuilder
       .build(events, now, this.incidentRecoveryProbe)
       .reverse()
