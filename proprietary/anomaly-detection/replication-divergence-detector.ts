@@ -221,6 +221,17 @@ function evaluateReplica(
   };
 }
 
+function dropReplica(
+  state: DivergenceConnectionState,
+  replica: ReplicaDivergenceState,
+): DivergenceRecovery[] {
+  if (replica.level === 'none') {
+    state.replicas.delete(replica.addr);
+    return [];
+  }
+  return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
+}
+
 function closeWindow(
   state: DivergenceConnectionState,
   start: number,
@@ -234,12 +245,7 @@ function closeWindow(
   }
 
   for (const [addr, replica] of state.replicas) {
-    if (!state.accumulators.has(addr)) {
-      state.replicas.delete(addr);
-      if (replica.level !== 'none') {
-        outcomes.push({ kind: 'cleared', addr, eventId: replica.eventId, gapBytes: null });
-      }
-    }
+    if (!state.accumulators.has(addr)) outcomes.push(...dropReplica(state, replica));
   }
 
   for (const [addr, acc] of state.accumulators) {
@@ -263,7 +269,11 @@ export function observeDivergence(
   sample: ReplicationStreamSample,
   windowMs: number,
 ): DivergenceOutcome[] {
-  if (sample.role !== 'primary') return [];
+  if (sample.role !== 'primary') {
+    state.windowStart = null;
+    state.accumulators = new Map();
+    return [...state.replicas.values()].flatMap((replica) => dropReplica(state, replica));
+  }
   const outcomes: DivergenceOutcome[] = [];
 
   if (state.windowStart === null) {
