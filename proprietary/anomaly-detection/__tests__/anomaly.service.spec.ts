@@ -6745,16 +6745,32 @@ describe('AnomalyService', () => {
         expect(probe()(signal({ until: T + MIN }))).toBeNull();
       });
 
-      it('infers recovery for an old signal that fired again after the buffer window', () => {
+      it('does not know whether an old signal recovered before it fired again', () => {
         withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
 
-        expect(probe()(signal({ until: T + 30 * MIN }))).toBe(T + MIN);
+        expect(probe()(signal({ until: T + 30 * MIN }))).toBeUndefined();
       });
 
-      it('recovers an old signal at the first observed in-band sample, not a made-up time', () => {
+      it('does not know when an old signal recovered once the buffer moved past it', () => {
         withBuffer([[T + 60 * MIN, 900], ...baseline(T + 61 * MIN)]);
 
-        expect(probe()(signal())).toBe(T + 61 * MIN);
+        expect(probe()(signal())).toBeUndefined();
+      });
+
+      it('does not know whether a signal recovered without its buffer', () => {
+        expect(probe()(signal({ connectionId: 'gone' }))).toBeUndefined();
+      });
+
+      it('keeps a state signal with no buffer open', () => {
+        expect(
+          probe()(signal({ connectionId: 'gone', metricType: MetricType.CLUSTER_STATE })),
+        ).toBeNull();
+      });
+
+      it('still settles a point-in-time signal without its buffer', () => {
+        expect(probe()(signal({ connectionId: 'gone', metricType: MetricType.COMMAND_P99 }))).toBe(
+          T + MIN,
+        );
       });
     });
 

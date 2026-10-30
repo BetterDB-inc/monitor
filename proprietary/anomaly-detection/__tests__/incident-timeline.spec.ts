@@ -159,6 +159,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery).toEqual({
         status: 'recovered',
         openSignals: [],
+        unknownSignals: [],
         recoveredAt: T0 + 2 * MIN,
       });
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([T0 + MIN, T0 + 2 * MIN]);
@@ -198,6 +199,41 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.recoveredAt).toBeNull();
     });
 
+    it('reports recovery as unknown when the probe cannot tell', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ metricType: MetricType.CONNECTIONS }),
+          event({ metricType: MetricType.MEMORY_USED, timestamp: T0 + MIN }),
+        ],
+        T0 + 30 * MIN,
+        ({ metricType, since }) =>
+          metricType === MetricType.CONNECTIONS ? since + MIN : undefined,
+      );
+
+      expect(incident.recovery).toEqual({
+        status: 'unknown',
+        openSignals: [],
+        unknownSignals: [MetricType.MEMORY_USED],
+        recoveredAt: null,
+      });
+      expect(incident.entries.map((e) => e.recoveredAt)).toEqual([T0 + MIN, null]);
+    });
+
+    it('keeps an incident with an open signal recovering even if another is unknown', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ metricType: MetricType.CONNECTIONS }),
+          event({ metricType: MetricType.MEMORY_USED }),
+        ],
+        T0 + 5 * MIN,
+        ({ metricType }) => (metricType === MetricType.CONNECTIONS ? null : undefined),
+      );
+
+      expect(incident.recovery.status).toBe('recovering');
+      expect(incident.recovery.openSignals).toEqual([MetricType.CONNECTIONS]);
+      expect(incident.recovery.unknownSignals).toEqual([MetricType.MEMORY_USED]);
+    });
+
     it('settles into degraded when signals stay open past the degraded threshold', () => {
       const [incident] = new IncidentTimelineBuilder().build(
         [event()],
@@ -209,7 +245,9 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     it('judges a signal by its latest event only', () => {
-      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(({ since }) => since + MIN);
+      const probe = jest.fn<ReturnType<RecoveryProbe>, Parameters<RecoveryProbe>>(
+        ({ since }) => since + MIN,
+      );
 
       new IncidentTimelineBuilder().build(
         [event(), event({ timestamp: T0 + MIN })],
@@ -229,7 +267,7 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     it('judges recovery against the baseline from before the incident', () => {
-      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(() => null);
+      const probe = jest.fn<ReturnType<RecoveryProbe>, Parameters<RecoveryProbe>>(() => null);
 
       new IncidentTimelineBuilder().build(
         [
@@ -244,7 +282,7 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     it('bounds the probe by the next occurrence of the signal', () => {
-      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(() => null);
+      const probe = jest.fn<ReturnType<RecoveryProbe>, Parameters<RecoveryProbe>>(() => null);
 
       new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
         [event(), event({ timestamp: T0 + 10 * MIN })],

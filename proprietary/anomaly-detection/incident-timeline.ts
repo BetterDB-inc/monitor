@@ -14,7 +14,7 @@ export interface IncidentTimelineEntry {
   recoveredAt: number | null;
 }
 
-export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded';
+export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
 
 export interface IncidentSequenceMatch {
   pattern: AnomalyPattern;
@@ -37,6 +37,7 @@ export interface IncidentTimeline {
   recovery: {
     status: IncidentRecoveryStatus;
     openSignals: MetricType[];
+    unknownSignals: MetricType[];
     recoveredAt: number | null;
   };
 }
@@ -64,7 +65,7 @@ export interface RecoverySignal {
   stdDev: number;
 }
 
-export type RecoveryProbe = (signal: RecoverySignal) => number | null;
+export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
 
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
 
@@ -214,7 +215,7 @@ export class IncidentTimelineBuilder {
       if (!firstBySignal.has(key)) firstBySignal.set(key, event);
       lastBySignal.set(key, event);
     }
-    const recoveredAtBySignal = new Map<string, number | null>();
+    const recoveredAtBySignal = new Map<string, number | null | undefined>();
     for (const [key, event] of lastBySignal) {
       recoveredAtBySignal.set(
         key,
@@ -252,11 +253,14 @@ export class IncidentTimelineBuilder {
     }
 
     const openSignals: MetricType[] = [];
+    const unknownSignals: MetricType[] = [];
     let recoveredAt: number | null = null;
     for (const [key, at] of recoveredAtBySignal) {
       const metricType = lastBySignal.get(key)!.metricType;
       if (at === null) {
         if (!openSignals.includes(metricType)) openSignals.push(metricType);
+      } else if (at === undefined) {
+        if (!unknownSignals.includes(metricType)) unknownSignals.push(metricType);
       } else if (recoveredAt === null || at > recoveredAt) {
         recoveredAt = at;
       }
@@ -275,9 +279,10 @@ export class IncidentTimelineBuilder {
       matchedPatterns: sequenceMatches.map((m) => m.pattern),
       sequenceMatches,
       recovery: {
-        status: this.status(now, lastEventAt, openSignals.length),
+        status: this.status(now, lastEventAt, openSignals.length, unknownSignals.length),
         openSignals,
-        recoveredAt: openSignals.length === 0 ? recoveredAt : null,
+        unknownSignals,
+        recoveredAt: openSignals.length === 0 && unknownSignals.length === 0 ? recoveredAt : null,
       },
     };
   }
@@ -292,7 +297,7 @@ export class IncidentTimelineBuilder {
     until: number | null,
     now: number,
     probe: RecoveryProbe,
-  ): number | null {
+  ): number | null | undefined {
     if (event.resolved) return event.resolvedAt ?? event.timestamp;
     if (now - event.timestamp < this.opts.settleMs) return null;
     return probe({
@@ -305,10 +310,15 @@ export class IncidentTimelineBuilder {
     });
   }
 
-  private status(now: number, lastEventAt: number, openCount: number): IncidentRecoveryStatus {
+  private status(
+    now: number,
+    lastEventAt: number,
+    openCount: number,
+    unknownCount: number,
+  ): IncidentRecoveryStatus {
     const quietFor = now - lastEventAt;
     if (quietFor < this.opts.gapMs) return 'active';
-    if (openCount === 0) return 'recovered';
+    if (openCount === 0) return unknownCount === 0 ? 'recovered' : 'unknown';
     return quietFor >= this.opts.degradedAfterMs ? 'degraded' : 'recovering';
   }
 }

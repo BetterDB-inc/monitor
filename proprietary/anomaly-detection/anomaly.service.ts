@@ -1583,8 +1583,7 @@ export class AnomalyService
     const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
     const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
     buffer.addSample(sample.connectsPerSec, timestamp);
-    const elevated =
-      buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
+    const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
     if (!elevated || !isChurnWithFlatPopulation(sample)) {
       this.resetSpikeRun(detector, buffer, timestamp);
       return;
@@ -1967,7 +1966,7 @@ export class AnomalyService
     'Loop starvation like this is most often blocking hostname resolution on the ' +
     'Sentinel main loop (resolve-hostnames yes against FQDN targets), but a clock ' +
     'step (NTP), VM pause or live migration, CPU throttling or host overload stall ' +
-    'the loop the same way, and the INFO round-trip also includes this monitor\'s own ' +
+    "the loop the same way, and the INFO round-trip also includes this monitor's own " +
     'event-loop and network latency. If it is DNS, address monitored/announced targets ' +
     'by IP or serve those names from a local cache (peers resolving announced FQDNs are ' +
     'the ones that stall); otherwise check the host clock, scheduling and CPU.';
@@ -2179,7 +2178,9 @@ export class AnomalyService
     if (looksDown) {
       return false;
     }
-    return message.includes('timeout') || message.includes('timed out') || message.includes('etimedout');
+    return (
+      message.includes('timeout') || message.includes('timed out') || message.includes('etimedout')
+    );
   }
 
   private buildSentinelLoopStallEvent(
@@ -5449,9 +5450,12 @@ export class AnomalyService
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => {
     const settledAt = signal.since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
+    if (signal.until !== null && signal.until <= settledAt) return null;
     const buffer = this.buffers.get(signal.connectionId)?.get(signal.metricType);
-    if (!buffer || !buffer.isReady()) {
-      return POINT_IN_TIME_METRICS.has(signal.metricType) ? settledAt : null;
+    const samples = buffer?.isReady() ? buffer.getSamples() : [];
+    if (!buffer || samples.length === 0 || samples[0].timestamp > settledAt) {
+      if (POINT_IN_TIME_METRICS.has(signal.metricType)) return settledAt;
+      return METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) ? null : undefined;
     }
     const warningZ =
       this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??
@@ -5460,16 +5464,13 @@ export class AnomalyService
       signal.stdDev > 0
         ? Math.abs(value - signal.baseline) / signal.stdDev < warningZ
         : Math.abs(buffer.getZScore(value)) < warningZ;
-    const observed = buffer
-      .getSamples()
-      .filter(
-        (s) => s.timestamp >= settledAt && (signal.until === null || s.timestamp < signal.until),
-      );
-    const backInBand = observed.find((s) => inBand(s.value));
-    if (backInBand) return backInBand.timestamp;
-    if (observed.length > 0 || signal.until === null) return null;
-    if (signal.until - signal.since <= DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs) return null;
-    return settledAt;
+    const backInBand = samples.find(
+      (s) =>
+        s.timestamp >= settledAt &&
+        (signal.until === null || s.timestamp < signal.until) &&
+        inBand(s.value),
+    );
+    return backInBand ? backInBand.timestamp : null;
   };
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
@@ -5609,7 +5610,10 @@ export class AnomalyService
           signal.connectionId,
         );
         return after.reduce<AnomalyEvent | null>(
-          (first, e) => (first === null || e.timestamp < first.timestamp ? e : first),
+          (first, e) =>
+            e.timestamp > windowEnd && (first === null || e.timestamp < first.timestamp)
+              ? e
+              : first,
           null,
         );
       }),
