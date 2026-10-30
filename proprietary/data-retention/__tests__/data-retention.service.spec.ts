@@ -79,6 +79,14 @@ describe('DataRetentionService', () => {
     }
   });
 
+  // Repository-backed store: attached after the storage mock is built so the
+  // prune-method lists below stay limited to the pruneOld* mocks.
+  const maintenanceWindows = { prune: jest.fn() };
+  beforeEach(() => {
+    maintenanceWindows.prune.mockReset().mockResolvedValue(25);
+    (storage as unknown as Record<string, unknown>).getMaintenanceWindowRepository = () => maintenanceWindows;
+  });
+
   const allPruneMethods = [
     'pruneOldSlowLogEntries',
     'pruneOldCommandLogEntries',
@@ -242,5 +250,14 @@ describe('DataRetentionService', () => {
     for (const method of allPruneMethods) {
       expect(storage[method]).not.toHaveBeenCalled();
     }
+  });
+
+  it('prunes ended maintenance windows at the tier cutoff', async () => {
+    licenseService.getLicenseTier.mockReturnValue(Tier.enterprise);
+
+    await service.runRetention();
+
+    expect(maintenanceWindows.prune).toHaveBeenCalledTimes(1);
+    expect(maintenanceWindows.prune).toHaveBeenCalledWith(NOW - 365 * MS_PER_DAY);
   });
 });

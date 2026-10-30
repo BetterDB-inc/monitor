@@ -220,6 +220,8 @@ export enum DeliveryStatus {
   FAILED = 'failed',
   RETRYING = 'retrying',
   DEAD_LETTER = 'dead_letter',
+  /** Not sent: a maintenance window covered the event. Recorded so "why was nobody paged?" has an answer. */
+  SUPPRESSED = 'suppressed',
 }
 
 export interface RetryPolicy {

@@ -2,6 +2,7 @@ import { Injectable, Inject, Logger, OnModuleDestroy, Optional } from '@nestjs/c
 import { ConfigService } from '@nestjs/config';
 import { LRUCache } from 'lru-cache';
 import type {
+  MaintenanceWindow,
   Webhook,
   WebhookDelivery,
   WebhookPayload,
@@ -23,6 +24,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { formatWebhookBody } from './webhook-payload-formatter';
 import { BlockedAddressError, guardedLookup } from '../common/utils/outbound-url-guard';
 import { pinnedRequest } from '../common/utils/pinned-request';
+import { MaintenanceWindowService } from './maintenance/maintenance-window.service';
 
 interface AlertState {
   fired: boolean;
@@ -39,6 +41,11 @@ interface PendingEvent {
   payloads: Map<string, WebhookPayload>;
   pendingWebhookIds: Set<string> | null;
   unconfirmedWebhookIds: Set<string>;
+  /**
+   * Maintenance decision, made once on the first delivery attempt so an event
+   * retried through the storage buffer is judged the same way every time.
+   */
+  maintenance?: { suppressedBy: MaintenanceWindow | null; openerSettled?: boolean };
 }
 
 const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
@@ -108,7 +115,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     private readonly webhooksService: WebhooksService,
     private readonly configService: ConfigService,
     @Optional() private readonly connectionRegistry?: ConnectionRegistry,
+    @Optional() private readonly maintenance?: MaintenanceWindowService,
   ) {
+    // An opener silenced by a maintenance window that is still unresolved
+    // when the window ends is sent then, through the normal path.
+    this.maintenance?.setReplayHandler((eventType, data, connectionId) =>
+      this.dispatchEvent(eventType, data, connectionId),
+    );
     this.DEFAULT_REQUEST_TIMEOUT_MS = this.configService.get<number>(
       'WEBHOOK_TIMEOUT_MS',
       DEFAULT_DELIVERY_CONFIG.timeoutMs,
@@ -236,6 +249,15 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     knownWebhooks?: Webhook[],
   ): Promise<{ storageUnavailable: boolean; terminalFailure: boolean }> {
     const { eventType, connectionId } = event;
+    // Decided once, at the event's own time: an event buffered through a
+    // storage outage is judged by the window that covered it when it fired.
+    if (event.maintenance === undefined) {
+      event.maintenance = {
+        suppressedBy: this.maintenance?.evaluate(eventType, event.data, connectionId, event.timestamp) ?? null,
+      };
+    }
+    const { suppressedBy } = event.maintenance;
+
     let webhooks: Webhook[];
     if (knownWebhooks) {
       webhooks = knownWebhooks;
@@ -256,6 +278,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       this.logger.debug(
         `No webhooks subscribed to event: ${eventType}${connectionId ? ` for connection ${connectionId}` : ''}`,
       );
+      this.settleOpener(event, false);
+      return { storageUnavailable: false, terminalFailure: false };
+    }
+
+    if (suppressedBy !== null) {
+      this.logger.log(
+        `Suppressed ${eventType} for ${targets.length} webhook(s): maintenance window "${suppressedBy.name}" (${suppressedBy.id})`,
+      );
+      await Promise.allSettled(
+        targets.map((webhook) => this.recordSuppressedDelivery(webhook, event, suppressedBy)),
+      );
       return { storageUnavailable: false, terminalFailure: false };
     }
 
@@ -270,6 +303,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const storageUnavailable = settled.some(
       (result) => result.status === 'fulfilled' && result.value === STORAGE_UNAVAILABLE,
     );
+    const accepted = settled.some(
+      (result) =>
+        result.status === 'fulfilled' &&
+        (result.value === DeliveryStatus.SUCCESS ||
+          result.value === DeliveryStatus.RETRYING ||
+          result.value === DeliveryStatus.PENDING),
+    );
+    // A storage outage mid-send leaves the event to be retried; settle then.
+    if (accepted || !storageUnavailable) {
+      this.settleOpener(event, accepted);
+    }
     const failed = settled.filter((result) => {
       if (result.status === 'rejected') {
         return true;
@@ -286,6 +330,49 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     return { storageUnavailable, terminalFailure: failed.length > 0 };
+  }
+
+  /** Tell the maintenance service how an unsuppressed opener ended, once per event. */
+  private settleOpener(event: PendingEvent, accepted: boolean): void {
+    if (event.maintenance === undefined || event.maintenance.suppressedBy !== null) return;
+    if (event.maintenance.openerSettled) return;
+    event.maintenance.openerSettled = true;
+    this.maintenance?.settleOpener(event.eventType, event.connectionId, accepted);
+  }
+
+  private isSuppressed(eventType: WebhookEventType, connectionId?: string): boolean {
+    return (this.maintenance?.findSuppressing(eventType, connectionId) ?? null) !== null;
+  }
+
+  /**
+   * Leave a SUPPRESSED row in the delivery log instead of sending, so the
+   * log answers "why was nobody paged?". Best effort: the alert is not sent
+   * either way, so a storage failure here is only logged.
+   */
+  private async recordSuppressedDelivery(
+    webhook: Webhook,
+    event: PendingEvent,
+    window: MaintenanceWindow,
+  ): Promise<void> {
+    event.pendingWebhookIds?.delete(webhook.id);
+    if (!webhook.enabled) return;
+    const payload = this.getOrCreatePayload(webhook.id, event);
+    try {
+      await this.storageClient.createDelivery({
+        webhookId: webhook.id,
+        eventType: event.eventType,
+        payload,
+        status: DeliveryStatus.SUPPRESSED,
+        attempts: 0,
+        responseBody: `Suppressed by maintenance window "${window.name}" (${window.id})`,
+        completedAt: Date.now(),
+        connectionId: event.connectionId,
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to record suppressed ${event.eventType} delivery for webhook ${webhook.id} (connection ${event.connectionId ?? 'none'}, window ${window.id}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private bufferEvent(event: PendingEvent): boolean {
@@ -402,6 +489,22 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     // Already fired - check for recovery (configurable hysteresis)
+    this.applyAlertRecovery(alertKey, currentValue, threshold, isAbove, hysteresisFactor);
+
+    return false;
+  }
+
+  /** Clears fired state when the value is back past the recovery threshold. Returns true if it cleared. */
+  private applyAlertRecovery(
+    alertKey: string,
+    currentValue: number,
+    threshold: number,
+    isAbove: boolean,
+    hysteresisFactor: number = this.DEFAULT_ALERT_HYSTERESIS_FACTOR,
+  ): boolean {
+    if (!this.alertStates.has(alertKey)) {
+      return false;
+    }
     const recoveryThreshold = isAbove
       ? threshold * hysteresisFactor
       : threshold * (2 - hysteresisFactor); // Mirror for below-threshold alerts
@@ -411,8 +514,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       this.alertStates.delete(alertKey);
       this.logger.debug(`Alert ${alertKey} recovered: ${currentValue} (threshold: ${threshold})`);
     }
-
-    return false;
+    return recovered;
   }
 
   clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
@@ -440,6 +542,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown>,
     connectionId?: string,
   ): Promise<boolean> {
+    // While silenced, process recoveries so a breach after the window alerts,
+    // but never record a fired edge or dispatch: a "fired" edge written now
+    // would stop a condition that outlives the window from alerting at its end.
+    if (this.isSuppressed(eventType, connectionId)) {
+      this.applyAlertRecovery(alertKey, currentValue, threshold, isAbove);
+      return false;
+    }
     if (!this.shouldFireAlert(alertKey, currentValue, threshold, isAbove)) {
       return false;
     }
@@ -489,6 +598,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
   ): Promise<boolean> {
+    // See dispatchThresholdAlert: while silenced, recovery runs per webhook
+    // (below) but nothing is recorded as fired or dispatched.
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
     try {
@@ -505,6 +616,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
         return false;
       }
 
+      // Sampled after the lookup: a window that opened while it awaited must
+      // not let a fired edge be recorded for an alert that is not sent.
+      const silenced = this.isSuppressed(eventType, connectionId);
+
       // Dispatch to each webhook with its own threshold
       await Promise.allSettled(
         webhooks.map(async (webhook) => {
@@ -517,6 +632,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
           const alertKey = connectionId
             ? `${alertKeyPrefix}:${connectionId}:${webhook.id}`
             : `${alertKeyPrefix}:${webhook.id}`;
+
+          if (silenced) {
+            this.applyAlertRecovery(
+              alertKey,
+              currentValue,
+              threshold,
+              isAbove,
+              alertConfig.hysteresisFactor,
+            );
+            return;
+          }
 
           if (
             this.shouldFireAlert(

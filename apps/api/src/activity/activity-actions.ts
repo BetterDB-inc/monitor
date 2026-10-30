@@ -16,6 +16,10 @@ export const ACTION_MAP: Readonly<Record<string, string>> = {
   'DELETE /workspace/members/:userId': 'member.remove',
   'PATCH /workspace/members/:userId/role': 'member.role',
   'POST /workspace/ownership/transfer': 'ownership.transfer',
+  'POST /maintenance-windows': 'maintenance_window.create',
+  'PATCH /maintenance-windows/:id': 'maintenance_window.update',
+  'POST /maintenance-windows/:id/end': 'maintenance_window.end',
+  'DELETE /maintenance-windows/:id': 'maintenance_window.delete',
 };
 
 type TargetSource = 'response' | 'param' | 'body';
@@ -37,6 +41,10 @@ const TARGET_RULES: Readonly<Record<string, TargetRule>> = {
   'member.remove': { type: 'member', source: 'param', key: 'userId' },
   'member.role': { type: 'member', source: 'param', key: 'userId' },
   'ownership.transfer': { type: 'member', source: 'body', key: 'userId' },
+  'maintenance_window.create': { type: 'maintenance_window', source: 'response', key: 'id' },
+  'maintenance_window.update': { type: 'maintenance_window', source: 'param', key: 'id' },
+  'maintenance_window.end': { type: 'maintenance_window', source: 'param', key: 'id' },
+  'maintenance_window.delete': { type: 'maintenance_window', source: 'param', key: 'id' },
 };
 
 export function actionFor(method: string, pattern: string): string {

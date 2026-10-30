@@ -84,6 +84,7 @@ export type {
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
 } from '@betterdb/shared';
+import type { MaintenanceWindowRepository } from './maintenance-window-repository.interface';
 import type { InvitationRepository } from './invitation-repository.interface';
 import type { ActivityRepository } from './activity-repository.interface';
 import type {
@@ -664,6 +665,8 @@ export interface StoragePort {
   ): Promise<boolean>;
   getRetriableDeliveries(limit?: number, connectionId?: string): Promise<WebhookDelivery[]>;
   pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Deliveries for the given events created at or after `since` (epoch ms), oldest first. */
+  getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]>;
 
   // Bulk-Delete Audit Methods - one row per execute run
   saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string>;
@@ -860,6 +863,8 @@ export interface StoragePort {
     store_name: string;
     target_discriminator: string;
   }): Promise<number>;
+
+  getMaintenanceWindowRepository(): MaintenanceWindowRepository;
 
   getInvitationRepository(): InvitationRepository;
 

@@ -5,6 +5,8 @@ import { WebhookDispatcherService } from './webhook-dispatcher.service';
 import { WebhookProcessorService } from './webhook-processor.service';
 import { WebhookHealthService } from './webhook-health.service';
 import { WebhooksController } from './webhooks.controller';
+import { MaintenanceWindowService } from './maintenance/maintenance-window.service';
+import { MaintenanceWindowsController } from './maintenance/maintenance-windows.controller';
 
 @Module({
   imports: [StorageModule],
@@ -13,10 +15,12 @@ import { WebhooksController } from './webhooks.controller';
     WebhookDispatcherService,
     WebhookProcessorService,
     WebhookHealthService,
+    MaintenanceWindowService,
   ],
-  controllers: [WebhooksController],
+  controllers: [WebhooksController, MaintenanceWindowsController],
   exports: [
     WebhookDispatcherService, // Only export dispatcher for event monitors to use
+    MaintenanceWindowService,
   ],
 })
 export class WebhooksModule {}

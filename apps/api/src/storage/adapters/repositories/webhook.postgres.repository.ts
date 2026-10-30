@@ -287,6 +287,21 @@ export class WebhookPostgresRepository {
     return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
+  async getDeliveriesForEventsSince(
+    events: WebhookEventType[],
+    since: number,
+  ): Promise<WebhookDelivery[]> {
+    if (events.length === 0) return [];
+    const result = await this.pool.query(
+      `SELECT * FROM webhook_deliveries
+       WHERE event_type = ANY($1) AND created_at >= to_timestamp($2 / 1000.0)
+       ORDER BY created_at ASC
+       LIMIT 10000`,
+      [events, since],
+    );
+    return result.rows.map((row) => this.mappers.mapDeliveryRow(row));
+  }
+
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     // created_at < to_timestamp(...) is sargable (can use an index on
     // created_at); wrapping the column in EXTRACT() forced a full scan.

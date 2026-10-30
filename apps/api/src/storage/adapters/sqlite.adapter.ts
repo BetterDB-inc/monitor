@@ -135,6 +135,8 @@ import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } f
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
+import { MaintenanceWindowSqliteRepository } from './repositories/maintenance-window.sqlite.repository';
+import type { MaintenanceWindowRepository } from '../../common/interfaces/maintenance-window-repository.interface';
 import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repository';
 import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
@@ -639,6 +641,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private ready: boolean = false;
   private readonly mappers = new RowMappers(SqliteDialect);
   private webhookRepo!: WebhookSqliteRepository;
+  private maintenanceWindowRepo!: MaintenanceWindowSqliteRepository;
   private slowlogRepo!: SlowLogSqliteRepository;
   private invitationRepo!: InvitationSqliteRepository;
   private activityRepo!: ActivitySqliteRepository;
@@ -662,6 +665,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       // Run migrations for existing databases
       this.runMigrations();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
+      this.maintenanceWindowRepo = new MaintenanceWindowSqliteRepository(this.db);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
       this.activityRepo = new ActivitySqliteRepository(this.db);
@@ -2372,6 +2376,24 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_scheduled_captures_conn_status
         ON scheduled_captures(connection_id, status);
 
+      CREATE TABLE IF NOT EXISTS maintenance_windows (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        reason TEXT,
+        connection_id TEXT,
+        events TEXT NOT NULL,
+        starts_at INTEGER NOT NULL,
+        ends_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        created_by TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (ends_at > starts_at)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_maintenance_windows_ends_at
+        ON maintenance_windows(ends_at);
+
       CREATE TABLE IF NOT EXISTS invitations (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
@@ -3580,6 +3602,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<WebhookDelivery[]> {
     if (!this.db) throw new Error('Database not initialized');
     return this.webhookRepo.getRetriableDeliveries(limit, connectionId);
+  }
+
+  async getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.webhookRepo.getDeliveriesForEventsSince(events, since);
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -6566,6 +6593,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       lastFiredSessionId: (row.last_fired_session_id as string | null) ?? undefined,
       lastSkipReason: (row.last_skip_reason as string | null) ?? undefined,
     };
+  }
+
+  getMaintenanceWindowRepository(): MaintenanceWindowRepository {
+    return this.maintenanceWindowRepo;
   }
 
   getInvitationRepository(): InvitationRepository {

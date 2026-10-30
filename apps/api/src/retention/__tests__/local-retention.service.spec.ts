@@ -54,6 +54,17 @@ describe('LocalRetentionService', () => {
     }
   });
 
+  // Repository-backed store, attached non-enumerable so the "every prune
+  // method" loops below keep iterating only the pruneOld* mocks.
+  const maintenanceWindows = { prune: jest.fn() };
+  beforeEach(() => {
+    maintenanceWindows.prune.mockReset().mockResolvedValue(7);
+    Object.defineProperty(storage, 'getMaintenanceWindowRepository', {
+      value: () => maintenanceWindows,
+      enumerable: false,
+    });
+  });
+
   const makeService = (localRetentionDays: number | null) => {
     const retentionPolicy = {
       getLocalRetentionDays: jest.fn().mockReturnValue(localRetentionDays),
@@ -141,5 +152,12 @@ describe('LocalRetentionService', () => {
     expect(jest.getTimerCount()).toBe(0);
     service.onModuleDestroy();
     jest.useRealTimers();
+  });
+
+  it('prunes ended maintenance windows with the same cutoff', async () => {
+    const results = await runRetentionSweep(storage, 1_234, { error: jest.fn() } as any);
+
+    expect(maintenanceWindows.prune).toHaveBeenCalledWith(1_234);
+    expect(results.maintenance_windows).toBe(7);
   });
 });

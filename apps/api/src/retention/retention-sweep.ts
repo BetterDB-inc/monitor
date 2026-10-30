@@ -42,6 +42,10 @@ export async function runRetentionSweep(
     { name: 'hot_keys', fn: () => storage.pruneOldHotKeys(cutoff) },
     { name: 'acl_entries', fn: () => storage.pruneOldEntries(cutoff) },
     { name: 'webhook_deliveries', fn: () => storage.pruneOldDeliveries(cutoff) },
+    {
+      name: 'maintenance_windows',
+      fn: () => storage.getMaintenanceWindowRepository().prune(cutoff),
+    },
     { name: 'latency_snapshots', fn: () => storage.pruneOldLatencySnapshots(cutoff) },
     { name: 'latency_histograms', fn: () => storage.pruneOldLatencyHistograms(cutoff) },
     { name: 'memory_snapshots', fn: () => storage.pruneOldMemorySnapshots(cutoff) },
