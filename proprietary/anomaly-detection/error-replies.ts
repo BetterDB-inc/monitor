@@ -13,8 +13,7 @@ export interface ErrorstatDelta {
 }
 
 export function errorRepliesPerPoll(delta: number, elapsedMs: number, intervalMs: number): number {
-  const polls = Math.max(1, Math.round(elapsedMs / intervalMs));
-  return Math.round(delta / polls);
+  return Math.round((delta * intervalMs) / Math.max(elapsedMs, intervalMs));
 }
 
 export function readErrorstatCounts(errorstats: ErrorStatsInfo | undefined): Map<string, number> {
