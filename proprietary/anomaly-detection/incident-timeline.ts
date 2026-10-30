@@ -78,13 +78,12 @@ export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricTyp
 export const POINT_IN_TIME_QUIET_MS =
   SUSTAINED_COOLDOWN_MS + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
 
-export const UNTRACKED_RECOVERY_METRICS: ReadonlySet<MetricType> = new Set([
-  MetricType.REPLICATION_ROLE,
-  MetricType.CLUSTER_STATE,
-  MetricType.CONNECTION_CHURN,
-  MetricType.REJECTED_CONNECTIONS,
-  MetricType.EVICTED_CLIENTS,
-  MetricType.SLOWLOG_LAST_ID,
+export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
+  MetricType.RAFT_HEALTH,
+  MetricType.RESHARD_SHARD_SKEW,
+  MetricType.REPLICA_SLOT_STATE,
+  MetricType.REPLICATION_DIVERGENCE,
+  MetricType.BACKLOG_COVERAGE_RISK,
 ]);
 
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {

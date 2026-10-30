@@ -40,7 +40,7 @@ import {
   MAX_MISSED_RECOVERY_POLLS,
   POINT_IN_TIME_METRICS,
   POINT_IN_TIME_QUIET_MS,
-  UNTRACKED_RECOVERY_METRICS,
+  RESOLVER_BACKED_METRICS,
   RecoveryProbe,
   incidentStartOf,
   matchSequence,
@@ -5742,11 +5742,7 @@ export class AnomalyService
         if (signal.until !== null && signal.until <= quietAt) return null;
         return signal.now < quietAt ? undefined : quietAt;
       }
-      return !buffer &&
-        METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) &&
-        !UNTRACKED_RECOVERY_METRICS.has(signal.metricType)
-        ? null
-        : undefined;
+      return !buffer && RESOLVER_BACKED_METRICS.has(signal.metricType) ? null : undefined;
     }
     const warningZ =
       this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??

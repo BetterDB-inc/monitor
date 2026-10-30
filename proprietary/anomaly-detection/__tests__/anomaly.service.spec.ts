@@ -7581,6 +7581,28 @@ describe('AnomalyService', () => {
         ).toBeUndefined();
       });
 
+      it('keeps a signal open only when something can resolve it', () => {
+        const stateMetrics = [...METRICS_HANDLED_OUTSIDE_EXTRACTOR].filter(
+          (m) => m !== MetricType.COMMAND_P99,
+        );
+        const open = stateMetrics.filter(
+          (metricType) => probe()(signal({ connectionId: 'gone', metricType })) === null,
+        );
+
+        expect(open.sort()).toEqual(
+          [
+            MetricType.RAFT_HEALTH,
+            MetricType.RESHARD_SHARD_SKEW,
+            MetricType.REPLICA_SLOT_STATE,
+            MetricType.REPLICATION_DIVERGENCE,
+            MetricType.BACKLOG_COVERAGE_RISK,
+          ].sort(),
+        );
+        for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
+          expect(probe()(signal({ connectionId: 'gone', metricType }))).toBeUndefined();
+        }
+      });
+
       it('keeps a point-in-time signal open when it re-fired before settling', () => {
         expect(
           probe()(
