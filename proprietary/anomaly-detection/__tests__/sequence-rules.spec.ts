@@ -32,8 +32,8 @@ describe('sequence rule registry', () => {
   });
 
   it('rejects a rule with an empty step', () => {
-    expect(() => registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC], []] })).toThrow(
-      /at least one metric/,
-    );
+    expect(() =>
+      registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC], []] }),
+    ).toThrow(/at least one metric/);
   });
 });

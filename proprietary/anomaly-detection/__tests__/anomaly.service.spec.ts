@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
+import { IncidentTimelineBuilder } from '../incident-timeline';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -17,6 +18,7 @@ import {
   AnomalySeverity,
   AnomalyType,
   AnomalyPattern,
+  AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
 import { DETECTOR_DEFAULTS } from '@app/anomaly/anomaly.types';
@@ -119,6 +121,7 @@ describe('AnomalyService', () => {
             list: jest.fn().mockReturnValue([]),
             get: jest.fn(),
             getConfig: jest.fn().mockReturnValue(null),
+            listMembers: jest.fn().mockReturnValue([]),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -3250,7 +3253,10 @@ describe('AnomalyService', () => {
       })();
     }
 
-    const baseline = Array.from({ length: 40 }, (_, i) => ({ connectsPerSec: 20 + (i % 3), clients: 100 }));
+    const baseline = Array.from({ length: 40 }, (_, i) => ({
+      connectsPerSec: 20 + (i % 3),
+      clients: 100,
+    }));
 
     it('alerts when the connect rate spikes while connected_clients stays flat', async () => {
       const { recorded } = await runChurn([
@@ -3315,7 +3321,11 @@ describe('AnomalyService', () => {
 
       expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
       expect(service.getConnectionChurnSample('conn-1')).toEqual(
-        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, clientsDeltaRatio: 0 }),
+        expect.objectContaining({
+          connectsPerSec: 30,
+          connectedClients: 100,
+          clientsDeltaRatio: 0,
+        }),
       );
     });
   });
@@ -6411,6 +6421,128 @@ describe('AnomalyService', () => {
       expect(liveDetector(MetricType.CONNECTIONS).getConfig().warningZScore).toBe(
         DETECTOR_DEFAULTS.connections.warningZScore,
       );
+    });
+  });
+
+  describe('incident timelines', () => {
+    const MIN = 60_000;
+    const anomaly = (overrides: Partial<AnomalyEvent> = {}): AnomalyEvent => ({
+      id: `evt-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 1,
+      baseline: 0,
+      stdDev: 0,
+      zScore: 4,
+      threshold: 3,
+      message: 'm',
+      resolved: false,
+      connectionId: 'conn-1',
+      ...overrides,
+    });
+    const rule = {
+      pattern: AnomalyPattern.MEMORY_PRESSURE,
+      steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED]],
+      maxSpanMs: 10 * MIN,
+      diagnosis: 'Connections led to memory growth',
+      recommendations: ['Check clients'],
+    };
+
+    it('emits one correlated group per sequence match across ticks', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pattern: AnomalyPattern.MEMORY_PRESSURE,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+        }),
+        'conn-1',
+      );
+      expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
+      const groups = (service as any).recentGroups;
+      expect(groups).toHaveLength(1);
+      expect(groups[0].anomalies.map((a: any) => a.id)).toEqual(['a', 'b']);
+      expect(service.getLiveIncidentTimelines()[0].matchedPatterns).toEqual([
+        AnomalyPattern.MEMORY_PRESSURE,
+      ]);
+    });
+
+    it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.COMMAND_P99 }),
+        anomaly({
+          timestamp: now - 15 * MIN,
+          metricType: MetricType.CLUSTER_STATE,
+          connectionId: 'conn-2',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      const byConn = Object.fromEntries(
+        service.getLiveIncidentTimelines().map((t) => [t.scope, t.recovery]),
+      );
+      expect(byConn['conn-1'].status).toBe('recovered');
+      expect(byConn['conn-2']).toEqual(
+        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.CLUSTER_STATE] }),
+      );
+    });
+
+    it('builds history across every member of the topology and keeps resolvedAt', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'node-2' }]);
+      const t = Date.now() - 30 * MIN;
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2'
+          ? [
+              {
+                ...anomaly({ id: 'n2', timestamp: t + 1000, connectionId: 'node-2' }),
+                anomalyType: 'spike',
+                resolved: true,
+                resolvedAt: t + 5 * MIN,
+              },
+            ]
+          : connectionId === 'conn-1'
+            ? [{ ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike' }]
+            : [],
+      );
+
+      const [incident] = await service.getIncidentTimelines('conn-1');
+
+      const queried = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => q.connectionId);
+      expect(new Set(queried)).toEqual(new Set(['conn-1', 'seed', 'node-2']));
+      expect(incident.scope).toBe('seed');
+      expect(incident.entries.map((e) => e.anomalyId)).toEqual(['c1', 'n2']);
+      expect(incident.entries[1].recoveredAt).toBe(t + 5 * MIN);
+      await expect(service.getIncidentTimeline(incident.incidentId, 'conn-1')).resolves.toEqual(
+        incident,
+      );
+    });
+
+    it('stamps resolvedAt when an anomaly is resolved', async () => {
+      const event: AnomalyEvent = anomaly({ id: 'mem-only' });
+      (service as any).recentAnomalies.push(event);
+
+      await service.resolveAnomaly('mem-only');
+
+      expect(event.resolvedAt).toEqual(expect.any(Number));
     });
   });
 });

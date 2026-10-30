@@ -61,6 +61,8 @@ export type RecoveryProbe = (
   since: number,
 ) => number | null;
 
+export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
+
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {
   [AnomalySeverity.INFO]: 0,
   [AnomalySeverity.WARNING]: 1,
@@ -128,7 +130,9 @@ export class IncidentTimelineBuilder {
         timelines.push(this.toTimeline(scope, cluster, now, probe));
       }
     }
-    return timelines.sort((a, b) => a.startedAt - b.startedAt || a.incidentId.localeCompare(b.incidentId));
+    return timelines.sort(
+      (a, b) => a.startedAt - b.startedAt || a.incidentId.localeCompare(b.incidentId),
+    );
   }
 
   private cluster(sorted: AnomalyEvent[]): AnomalyEvent[][] {
@@ -176,7 +180,9 @@ export class IncidentTimelineBuilder {
         metricType: event.metricType,
         severity: event.severity,
         message: event.message,
-        recoveredAt: isLast ? (recoveredAtBySignal.get(key) ?? null) : this.recoveredAtIfResolved(event),
+        recoveredAt: isLast
+          ? (recoveredAtBySignal.get(key) ?? null)
+          : this.recoveredAtIfResolved(event),
       };
     });
 

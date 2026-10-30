@@ -32,6 +32,14 @@ import {
   ConnectionChurnReading,
   ConnectionChurnSample,
 } from './connection-churn';
+import {
+  IncidentTimeline,
+  IncidentTimelineBuilder,
+  DEFAULT_INCIDENT_TIMELINE_OPTIONS,
+  POINT_IN_TIME_METRICS,
+  RecoveryProbe,
+} from './incident-timeline';
+import { getSequenceRules } from './sequence-rules';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
@@ -231,6 +239,13 @@ export class AnomalyService
 
   private recentAnomalies: AnomalyEvent[] = [];
   private recentGroups: CorrelatedAnomalyGroup[] = [];
+  private readonly incidentTimelineBuilder = new IncidentTimelineBuilder(
+    {},
+    (connectionId) => this.correlationScopeOf(connectionId),
+    getSequenceRules,
+  );
+  private liveIncidents: IncidentTimeline[] = [];
+  private readonly emittedSequenceGroups = new Map<string, number>();
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -566,9 +581,14 @@ export class AnomalyService
 
     // Start correlation loop
     this.correlationInterval = setInterval(() => {
-      this.correlateAnomalies().catch((err) => {
-        this.logger.error('Failed to correlate anomalies:', err);
-      });
+      this.correlateAnomalies()
+        .catch((err) => {
+          this.logger.error('Failed to correlate anomalies:', err);
+        })
+        .then(() => this.tickIncidentTimelines())
+        .catch((err) => {
+          this.logger.error('Failed to build incident timelines:', err);
+        });
     }, this.correlationIntervalMs);
 
     // Start prometheus summary loop
@@ -5431,6 +5451,139 @@ export class AnomalyService
     return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
+  private incidentRecoveryProbe: RecoveryProbe = (connectionId, metricType, since) => {
+    const recoveredAt = since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
+    const buffer = this.buffers.get(connectionId)?.get(metricType);
+    const latest = buffer?.getLatest() ?? null;
+    if (buffer && buffer.isReady() && latest !== null) {
+      const warningZ =
+        this.detectors.get(connectionId)?.get(metricType)?.getConfig().warningZScore ?? 2;
+      return Math.abs(buffer.getZScore(latest)) < warningZ ? recoveredAt : null;
+    }
+    return POINT_IN_TIME_METRICS.has(metricType) ? recoveredAt : null;
+  };
+
+  private async tickIncidentTimelines(now = Date.now()): Promise<void> {
+    const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
+    this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
+
+    for (const [key, at] of this.emittedSequenceGroups) {
+      if (at < now - windowMs) this.emittedSequenceGroups.delete(key);
+    }
+
+    const byId = new Map(live.map((a) => [a.id, a]));
+    for (const incident of this.liveIncidents) {
+      for (const match of incident.sequenceMatches) {
+        const key = `${match.pattern}\u0000${match.anomalyIds[0]}`;
+        if (this.emittedSequenceGroups.has(key)) continue;
+        const anomalies = match.anomalyIds
+          .map((id) => byId.get(id))
+          .filter((a): a is AnomalyEvent => a !== undefined);
+        if (anomalies.length === 0) continue;
+        this.emittedSequenceGroups.set(key, now);
+        await this.recordSequenceGroup({
+          correlationId: randomUUID(),
+          timestamp: anomalies[0].timestamp,
+          anomalies,
+          pattern: match.pattern,
+          diagnosis: match.diagnosis,
+          recommendations: match.recommendations,
+          severity: match.severity,
+        });
+      }
+    }
+  }
+
+  private async recordSequenceGroup(group: CorrelatedAnomalyGroup): Promise<void> {
+    this.logger.warn(
+      `Sequence detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
+    );
+    const connectionId = group.anomalies[0]?.connectionId;
+    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+    if (connectionId) {
+      try {
+        await this.storage.saveCorrelatedGroup(
+          {
+            correlationId: group.correlationId,
+            timestamp: group.timestamp,
+            pattern: group.pattern,
+            severity: group.severity,
+            diagnosis: group.diagnosis,
+            recommendations: group.recommendations,
+            anomalyCount: group.anomalies.length,
+            metricTypes: group.anomalies.map((a) => a.metricType),
+            sourceHost: this.configService.get('database.host'),
+            sourcePort: this.configService.get('database.port'),
+          },
+          connectionId,
+        );
+      } catch (err) {
+        this.logger.error('Failed to persist sequence group:', err);
+      }
+    }
+    this.recentGroups.push(group);
+    this.lastHourGroups.push({
+      timestamp: group.timestamp,
+      pattern: group.pattern,
+      severity: group.severity,
+    });
+    if (this.recentGroups.length > this.maxRecentGroups) {
+      this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
+    }
+  }
+
+  getLiveIncidentTimelines(): IncidentTimeline[] {
+    return this.liveIncidents;
+  }
+
+  async getIncidentTimelines(
+    connectionId?: string,
+    startTime?: number,
+    endTime?: number,
+    limit = 50,
+  ): Promise<IncidentTimeline[]> {
+    const now = Date.now();
+    const from = startTime ?? now - 24 * 60 * 60_000;
+    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
+    const batches = await Promise.all(
+      connectionIds.map((id) =>
+        this.getRecentAnomalies(from, endTime, undefined, undefined, 1000, id),
+      ),
+    );
+    const events = [...new Map(batches.flat().map((e) => [e.id, e])).values()];
+    return this.incidentTimelineBuilder
+      .build(events, now, this.incidentRecoveryProbe)
+      .reverse()
+      .slice(0, limit);
+  }
+
+  async getIncidentTimeline(
+    incidentId: string,
+    connectionId?: string,
+    startTime?: number,
+  ): Promise<IncidentTimeline | null> {
+    const timelines = await this.getIncidentTimelines(
+      connectionId,
+      startTime,
+      undefined,
+      Number.MAX_SAFE_INTEGER,
+    );
+    return timelines.find((t) => t.incidentId === incidentId) ?? null;
+  }
+
+  private scopeConnectionIds(connectionId: string): string[] {
+    const scope = this.correlationScopeOf(connectionId);
+    const members = this.connectionRegistry.listMembers(scope);
+    return [
+      ...new Set([
+        connectionId,
+        ...(this.connectionRegistry.getConfig(scope) ? [scope] : []),
+        ...members.map((m) => m.id),
+      ]),
+    ];
+  }
+
   private async correlateAnomalies(): Promise<void> {
     try {
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
@@ -5524,6 +5677,7 @@ export class AnomalyService
       relatedMetrics: s.relatedMetrics as MetricType[],
       resolved: s.resolved,
       connectionId: s.connectionId,
+      resolvedAt: s.resolvedAt,
     };
   }
 
@@ -5831,6 +5985,7 @@ export class AnomalyService
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = Date.now();
       return 'resolved';
     }
 
@@ -5839,8 +5994,9 @@ export class AnomalyService
     // durable. Reporting success on an in-memory-only flip would let a client
     // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
+    const resolvedAt = Date.now();
     try {
-      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+      persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
       return 'retry';
@@ -5857,6 +6013,7 @@ export class AnomalyService
     // Keep the cached copy in sync with the durable store.
     if (anomaly) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
     }
 
     return 'resolved';
@@ -5876,6 +6033,7 @@ export class AnomalyService
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
         continue;
       }
       let persisted = false;
@@ -5886,6 +6044,7 @@ export class AnomalyService
       }
       if (persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
       } else {
         allResolved = false;
       }

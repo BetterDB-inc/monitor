@@ -1,16 +1,6 @@
-import {
-  IncidentTimelineBuilder,
-  RecoveryProbe,
-  incidentIdFor,
-} from '../incident-timeline';
+import { IncidentTimelineBuilder, RecoveryProbe, incidentIdFor } from '../incident-timeline';
 import { SequenceRule } from '../sequence-rules';
-import {
-  AnomalyEvent,
-  AnomalyPattern,
-  AnomalySeverity,
-  AnomalyType,
-  MetricType,
-} from '../types';
+import { AnomalyEvent, AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
 
 const T0 = 1_700_000_000_000;
 const MIN = 60_000;
@@ -117,7 +107,11 @@ describe('IncidentTimelineBuilder', () => {
     it('derives a stable incident id from the scope and first anomaly', () => {
       const first = event();
       const build = () =>
-        new IncidentTimelineBuilder().build([first, event({ timestamp: T0 + 1 })], T0, neverRecovers);
+        new IncidentTimelineBuilder().build(
+          [first, event({ timestamp: T0 + 1 })],
+          T0,
+          neverRecovers,
+        );
 
       expect(build()[0].incidentId).toBe(incidentIdFor('conn-a', first.id));
       expect(build()[0].incidentId).toBe(build()[0].incidentId);
@@ -126,7 +120,11 @@ describe('IncidentTimelineBuilder', () => {
 
   describe('recovery', () => {
     it('is active while events keep arriving', () => {
-      const [incident] = new IncidentTimelineBuilder().build([event()], T0 + 30_000, recoversAfterQuiet);
+      const [incident] = new IncidentTimelineBuilder().build(
+        [event()],
+        T0 + 30_000,
+        recoversAfterQuiet,
+      );
 
       expect(incident.recovery.status).toBe('active');
       expect(incident.recovery.openSignals).toEqual([MetricType.MEMORY_USED]);
@@ -171,7 +169,10 @@ describe('IncidentTimelineBuilder', () => {
 
     it('is recovering while quiet with signals still open', () => {
       const [incident] = new IncidentTimelineBuilder().build(
-        [event({ metricType: MetricType.CONNECTIONS }), event({ metricType: MetricType.CPU_UTILIZATION })],
+        [
+          event({ metricType: MetricType.CONNECTIONS }),
+          event({ metricType: MetricType.CPU_UTILIZATION }),
+        ],
         T0 + 5 * MIN,
         (_c, metric, since) => (metric === MetricType.CONNECTIONS ? since + MIN : null),
       );
@@ -182,7 +183,11 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     it('settles into degraded when signals stay open past the degraded threshold', () => {
-      const [incident] = new IncidentTimelineBuilder().build([event()], T0 + 11 * MIN, neverRecovers);
+      const [incident] = new IncidentTimelineBuilder().build(
+        [event()],
+        T0 + 11 * MIN,
+        neverRecovers,
+      );
 
       expect(incident.recovery.status).toBe('degraded');
     });
