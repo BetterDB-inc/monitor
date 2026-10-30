@@ -383,6 +383,7 @@ export class AnomalyService
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
   private replicationStream = new ReplicationStreamTracker();
   private divergenceState = new Map<string, DivergenceConnectionState>();
+  private divergenceOrphansSwept = new Set<string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -788,6 +789,7 @@ export class AnomalyService
     this.configDriftRecheck.delete(connectionId);
     this.replicationStream.forget(connectionId);
     this.divergenceState.delete(connectionId);
+    this.divergenceOrphansSwept.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -5742,6 +5744,9 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
+    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
+      await this.resolveOrphanedDivergenceEvents(ctx);
+    }
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
 
@@ -5753,6 +5758,30 @@ export class AnomalyService
       }
     }
     await this.persistDivergenceWindows(state, ctx);
+  }
+
+  private async resolveOrphanedDivergenceEvents(ctx: ConnectionContext): Promise<void> {
+    try {
+      const open = await this.storage.getAnomalyEvents({
+        connectionId: ctx.connectionId,
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+      });
+      const tracked = new Set(
+        [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])].map((r) => r.eventId),
+      );
+      for (const event of open) {
+        if (tracked.has(event.id)) continue;
+        if ((await this.resolveAnomalyOutcome(event.id)) === 'retry') return;
+      }
+      this.divergenceOrphansSwept.add(ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   private async persistDivergenceWindows(

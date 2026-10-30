@@ -6612,6 +6612,30 @@ describe('AnomalyService', () => {
       expect(replica.latest?.gapBytes).toBe(4 * MiB);
     });
 
+    it('resolves divergence events left open by a previous run, once per connection', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        { id: 'old-1', metricType: MetricType.REPLICATION_DIVERGENCE, resolved: false },
+      ]);
+
+      await feed([2, 4], T0);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+      });
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+    });
+
+    it('retries the orphan sweep on the next poll when storage cannot be read', async () => {
+      storage.getAnomalyEvents.mockRejectedValueOnce(new Error('db down'));
+
+      await feed([2], T0);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+    });
+
     it('falls back to in-memory windows when storage cannot be read', async () => {
       await feed([2, 4, 6], T0);
       storage.getReplicationDivergenceWindows.mockRejectedValueOnce(new Error('db down'));
