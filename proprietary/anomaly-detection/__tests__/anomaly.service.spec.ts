@@ -7315,19 +7315,25 @@ describe('AnomalyService', () => {
           expect(probe()(signal({ now: newestSample + 3000 }))).toBeNull();
         });
 
-        it('does not know when polling resumed with a hole inside the buffer', () => {
+        it('stays open when polling resumed out of band after a hole', () => {
           withBuffer([...outOfBand(T - 30_000, 200), ...outOfBand(T + 400_000)]);
 
-          expect(probe()(signal())).toBeUndefined();
+          expect(probe()(signal({ now: T + 400_000 + 1000 }))).toBeNull();
         });
 
-        it('does not know when a hole opens after what was observed', () => {
+        it('stays open when a hole opens after what was observed', () => {
           withBuffer(outOfBand(T - 30_000, 200));
           probe()(signal());
 
           withBuffer([...outOfBand(T + 100_000, 100), ...outOfBand(T + 400_000)]);
 
-          expect(probe()(signal())).toBeUndefined();
+          expect(probe()(signal({ now: T + 400_000 + 1000 }))).toBeNull();
+        });
+
+        it('does not know whether a re-fired signal recovered inside a hole', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal({ until: T + 410_000 }))).toBeUndefined();
         });
 
         it('still recovers at an in-band sample after a hole', () => {
@@ -7757,6 +7763,72 @@ describe('AnomalyService', () => {
 
       expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
       expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(['grp-seq'], ['c', 'm']);
+    });
+
+    describe('during a fleet-wide event storm', () => {
+      const storm = (now: number) => {
+        for (let i = 0; i < 1100; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `storm-${i}`,
+              timestamp: now - 50 * MIN,
+              metricType: MetricType.CPU_UTILIZATION,
+              connectionId: 'storm',
+            }),
+          );
+        }
+      };
+
+      it('still matches a sequence whose steps left the shared event list', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storm(now);
+        expect((service as any).recentAnomalies.some((a: any) => a.id === 'early')).toBe(false);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', 'mem'] }),
+          'conn-1',
+        );
+      });
+
+      it('bounds the buffer per connection', async () => {
+        storm(Date.now());
+
+        expect((service as any).incidentEvents.get('storm')).toHaveLength(200);
+      });
+
+      it('resolves an event that only the incident buffer still holds', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        storm(now);
+
+        await (service as any).resolveAnomalyOutcome('early');
+
+        expect((service as any).incidentEvents.get('conn-1')[0].resolved).toBe(true);
+      });
+
+      it('closes a buffered event that storage no longer holds', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(false);
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        storm(now);
+
+        const outcome = await (service as any).resolveAnomalyOutcome('early');
+
+        expect(outcome).toBe('gone');
+        expect((service as any).incidentEvents.get('conn-1')[0].resolved).toBe(true);
+      });
     });
 
     it('stores the ids of a sequence group with the group', async () => {

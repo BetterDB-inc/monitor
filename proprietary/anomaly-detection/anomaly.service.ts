@@ -284,6 +284,7 @@ interface ConnectionPersistenceState {
 
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 
 @Injectable()
 export class AnomalyService
@@ -298,6 +299,7 @@ export class AnomalyService
   private correlator: Correlator;
 
   private recentAnomalies: AnomalyEvent[] = [];
+  private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly incidentTimelineBuilder = new IncidentTimelineBuilder(
     {},
@@ -810,6 +812,7 @@ export class AnomalyService
     this.reshardSkewEventIds.delete(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
+    this.incidentEvents.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -5649,8 +5652,25 @@ export class AnomalyService
     };
   }
 
+  private rememberIncidentEvent(anomaly: AnomalyEvent): void {
+    const connectionId = anomaly.connectionId ?? '';
+    const events = this.incidentEvents.get(connectionId) ?? [];
+    events.push(anomaly);
+    if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) events.shift();
+    this.incidentEvents.set(connectionId, events);
+  }
+
+  private findIncidentEvent(anomalyId: string): AnomalyEvent | undefined {
+    for (const events of this.incidentEvents.values()) {
+      const found = events.find((a) => a.id === anomalyId);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
   private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
     this.recentAnomalies.push(anomaly);
+    this.rememberIncidentEvent(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
@@ -5707,7 +5727,9 @@ export class AnomalyService
 
   ingestExternalAnomaly(event: AnomalyEvent): void {
     if (this.recentAnomalies.some((a) => a.id === event.id)) return;
-    this.recentAnomalies.push({ ...event, persisted: true });
+    const ingested = { ...event, persisted: true };
+    this.recentAnomalies.push(ingested);
+    this.rememberIncidentEvent(ingested);
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
@@ -5756,12 +5778,13 @@ export class AnomalyService
       this.rememberIncidentObservation(this.observedRecoveries, key, backInBand.timestamp);
       return backInBand.timestamp;
     }
-    if (!this.observedWithoutGap(samples, observedFrom, signal.until ?? signal.now)) {
+    const newest = samples[samples.length - 1].timestamp;
+    const gapFrom = signal.until === null ? newest : observedFrom;
+    if (!this.observedWithoutGap(samples, gapFrom, signal.until ?? signal.now)) {
       return undefined;
     }
     if (signal.until === null) {
-      const through = samples[samples.length - 1].timestamp;
-      this.rememberIncidentObservation(this.observedOpenThrough, key, through);
+      this.rememberIncidentObservation(this.observedOpenThrough, key, newest);
     }
     return null;
   };
@@ -5792,7 +5815,10 @@ export class AnomalyService
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
-    const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
+    const known = new Map(
+      [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies].map((a) => [a.id, a]),
+    );
+    const live = [...known.values()].filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
     if (!seeded) {
       this.sequenceDedupeSeedFailedAt ??= now;
@@ -6919,6 +6945,7 @@ export class AnomalyService
    */
   private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
+    const evicted = anomaly ? undefined : this.findIncidentEvent(anomalyId);
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
     // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
@@ -6947,13 +6974,19 @@ export class AnomalyService
       // longer exists anywhere and can never be resolved — report `gone` so the
       // caller drops it. A cache-present event may just be a momentary storage
       // miss, so keep retrying that one.
-      return anomaly ? 'retry' : 'gone';
+      if (anomaly) return 'retry';
+      if (evicted) {
+        evicted.resolved = true;
+        evicted.resolvedAt ??= resolvedAt;
+      }
+      return 'gone';
     }
 
     // Keep the cached copy in sync with the durable store.
-    if (anomaly) {
-      anomaly.resolved = true;
-      anomaly.resolvedAt ??= resolvedAt;
+    const cached = anomaly ?? evicted;
+    if (cached) {
+      cached.resolved = true;
+      cached.resolvedAt ??= resolvedAt;
     }
 
     return 'resolved';
@@ -6995,6 +7028,12 @@ export class AnomalyService
   clearResolved(): number {
     const beforeCount = this.recentAnomalies.length;
     this.recentAnomalies = this.recentAnomalies.filter((a) => !a.resolved);
+    for (const [connectionId, events] of this.incidentEvents) {
+      this.incidentEvents.set(
+        connectionId,
+        events.filter((a) => !a.resolved),
+      );
+    }
     return beforeCount - this.recentAnomalies.length;
   }
 
