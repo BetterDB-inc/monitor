@@ -90,6 +90,7 @@ export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.REPLICA_SLOT_STATE,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
+  MetricType.CLIENT_SATURATION,
 ]);
 
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {

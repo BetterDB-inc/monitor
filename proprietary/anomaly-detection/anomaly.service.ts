@@ -488,6 +488,7 @@ export class AnomalyService
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
+  private clientSaturationEventIds = new Map<string, string[]>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -804,7 +805,9 @@ export class AnomalyService
     this.lastClusterState.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
+    this.closeSaturationAndBacklogEventsOnRemoval(connectionId);
     this.clientSaturationLevel.delete(connectionId);
+    this.clientSaturationEventIds.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
@@ -1776,11 +1779,27 @@ export class AnomalyService
       // escalation is retried on the next poll rather than being silently swallowed
       // by the hysteresis.
       await this.addAnomaly(event, ctx);
+      this.clientSaturationEventIds.set(ctx.connectionId, [
+        ...(this.clientSaturationEventIds.get(ctx.connectionId) ?? []),
+        event.id,
+      ]);
     }
 
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
+    if (level === 'none') await this.settleClientSaturationEvents(ctx.connectionId);
+  }
+
+  private async settleClientSaturationEvents(connectionId: string): Promise<void> {
+    const ids = this.clientSaturationEventIds.get(connectionId);
+    if (!ids) return;
+    const pending: string[] = [];
+    for (const id of ids) {
+      if ((await this.resolveAnomalyOutcome(id)) === 'retry') pending.push(id);
+    }
+    if (pending.length > 0) this.clientSaturationEventIds.set(connectionId, pending);
+    else this.clientSaturationEventIds.delete(connectionId);
   }
 
   /**
@@ -6821,6 +6840,19 @@ export class AnomalyService
     for (const id of this.removedDivergenceEvents) {
       if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
     }
+  }
+
+  private closeSaturationAndBacklogEventsOnRemoval(connectionId: string): void {
+    const backlogEventId = this.backlogCoverageEventIds.get(connectionId);
+    const ids = [
+      ...(this.clientSaturationEventIds.get(connectionId) ?? []),
+      ...(backlogEventId ? [backlogEventId] : []),
+    ];
+    if (ids.length === 0) return;
+    ids.forEach((id) => this.removedDivergenceEvents.add(id));
+    this.resolveRemovedDivergenceEvents().catch((err) => {
+      this.logger.error('Failed to resolve saturation events of a removed connection', err);
+    });
   }
 
   private closeDivergenceEventsOnRemoval(connectionId: string): void {

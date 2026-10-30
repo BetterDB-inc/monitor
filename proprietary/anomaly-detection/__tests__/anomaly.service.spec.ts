@@ -3765,6 +3765,57 @@ describe('AnomalyService', () => {
       expect(satEvents()).toHaveLength(0);
     });
 
+    it('resolves every open event once saturation falls below the warning threshold', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll();
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(79));
+      await poll();
+
+      expect(satEvents().map((e) => e.resolved)).toEqual([true, true]);
+      expect(satEvents().every((e) => typeof e.resolvedAt === 'number')).toBe(true);
+    });
+
+    it('keeps events open on a drop from critical to warning', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll();
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+
+      expect(satEvents().map((e) => e.resolved)).toEqual([false]);
+    });
+
+    it('retries a resolve that storage rejected', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(50));
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await poll();
+      expect(satEvents().map((e) => e.resolved)).toEqual([false]);
+
+      await poll();
+      expect(satEvents().map((e) => e.resolved)).toEqual([true]);
+    });
+
+    it('closes open saturation and backlog events when the connection is removed', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      const [event] = satEvents();
+      const connectionId = event.connectionId as string;
+      (service as any).backlogCoverageEventIds.set(connectionId, 'backlog-event');
+
+      (service as any).onConnectionRemoved(connectionId);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, expect.any(Number));
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('backlog-event', expect.any(Number));
+      expect(satEvents().map((e) => e.resolved)).toEqual([true]);
+    });
+
     it('re-alerts on the next poll when the escalation emit fails (level not advanced on failure)', async () => {
       let failSaturationEmit = true;
       const addSpy = jest
@@ -7216,6 +7267,19 @@ describe('AnomalyService', () => {
       );
     });
 
+    it('keeps an unresolved client saturation event open', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 40 * MIN, metricType: MetricType.CLIENT_SATURATION }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery).toEqual(
+        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.CLIENT_SATURATION] }),
+      );
+    });
+
     it('does not call a P99 regression recovered inside its re-fire cooldown', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
@@ -7703,6 +7767,7 @@ describe('AnomalyService', () => {
             MetricType.REPLICA_SLOT_STATE,
             MetricType.REPLICATION_DIVERGENCE,
             MetricType.BACKLOG_COVERAGE_RISK,
+            MetricType.CLIENT_SATURATION,
           ].sort(),
         );
         for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
