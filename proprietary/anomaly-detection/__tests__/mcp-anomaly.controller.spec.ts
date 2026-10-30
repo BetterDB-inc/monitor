@@ -57,6 +57,18 @@ describe('McpAnomalyController', () => {
     jest.restoreAllMocks();
   });
 
+  it('replication divergence keeps the replica series when events cannot be read', async () => {
+    svc.getRecentAnomalies.mockRejectedValueOnce(new Error('db down'));
+
+    const res = await controller.getReplicationDivergence('inst1', undefined, undefined);
+
+    expect(res).toEqual({
+      replicas: [{ replica: '10.0.0.2:6379' }],
+      events: [],
+      eventsUnavailable: true,
+    });
+  });
+
   it('anomalies rejects unknown metricType with 400', async () => {
     let caught: unknown;
     try {

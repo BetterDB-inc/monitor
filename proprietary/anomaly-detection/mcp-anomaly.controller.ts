@@ -64,16 +64,23 @@ export class McpAnomalyController {
           safeParseInt(startTime, now - DIVERGENCE_SERIES_LOOKBACK_MS),
           now,
         ),
-        this.anomalyService.getRecentAnomalies(
-          safeParseInt(startTime, now - DEFAULT_LOOKBACK_MS),
-          undefined,
-          undefined,
-          MetricType.REPLICATION_DIVERGENCE,
-          safeLimit(limit, 100),
-          id,
-        ),
+        this.anomalyService
+          .getRecentAnomalies(
+            safeParseInt(startTime, now - DEFAULT_LOOKBACK_MS),
+            undefined,
+            undefined,
+            MetricType.REPLICATION_DIVERGENCE,
+            safeLimit(limit, 100),
+            id,
+          )
+          .catch((error) => {
+            this.logger.warn(
+              `Failed to read divergence events: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          }),
       ]);
-      return { replicas, events };
+      return events ? { replicas, events } : { replicas, events: [], eventsUnavailable: true };
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get replication divergence');
     }
