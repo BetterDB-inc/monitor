@@ -6204,16 +6204,24 @@ describe('AnomalyService', () => {
         connectionId: 'node-1',
       });
       const sibling = [
-        ...Array.from({ length: 1500 }, (_, i) => group(`noise-${i}`, 3_000_000 - i)),
+        ...Array.from({ length: 1500 }, (_, i) => group(`noise-${i}`, 1_000_000 + i)),
         group('grp-1', 1_000_000),
       ];
       storage.getCorrelatedGroups.mockImplementation(
-        async ({ connectionId, startTime, endTime, limit = 100, offset = 0 }: any) =>
+        async ({
+          connectionId,
+          startTime,
+          endTime,
+          correlationIds,
+          limit = 100,
+          offset = 0,
+        }: any) =>
           connectionId !== 'node-1'
             ? []
             : sibling
                 .filter(
                   (g) =>
+                    (!correlationIds || correlationIds.includes(g.correlationId)) &&
                     (!startTime || g.timestamp >= startTime) &&
                     (!endTime || g.timestamp <= endTime),
                 )
@@ -6249,12 +6257,21 @@ describe('AnomalyService', () => {
         group('grp-1', 1_000_000, 'memory_pressure'),
       ];
       storage.getCorrelatedGroups.mockImplementation(
-        async ({ connectionId, startTime, endTime, pattern, limit = 100, offset = 0 }: any) =>
+        async ({
+          connectionId,
+          startTime,
+          endTime,
+          pattern,
+          correlationIds,
+          limit = 100,
+          offset = 0,
+        }: any) =>
           connectionId !== 'node-1'
             ? []
             : sibling
                 .filter(
                   (g) =>
+                    (!correlationIds || correlationIds.includes(g.correlationId)) &&
                     (!pattern || g.pattern === pattern) &&
                     (!startTime || g.timestamp >= startTime) &&
                     (!endTime || g.timestamp <= endTime),
@@ -6282,6 +6299,46 @@ describe('AnomalyService', () => {
         50,
         'node-2',
       );
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
+    it('reads past the newest caller events to find the groups it took part in', async () => {
+      const caller = [
+        ...Array.from({ length: 10_000 }, (_, i) => ({
+          ...member(`plain-${i}`, 'node-2'),
+          correlationId: undefined,
+          timestamp: 2_000_000 - i,
+        })),
+        member('b', 'node-2'),
+      ];
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-1'
+          ? [
+              {
+                correlationId: 'grp-1',
+                timestamp: 1_000_000,
+                pattern: 'memory_pressure',
+                severity: 'warning',
+                diagnosis: '',
+                recommendations: [],
+                anomalyCount: 2,
+                metricTypes: [],
+                connectionId: 'node-1',
+              },
+            ]
+          : [],
+      );
+      storage.getAnomalyEvents.mockImplementation(
+        async ({ connectionId, limit = 100, offset = 0 }: any) =>
+          connectionId === 'node-2'
+            ? caller.slice(offset, offset + limit)
+            : connectionId === 'node-1'
+              ? [member('a', 'node-1')]
+              : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
 
       expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
     });
@@ -6319,7 +6376,7 @@ describe('AnomalyService', () => {
         expect.objectContaining({ connectionId: 'node-2', limit: 50 }),
       );
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionId: 'node-1', limit: 1000 }),
+        expect.objectContaining({ connectionId: 'node-1', correlationIds: ['grp-1'] }),
       );
     });
   });
