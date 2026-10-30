@@ -1,9 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
+import type { CaptureCounterDeltas } from '@betterdb/shared';
 import {
   StoragePort,
   StoredCaptureSession,
   StoredSlowLogEntry,
 } from '../common/interfaces/storage-port.interface';
+import { computeCounterDeltas } from './capture-counters';
 import { ParsedMonitorLine, parseMonitorLine } from './monitor-line.parser';
 
 /** Baseline window selector. `same-hour-last-week` shifts the window to the same hour-of-day 7 days ago. */
@@ -20,6 +22,25 @@ const HOT_KEY_TOP_K = 50;
 export interface CrossReferenceInput {
   sessionId: string;
   baseline: BaselineWindow;
+  /** Pre-read row; when given, the engine does not read it again. */
+  session?: StoredCaptureSession;
+  /**
+   * Whether a live capture owned the session, evaluated BEFORE the row was read
+   * (so a capture that finalizes in between can't be misreported as interrupted).
+   * Only used for a `running` row. Omitted → treated as live.
+   */
+  sessionLive?: boolean;
+}
+
+/** Why counter deltas are not final yet; undefined once the session row has ended. */
+function pendingCounters(
+  session: StoredCaptureSession,
+  sessionLive: boolean | undefined,
+): CaptureCounterDeltas['pending'] {
+  if (session.status !== 'running') {
+    return undefined;
+  }
+  return sessionLive === false ? 'capture_interrupted' : 'capture_running';
 }
 
 export interface NewShape {
@@ -56,9 +77,10 @@ export interface AclDeltas {
   /** Audit-trail entries persisted with `captured_at` inside the session window. Empty when the audit module is not in use. */
   auditEntriesInWindow: number;
   /**
-   * INFO counter snapshots are not yet captured at session start/end. v1 surfaces a
-   * placeholder so the UI shape is final; PR 9-era pre-flight INFO + future session-
-   * boundary snapshots will populate these.
+   * Session-boundary INFO counter deltas for the capture window, mirrored
+   * from {@link CrossReferenceResult.counterDeltas}. Null when the session has
+   * no counter snapshots (recorded before they existed, or INFO was unreachable)
+   * or the server does not report the field.
    */
   counters: {
     aclAccessDeniedAuthDelta: number | null;
@@ -84,6 +106,10 @@ export interface CrossReferenceResult {
   hotKeyDelta: HotKeyDelta;
   slowlogRegressions: SlowlogRegression[];
   aclDeltas: AclDeltas;
+  /** INFO `# Stats` counter deltas measured at session start/end (per node, summed). */
+  counterDeltas: CaptureCounterDeltas;
+  /** Capture-vs-capture diff only: the baseline capture's own counter deltas. */
+  baselineCounterDeltas?: CaptureCounterDeltas;
 }
 
 /**
@@ -106,7 +132,7 @@ export class CrossReferenceEngine {
   ) {}
 
   async compute(input: CrossReferenceInput): Promise<CrossReferenceResult> {
-    const session = await this.storage.getCaptureSession(input.sessionId);
+    const session = input.session ?? (await this.storage.getCaptureSession(input.sessionId));
     if (!session) {
       throw new Error(`Session ${input.sessionId} not found`);
     }
@@ -156,6 +182,10 @@ export class CrossReferenceEngine {
       sessionStartMs,
       sessionEndMs,
     );
+    const counterDeltas = computeCounterDeltas(
+      session.counterSnapshots,
+      pendingCounters(session, input.sessionLive),
+    );
 
     return {
       sessionId: input.sessionId,
@@ -175,29 +205,38 @@ export class CrossReferenceEngine {
       aclDeltas: {
         auditEntriesInWindow: auditEntries.length,
         counters: {
-          aclAccessDeniedAuthDelta: null,
-          rejectedConnectionsDelta: null,
+          aclAccessDeniedAuthDelta: counterDeltas.deltas.acl_access_denied_auth,
+          rejectedConnectionsDelta: counterDeltas.deltas.rejected_connections,
         },
       },
+      counterDeltas,
     };
   }
 
   /**
    * Capture-vs-capture diff. Treats {@code baselineSessionId} as the baseline
    * source for shapes and hot keys; returns the same result shape as
-   * {@link compute} but with empty slowlog/ACL deltas (those axes are scoped to
-   * connection history, not a single capture).
+   * {@link compute}; slowlog regressions and the audit-entry count stay empty (they
+   * are scoped to connection history), while INFO counter deltas are reported for
+   * both captures. Pre-read rows and their liveness (evaluated before the read)
+   * can be passed in `opts`; a row that is passed is not read again.
    */
   async computeCaptureDiff(
     sessionId: string,
     baselineSessionId: string,
+    opts: {
+      session?: StoredCaptureSession;
+      baselineSession?: StoredCaptureSession;
+      sessionLive?: boolean;
+      baselineLive?: boolean;
+    } = {},
   ): Promise<CrossReferenceResult> {
     if (sessionId === baselineSessionId) {
       throw new Error('Cannot diff a capture against itself');
     }
     const [session, baselineSession] = await Promise.all([
-      this.storage.getCaptureSession(sessionId),
-      this.storage.getCaptureSession(baselineSessionId),
+      opts.session ?? this.storage.getCaptureSession(sessionId),
+      opts.baselineSession ?? this.storage.getCaptureSession(baselineSessionId),
     ]);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -216,6 +255,14 @@ export class CrossReferenceEngine {
 
     const newShapes = computeNewShapes(capturedLines, baselineShapes);
     const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
+    const counterDeltas = computeCounterDeltas(
+      session.counterSnapshots,
+      pendingCounters(session, opts.sessionLive),
+    );
+    const baselineCounterDeltas = computeCounterDeltas(
+      baselineSession.counterSnapshots,
+      pendingCounters(baselineSession, opts.baselineLive),
+    );
 
     return {
       sessionId,
@@ -236,10 +283,12 @@ export class CrossReferenceEngine {
       aclDeltas: {
         auditEntriesInWindow: 0,
         counters: {
-          aclAccessDeniedAuthDelta: null,
-          rejectedConnectionsDelta: null,
+          aclAccessDeniedAuthDelta: counterDeltas.deltas.acl_access_denied_auth,
+          rejectedConnectionsDelta: counterDeltas.deltas.rejected_connections,
         },
       },
+      counterDeltas,
+      baselineCounterDeltas,
     };
   }
 

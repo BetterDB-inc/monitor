@@ -1,3 +1,4 @@
+import type { CaptureCounterSnapshots } from '@betterdb/shared';
 import type {
   StoragePort,
   StoredCaptureChunk,
@@ -315,6 +316,27 @@ function chunkOf(lines: string[]): StoredCaptureChunk {
   };
 }
 
+function baseSession(): StoredCaptureSession {
+  return {
+    id: SESSION_ID,
+    connectionId: CONNECTION_ID,
+    status: 'completed',
+    source: 'manual',
+    startedAt: SESSION_START_MS,
+    endedAt: SESSION_END_MS,
+    byteCount: 0,
+    lineCount: 0,
+    byteCap: 100_000,
+    lineCap: 100_000,
+  };
+}
+
+function withCounters(nodes: CaptureCounterSnapshots['nodes']): {
+  counterSnapshots: CaptureCounterSnapshots;
+} {
+  return { counterSnapshots: { version: 1, nodes } };
+}
+
 function makeStorage(overrides: {
   session?: StoredCaptureSession | null;
   chunks?: StoredCaptureChunk[];
@@ -475,8 +497,10 @@ describe('CrossReferenceEngine.compute', () => {
     function buildStorage(
       sessionALines: string[],
       sessionBLines: string[],
+      snapshots: { a?: CaptureCounterSnapshots; b?: CaptureCounterSnapshots } = {},
     ): StoragePort {
       const sessionA: StoredCaptureSession = {
+        counterSnapshots: snapshots.a,
         id: SESSION_ID,
         connectionId: CONNECTION_ID,
         status: 'completed',
@@ -490,6 +514,7 @@ describe('CrossReferenceEngine.compute', () => {
       };
       const sessionB: StoredCaptureSession = {
         ...sessionA,
+        counterSnapshots: snapshots.b,
         id: SESSION_B_ID,
         startedAt: SESSION_B_START_MS,
         endedAt: SESSION_B_END_MS,
@@ -556,6 +581,144 @@ describe('CrossReferenceEngine.compute', () => {
       ];
       expect(keysInResult).toContain('k2');
     });
+
+    it('reports counter deltas for both captures and mirrors A into aclDeltas.counters', async () => {
+      const a = withCounters([
+        {
+          start: { capturedAt: 1_000, counters: { acl_access_denied_auth: 1, rejected_connections: 0 } },
+          end: { capturedAt: 6_000, counters: { acl_access_denied_auth: 4, rejected_connections: 2 } },
+        },
+      ]);
+      const b = withCounters([
+        {
+          start: { capturedAt: 1_000, counters: { acl_access_denied_auth: 0, total_commands_processed: 10 } },
+          end: { capturedAt: 31_000, counters: { acl_access_denied_auth: 9, total_commands_processed: 70 } },
+        },
+      ]);
+      const engine = new CrossReferenceEngine(
+        buildStorage([], [], { a: a.counterSnapshots, b: b.counterSnapshots }),
+      );
+      const result = await engine.computeCaptureDiff(SESSION_ID, SESSION_B_ID);
+      expect(result.counterDeltas.deltas.acl_access_denied_auth).toBe(3);
+      expect(result.baselineCounterDeltas?.deltas.acl_access_denied_auth).toBe(9);
+      expect(result.baselineCounterDeltas?.deltas.total_commands_processed).toBe(60);
+      expect(result.aclDeltas.counters).toEqual({
+        aclAccessDeniedAuthDelta: 3,
+        rejectedConnectionsDelta: 2,
+      });
+    });
+  });
+
+  it('computeCaptureDiff does not read sessions that are passed in', async () => {
+    const storage = makeStorage();
+    const engine = new CrossReferenceEngine(storage);
+    await engine.computeCaptureDiff(SESSION_ID, 'session-b', {
+      session: { ...baseSession(), id: SESSION_ID },
+      baselineSession: { ...baseSession(), id: 'session-b' },
+      sessionLive: false,
+      baselineLive: true,
+    });
+    expect(storage.getCaptureSession).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable counter deltas and null ACL counters for legacy sessions', async () => {
+    const engine = new CrossReferenceEngine(makeStorage());
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(result.counterDeltas.coverage).toBe('unavailable');
+    expect(result.aclDeltas.counters).toEqual({
+      aclAccessDeniedAuthDelta: null,
+      rejectedConnectionsDelta: null,
+    });
+  });
+
+  it('populates aclDeltas.counters from session-boundary snapshots', async () => {
+    const session = {
+      ...baseSession(),
+      ...withCounters([
+        {
+          start: { capturedAt: 1_000, counters: { acl_access_denied_auth: 1, rejected_connections: 0 } },
+          end: { capturedAt: 6_000, counters: { acl_access_denied_auth: 4, rejected_connections: 2 } },
+        },
+      ]),
+    };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(result.aclDeltas.counters.aclAccessDeniedAuthDelta).toBe(3);
+    expect(result.aclDeltas.counters.rejectedConnectionsDelta).toBe(2);
+    expect(result.counterDeltas.coverage).toBe('complete');
+  });
+
+  it('marks a running session as capture_running when a live capture owns it', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      sessionLive: true,
+    });
+    expect(result.counterDeltas.coverage).toBe('unavailable');
+    expect(result.counterDeltas.pending).toBe('capture_running');
+  });
+
+  it('reads the session once per compute, and not at all when it is passed in', async () => {
+    const storage = makeStorage();
+    const engine = new CrossReferenceEngine(storage);
+    await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(storage.getCaptureSession).toHaveBeenCalledTimes(1);
+
+    const passed = makeStorage();
+    await new CrossReferenceEngine(passed).compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      session: baseSession(),
+    });
+    expect(passed.getCaptureSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the pre-read session for the counter status instead of re-reading', async () => {
+    const running = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session: baseSession() }));
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      session: running,
+      sessionLive: true,
+    });
+    expect(result.counterDeltas.pending).toBe('capture_running');
+  });
+
+  it('marks a running session with no live capture as capture_interrupted', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      sessionLive: false,
+    });
+    expect(result.counterDeltas.pending).toBe('capture_interrupted');
+  });
+
+  it('defaults a running session to capture_running when no liveness check is given', async () => {
+    const session = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session }));
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(result.counterDeltas.pending).toBe('capture_running');
+  });
+
+  it('leaves pending unset for an ended session', async () => {
+    const engine = new CrossReferenceEngine(makeStorage());
+    const result = await engine.compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      sessionLive: false,
+    });
+    expect(result.counterDeltas).not.toHaveProperty('pending');
+  });
+
+  it('does not set baselineCounterDeltas outside capture diffs', async () => {
+    const engine = new CrossReferenceEngine(makeStorage());
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(result.baselineCounterDeltas).toBeUndefined();
   });
 
   it('surfaces audit-trail entry count in aclDeltas when audit module persists rows in the window', async () => {
