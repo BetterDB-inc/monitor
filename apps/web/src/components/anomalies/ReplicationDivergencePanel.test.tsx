@@ -44,7 +44,7 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getByText('Diverging')).toBeInTheDocument();
     expect(screen.getByText('8.0 MiB')).toBeInTheDocument();
     expect(screen.getByText('8s')).toBeInTheDocument();
-    expect(screen.getByText('Critical')).toBeInTheDocument();
+    expect(screen.getByText('Critical')).toHaveClass('bg-destructive', 'text-destructive-foreground');
     expect(screen.getByText('In sync')).toBeInTheDocument();
     expect(screen.getByText('Not observed')).toBeInTheDocument();
     expect(screen.getAllByText('collecting')).toHaveLength(3);

@@ -617,6 +617,24 @@ describe('observeDivergence', () => {
       expect(replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000)).toBe('warning');
     });
 
+    it('is unobserved while the replica stops acknowledging, before any alert', () => {
+      const { h, last } = quiet();
+
+      h.windows([{ gap: 0, rate: MiB, lagSec: 30 }]);
+
+      expect(h.state.replicas.get(ADDR)?.level ?? 'none').toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('unobserved');
+    });
+
+    it('is in sync again once acknowledgements resume', () => {
+      const { h, last } = quiet();
+
+      h.windows([{ gap: 0, rate: MiB, lagSec: 30 }]);
+      h.windows([{ gap: 0, rate: MiB }]);
+
+      expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('none');
+    });
+
     it('leaves observation untouched for restart orphans', () => {
       const { h, last } = quiet();
 

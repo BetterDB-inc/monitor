@@ -80,6 +80,7 @@ export interface DivergenceConnectionState {
   rateHistory: number[];
   replicas: Map<string, ReplicaDivergenceState>;
   observed: Set<string>;
+  staleAcks: Set<string>;
   closedWindowCount: number;
   lastWindowEnd: number | null;
 }
@@ -138,6 +139,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     rateHistory: [],
     replicas: new Map(),
     observed: new Set(),
+    staleAcks: new Set(),
     closedWindowCount: 0,
     lastWindowEnd: null,
   };
@@ -434,6 +436,7 @@ export function observeDivergence(
     state.accumulators = new Map();
     state.staleGaps = new Map();
     state.observed = new Set();
+    state.staleAcks = new Set();
     return [...state.replicas.values()].flatMap((replica) => dropReplica(state, replica));
   }
   const outcomes: DivergenceOutcome[] = [];
@@ -469,7 +472,9 @@ export function observeDivergence(
   }
   state.windowSamples++;
 
-  state.observed = new Set(sample.replicas.filter(isStreaming).map((line) => line.addr));
+  const streaming = sample.replicas.filter(isStreaming);
+  state.observed = new Set(streaming.map((line) => line.addr));
+  state.staleAcks = new Set(streaming.filter(isStaleAck).map((line) => line.addr));
   for (const line of sample.replicas) {
     if (isStreaming(line) && isStaleAck(line)) state.staleGaps.set(line.addr, line.gapBytes);
     if (!isTracked(line)) continue;
@@ -491,7 +496,9 @@ export function replicaObservedLevel(
   const replica = state?.replicas.get(addr);
   const level = replica ? activeLevel(replica) : 'none';
   if (level !== 'none') return level;
-  if (!state?.observed.has(addr) || state.lastObservedAt === null) return 'unobserved';
+  if (!state?.observed.has(addr) || state.staleAcks.has(addr) || state.lastObservedAt === null) {
+    return 'unobserved';
+  }
   return now - state.lastObservedAt > staleAfterMs ? 'unobserved' : 'none';
 }
 
