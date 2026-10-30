@@ -23,6 +23,7 @@ export async function runRetentionSweep(
   const pruneOps: Array<{ name: string; fn: () => Promise<number> }> = [
     { name: 'slowlog', fn: () => storage.pruneOldSlowLogEntries(cutoff) },
     { name: 'commandlog', fn: () => storage.pruneOldCommandLogEntries(cutoff) },
+    { name: 'log_capture_gaps', fn: () => storage.getLogCaptureGapRepository().prune(cutoff) },
     { name: 'client_snapshots', fn: () => storage.pruneOldClientSnapshots(cutoff) },
     // The rollup poller also trims rollups hourly to
     // CLIENT_ANALYTICS_ROLLUP_RETENTION_DAYS, but only for registered

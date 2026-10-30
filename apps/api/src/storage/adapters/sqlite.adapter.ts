@@ -139,6 +139,8 @@ import { SlowLogSqliteRepository } from './repositories/slowlog.sqlite.repositor
 import { InvitationSqliteRepository } from './repositories/invitation.sqlite.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
+import { LogCaptureGapSqliteRepository } from './repositories/log-capture-gap.sqlite.repository';
+import type { LogCaptureGapRepository } from '../../common/interfaces/log-capture-gap-repository.interface';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
@@ -642,6 +644,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private slowlogRepo!: SlowLogSqliteRepository;
   private invitationRepo!: InvitationSqliteRepository;
   private activityRepo!: ActivitySqliteRepository;
+  private logCaptureGapRepo!: LogCaptureGapSqliteRepository;
 
   constructor(private config: SqliteAdapterConfig) {}
 
@@ -665,6 +668,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
       this.activityRepo = new ActivitySqliteRepository(this.db);
+      this.logCaptureGapRepo = new LogCaptureGapSqliteRepository(this.db);
       this.ready = true;
     } catch (error) {
       this.ready = false;
@@ -2405,6 +2409,24 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON activity_events(actor_user_id, occurred_at);
       CREATE INDEX IF NOT EXISTS idx_activity_events_connection
         ON activity_events(connection_id, occurred_at);
+
+      CREATE TABLE IF NOT EXISTS log_capture_gaps (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        log_type TEXT NOT NULL CHECK (log_type IN ('slowlog', 'commandlog-slow', 'commandlog-large-request', 'commandlog-large-reply')),
+        first_missing_id INTEGER NOT NULL,
+        last_missing_id INTEGER NOT NULL,
+        missing_count INTEGER NOT NULL,
+        cause TEXT NOT NULL CHECK (cause IN ('server_evicted', 'fetch_limit', 'monitor_offline')),
+        captured_count INTEGER NOT NULL,
+        previous_poll_at INTEGER,
+        detected_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_capture_gaps_conn_detected
+        ON log_capture_gaps(connection_id, detected_at);
+      CREATE INDEX IF NOT EXISTS idx_log_capture_gaps_detected
+        ON log_capture_gaps(detected_at);
     `);
 
     // Idempotent migration for deployments that ran the PR 19 schema before
@@ -6574,6 +6596,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   getActivityRepository(): ActivityRepository {
     return this.activityRepo;
+  }
+
+  getLogCaptureGapRepository(): LogCaptureGapRepository {
+    return this.logCaptureGapRepo;
   }
 }
 

@@ -134,6 +134,8 @@ import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repos
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityPostgresRepository } from './repositories/activity.postgres.repository';
+import { LogCaptureGapPostgresRepository } from './repositories/log-capture-gap.postgres.repository';
+import type { LogCaptureGapRepository } from '../../common/interfaces/log-capture-gap-repository.interface';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
@@ -319,6 +321,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   private slowlogRepo!: SlowLogPostgresRepository;
   private invitationRepo!: InvitationPostgresRepository;
   private activityRepo!: ActivityPostgresRepository;
+  private logCaptureGapRepo!: LogCaptureGapPostgresRepository;
 
   constructor(private config: PostgresAdapterConfig) {}
 
@@ -492,6 +495,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.slowlogRepo = new SlowLogPostgresRepository(this.pool, this.mappers);
       this.invitationRepo = new InvitationPostgresRepository(this.pool);
       this.activityRepo = new ActivityPostgresRepository(this.pool);
+      this.logCaptureGapRepo = new LogCaptureGapPostgresRepository(this.pool);
 
       // Test connection (will have correct search_path if schema is set)
       const testClient = await this.pool.connect();
@@ -2594,6 +2598,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON activity_events(actor_user_id, occurred_at);
       CREATE INDEX IF NOT EXISTS idx_activity_events_connection
         ON activity_events(connection_id, occurred_at);
+
+      CREATE TABLE IF NOT EXISTS log_capture_gaps (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        log_type VARCHAR(32) NOT NULL CHECK (log_type IN ('slowlog', 'commandlog-slow', 'commandlog-large-request', 'commandlog-large-reply')),
+        first_missing_id BIGINT NOT NULL,
+        last_missing_id BIGINT NOT NULL,
+        missing_count BIGINT NOT NULL,
+        cause VARCHAR(20) NOT NULL CHECK (cause IN ('server_evicted', 'fetch_limit', 'monitor_offline')),
+        captured_count INTEGER NOT NULL,
+        previous_poll_at BIGINT,
+        detected_at BIGINT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_log_capture_gaps_conn_detected
+        ON log_capture_gaps(connection_id, detected_at);
+      CREATE INDEX IF NOT EXISTS idx_log_capture_gaps_detected
+        ON log_capture_gaps(detected_at);
     `);
   }
 
@@ -7018,6 +7040,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   getActivityRepository(): ActivityRepository {
     return this.activityRepo;
+  }
+
+  getLogCaptureGapRepository(): LogCaptureGapRepository {
+    return this.logCaptureGapRepo;
   }
 }
 

@@ -14,8 +14,10 @@ describe('DataRetentionService', () => {
   let storage: jest.Mocked<StoragePort>;
   let licenseService: jest.Mocked<LicenseService>;
   let originalCloudMode: string | undefined;
+  let logCaptureGaps: { prune: jest.Mock };
 
   beforeEach(async () => {
+    logCaptureGaps = { prune: jest.fn().mockResolvedValue(24) };
     originalCloudMode = process.env.CLOUD_MODE;
     process.env.CLOUD_MODE = 'true';
 
@@ -44,6 +46,7 @@ describe('DataRetentionService', () => {
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(20),
       pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(22),
       pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(23),
+      getLogCaptureGapRepository: () => logCaptureGaps,
     } as any;
 
     licenseService = {
@@ -136,6 +139,15 @@ describe('DataRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }
+  });
+
+  it('prunes log capture gaps at the tier cutoff, not the sample cap', async () => {
+    licenseService.getLicenseTier.mockReturnValue(Tier.pro);
+
+    await service.runRetention();
+
+    expect(logCaptureGaps.prune).toHaveBeenCalledTimes(1);
+    expect(logCaptureGaps.prune).toHaveBeenCalledWith(NOW - 90 * MS_PER_DAY);
   });
 
   it('pro tier uses 90-day cutoff, sample stores stay at the 7-day cap', async () => {

@@ -12,9 +12,12 @@ import { SlowLogTable } from '../components/metrics/SlowLogTable';
 import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { ScanSkewAdvisory } from '../components/metrics/ScanSkewAdvisory';
+import { LogCaptureGapAdvisory, UnviewableLogGapAdvisories } from '../components/metrics/LogCaptureGapAdvisory';
+import { logCaptureApi } from '../api/log-capture';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
 import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
 import type { CommandLogType, LogSortBy } from '../types/metrics';
+import type { CapturedLogType } from '@betterdb/shared';
 
 function getTabFromParams(params: URLSearchParams): CommandLogType {
   const tab = params.get('tab');
@@ -237,6 +240,22 @@ export function SlowLog() {
   // banner when BOTH are missing, so we never spam "COMMANDLOG not exposed"
   // on every Redis SlowLog page.
   const bothMissing = !hasSlowLog && !hasCommandLog;
+  // Entries the server overwrote before BetterDB read them. Checked once a
+  // minute: gaps are only written by the 30s pollers.
+  const { data: logCaptureSummary } = usePolling({
+    fetcher: (signal) => logCaptureApi.getSummary(signal),
+    interval: 60_000,
+    enabled: true,
+    queryKey: ['log-capture-summary', currentConnection?.id],
+  });
+  const visibleCapturedLog = hasCommandLog ? (`commandlog-${activeTab}` as const) : ('slowlog' as const);
+  // Logs this page can show: the command log tabs, or the slow log. Retained
+  // gaps for any other log (e.g. command log after COMMANDLOG went away) are
+  // still surfaced below, so history is never hidden.
+  const viewableCapturedLogs: CapturedLogType[] = hasCommandLog
+    ? ['commandlog-slow', 'commandlog-large-request', 'commandlog-large-reply']
+    : ['slowlog'];
+
   const showSlowLogBanner = !hasSlowLog && (Boolean(slowLogReason) || bothMissing);
   const showCommandLogBanner = !hasCommandLog && (Boolean(commandLogReason) || bothMissing);
   const FALLBACK_REASON = 'Not exposed by this server.';
@@ -296,6 +315,9 @@ export function SlowLog() {
           onRetry={commandLogReason ? handleRetryCommandLog : undefined}
         />
       )}
+
+      <LogCaptureGapAdvisory summary={logCaptureSummary} logType={visibleCapturedLog} />
+      <UnviewableLogGapAdvisories summary={logCaptureSummary} viewableLogTypes={viewableCapturedLogs} />
 
       {hasCommandLog ? (
         <Card>
