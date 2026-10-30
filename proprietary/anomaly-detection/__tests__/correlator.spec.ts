@@ -81,6 +81,27 @@ describe('Correlator', () => {
     });
   });
 
+  describe('RESHARD_PRESSURE pattern', () => {
+    it('needs only the skew event', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it('wins over a latency pattern in the same window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.COMMAND_P99, timestamp: now }),
+        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+  });
+
   describe('NODE_FAILOVER pattern', () => {
     it('matches on REPLICATION_ROLE metric', () => {
       const anomaly = makeAnomaly({

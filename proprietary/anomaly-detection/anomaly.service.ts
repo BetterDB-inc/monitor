@@ -45,6 +45,17 @@ import {
   toTimelineEntry,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
+import {
+  RESHARD_MIN_PRIMARIES,
+  RESHARD_PERSIST_POLLS,
+  RESHARD_QUIET_POLLS,
+  RESHARD_STALE_POLLS,
+  ReshardShardSnapshot,
+  ReshardSkewFinding,
+  evaluateReshardSkew,
+  isReshardActive,
+  reshardSkewSignature,
+} from './reshard-pressure-detector';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
@@ -128,6 +139,7 @@ import {
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
+import { isWriteCommand } from '@app/cluster/write-commands';
 import {
   ClusterNode,
   ClusterShard,
@@ -293,6 +305,12 @@ export class AnomalyService
   // the alert once the persistence gate has fired.
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
+  private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
+  private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
+  private activeReshardSkews = new Map<string, Set<string>>();
+  private reshardSkewEventIds = new Map<string, Map<string, string>>();
+  private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
+  private reshardThinViewLogged = new Set<string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -739,6 +757,12 @@ export class AnomalyService
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
+    this.reshardSnapshot.delete(connectionId);
+    this.reshardSkewFirstSeen.delete(connectionId);
+    this.activeReshardSkews.delete(connectionId);
+    this.reshardSkewEventIds.delete(connectionId);
+    this.reshardWriteP99.delete(connectionId);
+    this.reshardThinViewLogged.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -1423,6 +1447,7 @@ export class AnomalyService
           // under Raft, and CLUSTER NODES / SLOT-STATS remain available — so
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
+          await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
         }
         aclClusterNodes = nodes;
       }
@@ -3724,6 +3749,8 @@ export class AnomalyService
   // settles and clears before the (larger) fire window elapses.
   private static readonly RAFT_DEFAULT_NODE_TIMEOUT_MS = 15_000;
   private static readonly RAFT_RECOVERED_FLOOR_MS = 30_000;
+  private static readonly RESHARD_P99_LOOKBACK_MS = 120_000;
+  private static readonly RESHARD_P99_REFRESH_MS = 30_000;
   // Clamp the node-timeout used for sizing (not the derived window): the recovery
   // window must stay 3x node-timeout to exceed the ~2x inter-seek gap, so bounding
   // the *input* keeps that invariant for every realistic tuning (this covers up to
@@ -4343,6 +4370,167 @@ export class AnomalyService
    * dedupes per (replica, primary) pair, and clears state on recovery so a
    * resolved-then-recurring stuck replica alerts again.
    */
+  private async detectReshardPressure(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+    cpuUtilization: number | null,
+  ): Promise<void> {
+    try {
+      const self = nodes.find((n) => n.flags.includes('myself'));
+      const findings: ReshardSkewFinding[] = [];
+      if (self?.flags.includes('master')) {
+        const finding = await this.evaluateOwnReshardSkew(
+          info,
+          ctx,
+          timestamp,
+          self,
+          clusterKeyFromNodes(nodes),
+          cpuUtilization,
+        );
+        if (finding) findings.push(finding);
+      } else {
+        this.reshardSnapshot.delete(ctx.connectionId);
+      }
+      await this.applyTopologyPersistenceGate({
+        ctx,
+        timestamp,
+        findings,
+        signatureOf: reshardSkewSignature,
+        firstSeenByConn: this.reshardSkewFirstSeen,
+        activeByConn: this.activeReshardSkews,
+        minPersistMs: (RESHARD_PERSIST_POLLS - 1) * this.getIntervalMs(),
+        eventIdsByConn: this.reshardSkewEventIds,
+        metricType: MetricType.RESHARD_SHARD_SKEW,
+        buildEvent: (finding) => this.buildReshardSkewEvent(ctx, timestamp, finding),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Reshard pressure check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private async evaluateOwnReshardSkew(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+    self: ClusterNode,
+    clusterKey: string,
+    cpuUtilization: number | null,
+  ): Promise<ReshardSkewFinding | null> {
+    const migratingSlots = self.migratingSlots?.length ?? 0;
+    const importingSlots = self.importingSlots?.length ?? 0;
+    const previous = this.reshardSnapshot.get(ctx.connectionId);
+    const snapshot: ReshardShardSnapshot = {
+      connectionId: ctx.connectionId,
+      clusterKey,
+      shardId: self.id,
+      migratingSlots,
+      importingSlots,
+      lastMarkerAt:
+        migratingSlots + importingSlots > 0 ? timestamp : (previous?.lastMarkerAt ?? null),
+      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec) ?? 0,
+      cpuUtilization,
+      usedMemory: this.parseNumber(info.used_memory) ?? 0,
+      writeP99Us: null,
+      timestamp,
+    };
+    this.reshardSnapshot.set(ctx.connectionId, snapshot);
+
+    const intervalMs = this.getIntervalMs();
+    const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
+    if (!isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs)) return null;
+
+    if (shards.length < RESHARD_MIN_PRIMARIES) {
+      if (!this.reshardThinViewLogged.has(ctx.connectionId)) {
+        this.reshardThinViewLogged.add(ctx.connectionId);
+        this.logger.warn(
+          `Reshard skew skipped for ${ctx.connectionName}: only ${shards.length} of the cluster's primaries are monitored`,
+        );
+      }
+      return null;
+    }
+    this.reshardThinViewLogged.delete(ctx.connectionId);
+
+    const measured = {
+      ...snapshot,
+      writeP99Us: await this.latestWriteP99(ctx.connectionId, timestamp),
+    };
+    this.reshardSnapshot.set(ctx.connectionId, measured);
+    return evaluateReshardSkew(
+      measured,
+      shards.map((s) => (s.shardId === measured.shardId ? measured : s)),
+    );
+  }
+
+  private freshReshardShards(
+    clusterKey: string,
+    timestamp: number,
+    intervalMs: number,
+  ): ReshardShardSnapshot[] {
+    const shards = new Map<string, ReshardShardSnapshot>();
+    for (const snapshot of this.reshardSnapshot.values()) {
+      if (snapshot.clusterKey !== clusterKey) continue;
+      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) continue;
+      shards.set(snapshot.shardId, snapshot);
+    }
+    return [...shards.values()];
+  }
+
+  private async latestWriteP99(connectionId: string, timestamp: number): Promise<number | null> {
+    const cached = this.reshardWriteP99.get(connectionId);
+    if (cached && timestamp - cached.readAt < AnomalyService.RESHARD_P99_REFRESH_MS) {
+      return cached.value;
+    }
+    let value: number | null = null;
+    try {
+      const rows = await this.storage.getLatencyStatsHistory({
+        connectionId,
+        startTime: timestamp - AnomalyService.RESHARD_P99_LOOKBACK_MS,
+        endTime: timestamp,
+        limit: 1,
+      });
+      const writes = rows.filter((row) => isWriteCommand(row.command)).map((row) => row.p99Us);
+      value = writes.length > 0 ? Math.max(...writes) : null;
+    } catch (err) {
+      this.logger.debug(
+        `Write P99 read failed for ${connectionId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    this.reshardWriteP99.set(connectionId, { readAt: timestamp, value });
+    return value;
+  }
+
+  private buildReshardSkewEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    finding: ReshardSkewFinding,
+  ): AnomalyEvent {
+    const worst = finding.deviations.reduce((a, b) => (b.ratio > a.ratio ? b : a));
+    const deviations = finding.deviations
+      .map((d) => `${d.metric} ${d.ratio.toFixed(1)}x the median`)
+      .join(', ');
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.RESHARD_SHARD_SKEW,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: worst.ratio,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: worst.threshold,
+      message:
+        `Reshard pressure on shard ${finding.shardId.substring(0, 8)} (${finding.role}): ` +
+        `${deviations} of the cluster's primaries during an active reshard`,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+  }
+
   private async detectStuckReplicas(
     ctx: ConnectionContext,
     timestamp: number,

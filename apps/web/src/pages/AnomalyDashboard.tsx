@@ -156,6 +156,7 @@ const METRIC_LABELS: Record<string, string> = {
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
+  reshard_shard_skew: 'Reshard Shard Skew',
 };
 
 function formatTime(ts: number): string {

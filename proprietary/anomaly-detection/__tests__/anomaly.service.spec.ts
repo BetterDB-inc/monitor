@@ -1523,6 +1523,165 @@ describe('AnomalyService', () => {
 
   // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
 
+  describe('reshard pressure', () => {
+    const BASE = 1_700_000_000_000;
+    const IDS = ['a', 'b', 'c'];
+    let clock: number;
+
+    function shardNodes(self: string, migrating: boolean) {
+      return IDS.map((id) => ({
+        id: `${id}0000000`,
+        address: `10.0.0.${id.charCodeAt(0)}:6379@16379`,
+        flags: id === self ? ['myself', 'master'] : ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        migratingSlots: id === self && migrating ? [{ slot: 1, targetNodeId: 'b0000000' }] : [],
+      }));
+    }
+
+    function shardCtx(id: string, ops: number, migrating: boolean, role = 'master') {
+      const info = {
+        server: { redis_version: '8.0.0' },
+        replication: { role },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { instantaneous_ops_per_sec: String(ops), cluster_enabled: '1' },
+      };
+      return {
+        ...mockCtx,
+        connectionId: `conn-${id}`,
+        connectionName: id,
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(info),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn().mockResolvedValue(shardNodes(id, migrating)),
+        },
+      } as unknown as ConnectionContext;
+    }
+
+    async function pollCluster(aOps: number, migrating: boolean): Promise<void> {
+      clock += 1000;
+      await poll(shardCtx('a', aOps, migrating));
+      await poll(shardCtx('b', 6000, false));
+      await poll(shardCtx('c', 6000, false));
+    }
+
+    const skewEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.RESHARD_SHARD_SKEW);
+
+    beforeEach(() => {
+      clock = BASE;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('alerts once when a shard stays above the cluster median during a reshard', async () => {
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+      expect(skewEvents()).toHaveLength(0);
+
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(skewEvents()[0]).toMatchObject({
+        connectionId: 'conn-a',
+        severity: AnomalySeverity.WARNING,
+        value: 3,
+      });
+      expect(skewEvents()[0].message).toContain('a0000000');
+      expect(skewEvents()[0].message).toContain('(source)');
+    });
+
+    it('stays quiet when the same skew has no reshard behind it', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, false);
+
+      expect(skewEvents()).toHaveLength(0);
+      expect(storage.getLatencyStatsHistory).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet during a reshard under light load', async () => {
+      for (let i = 0; i < 4; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 400, true));
+        await poll(shardCtx('b', 100, false));
+        await poll(shardCtx('c', 100, false));
+      }
+
+      expect(skewEvents()).toHaveLength(0);
+    });
+
+    it('resolves the event once the reshard window closes', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(18_000, false);
+      await pollCluster(18_000, false);
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(18_000, false);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('rereads the stored write P99 on a slower cadence than the poll', async () => {
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([
+        { command: 'set', p99Us: 900, capturedAt: BASE },
+        { command: 'get', p99Us: 50_000, capturedAt: BASE },
+      ]);
+
+      await pollCluster(6000, true);
+      await pollCluster(6000, true);
+
+      expect(storage.getLatencyStatsHistory).toHaveBeenCalledTimes(3);
+      expect((service as any).reshardSnapshot.get('conn-a').writeP99Us).toBe(900);
+    });
+
+    it('judges the other metrics when the write P99 read fails', async () => {
+      storage.getLatencyStatsHistory = jest.fn().mockRejectedValue(new Error('down'));
+
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(storage.getLatencyStatsHistory).toHaveBeenCalledTimes(3);
+    });
+
+    it('drops a node from the comparison once it stops being a primary', async () => {
+      await pollCluster(18_000, true);
+      expect((service as any).reshardSnapshot.has('conn-b')).toBe(true);
+
+      const demoted = shardCtx('b', 6000, false);
+      (demoted.client as any).getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          shardNodes('b', false).map((n) =>
+            n.id === 'b0000000' ? { ...n, flags: ['myself', 'slave'], master: 'a0000000' } : n,
+          ),
+        );
+      await poll(demoted);
+
+      expect((service as any).reshardSnapshot.has('conn-b')).toBe(false);
+    });
+
+    it('clears its state when a connection is removed', async () => {
+      await pollCluster(18_000, true);
+
+      (service as any).onConnectionRemoved('conn-a');
+
+      expect((service as any).reshardSnapshot.has('conn-a')).toBe(false);
+      expect((service as any).reshardWriteP99.has('conn-a')).toBe(false);
+    });
+  });
+
   describe('cluster state webhook dispatch', () => {
     it('dispatches cluster.failover webhook on ok→fail transition', async () => {
       // First poll: establish cluster state as 'ok'
