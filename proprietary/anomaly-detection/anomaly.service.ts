@@ -228,6 +228,9 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
+const MAX_INVOLVED_GROUP_IDS = 5_000;
+const MAX_SCANNED_CALLER_EVENTS = 100_000;
+
 @Injectable()
 export class AnomalyService
   extends MultiConnectionPoller
@@ -5903,9 +5906,14 @@ export class AnomalyService
   ): Promise<StoredCorrelatedGroup[]> {
     if (siblings.length === 0) return [];
     const pageSize = 10_000;
-    const enough = (wanted: Set<string>) => !pattern && wanted.size >= limit;
+    const maxWanted = pattern ? MAX_INVOLVED_GROUP_IDS : Math.min(limit, MAX_INVOLVED_GROUP_IDS);
+    const enough = (wanted: Set<string>) => wanted.size >= maxWanted;
     const wanted = new Set<string>();
-    for (let offset = 0; !enough(wanted); offset += pageSize) {
+    for (
+      let offset = 0;
+      !enough(wanted) && offset < MAX_SCANNED_CALLER_EVENTS;
+      offset += pageSize
+    ) {
       const page = await this.storage.getAnomalyEvents({
         startTime: startTime - this.correlationIntervalMs,
         endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
@@ -5925,19 +5933,20 @@ export class AnomalyService
     const chunks = Array.from({ length: Math.ceil(ids.length / chunkSize) }, (_, i) =>
       ids.slice(i * chunkSize, (i + 1) * chunkSize),
     );
-    const found = await Promise.all(
-      siblings.flatMap((id) =>
-        chunks.map((chunk) =>
-          this.storage.getCorrelatedGroups({
+    const found: StoredCorrelatedGroup[] = [];
+    for (const id of siblings) {
+      for (const chunk of chunks) {
+        found.push(
+          ...(await this.storage.getCorrelatedGroups({
             pattern: pattern as string,
             correlationIds: chunk,
             limit: chunk.length,
             connectionId: id,
-          }),
-        ),
-      ),
-    );
-    return found.flat();
+          })),
+        );
+      }
+    }
+    return found;
   }
 
   async getRecentCorrelatedGroups(
