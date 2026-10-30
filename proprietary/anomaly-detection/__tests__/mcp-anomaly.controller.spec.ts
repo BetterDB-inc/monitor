@@ -9,6 +9,7 @@ describe('McpAnomalyController', () => {
   let controller: McpAnomalyController;
   const svc = {
     getRecentAnomalies: jest.fn(),
+    getRetryAmplificationStatus: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -81,5 +82,13 @@ describe('McpAnomalyController', () => {
     }
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
+  it('retry amplification returns the detector status for the instance', () => {
+    const status = { armed: true, classification: 'none', topContributors: null };
+    svc.getRetryAmplificationStatus.mockReturnValue(status);
+
+    expect(controller.getRetryAmplification('inst1')).toBe(status);
+    expect(svc.getRetryAmplificationStatus).toHaveBeenCalledWith('inst1');
   });
 });

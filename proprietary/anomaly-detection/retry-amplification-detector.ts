@@ -54,7 +54,7 @@ export interface RetryAmplificationWindow {
   saturationMetrics: MetricType[];
 }
 
-interface WindowBaseline {
+export interface WindowBaseline {
   opsPerSec: number;
   connectedClients: number;
   cmdsPerClient: number;
@@ -519,6 +519,41 @@ export function evaluateRetryAmplification(
   };
 
   return state.pending;
+}
+
+export interface RetryAmplificationStatus {
+  armed: boolean;
+  classification: 'none' | 'candidate' | 'amplifying';
+  level: RetryAmplificationLevel;
+  windows: number;
+  baseline: WindowBaseline | null;
+  lastEpisode: RetryAmplificationEpisode | null;
+}
+
+export function describeRetryAmplificationState(
+  state: RetryAmplificationState | undefined,
+): RetryAmplificationStatus {
+  if (state === undefined) {
+    return {
+      armed: false,
+      classification: 'none',
+      level: 'none',
+      windows: 0,
+      baseline: null,
+      lastEpisode: null,
+    };
+  }
+  const armed = state.coldWindows.length >= RETRY_AMP_ARM_WINDOWS;
+  const classification =
+    state.hotRun.length === 0 ? 'none' : state.episodeLevel !== 'none' ? 'amplifying' : 'candidate';
+  return {
+    armed,
+    classification,
+    level: state.episodeLevel,
+    windows: state.hotRun.length,
+    baseline: armed ? computeBaseline(state.coldWindows) : null,
+    lastEpisode: state.lastEpisode,
+  };
 }
 
 export function retryAmplificationEpisodeStart(state: RetryAmplificationState): number | null {

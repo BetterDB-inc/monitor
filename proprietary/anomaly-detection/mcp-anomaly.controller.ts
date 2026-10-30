@@ -48,4 +48,13 @@ export class McpAnomalyController {
       throw mapMcpError(this.logger, error, 'Failed to get anomalies');
     }
   }
+
+  @Get('instance/:id/anomalies/retry-amplification')
+  getRetryAmplification(@Param('id', ValidateInstanceIdPipe) id: string) {
+    try {
+      return this.anomalyService.getRetryAmplificationStatus(id);
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get retry amplification status');
+    }
+  }
 }

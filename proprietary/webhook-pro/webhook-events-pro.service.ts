@@ -8,6 +8,7 @@ import {
   type KvCacheHitRateLowData,
   type LatencyRegressionDetectedData,
   type MetricKind,
+  type RetryAmplificationDetectedData,
   type ScalingReadinessLowData,
   type WebhookInstanceInfo,
 } from '@betterdb/shared';
@@ -368,6 +369,29 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         topologyRefreshCorrelated: data.topologyRefreshCorrelated,
         prefetchBatchMaxSize: data.prefetchBatchMaxSize ?? null,
         runbook: data.runbook,
+        message: data.message,
+        timestamp: data.timestamp,
+        instance: data.instance,
+      },
+      data.connectionId,
+    );
+  }
+
+  async dispatchRetryAmplificationDetected(data: RetryAmplificationDetectedData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Retry amplification event skipped - requires PRO license');
+      return;
+    }
+
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
+      {
+        level: data.level,
+        trigger: data.trigger,
+        windows: data.windows,
+        loadRatio: data.loadRatio,
+        correlation: data.correlation,
+        topContributors: data.topContributors,
         message: data.message,
         timestamp: data.timestamp,
         instance: data.instance,

@@ -146,6 +146,7 @@ Once connected, your AI assistant can query your databases directly:
 | `get_commandlog_history` | Persisted COMMANDLOG entries with time range filtering |
 | `get_commandlog_patterns` | Aggregated COMMANDLOG patterns |
 | `get_anomalies` | Anomaly detection events *(Pro)* |
+| `get_retry_amplification` | Live retry-amplification state, last episode and top clients *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
 | `get_cluster_nodes` | Cluster node discovery — roles, health, slot ranges |

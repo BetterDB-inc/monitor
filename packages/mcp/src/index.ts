@@ -662,6 +662,33 @@ server.tool(
 );
 
 server.tool(
+  'get_retry_amplification',
+  'Get the live retry-amplification detector state: whether its baseline is armed, whether a candidate or amplifying episode is open (load per client rising with latency, errors or churn while the client count stays flat), the last episode and its trigger, and the clients whose command rate or reconnects grew most. Use when an incident looks like a self-sustaining retry storm rather than real traffic growth.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_retry_amplification', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/anomalies/retry-amplification`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+      };
+    }),
+);
+
+server.tool(
   'get_client_activity',
   'Get time-bucketed client activity from persisted snapshots. Shows connection counts, command distribution, and buffer usage over time. Use startTime/endTime to focus on a specific incident window.',
   {

@@ -175,6 +175,8 @@ import {
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
   evaluateRetryAmplification,
+  RetryAmplificationStatus,
+  describeRetryAmplificationState,
   retryAmplificationEpisodeStart,
 } from './retry-amplification-detector';
 import {
@@ -3181,6 +3183,25 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     acknowledgeRetryAmplificationFinding(state, finding);
+
+    if (this.webhookEventsProService) {
+      this.webhookEventsProService
+        .dispatchRetryAmplificationDetected({
+          level: finding.level,
+          trigger: finding.trigger,
+          windows: finding.windows,
+          loadRatio: finding.loadRatio,
+          correlation: finding.correlation,
+          topContributors: contributors,
+          message: event.message,
+          timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
+        });
+    }
   }
 
   private async readClientCommandCounts(
@@ -3226,6 +3247,15 @@ export class AnomalyService
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
     return this.retryAmplificationContributors.get(connectionId) ?? null;
+  }
+
+  getRetryAmplificationStatus(
+    connectionId: string,
+  ): RetryAmplificationStatus & { topContributors: RetryAmplificationContributor[] | null } {
+    return {
+      ...describeRetryAmplificationState(this.retryAmplificationState.get(connectionId)),
+      topContributors: this.getRetryAmplificationContributors(connectionId),
+    };
   }
 
   /**

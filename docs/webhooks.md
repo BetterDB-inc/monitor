@@ -80,6 +80,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
 | `kv_cache.hit_rate_low` | KV cache hit rate low | An LMCache engine's token hit rate over the last 15 minutes dropped to or below the connection's threshold |
 | `kv_cache.eviction_risk` | KV cache eviction risk | LMCache keys cannot be evicted under a `volatile-*` policy, or Valkey is evicting while LMCache holds most of its memory |
+| `retry_amplification.detected` | Retry amplification detected | Load per client keeps rising together with latency, errors or connection churn while the client count stays flat |
 
 ### Enterprise Tier
 
@@ -479,6 +480,28 @@ Fires once per connection and reason when a footprint collection finds LMCache a
   "noTtlRatio": 1,
   "evictedKeysDelta": null,
   "message": "LMCache keys have no TTL under volatile-lru; Valkey cannot evict them",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
+#### retry_amplification.detected (Pro)
+
+Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires when load and stress rise together (`correlation` ≥ 0.5) and load is not decaying. `level` is `critical` when a saturation anomaly (load, CPU, rejected connections, client saturation or lockout risk) lands in the episode, otherwise `warning`. It fires once per level and re-arms after 2 normal windows.
+
+`trigger` is the stress signal that showed up first: `latency`, `errors`, `churn` or `saturation`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read. The generic `anomaly.detected` event is sent as well.
+
+```json
+{
+  "level": "warning",
+  "trigger": "latency",
+  "windows": 3,
+  "loadRatio": 1.9,
+  "correlation": 0.97,
+  "topContributors": [
+    { "key": "checkout", "keyKind": "name", "commandRateGrowth": 4.8, "newConnections": 12, "connections": 40 }
+  ],
+  "message": "WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while connected clients stay flat at ~120; load is rising with stress (r=0.97). Trigger: a latency regression (COMMAND_P99). Without client backoff the loop keeps feeding itself. Top clients: name checkout (cmds 4.8×, 12 reconnects).",
   "timestamp": 1735689600000,
   "instance": { "host": "valkey.example.com", "port": 6379 }
 }

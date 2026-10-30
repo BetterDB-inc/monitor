@@ -76,6 +76,7 @@ describe('AnomalyService', () => {
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
       dispatchDataLossDetected: jest.fn().mockResolvedValue(undefined),
+      dispatchRetryAmplificationDetected: jest.fn().mockResolvedValue(undefined),
     };
 
     otelEvents = { dispatch: jest.fn() };
@@ -3346,6 +3347,50 @@ describe('AnomalyService', () => {
       expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
       expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
+    });
+
+    it('dispatches retry_amplification.detected with the finding and contributors', async () => {
+      const { recorded } = await runRetry();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warning',
+          trigger: 'latency',
+          loadRatio: recorded[0].value,
+          message: recorded[0].message,
+          topContributors: service.getRetryAmplificationContributors('conn-1'),
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('still records the anomaly when the webhook dispatch rejects', async () => {
+      webhookEventsProService.dispatchRetryAmplificationDetected.mockRejectedValueOnce(
+        new Error('dispatcher down'),
+      );
+
+      const { recorded, errorsCaught } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(errorsCaught).toHaveLength(0);
+    });
+
+    it('reports detector status and contributors per connection', async () => {
+      expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
+        expect.objectContaining({ armed: false, classification: 'none', topContributors: null }),
+      );
+
+      await runRetry();
+
+      expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
+        expect.objectContaining({
+          armed: true,
+          classification: 'amplifying',
+          level: 'warning',
+          lastEpisode: null,
+        }),
+      );
     });
 
     it('retries a failed emit on the next poll', async () => {

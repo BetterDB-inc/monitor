@@ -1,6 +1,7 @@
 import {
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
+  describeRetryAmplificationState,
   evaluateRetryAmplification,
   readRetryAmplificationTrigger,
   RetryAmplificationFinding,
@@ -294,5 +295,24 @@ describe('retry amplification detector', () => {
       d.t += RETRY_AMP_WINDOW_MS;
     }
     expect(d.state.coldWindows).toHaveLength(0);
+  });
+
+  describe('describeRetryAmplificationState', () => {
+    it('reports an unknown connection as unarmed with no episode', () => {
+      expect(describeRetryAmplificationState(undefined)).toEqual({
+        armed: false,
+        classification: 'none',
+        level: 'none',
+        windows: 0,
+        baseline: null,
+        lastEpisode: null,
+      });
+    });
+
+    it('reports a fresh state as unarmed', () => {
+      expect(describeRetryAmplificationState(createRetryAmplificationState())).toEqual(
+        expect.objectContaining({ armed: false, classification: 'none', baseline: null }),
+      );
+    });
   });
 });
