@@ -11,7 +11,10 @@ import { ConnectionContext } from '@app/common/services/multi-connection-poller'
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
-import { RETRY_AMP_SNAPSHOT_LIMIT } from '../retry-amplification-attribution';
+import {
+  RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
+  RETRY_AMP_SNAPSHOT_LIMIT,
+} from '../retry-amplification-attribution';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -3558,6 +3561,7 @@ describe('AnomalyService', () => {
       (service as any).retryAmplificationFirstClients.set('conn-1', {
         episodeStart: 1,
         snapshot: { takenAt: 0, clients: new Map() },
+        attempts: 1,
       });
       dbClient.getClients = jest.fn().mockResolvedValue([]);
 
@@ -3608,6 +3612,15 @@ describe('AnomalyService', () => {
 
       expect(dbClient.getClients).toHaveBeenCalledTimes(3);
       expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+    });
+
+    it('stops retrying CLIENT LIST after a few failed first snapshots', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry({ coolWindows: 0 });
+
+      expect(dbClient.getClients).toHaveBeenCalledTimes(RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS + 1);
     });
 
     it('falls back to reconnects from stored snapshots without tot-cmds', async () => {

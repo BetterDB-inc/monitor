@@ -2,6 +2,7 @@ export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
 export const RETRY_AMP_ATTRIBUTION_MIN_WINDOWS = 2;
+export const RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS = 3;
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 

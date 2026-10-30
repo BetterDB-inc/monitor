@@ -188,6 +188,7 @@ import {
 import {
   ClientCommandSnapshot,
   RETRY_AMP_ATTRIBUTION_MIN_WINDOWS,
+  RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
   RETRY_AMP_SNAPSHOT_LIMIT,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
@@ -410,7 +411,7 @@ export class AnomalyService
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
   private retryAmplificationFirstClients = new Map<
     string,
-    { episodeStart: number; snapshot: ClientCommandSnapshot | null }
+    { episodeStart: number; snapshot: ClientCommandSnapshot | null | undefined; attempts: number }
   >();
   private retryAmplificationContributors = new Map<
     string,
@@ -3216,13 +3217,16 @@ export class AnomalyService
     const episodeStart = retryAmplificationEpisodeStart(state);
     if (episodeStart === null) {
       this.retryAmplificationFirstClients.delete(ctx.connectionId);
-    } else if (
-      state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS &&
-      this.retryAmplificationFirstClients.get(ctx.connectionId)?.episodeStart !== episodeStart
-    ) {
-      const snapshot = await this.readClientCommandCounts(ctx, timestamp);
-      if (snapshot !== undefined) {
-        this.retryAmplificationFirstClients.set(ctx.connectionId, { episodeStart, snapshot });
+    } else if (state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS) {
+      const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
+      const attempts = first?.episodeStart === episodeStart ? first.attempts : 0;
+      const needed = first?.episodeStart !== episodeStart || first.snapshot === undefined;
+      if (needed && attempts < RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS) {
+        this.retryAmplificationFirstClients.set(ctx.connectionId, {
+          episodeStart,
+          snapshot: await this.readClientCommandCounts(ctx, timestamp),
+          attempts: attempts + 1,
+        });
       }
     }
     if (finding === null) return;
@@ -3313,7 +3317,7 @@ export class AnomalyService
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
     const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
-    const firstSnapshot = first?.episodeStart === episodeStart ? first.snapshot : null;
+    const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
     if (!snapshotsLoaded && (firstSnapshot === null || latest === null)) return null;
     return rankRetryAmplificationContributors({
       first: firstSnapshot,
