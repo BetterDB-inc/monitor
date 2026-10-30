@@ -16,6 +16,8 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
+import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
+import type { ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
   AlertCircle,
@@ -290,6 +292,13 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  const { data: replicationDivergence } = usePolling<ReplicaDivergenceHistory[]>({
+    fetcher: () =>
+      currentConnection?.id ? metricsApi.getReplicationDivergence() : Promise.resolve([]),
+    interval: 10000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: buffers, error: buffersError } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
@@ -418,6 +427,8 @@ export function AnomalyDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <ReplicationDivergencePanel replicas={replicationDivergence ?? undefined} />
 
       {/* Charts Row */}
       <div className="grid md:grid-cols-2 gap-4">

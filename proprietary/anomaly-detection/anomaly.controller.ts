@@ -9,6 +9,7 @@ import {
   MetricType,
   AnomalyPattern,
 } from './types';
+import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 
@@ -105,6 +106,21 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   getBuffers(@ConnectionId() connectionId?: string): BufferStats[] {
     return this.anomalyService.getBufferStats(connectionId);
+  }
+
+  @Get('replication-divergence')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the primary' })
+  getReplicationDivergence(
+    @ConnectionId({ required: true }) connectionId: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<ReplicaDivergenceHistory[]> {
+    const now = Date.now();
+    const parsedEndTime = endTime ? parseInt(endTime, 10) : now;
+    const parsedStartTime = startTime ? parseInt(startTime, 10) : parsedEndTime - 60 * 60 * 1000;
+    return this.anomalyService.getReplicationDivergenceHistory(connectionId, parsedStartTime, parsedEndTime);
   }
 
   @Post('events/:id/resolve')

@@ -46,6 +46,8 @@ describe('AnomalyService', () => {
 
     storage = {
       saveAnomalyEvent: jest.fn().mockResolvedValue(undefined),
+      saveReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
+      getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
@@ -6416,7 +6418,9 @@ describe('AnomalyService', () => {
           slave0: 'ip=10.0.0.2,port=6379,state=online,offset=6500,lag=0',
         },
       });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
       await poll();
+      clock.mockRestore();
 
       const next = service.getReplicationStreamSample('conn-1');
       expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogHistlen: 6144 });
@@ -6443,6 +6447,11 @@ describe('AnomalyService', () => {
         ],
       };
     }
+
+    beforeEach(() => {
+      (webhookEventsProService as any).dispatchReplicationDivergence = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationRecovered = jest.fn().mockResolvedValue(undefined);
+    });
 
     async function feed(gapsMiB: number[], start: number): Promise<number> {
       let t = start;
@@ -6498,6 +6507,83 @@ describe('AnomalyService', () => {
       expect(recoveredHook).toHaveBeenCalledTimes(1);
       expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379' });
       expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('none');
+    });
+
+    it('persists each closed window and keeps detecting when the write fails', async () => {
+      storage.saveReplicationDivergenceWindows.mockRejectedValueOnce(new Error('disk full'));
+
+      await feed([2, 4, 6], T0);
+
+      expect(storage.saveReplicationDivergenceWindows).toHaveBeenCalledTimes(2);
+      expect(storage.saveReplicationDivergenceWindows).toHaveBeenLastCalledWith(
+        [
+          {
+            replicaAddr: '10.0.0.2:6379',
+            windowStart: T0 + 30_000,
+            windowEnd: T0 + 60_000,
+            gapBytes: 4 * MiB,
+            bytesPerSec: MiB,
+            secondsBehind: 4,
+          },
+        ],
+        'conn-1',
+      );
+      expect(service.getReplicationDivergenceState('conn-1')[0].windows).toHaveLength(2);
+    });
+
+    it('serves the stored gap series with the live level per replica', async () => {
+      await feed([2, 4, 6, 8, 10, 12], T0);
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
+        },
+        {
+          id: 'w2',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.9:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 0,
+          bytesPerSec: null,
+          secondsBehind: null,
+        },
+      ]);
+
+      const history = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(storage.getReplicationDivergenceWindows).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        startTime: T0,
+        endTime: T0 + 600_000,
+      });
+      expect(history.map((h) => [h.replica, h.level, h.windows.length])).toEqual([
+        ['10.0.0.2:6379', 'warning', 1],
+        ['10.0.0.9:6379', 'none', 1],
+      ]);
+      expect(history[0].latest).toEqual({
+        start: T0,
+        end: T0 + 30_000,
+        gapBytes: 2 * MiB,
+        bytesPerSec: MiB,
+        secondsBehind: 2,
+      });
+    });
+
+    it('falls back to in-memory windows when storage cannot be read', async () => {
+      await feed([2, 4, 6], T0);
+      storage.getReplicationDivergenceWindows.mockRejectedValueOnce(new Error('db down'));
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.replica).toBe('10.0.0.2:6379');
+      expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
     });
   });
 });

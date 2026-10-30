@@ -58,6 +58,8 @@ import {
   StoredCommandLogEntry,
   StoredCommandStatsSample,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -2127,6 +2129,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON latency_stats_samples(connection_id, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
         ON latency_stats_samples(captured_at);
+
+      CREATE TABLE IF NOT EXISTS replication_divergence_windows (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start BIGINT NOT NULL,
+        window_end BIGINT NOT NULL,
+        gap_bytes DOUBLE PRECISION NOT NULL,
+        bytes_per_sec DOUBLE PRECISION,
+        seconds_behind DOUBLE PRECISION
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
+        ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE INDEX IF NOT EXISTS idx_repl_div_end
+        ON replication_divergence_windows(window_end);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -4849,6 +4867,95 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool || windows.length === 0) return 0;
+
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    for (const w of windows) {
+      const base = values.length;
+      placeholders.push(`(${Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        w.replicaAddr,
+        w.windowStart,
+        w.windowEnd,
+        w.gapBytes,
+        w.bytesPerSec,
+        w.secondsBehind,
+      );
+    }
+
+    const result = await this.pool.query(
+      `INSERT INTO replication_divergence_windows
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+       VALUES ${placeholders.join(', ')}`,
+      values,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const params: (string | number)[] = [options.connectionId];
+    let replicaFilter = '';
+    if (options.replicaAddr) {
+      params.push(options.replicaAddr);
+      replicaFilter = `AND replica_addr = $${params.length}`;
+    }
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+    const startIdx = params.length - 2;
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
+         FROM replication_divergence_windows
+         WHERE connection_id = $1 ${replicaFilter} AND window_end >= $${startIdx} AND window_end <= $${startIdx + 1}
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY window_end ASC`,
+      params,
+    );
+    const rows = result.rows;
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      replicaAddr: row.replica_addr,
+      windowStart: Number(row.window_start),
+      windowEnd: Number(row.window_end),
+      gapBytes: Number(row.gap_bytes),
+      bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
+      secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+    }));
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'replication_divergence_windows',
+        'window_end < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedPostgresDelete(this.pool, 'replication_divergence_windows', 'window_end < $1', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods

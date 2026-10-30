@@ -372,6 +372,25 @@ export interface LatencyStatsHistoryQueryOptions {
   limit?: number;
 }
 
+export interface StoredReplicationDivergenceWindow {
+  id: string;
+  connectionId: string;
+  replicaAddr: string;
+  windowStart: number;
+  windowEnd: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+}
+
+export interface ReplicationDivergenceWindowQueryOptions {
+  connectionId: string;
+  replicaAddr?: string;
+  startTime: number;
+  endTime: number;
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -747,6 +766,15 @@ export interface StoragePort {
   ): Promise<number>;
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]>;
+  pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(

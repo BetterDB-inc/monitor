@@ -49,8 +49,13 @@ export interface ReplicaDivergenceState {
   belowFloorStreak: number;
 }
 
+export interface ClosedDivergenceWindow extends DivergenceWindow {
+  addr: string;
+}
+
 export interface DivergenceConnectionState {
   windowStart: number | null;
+  closedWindows: ClosedDivergenceWindow[];
   accumulators: Map<string, ReplicaWindowAccumulator>;
   rateHistory: number[];
   replicas: Map<string, ReplicaDivergenceState>;
@@ -78,6 +83,13 @@ export interface DivergenceRecovery {
 
 export type DivergenceOutcome = DivergenceFinding | DivergenceRecovery;
 
+export interface ReplicaDivergenceHistory {
+  replica: string;
+  level: DivergenceLevel;
+  latest: DivergenceWindow | null;
+  windows: DivergenceWindow[];
+}
+
 const LEVEL_RANK: Record<DivergenceLevel, number> = { none: 0, warning: 1, critical: 2 };
 
 export function divergenceWindowMs(pollIntervalMs: number): number {
@@ -85,7 +97,13 @@ export function divergenceWindowMs(pollIntervalMs: number): number {
 }
 
 export function createDivergenceState(): DivergenceConnectionState {
-  return { windowStart: null, accumulators: new Map(), rateHistory: [], replicas: new Map() };
+  return {
+    windowStart: null,
+    closedWindows: [],
+    accumulators: new Map(),
+    rateHistory: [],
+    replicas: new Map(),
+  };
 }
 
 function median(values: number[]): number {
@@ -248,7 +266,9 @@ function closeWindow(
     state.replicas.set(addr, replica);
     const gapBytes = median(acc.gaps);
     const secondsBehind = acc.lastRate === null || acc.lastRate === 0 ? null : gapBytes / acc.lastRate;
-    replica.windows.push({ start, end, gapBytes, bytesPerSec: acc.lastRate, secondsBehind });
+    const window: DivergenceWindow = { start, end, gapBytes, bytesPerSec: acc.lastRate, secondsBehind };
+    replica.windows.push(window);
+    state.closedWindows.push({ addr, ...window });
     if (replica.windows.length > DIVERGENCE_HISTORY_WINDOWS) replica.windows.shift();
     const outcome = evaluateReplica(replica, state.rateHistory);
     if (outcome) outcomes.push(outcome);
@@ -282,6 +302,12 @@ export function observeDivergence(
   }
 
   return outcomes;
+}
+
+export function drainClosedWindows(state: DivergenceConnectionState): ClosedDivergenceWindow[] {
+  const drained = state.closedWindows;
+  state.closedWindows = [];
+  return drained;
 }
 
 export function acknowledgeDivergence(

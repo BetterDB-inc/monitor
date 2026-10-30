@@ -158,11 +158,13 @@ import {
   DivergenceFinding,
   DivergenceRecovery,
   DivergenceWindow,
+  ReplicaDivergenceHistory,
   acknowledgeDivergence,
   acknowledgeRecovery,
   createDivergenceState,
   describeDivergence,
   divergenceWindowMs,
+  drainClosedWindows,
   observeDivergence,
 } from './replication-divergence-detector';
 import {
@@ -5681,6 +5683,52 @@ export class AnomalyService
     }));
   }
 
+  async getReplicationDivergenceHistory(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<ReplicaDivergenceHistory[]> {
+    const live = this.divergenceState.get(connectionId)?.replicas;
+    const series = new Map<string, DivergenceWindow[]>();
+    try {
+      const stored = await this.storage.getReplicationDivergenceWindows({ connectionId, startTime, endTime });
+      for (const row of stored) {
+        const windows = series.get(row.replicaAddr) ?? [];
+        windows.push({
+          start: row.windowStart,
+          end: row.windowEnd,
+          gapBytes: row.gapBytes,
+          bytesPerSec: row.bytesPerSec,
+          secondsBehind: row.secondsBehind,
+        });
+        series.set(row.replicaAddr, windows);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read replication divergence windows, using in-memory history: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      for (const replica of live?.values() ?? []) {
+        series.set(
+          replica.addr,
+          replica.windows.filter((w) => w.end >= startTime && w.end <= endTime),
+        );
+      }
+    }
+    for (const addr of live?.keys() ?? []) {
+      if (!series.has(addr)) series.set(addr, []);
+    }
+    return [...series.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([replica, windows]) => ({
+        replica,
+        level: live?.get(replica)?.level ?? 'none',
+        latest: windows[windows.length - 1] ?? null,
+        windows,
+      }));
+  }
+
   private async detectReplicationDivergence(
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
@@ -5694,6 +5742,34 @@ export class AnomalyService
       } else {
         await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
       }
+    }
+    await this.persistDivergenceWindows(state, ctx);
+  }
+
+  private async persistDivergenceWindows(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const closed = drainClosedWindows(state);
+    if (closed.length === 0) return;
+    try {
+      await this.storage.saveReplicationDivergenceWindows(
+        closed.map((w) => ({
+          replicaAddr: w.addr,
+          windowStart: w.start,
+          windowEnd: w.end,
+          gapBytes: w.gapBytes,
+          bytesPerSec: w.bytesPerSec,
+          secondsBehind: w.secondsBehind,
+        })),
+        ctx.connectionId,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to persist replication divergence windows for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
   }
 
