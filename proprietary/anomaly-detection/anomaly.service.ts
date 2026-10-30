@@ -401,6 +401,7 @@ export class AnomalyService
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
   private removedDivergenceEvents = new Set<string>();
+  private removedDivergenceSweeps = new Set<string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -5898,6 +5899,7 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
+    this.removedDivergenceSweeps.delete(ctx.connectionId);
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
     await this.resolveRemovedDivergenceEvents();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
@@ -5917,6 +5919,21 @@ export class AnomalyService
     await this.persistDivergenceWindows(state, ctx);
   }
 
+  private async readOpenDivergenceEvents(connectionId: string): Promise<StoredAnomalyEvent[]> {
+    const events: StoredAnomalyEvent[] = [];
+    for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
+      const open = await this.storage.getAnomalyEvents({
+        connectionId,
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        offset,
+      });
+      events.push(...open);
+      if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) return events;
+    }
+  }
+
   private async collectOrphanedDivergenceEvents(
     state: DivergenceConnectionState,
     ctx: ConnectionContext,
@@ -5927,27 +5944,17 @@ export class AnomalyService
         ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
       ]);
       const orphans = new Map<string, OrphanedDivergence>();
-      for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
-        const open = await this.storage.getAnomalyEvents({
-          connectionId: ctx.connectionId,
-          metricType: MetricType.REPLICATION_DIVERGENCE,
-          resolved: false,
-          limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
-          offset,
-        });
-        for (const event of open) {
-          if (seen.has(event.id)) continue;
-          seen.add(event.id);
-          const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
-          const orphan = orphans.get(replica) ?? {
-            eventIds: new Set<string>(),
-            sinceWindow: state.closedWindowCount,
-            claimed: false,
-          };
-          orphan.eventIds.add(event.id);
-          orphans.set(replica, orphan);
-        }
-        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) break;
+      for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+        const orphan = orphans.get(replica) ?? {
+          eventIds: new Set<string>(),
+          sinceWindow: state.closedWindowCount,
+          claimed: false,
+        };
+        orphan.eventIds.add(event.id);
+        orphans.set(replica, orphan);
       }
       if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
       this.divergenceOrphansSwept.add(ctx.connectionId);
@@ -6050,7 +6057,24 @@ export class AnomalyService
     await this.resolveSupersededDivergenceEvents(connectionId);
   }
 
+  private async sweepRemovedConnections(): Promise<void> {
+    for (const connectionId of this.removedDivergenceSweeps) {
+      try {
+        const open = await this.readOpenDivergenceEvents(connectionId);
+        if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
+        for (const event of open) this.removedDivergenceEvents.add(event.id);
+      } catch (err) {
+        this.logger.warn(
+          `Failed to read open divergence events of removed connection ${connectionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
   private async resolveRemovedDivergenceEvents(): Promise<void> {
+    await this.sweepRemovedConnections();
     for (const id of this.removedDivergenceEvents) {
       if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
     }
@@ -6068,6 +6092,9 @@ export class AnomalyService
     }
     for (const orphan of this.divergenceOrphans.get(connectionId)?.values() ?? []) {
       for (const id of orphan.eventIds) this.removedDivergenceEvents.add(id);
+    }
+    if (!this.divergenceOrphansSwept.has(connectionId)) {
+      this.removedDivergenceSweeps.add(connectionId);
     }
     this.resolveRemovedDivergenceEvents().catch((err) => {
       this.logger.error('Failed to resolve divergence events of a removed connection', err);
