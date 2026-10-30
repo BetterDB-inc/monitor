@@ -11,7 +11,7 @@ import { isControlPlaneSaturationEvent } from './control-plane-saturation-detect
 import { readRetryAmplificationTrigger } from './retry-amplification-detector';
 
 const RETRY_AMPLIFICATION_DIAGNOSIS =
-  'Retry amplification: load per client is rising together with {trigger} while the client ' +
+  'Retry amplification: load per client is rising or has stepped up together with {trigger} while the client ' +
   'count stays flat — the retry loop is self-sustaining';
 
 interface PatternRule {
