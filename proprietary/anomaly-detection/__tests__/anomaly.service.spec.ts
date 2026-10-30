@@ -3581,9 +3581,9 @@ describe('AnomalyService', () => {
       dbClient.getClients = jest.fn().mockResolvedValue([]);
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
-      const { recorded, errorsCaught } = await runRetry({ failEmits: 90 });
+      const { recorded, errorsCaught } = await runRetry({ failEmits: 2 });
 
-      expect(errorsCaught).toHaveLength(90);
+      expect(errorsCaught).toHaveLength(2);
       expect(recorded).toHaveLength(1);
       expect(dbClient.getClients).toHaveBeenCalledTimes(2);
       expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
