@@ -59,25 +59,6 @@ export class Correlator {
         ],
       },
       {
-        pattern: AnomalyPattern.RESHARD_PRESSURE,
-        requiredMetrics: [MetricType.RESHARD_SHARD_SKEW],
-        optionalMetrics: [
-          MetricType.COMMAND_P99,
-          MetricType.LOAD_SATURATION,
-          MetricType.CPU_UTILIZATION,
-          MetricType.MEMORY_USED,
-          MetricType.OPS_PER_SEC,
-        ],
-        diagnosis:
-          'Slot migration is concentrating load on one shard while the cluster aggregate looks healthy',
-        recommendations: [
-          'Pause or slow the reshard until the skewed shard recovers',
-          'Reduce the keys moved per batch, or schedule the migration for a lower write period',
-          'Check the source and target shards for slow commands and large keys in the moving slots',
-          'Rebalance slots once the migration finishes if the skew remains',
-        ],
-      },
-      {
         pattern: AnomalyPattern.AUTH_ATTACK,
         requiredMetrics: [MetricType.ACL_DENIED],
         diagnosis: 'Potential authentication attack detected with high ACL denial rate',
@@ -120,6 +101,25 @@ export class Correlator {
           'Review cluster-level slow queries across nodes',
           'Inspect CLUSTER INFO for partially-failed slots',
           'Confirm no split-brain scenario exists',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.RESHARD_PRESSURE,
+        requiredMetrics: [MetricType.RESHARD_SHARD_SKEW],
+        optionalMetrics: [
+          MetricType.COMMAND_P99,
+          MetricType.LOAD_SATURATION,
+          MetricType.CPU_UTILIZATION,
+          MetricType.MEMORY_USED,
+          MetricType.OPS_PER_SEC,
+        ],
+        diagnosis:
+          'Slot migration is concentrating load on one shard while the cluster aggregate looks healthy',
+        recommendations: [
+          'Pause or slow the reshard until the skewed shard recovers',
+          'Reduce the keys moved per batch, or schedule the migration for a lower write period',
+          'Check the source and target shards for slow commands and large keys in the moving slots',
+          'Rebalance slots once the migration finishes if the skew remains',
         ],
       },
       {

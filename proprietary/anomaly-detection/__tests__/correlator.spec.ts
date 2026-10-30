@@ -100,6 +100,20 @@ describe('Correlator', () => {
       expect(groups).toHaveLength(1);
       expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
     });
+
+    it.each([MetricType.REPLICATION_ROLE, MetricType.CLUSTER_STATE])(
+      'leaves a window with %s to the failover diagnosis',
+      (metricType) => {
+        const now = Date.now();
+        const groups = correlator.correlate([
+          makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now }),
+          makeAnomaly({ metricType, timestamp: now + 100 }),
+        ]);
+
+        expect(groups).toHaveLength(1);
+        expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      },
+    );
   });
 
   describe('NODE_FAILOVER pattern', () => {
