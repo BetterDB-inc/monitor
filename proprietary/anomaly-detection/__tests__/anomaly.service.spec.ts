@@ -3258,6 +3258,15 @@ describe('AnomalyService', () => {
       })();
     }
 
+    it('drops the churn sample when the INFO counters go missing', async () => {
+      await runChurn([{ connectsPerSec: 20, clients: 100 }]);
+      expect(service.getConnectionChurnSample('conn-1')?.connectsPerSec).toBe(20);
+
+      await (service as any).detectConnectionChurn(mockCtx, {}, new Map(), new Map(), 1_002_000);
+
+      expect(service.getConnectionChurnSample('conn-1')).toBeUndefined();
+    });
+
     const baseline = Array.from({ length: 40 }, (_, i) => ({
       connectsPerSec: 20 + (i % 3),
       clients: 100,

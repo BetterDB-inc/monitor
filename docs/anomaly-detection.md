@@ -347,7 +347,7 @@ A run of hot windows is classified once it reaches 3 windows. It qualifies in ei
 
 Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
 
-Runs that end within 3 windows are recorded as transient.
+Runs that end before reaching 3 windows are recorded as transient.
 
 - **WARNING** when the run qualifies
 - **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.

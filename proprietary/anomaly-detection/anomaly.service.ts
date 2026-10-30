@@ -1603,7 +1603,11 @@ export class AnomalyService
   ): Promise<void> {
     const totalReceived = this.parseNumber(info.total_connections_received);
     const connectedClients = this.parseNumber(info.connected_clients);
-    if (totalReceived === null || connectedClients === null) return;
+    if (totalReceived === null || connectedClients === null) {
+      this.lastChurnReading.delete(ctx.connectionId);
+      this.connectionChurnSamples.delete(ctx.connectionId);
+      return;
+    }
 
     const reading = { totalReceived, connectedClients, timestamp };
     const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
