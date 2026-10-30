@@ -390,6 +390,7 @@ export class AnomalyService
   private replicationStream = new ReplicationStreamTracker();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
+  private divergenceSuperseded = new Map<string, Set<string>>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -796,6 +797,7 @@ export class AnomalyService
     this.replicationStream.forget(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
+    this.divergenceSuperseded.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -5853,6 +5855,7 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
+    await this.resolveSupersededDivergenceEvents(ctx.connectionId);
     if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
       await this.resolveOrphanedDivergenceEvents(ctx);
     }
@@ -5942,6 +5945,15 @@ export class AnomalyService
     }
   }
 
+  private async resolveSupersededDivergenceEvents(connectionId: string): Promise<void> {
+    const pending = this.divergenceSuperseded.get(connectionId);
+    if (!pending) return;
+    for (const id of pending) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') pending.delete(id);
+    }
+    if (pending.size === 0) this.divergenceSuperseded.delete(connectionId);
+  }
+
   private async emitReplicationDivergence(
     state: DivergenceConnectionState,
     finding: DivergenceFinding,
@@ -5982,7 +5994,11 @@ export class AnomalyService
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
     await this.addAnomaly(event, ctx);
     acknowledgeDivergence(state, finding, event.id);
-    if (previousEventId) await this.resolveAnomalyOutcome(previousEventId);
+    if (previousEventId && (await this.resolveAnomalyOutcome(previousEventId)) === 'retry') {
+      const pending = this.divergenceSuperseded.get(ctx.connectionId) ?? new Set<string>();
+      pending.add(previousEventId);
+      this.divergenceSuperseded.set(ctx.connectionId, pending);
+    }
 
     this.webhookEventsProService
       ?.dispatchReplicationDivergence({

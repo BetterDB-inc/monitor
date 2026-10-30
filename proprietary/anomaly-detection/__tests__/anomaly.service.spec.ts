@@ -7084,5 +7084,24 @@ describe('AnomalyService', () => {
       expect(replica.replica).toBe('10.0.0.2:6379');
       expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
     });
+
+    it('retries resolving a superseded warning that storage could not resolve', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('db down'));
+
+      await feed([130, 140, 150], t);
+
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual([
+        'warning',
+        'critical',
+      ]);
+      const attempts = storage.resolveAnomaly.mock.calls.filter(([id]: [string]) => id === warningId);
+      expect(attempts.length).toBe(2);
+      expect((service as any).divergenceSuperseded.has('conn-1')).toBe(false);
+    });
   });
 });
