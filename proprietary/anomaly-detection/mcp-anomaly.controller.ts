@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { ValidateInstanceIdPipe, mapMcpError, safeLimit, safeParseInt } from '@app/mcp/mcp-helpers';
 import { AnomalyService } from './anomaly.service';
 import { MetricType } from './types';
@@ -22,7 +23,10 @@ const METRIC_TYPE_VALUES = new Set<string>(Object.values(MetricType));
 export class McpAnomalyController {
   private readonly logger = new Logger(McpAnomalyController.name);
 
-  constructor(private readonly anomalyService: AnomalyService) {}
+  constructor(
+    private readonly anomalyService: AnomalyService,
+    private readonly registry: ConnectionRegistry,
+  ) {}
 
   @Get('instance/:id/history/anomalies')
   async getAnomalies(
@@ -52,6 +56,7 @@ export class McpAnomalyController {
   @Get('instance/:id/anomalies/retry-amplification')
   getRetryAmplification(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
+      this.registry.get(id);
       return this.anomalyService.getRetryAmplificationStatus(id);
     } catch (error) {
       throw mapMcpError(this.logger, error, 'Failed to get retry amplification status');

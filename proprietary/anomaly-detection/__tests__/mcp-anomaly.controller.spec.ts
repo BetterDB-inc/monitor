@@ -1,8 +1,9 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { McpAnomalyController } from '../mcp-anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseGuard } from '@proprietary/licenses';
 
 describe('McpAnomalyController', () => {
@@ -11,13 +12,17 @@ describe('McpAnomalyController', () => {
     getRecentAnomalies: jest.fn(),
     getRetryAmplificationStatus: jest.fn(),
   };
+  const registry = { get: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
     svc.getRecentAnomalies.mockResolvedValue([{ id: 'a1' }]);
     const mod = await Test.createTestingModule({
       controllers: [McpAnomalyController],
-      providers: [{ provide: AnomalyService, useValue: svc }],
+      providers: [
+        { provide: AnomalyService, useValue: svc },
+        { provide: ConnectionRegistry, useValue: registry },
+      ],
     })
       .overrideGuard(AgentTokenGuard)
       .useValue({ canActivate: () => true })
@@ -90,5 +95,21 @@ describe('McpAnomalyController', () => {
 
     expect(controller.getRetryAmplification('inst1')).toBe(status);
     expect(svc.getRetryAmplificationStatus).toHaveBeenCalledWith('inst1');
+  });
+
+  it('retry amplification returns 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getRetryAmplification('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getRetryAmplificationStatus).not.toHaveBeenCalled();
   });
 });
