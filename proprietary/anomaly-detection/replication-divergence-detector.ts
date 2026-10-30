@@ -54,6 +54,7 @@ export interface ReplicaDivergenceState {
   belowFloorStreak: number;
   staleWindows: number;
   staleSince: number | null;
+  clearing: boolean;
 }
 
 export interface ClosedDivergenceWindow extends DivergenceWindow {
@@ -151,6 +152,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     belowFloorStreak: 0,
     staleWindows: 0,
     staleSince: null,
+    clearing: false,
   };
 }
 
@@ -321,6 +323,7 @@ function dropReplica(
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
   replica.staleSince = null;
+  replica.clearing = true;
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
@@ -337,7 +340,7 @@ function closeWindow(
   }
 
   for (const [addr, replica] of state.replicas) {
-    if (state.accumulators.has(addr) || state.staleGaps.has(addr)) continue;
+    if (!replica.clearing && (state.accumulators.has(addr) || state.staleGaps.has(addr))) continue;
     outcomes.push(...dropReplica(state, replica));
   }
 
@@ -345,6 +348,7 @@ function closeWindow(
     if (state.accumulators.has(addr)) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
+    if (replica.clearing) continue;
     const finding = staleAckFinding(replica, gapBytes, start, rate);
     if (finding) outcomes.push(finding);
   }
@@ -361,6 +365,7 @@ function closeWindow(
     replica.windows.push(window);
     state.closedWindows.push({ addr, ...window });
     if (replica.windows.length > DIVERGENCE_HISTORY_WINDOWS) replica.windows.shift();
+    if (replica.clearing) continue;
     const outcome = evaluateReplica(replica, state.rateHistory);
     if (outcome) outcomes.push(outcome);
   }
@@ -438,6 +443,7 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
   replica.staleSince = null;
+  replica.clearing = false;
 }
 
 export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
