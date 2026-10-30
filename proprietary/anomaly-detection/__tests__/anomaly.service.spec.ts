@@ -7231,9 +7231,9 @@ describe('AnomalyService', () => {
     it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
-        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.COMMAND_P99 }),
+        anomaly({ timestamp: now - 40 * MIN, metricType: MetricType.COMMAND_P99 }),
         anomaly({
-          timestamp: now - 15 * MIN,
+          timestamp: now - 40 * MIN,
           metricType: MetricType.RAFT_HEALTH,
           connectionId: 'conn-2',
         }),
@@ -7247,6 +7247,23 @@ describe('AnomalyService', () => {
       expect(byConn['conn-1'].status).toBe('recovered');
       expect(byConn['conn-2']).toEqual(
         expect.objectContaining({ status: 'degraded', openSignals: [MetricType.RAFT_HEALTH] }),
+      );
+    });
+
+    it('does not call a P99 regression recovered inside its re-fire cooldown', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.COMMAND_P99 }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          unknownSignals: [MetricType.COMMAND_P99],
+          recoveredAt: null,
+        }),
       );
     });
 
@@ -7576,9 +7593,31 @@ describe('AnomalyService', () => {
         ).toBeNull();
       });
 
-      it('still settles a point-in-time signal without its buffer', () => {
-        expect(probe()(signal({ connectionId: 'gone', metricType: MetricType.COMMAND_P99 }))).toBe(
-          T + MIN,
+      it('keeps a point-in-time signal open when it re-fired on the cooldown', () => {
+        expect(
+          probe()(
+            signal({
+              connectionId: 'gone',
+              metricType: MetricType.COMMAND_P99,
+              until: T + 30 * MIN,
+            }),
+          ),
+        ).toBeNull();
+      });
+
+      it('leaves a point-in-time signal unknown until its cooldown has passed', () => {
+        const p99 = { connectionId: 'gone', metricType: MetricType.COMMAND_P99 };
+
+        expect(probe()(signal({ ...p99, now: T + 15 * MIN }))).toBeUndefined();
+        expect(probe()(signal({ ...p99, now: T + 31 * MIN - 1 }))).toBeUndefined();
+      });
+
+      it('recovers a point-in-time signal once the cooldown passes without a re-fire', () => {
+        const p99 = { connectionId: 'gone', metricType: MetricType.COMMAND_P99 };
+
+        expect(probe()(signal({ ...p99, now: T + 31 * MIN }))).toBe(T + 31 * MIN);
+        expect(probe()(signal({ ...p99, until: T + 40 * MIN, now: T + 41 * MIN }))).toBe(
+          T + 31 * MIN,
         );
       });
     });

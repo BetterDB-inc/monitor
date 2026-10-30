@@ -39,6 +39,7 @@ import {
   FLAT_BASELINE_RECOVERY_TOLERANCE,
   MAX_MISSED_RECOVERY_POLLS,
   POINT_IN_TIME_METRICS,
+  POINT_IN_TIME_QUIET_MS,
   UNTRACKED_RECOVERY_METRICS,
   RecoveryProbe,
   incidentStartOf,
@@ -5737,7 +5738,9 @@ export class AnomalyService
     const samples = buffer?.isReady() ? buffer.getSamples() : [];
     if (!buffer || samples.length === 0 || samples[0].timestamp > observedFrom) {
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
-        return signal.until !== null && signal.until <= settledAt ? null : settledAt;
+        const quietAt = signal.since + POINT_IN_TIME_QUIET_MS;
+        if (signal.until !== null && signal.until <= quietAt) return null;
+        return signal.now < quietAt ? undefined : quietAt;
       }
       return !buffer &&
         METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) &&

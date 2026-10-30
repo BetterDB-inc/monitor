@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
 import { SequenceRule } from './sequence-rules';
+import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
 
@@ -73,6 +74,9 @@ export const FLAT_BASELINE_RECOVERY_TOLERANCE = 0.05;
 export const MAX_MISSED_RECOVERY_POLLS = 3;
 
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
+
+export const POINT_IN_TIME_QUIET_MS =
+  SUSTAINED_COOLDOWN_MS + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
 
 export const UNTRACKED_RECOVERY_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.REPLICATION_ROLE,
