@@ -50,7 +50,15 @@ describe('normalizeAdvisories', () => {
     );
 
     expect(advisories).toHaveLength(1);
-    expect(advisories[0].affected).toEqual(GHSA_VIEW.affected);
+    expect(advisories[0].affected.filter((range) => range.fallback !== true)).toEqual(
+      GHSA_VIEW.affected,
+    );
+    // NVD's '*' survives only as a flagged fallback range.
+    expect(advisories[0].affected).toContainEqual({
+      branch: '*',
+      vulnerableAtOrBelow: '9.1.1-0',
+      fallback: true,
+    });
     expect(advisories[0].confidence).toBe('exact');
   });
 
@@ -78,13 +86,20 @@ describe('normalizeAdvisories', () => {
     expect(nvd?.fields).toContain('affected');
   });
 
-  it('refuses to widen a branch-specific winner with a broad wildcard range', () => {
+  it('refuses to widen a branch-specific winner with a broad wildcard range, except as a flagged fallback', () => {
     const { advisories } = normalizeAdvisories(
       [fetched('nvd', [NVD_VIEW]), fetched('ghsa', [GHSA_VIEW])],
       [],
     );
 
-    expect(advisories[0].affected).toEqual(GHSA_VIEW.affected);
+    expect(advisories[0].affected.filter((range) => range.fallback !== true)).toEqual(
+      GHSA_VIEW.affected,
+    );
+    expect(advisories[0].affected).toContainEqual({
+      branch: '*',
+      vulnerableAtOrBelow: '9.1.1-0',
+      fallback: true,
+    });
   });
 
   it('keeps the NVD range when GHSA has no opinion', () => {
@@ -192,22 +207,26 @@ describe('normalizeAdvisories - one CVE affecting two products', () => {
       branch: '7.4',
       vulnerableBelow: '7.4.3',
       vulnerableFrom: '7.4.0',
+      patchedAt: '7.4.3',
     });
     expect(valkey?.affected).toHaveLength(3);
     expect(valkey?.affected).toContainEqual({
       branch: '7.2',
       vulnerableBelow: '7.2.9',
       vulnerableFrom: '7.2.4',
+      patchedAt: '7.2.9',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.0',
       vulnerableBelow: '8.0.3',
       vulnerableFrom: '8.0.0',
+      patchedAt: '8.0.3',
     });
     expect(valkey?.affected).toContainEqual({
       branch: '8.1',
       vulnerableBelow: '8.1.1',
       vulnerableFrom: '8.1.0',
+      patchedAt: '8.1.1',
     });
     expect(redis?.affected).not.toContainEqual({ branch: '8.0', vulnerableBelow: '8.0.3' });
   });
@@ -493,7 +512,14 @@ describe('normalizeAdvisories - field-level fallback', () => {
     expect(advisories[0].cvssScore).toBe(9.8);
     expect(advisories[0].cwes).toEqual(['CWE-122']);
     expect(advisories[0].summary).toBe('Use after free in the server');
-    expect(advisories[0].affected).toEqual(GHSA_UNSCORED.affected);
+    expect(advisories[0].affected.filter((range) => range.fallback !== true)).toEqual(
+      GHSA_UNSCORED.affected,
+    );
+    expect(advisories[0].affected).toContainEqual({
+      branch: '*',
+      vulnerableAtOrBelow: '9.1.0',
+      fallback: true,
+    });
     expect(advisories[0].confidence).toBe('exact');
   });
 
@@ -556,7 +582,7 @@ describe('normalizeAdvisories - field-level fallback', () => {
 // Q3 guard: sources exists so the UI can say which source supplied which field.
 // Crediting NVD with `affected` after GHSA won the ranges is a falsehood on screen.
 describe('normalizeAdvisories - provenance honesty', () => {
-  it('credits GHSA and not NVD for the ranges GHSA won', () => {
+  it('credits GHSA for the ranges GHSA won, and NVD only for its fallback range', () => {
     const { advisories } = normalizeAdvisories(
       [fetched('nvd', [NVD_VIEW]), fetched('ghsa', [GHSA_VIEW])],
       [],
@@ -569,7 +595,8 @@ describe('normalizeAdvisories - provenance honesty', () => {
     });
 
     expect(ghsa?.fields).toContain('affected');
-    expect(nvd?.fields).not.toContain('affected');
+    // NVD is credited for 'affected' solely because its '*' range is kept as a fallback.
+    expect(nvd?.fields).toContain('affected');
     expect(nvd?.fields).toContain('references');
   });
 
@@ -720,5 +747,56 @@ describe('computeDatasetVersion - canonical ordering', () => {
     const zeroed = computeDatasetVersion([{ ...MULTI, epssScore: 0 }]);
 
     expect(absent).not.toBe(zeroed);
+  });
+});
+
+describe('normalizeAdvisories - NVD fallback wildcards', () => {
+  const nvdWildcard: Advisory = {
+    ...NVD_VIEW,
+    affected: [{ branch: '*', vulnerableBelow: '7.2.11' }],
+  };
+
+  it('keeps an NVD "*" as a fallback when GHSA pins branches', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [nvdWildcard]), fetched('ghsa', [GHSA_VIEW])],
+      [],
+    );
+
+    expect(advisories[0].affected).toEqual([
+      ...GHSA_VIEW.affected,
+      { branch: '*', vulnerableBelow: '7.2.11', fallback: true },
+    ]);
+  });
+
+  it('drops the NVD "*" when GHSA states its own "*"', () => {
+    const ghsaWithWildcard: Advisory = {
+      ...GHSA_VIEW,
+      affected: [...GHSA_VIEW.affected, { branch: '*', vulnerableAtOrBelow: '7.0.5' }],
+    };
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [nvdWildcard]), fetched('ghsa', [ghsaWithWildcard])],
+      [],
+    );
+
+    expect(advisories[0].affected).toEqual(ghsaWithWildcard.affected);
+  });
+
+  it('passes NVD ranges through unflagged when GHSA pins nothing', () => {
+    const { advisories } = normalizeAdvisories(
+      [fetched('nvd', [nvdWildcard]), fetched('ghsa', [{ ...GHSA_VIEW, affected: [] }])],
+      [],
+    );
+
+    expect(advisories[0].affected).toEqual(nvdWildcard.affected);
+  });
+
+  it('changes the dataset hash only when fallback is set', () => {
+    const plain = computeDatasetVersion([nvdWildcard]);
+    const flagged = computeDatasetVersion([
+      { ...nvdWildcard, affected: [{ branch: '*', vulnerableBelow: '7.2.11', fallback: true }] },
+    ]);
+
+    expect(flagged).not.toBe(plain);
+    expect(computeDatasetVersion([structuredClone(nvdWildcard)])).toBe(plain);
   });
 });

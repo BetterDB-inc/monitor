@@ -182,3 +182,35 @@ describe('moduleVersionEncoding', () => {
     expect(missing).toEqual([]);
   });
 });
+
+describe('matchRanges fallback wildcards', () => {
+  const ranges: BranchRange[] = [
+    { branch: '6.2', vulnerableBelow: '6.2.20', patchedAt: '6.2.20' },
+    { branch: '7.2', vulnerableBelow: '7.2.11', patchedAt: '7.2.11' },
+    { branch: '7.0', vulnerableFrom: '7.0.8', vulnerableBelow: '7.0.12', patchedAt: '7.0.12' },
+    { branch: '*', vulnerableBelow: '7.2.11', fallback: true },
+  ];
+
+  it('skips the fallback when an on-branch range exists, even below its floor', () => {
+    expect(matchRanges('7.0.5', ranges).vulnerable).toBe(false);
+  });
+
+  it('marks a fallback match and takes fixedIn from the lowest fix on a newer branch', () => {
+    expect(matchRanges('5.0.14', ranges)).toEqual({
+      vulnerable: true,
+      fixedIn: '6.2.20',
+      fallback: true,
+    });
+  });
+
+  it('prefers a stated wildcard over a fallback, so the match carries no fallback flag', () => {
+    const both: BranchRange[] = [
+      { branch: '*', vulnerableBelow: '7.2.11', fallback: true },
+      { branch: '*', vulnerableBelow: '7.2.0' },
+    ];
+    const match = matchRanges('7.0.10', both);
+
+    expect(match.vulnerable).toBe(true);
+    expect(match).not.toHaveProperty('fallback');
+  });
+});
