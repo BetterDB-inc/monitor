@@ -5866,9 +5866,12 @@ export class AnomalyService
     const patterns = new Set(getSequenceRules().map((r) => r.pattern));
     if (patterns.size === 0) return true;
     try {
-      const groups = await this.storage.getCorrelatedGroups({ startTime: since, limit: 1000 });
-      for (const group of groups) {
-        if (!patterns.has(group.pattern as AnomalyPattern)) continue;
+      const groups = await Promise.all(
+        [...patterns].map((pattern) =>
+          this.storage.getCorrelatedGroups({ startTime: since, pattern, limit: 1000 }),
+        ),
+      );
+      for (const group of groups.flat()) {
         const members = await this.sequenceGroupMembers(group, group.connectionId ?? undefined);
         for (const member of members) {
           this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${member.id}`, member.timestamp);
