@@ -69,12 +69,14 @@ describe.each<[string, AdapterFactory]>(adapters)(
       await storage.saveCorrelatedGroup(group(randomUUID(), 600), 'conn-c');
 
       const rows = await storage.getCorrelatedGroups({
-        connectionIds: ['conn-b', 'conn-c'],
+        scope: { id: 'unused', connectionIds: ['conn-b', 'conn-c'] },
         patterns: ['batch_job'],
       });
 
       expect(rows.map((g) => g.correlationId)).toEqual([other]);
-      expect(await storage.getCorrelatedGroups({ connectionIds: [] })).toEqual([]);
+      expect(
+        await storage.getCorrelatedGroups({ scope: { id: 'unused', connectionIds: [] } }),
+      ).toEqual([]);
       expect(await storage.getCorrelatedGroups({ patterns: [] })).toEqual([]);
     });
 
@@ -148,7 +150,7 @@ describe.each<[string, AdapterFactory]>(adapters)(
 
         const rows = await storage.getCorrelatedGroups({
           involvingConnectionId: CONN,
-          connectionIds: ['conn-b'],
+          scope: { id: 'unused', connectionIds: ['conn-b'] },
           startTime: 100,
           limit: 1,
         });

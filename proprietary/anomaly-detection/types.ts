@@ -162,6 +162,7 @@ export interface AnomalyEvent {
   relatedMetrics?: MetricType[];
   resolved: boolean;
   connectionId?: string;
+  scopeId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.
    * createControlPlaneSaturationEvent) to mark an event that represents a

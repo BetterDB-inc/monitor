@@ -6543,7 +6543,9 @@ describe('AnomalyService', () => {
 
       expect(groups.map((g) => g.correlationId)).toEqual(['seq-in']);
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionIds: expect.arrayContaining(['node-1']) }),
+        expect.objectContaining({
+          scope: expect.objectContaining({ connectionIds: expect.arrayContaining(['node-1']) }),
+        }),
       );
     });
   });
@@ -7150,6 +7152,47 @@ describe('AnomalyService', () => {
       );
     });
 
+    it('keeps a removed member in its incident through the stored scope', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : id === 'gone' ? undefined : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }]);
+      const t = Date.now() - 30 * MIN;
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [
+              { ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike', scopeId: 'seed' },
+              {
+                ...anomaly({ id: 'g1', timestamp: t + 1000, connectionId: 'gone' }),
+                anomalyType: 'spike',
+                scopeId: 'seed',
+              },
+            ],
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual(['c1', 'g1']);
+    });
+
+    it('stores new events under the scope of their connection', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      const event = anomaly({ id: 'stamped', timestamp: Date.now() });
+
+      await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
+
+      expect(storage.saveAnomalyEvent.mock.calls.at(-1)[0]).toMatchObject({
+        id: 'stamped',
+        scopeId: 'seed',
+      });
+    });
+
     it('builds history across every member of the topology and keeps resolvedAt', async () => {
       const registry = (service as any).connectionRegistry;
       registry.getConfig.mockImplementation((id: string) =>
@@ -7157,27 +7200,26 @@ describe('AnomalyService', () => {
       );
       registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'node-2' }]);
       const t = Date.now() - 30 * MIN;
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId, order }: any) =>
-        order === 'asc'
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
           ? []
-          : connectionId === 'node-2'
-          ? [
+          : [
+              { ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike' },
               {
                 ...anomaly({ id: 'n2', timestamp: t + 1000, connectionId: 'node-2' }),
                 anomalyType: 'spike',
                 resolved: true,
                 resolvedAt: t + 5 * MIN,
               },
-            ]
-          : connectionId === 'conn-1'
-            ? [{ ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike' }]
-            : [],
+            ],
       );
 
       const [incident] = await service.getIncidentTimelines('conn-1');
 
-      const queried = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => q.connectionId);
-      expect(new Set(queried)).toEqual(new Set(['conn-1', 'seed', 'node-2']));
+      const queried = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => q.scope);
+      expect(queried).toEqual([
+        { id: 'seed', connectionIds: expect.arrayContaining(['conn-1', 'seed', 'node-2']) },
+      ]);
       expect(incident.scope).toBe('seed');
       expect(incident.entries.map((e) => e.anomalyId)).toEqual(['c1', 'n2']);
       expect(incident.entries[1].recoveredAt).toBe(t + 5 * MIN);
@@ -7672,7 +7714,7 @@ describe('AnomalyService', () => {
         after ? [row(999), row(1000)] : Array.from({ length: 1000 }, (_, i) => row(i)),
       );
 
-      const events = await (service as any).anomaliesInRange(['conn-1'], t, undefined);
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(1001);
       expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(1001);
@@ -7690,30 +7732,11 @@ describe('AnomalyService', () => {
         })),
       );
 
-      const events = await (service as any).anomaliesInRange(['conn-1'], t, undefined);
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(100);
       expect(events).toHaveLength(100_000);
       expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 100000 events');
-    });
-
-    it('shares the scan cap across the connections of one read', async () => {
-      const t = Date.now() - 3 * 60 * MIN;
-      jest.spyOn((service as any).logger, 'warn').mockImplementation();
-      storage.getAnomalyEvents.mockImplementation(
-        async ({ connectionId, after }: { connectionId: string; after?: { id: string } }) =>
-          Array.from({ length: 1000 }, (_, i) => ({
-            ...anomaly({
-              id: `${connectionId}-${(after ? Number(after.id.split('-').pop()) + 1 : 0) + i}`,
-              timestamp: t,
-            }),
-            anomalyType: 'spike',
-          })),
-      );
-
-      await (service as any).anomaliesInRange(['conn-1', 'conn-2'], t, undefined);
-
-      expect(storage.getAnomalyEvents.mock.calls.length).toBeLessThanOrEqual(101);
     });
 
     it('binds the next firing to the earliest of many later events', async () => {

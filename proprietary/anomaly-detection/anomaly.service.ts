@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   StoragePort,
   AnomalyEventCursor,
+  AnomalyScopeFilter,
   StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '@app/common/interfaces/storage-port.interface';
@@ -5660,6 +5661,7 @@ export class AnomalyService
       sourceHost: ctx?.host || this.configService.get('database.host'),
       sourcePort: ctx?.port || this.configService.get('database.port'),
       connectionId: ctx?.connectionId || anomaly.connectionId,
+      scopeId: anomaly.scopeId,
     };
   }
 
@@ -5679,7 +5681,12 @@ export class AnomalyService
     return undefined;
   }
 
+  private stampScope(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+    anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
+  }
+
   private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+    this.stampScope(anomaly, ctx?.connectionId || anomaly.connectionId);
     this.recentAnomalies.push(anomaly);
     this.rememberIncidentEvent(anomaly);
 
@@ -5739,6 +5746,7 @@ export class AnomalyService
   ingestExternalAnomaly(event: AnomalyEvent): void {
     if (this.recentAnomalies.some((a) => a.id === event.id)) return;
     const ingested = { ...event, persisted: true };
+    this.stampScope(ingested);
     this.recentAnomalies.push(ingested);
     this.rememberIncidentEvent(ingested);
     if (this.recentAnomalies.length > this.maxRecentEvents) {
@@ -5892,6 +5900,7 @@ export class AnomalyService
             sourceHost: this.configService.get('database.host'),
             sourcePort: this.configService.get('database.port'),
             anomalyIds: group.anomalies.map((a) => a.id),
+            scopeId: group.anomalies[0]?.scopeId,
           },
           connectionId,
         );
@@ -6010,55 +6019,49 @@ export class AnomalyService
     loadFrom: number,
     endTime: number | undefined,
   ): Promise<AnomalyEvent[]> {
-    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
-    return this.anomaliesInRange(connectionIds, loadFrom, endTime);
-  }
-
-  private async anomaliesInRange(
-    connectionIds: Array<string | undefined>,
-    startTime: number,
-    endTime: number | undefined,
-  ): Promise<AnomalyEvent[]> {
-    const budget = { rows: MAX_SCANNED_CALLER_EVENTS };
-    const batches = await Promise.all(
-      connectionIds.map((connectionId) =>
-        this.storedAnomaliesInRange(connectionId, startTime, endTime, budget),
-      ),
-    );
-    const scope = new Set(connectionIds);
+    const scope = connectionId ? this.scopeFilter(connectionId) : undefined;
+    const stored = await this.storedAnomaliesInRange(scope, loadFrom, endTime);
+    const members = new Set(scope?.connectionIds);
     const cached = this.recentAnomalies.filter(
       (e) =>
-        e.timestamp >= startTime &&
+        e.timestamp >= loadFrom &&
         (!endTime || e.timestamp <= endTime) &&
-        (scope.has(undefined) || scope.has(e.connectionId)),
+        (!scope ||
+          e.scopeId === scope.id ||
+          (e.connectionId !== undefined && members.has(e.connectionId))),
     );
-    return [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
+    return [...new Map([...cached, ...stored].map((e) => [e.id, e])).values()];
+  }
+
+  private scopeFilter(connectionId: string): AnomalyScopeFilter {
+    return {
+      id: this.correlationScopeOf(connectionId),
+      connectionIds: this.scopeConnectionIds(connectionId),
+    };
   }
 
   private async storedAnomaliesInRange(
-    connectionId: string | undefined,
+    scope: AnomalyScopeFilter | undefined,
     startTime: number,
     endTime: number | undefined,
-    budget: { rows: number },
   ): Promise<AnomalyEvent[]> {
     const pageSize = 1000;
     const events: AnomalyEvent[] = [];
     let after: AnomalyEventCursor | undefined;
-    while (budget.rows > 0) {
+    while (events.length < MAX_SCANNED_CALLER_EVENTS) {
       const page = await this.storage.getAnomalyEvents({
         startTime,
         endTime,
-        connectionId,
+        scope,
         limit: pageSize,
         after,
       });
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
-      budget.rows -= page.length;
       if (page.length < pageSize) return events;
       after = page[page.length - 1];
     }
     this.logger.warn(
-      `Incident history for ${connectionId ?? 'all connections'} stopped at ${events.length} events`,
+      `Incident history for ${scope?.id ?? 'all connections'} stopped at ${events.length} events`,
     );
     return events;
   }
@@ -6111,6 +6114,7 @@ export class AnomalyService
           metricTypes: group.anomalies.map((a) => a.metricType),
           sourceHost: this.configService.get('database.host'),
           sourcePort: this.configService.get('database.port'),
+          scopeId: group.anomalies[0]?.scopeId,
         };
 
         try {
@@ -6172,6 +6176,7 @@ export class AnomalyService
       resolved: s.resolved,
       connectionId: s.connectionId,
       resolvedAt: s.resolvedAt,
+      scopeId: s.scopeId,
     };
   }
 
@@ -6303,9 +6308,6 @@ export class AnomalyService
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
     }
 
-    const siblings = connectionId
-      ? this.scopeConnectionIds(connectionId).filter((id) => id !== connectionId)
-      : [];
     const sequencePatterns = getSequenceRules()
       .map((r) => r.pattern as string)
       .filter((p) => !pattern || p === pattern);
@@ -6317,12 +6319,12 @@ export class AnomalyService
         limit,
         involvingConnectionId: connectionId,
       }),
-      siblings.length > 0 && sequencePatterns.length > 0
+      connectionId && sequencePatterns.length > 0
         ? this.storage.getCorrelatedGroups({
             startTime,
             endTime,
             patterns: sequencePatterns,
-            connectionIds: siblings,
+            scope: this.scopeFilter(connectionId),
             limit: Math.max(limit, 1000),
           })
         : [],

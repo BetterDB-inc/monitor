@@ -164,6 +164,7 @@ export interface StoredAnomalyEvent {
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  scopeId?: string;
 }
 
 // Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
@@ -209,11 +210,17 @@ export interface StoredCorrelatedGroup {
   sourcePort?: number;
   connectionId?: string;
   anomalyIds?: string[];
+  scopeId?: string;
 }
 
 export interface AnomalyEventCursor {
   timestamp: number;
   id: string;
+}
+
+export interface AnomalyScopeFilter {
+  id: string;
+  connectionIds: string[];
 }
 
 export interface AnomalyQueryOptions {
@@ -229,11 +236,11 @@ export interface AnomalyQueryOptions {
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
   correlationIds?: string[];
+  scope?: AnomalyScopeFilter;
 }
 
 export interface CorrelatedGroupQueryOptions
   extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
-  connectionIds?: string[];
   patterns?: string[];
   involvingConnectionId?: string;
 }

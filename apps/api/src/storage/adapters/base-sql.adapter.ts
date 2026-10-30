@@ -208,6 +208,7 @@ export class RowMappers {
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      scopeId: row.scope_id ?? undefined,
     };
   }
 
@@ -228,6 +229,7 @@ export class RowMappers {
       sourcePort: row.source_port,
       connectionId: row.connection_id,
       anomalyIds: row.anomaly_ids ? this.dialect.fromArray(row.anomaly_ids) : undefined,
+      scopeId: row.scope_id ?? undefined,
     };
   }
 

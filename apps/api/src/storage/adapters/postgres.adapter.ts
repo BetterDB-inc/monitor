@@ -1681,6 +1681,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS anomaly_ids TEXT[];
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_anomaly_events_scope ON anomaly_events(scope_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_correlated_groups_scope ON correlated_anomaly_groups(scope_id, timestamp DESC);
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
@@ -2744,11 +2748,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         resolved = EXCLUDED.resolved,
         resolved_at = EXCLUDED.resolved_at,
         duration_ms = EXCLUDED.duration_ms`,
@@ -2772,6 +2777,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       ],
     );
 
@@ -2790,7 +2796,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2812,6 +2818,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       );
     }
 
@@ -2821,11 +2828,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         resolved = EXCLUDED.resolved,
         resolved_at = EXCLUDED.resolved_at,
         duration_ms = EXCLUDED.duration_ms`,
@@ -2866,6 +2874,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
+    }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
       const past = direction === 'ASC' ? '>' : '<';
@@ -2886,7 +2898,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, scope_id
       FROM anomaly_events
       ${whereClause}
       ORDER BY timestamp ${direction}, id ${direction}
@@ -3022,13 +3034,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (correlation_id) DO UPDATE SET
         diagnosis = EXCLUDED.diagnosis,
         recommendations = EXCLUDED.recommendations,
         anomaly_count = EXCLUDED.anomaly_count,
-        anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids)`,
+        anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, EXCLUDED.scope_id)`,
       [
         group.correlationId,
         group.timestamp,
@@ -3042,6 +3055,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         group.sourcePort || null,
         connectionId,
         group.anomalyIds ?? null,
+        group.scopeId ?? null,
       ],
     );
 
@@ -3081,9 +3095,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`correlation_id = ANY($${paramIndex++})`);
       params.push(options.correlationIds);
     }
-    if (options.connectionIds) {
-      conditions.push(`connection_id = ANY($${paramIndex++})`);
-      params.push(options.connectionIds);
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
     }
     if (options.patterns) {
       conditions.push(`pattern = ANY($${paramIndex++})`);
@@ -3107,7 +3121,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids
+        source_host, source_port, connection_id, anomaly_ids, scope_id
       FROM correlated_anomaly_groups
       ${whereClause}
       ORDER BY timestamp DESC, correlation_id DESC
@@ -3133,7 +3147,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, scope_id
       FROM (
         SELECT *, ROW_NUMBER() OVER (
           PARTITION BY COALESCE(correlation_id::text, id::text) ORDER BY timestamp DESC, id DESC

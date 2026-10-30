@@ -23,6 +23,7 @@ import {
   StoredCorrelatedGroup,
   AnomalyEventCursor,
   AnomalyQueryOptions,
+  AnomalyScopeFilter,
   CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
@@ -653,6 +654,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       resolved: event.resolved,
       resolvedAt: event.resolvedAt,
       durationMs: event.durationMs,
+      scopeId: existing.scopeId ?? event.scopeId,
     };
   }
 
@@ -706,6 +708,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
+    if (options.scope) filtered = filtered.filter(this.inScope(options.scope));
 
     const direction = options.order === 'asc' ? 1 : -1;
     const compare = (a: AnomalyEventCursor, b: AnomalyEventCursor) =>
@@ -783,7 +786,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       (g) => g.correlationId === group.correlationId && g.connectionId === connectionId,
     );
     if (existing >= 0) {
-      this.correlatedGroups[existing] = { ...group, connectionId };
+      const scopeId = this.correlatedGroups[existing].scopeId ?? group.scopeId;
+      this.correlatedGroups[existing] = { ...group, connectionId, scopeId };
     } else {
       this.correlatedGroups.push({ ...group, connectionId });
     }
@@ -805,10 +809,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       const ids = new Set(options.correlationIds);
       filtered = filtered.filter((g) => ids.has(g.correlationId));
     }
-    if (options.connectionIds) {
-      const ids = new Set(options.connectionIds);
-      filtered = filtered.filter((g) => g.connectionId !== undefined && ids.has(g.connectionId));
-    }
+    if (options.scope) filtered = filtered.filter(this.inScope(options.scope));
     if (options.patterns) {
       const patterns = new Set(options.patterns);
       filtered = filtered.filter((g) => patterns.has(g.pattern));
@@ -830,6 +831,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
           (a.correlationId < b.correlationId ? 1 : a.correlationId > b.correlationId ? -1 : 0),
       )
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 50));
+  }
+
+  private inScope(scope: AnomalyScopeFilter) {
+    const members = new Set(scope.connectionIds);
+    return (row: { scopeId?: string; connectionId?: string }) =>
+      row.scopeId === scope.id || (row.connectionId !== undefined && members.has(row.connectionId));
   }
 
   async getCorrelatedGroupMembers(

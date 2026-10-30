@@ -164,7 +164,7 @@ export class IncidentTimelineBuilder {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
       const connectionId = event.connectionId ?? '';
-      const scope = connectionId ? this.resolveScope(connectionId) : '';
+      const scope = event.scopeId ?? (connectionId ? this.resolveScope(connectionId) : '');
       const bucket = byScope.get(scope);
       if (bucket) bucket.push(event);
       else byScope.set(scope, [event]);

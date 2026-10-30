@@ -41,6 +41,7 @@ import {
   BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
+  AnomalyScopeFilter,
   CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
@@ -725,6 +726,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!groupColumns.some((col) => col.name === 'anomaly_ids')) {
       this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN anomaly_ids TEXT').run();
     }
+    if (!groupColumns.some((col) => col.name === 'scope_id')) {
+      this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN scope_id TEXT').run();
+    }
+    const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
+      name: string;
+    }[];
+    if (!eventColumns.some((col) => col.name === 'scope_id')) {
+      this.db.prepare('ALTER TABLE anomaly_events ADD COLUMN scope_id TEXT').run();
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_anomaly_events_scope ON anomaly_events(scope_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_correlated_groups_scope ON correlated_anomaly_groups(scope_id, timestamp DESC);
+    `);
 
     // Get existing columns in webhooks table
     const tableInfo = this.db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[];
@@ -2676,11 +2690,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         resolved = excluded.resolved,
         resolved_at = excluded.resolved_at,
         duration_ms = excluded.duration_ms
@@ -2706,6 +2721,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.sourceHost || null,
       event.sourcePort || null,
       connectionId,
+      event.scopeId ?? null,
     );
 
     return event.id;
@@ -2720,11 +2736,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         resolved = excluded.resolved,
         resolved_at = excluded.resolved_at,
         duration_ms = excluded.duration_ms
@@ -2752,6 +2769,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.sourceHost || null,
           event.sourcePort || null,
           connId,
+          event.scopeId ?? null,
         );
       }
     });
@@ -2789,6 +2807,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined) {
       conditions.push('resolved = ?');
       params.push(options.resolved ? 1 : 0);
+    }
+    if (options.scope) {
+      conditions.push(this.scopeCondition(options.scope));
+      params.push(options.scope.id, ...options.scope.connectionIds);
     }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
@@ -2931,13 +2953,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(correlation_id) DO UPDATE SET
         diagnosis = excluded.diagnosis,
         recommendations = excluded.recommendations,
         anomaly_count = excluded.anomaly_count,
-        anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids)
+        anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id)
     `);
 
     stmt.run(
@@ -2953,6 +2976,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       group.sourcePort || null,
       connectionId,
       group.anomalyIds ? JSON.stringify(group.anomalyIds) : null,
+      group.scopeId ?? null,
     );
 
     return group.correlationId;
@@ -2994,13 +3018,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
       params.push(...options.correlationIds);
     }
-    if (options.connectionIds) {
-      conditions.push(
-        options.connectionIds.length > 0
-          ? `connection_id IN (${options.connectionIds.map(() => '?').join(', ')})`
-          : '1 = 0',
-      );
-      params.push(...options.connectionIds);
+    if (options.scope) {
+      conditions.push(this.scopeCondition(options.scope));
+      params.push(options.scope.id, ...options.scope.connectionIds);
     }
     if (options.patterns) {
       conditions.push(
@@ -3035,6 +3055,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db.prepare(query).all(...params) as any[];
 
     return rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
+  }
+
+  private scopeCondition(scope: AnomalyScopeFilter): string {
+    const members = scope.connectionIds.map(() => '?').join(', ');
+    return members ? `(scope_id = ? OR connection_id IN (${members}))` : 'scope_id = ?';
   }
 
   async getCorrelatedGroupMembers(
