@@ -155,19 +155,23 @@ import { ReplicationStreamSample, ReplicationStreamTracker } from './replication
 import {
   DIVERGENCE_CORRELATED_METRICS,
   DIVERGENCE_FLOOR_BYTES,
+  DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_ORPHAN_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
   DivergenceRecovery,
   DivergenceWindow,
+  OrphanedDivergence,
   ReplicaDivergenceHistory,
   acknowledgeDivergence,
+  assessOrphanedReplica,
   acknowledgeRecovery,
   createDivergenceState,
   describeDivergence,
   divergenceReplicaFromMessage,
   divergenceWindowMs,
   drainClosedWindows,
+  replicaObservedLevel,
   requeueClosedWindows,
   observeDivergence,
 } from './replication-divergence-detector';
@@ -390,7 +394,7 @@ export class AnomalyService
   private replicationStream = new ReplicationStreamTracker();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
-  private divergenceOrphansNotified = new Map<string, Set<string>>();
+  private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
@@ -798,7 +802,7 @@ export class AnomalyService
     this.replicationStream.forget(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
-    this.divergenceOrphansNotified.delete(connectionId);
+    this.divergenceOrphans.delete(connectionId);
     this.divergenceSuperseded.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
@@ -5813,10 +5817,15 @@ export class AnomalyService
     startTime: number,
     endTime: number,
   ): Promise<ReplicaDivergenceHistory[]> {
-    const live = this.divergenceState.get(connectionId)?.replicas;
+    const state = this.divergenceState.get(connectionId);
     const series = new Map<string, DivergenceWindow[]>();
     try {
-      const stored = await this.storage.getReplicationDivergenceWindows({ connectionId, startTime, endTime });
+      const stored = await this.storage.getReplicationDivergenceWindows({
+        connectionId,
+        startTime,
+        endTime,
+        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
+      });
       for (const row of stored) {
         const windows = series.get(row.replicaAddr) ?? [];
         windows.push({
@@ -5835,7 +5844,7 @@ export class AnomalyService
         }`,
       );
     }
-    for (const replica of live?.values() ?? []) {
+    for (const replica of state?.replicas.values() ?? []) {
       const windows = series.get(replica.addr) ?? [];
       const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
       windows.push(
@@ -5847,7 +5856,7 @@ export class AnomalyService
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => ({
         replica,
-        level: live?.get(replica)?.level ?? 'none',
+        level: replicaObservedLevel(state, replica),
         latest: windows[windows.length - 1] ?? null,
         windows,
       }));
@@ -5858,11 +5867,11 @@ export class AnomalyService
     ctx: ConnectionContext,
   ): Promise<void> {
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
-    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
-      await this.resolveOrphanedDivergenceEvents(ctx);
-    }
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
+    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
+      await this.collectOrphanedDivergenceEvents(state, ctx);
+    }
 
     for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
       if (outcome.kind === 'divergence') {
@@ -5871,50 +5880,81 @@ export class AnomalyService
         await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
       }
     }
+    await this.settleOrphanedDivergenceEvents(state, ctx);
     await this.persistDivergenceWindows(state, ctx);
   }
 
-  private async resolveOrphanedDivergenceEvents(ctx: ConnectionContext): Promise<void> {
+  private async collectOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
     try {
-      const replicas = [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])];
       const seen = new Set([
-        ...replicas.map((r) => r.eventId),
+        ...[...state.replicas.values()].map((r) => r.eventId),
         ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
       ]);
-      const notified = this.divergenceOrphansNotified.get(ctx.connectionId) ?? new Set<string>();
-      this.divergenceOrphansNotified.set(ctx.connectionId, notified);
-      for (const replica of replicas) {
-        if (replica.level !== 'none') notified.add(replica.addr);
-      }
-      for (;;) {
+      const orphans = new Map<string, OrphanedDivergence>();
+      for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
         const open = await this.storage.getAnomalyEvents({
           connectionId: ctx.connectionId,
           metricType: MetricType.REPLICATION_DIVERGENCE,
           resolved: false,
           limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+          offset,
         });
-        const orphans = open.filter((event) => !seen.has(event.id));
-        for (const event of orphans) {
+        for (const event of open) {
+          if (seen.has(event.id)) continue;
           seen.add(event.id);
-          const claimed = await this.storage.resolveOpenAnomaly(event.id, Date.now());
-          const cached = this.recentAnomalies.find((a) => a.id === event.id);
-          if (cached) cached.resolved = true;
           const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
-          if (!claimed || notified.has(replica)) continue;
-          notified.add(replica);
-          this.dispatchOrphanRecovered(replica, ctx);
+          const orphan = orphans.get(replica) ?? {
+            eventIds: new Set<string>(),
+            sinceWindow: state.closedWindowCount,
+            claimed: false,
+          };
+          orphan.eventIds.add(event.id);
+          orphans.set(replica, orphan);
         }
-        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE || orphans.length === 0) break;
+        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) break;
       }
+      if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
       this.divergenceOrphansSwept.add(ctx.connectionId);
-      this.divergenceOrphansNotified.delete(ctx.connectionId);
     } catch (err) {
       this.logger.warn(
-        `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
+        `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
     }
+  }
+
+  private async settleOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const orphans = this.divergenceOrphans.get(ctx.connectionId);
+    if (!orphans) return;
+    for (const [replica, orphan] of orphans) {
+      const assessment = assessOrphanedReplica(state, replica, orphan.sinceWindow);
+      if (assessment === 'pending') continue;
+      try {
+        for (const id of orphan.eventIds) {
+          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, Date.now())) || orphan.claimed;
+          orphan.eventIds.delete(id);
+          const cached = this.recentAnomalies.find((a) => a.id === id);
+          if (cached) cached.resolved = true;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        continue;
+      }
+      orphans.delete(replica);
+      if (orphan.claimed && assessment !== 'diverging') this.dispatchOrphanRecovered(replica, ctx);
+    }
+    if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
   }
 
   private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {

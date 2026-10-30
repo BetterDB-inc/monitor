@@ -13,11 +13,12 @@ import type { ReplicaDivergenceHistory, ReplicationDivergenceLevel } from '@/typ
 
 const LEVEL_BADGE: Record<
   ReplicationDivergenceLevel,
-  { label: string; variant: 'success' | 'warning' | 'destructive' }
+  { label: string; variant: 'success' | 'warning' | 'destructive' | 'secondary' }
 > = {
   none: { label: 'In sync', variant: 'success' },
   warning: { label: 'Diverging', variant: 'warning' },
   critical: { label: 'Not catching up', variant: 'destructive' },
+  unobserved: { label: 'Not observed', variant: 'secondary' },
 };
 
 export function formatGap(bytes: number): string {

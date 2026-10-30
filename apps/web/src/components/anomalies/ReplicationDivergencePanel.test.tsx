@@ -34,6 +34,7 @@ describe('ReplicationDivergencePanel', () => {
         windows: [window(4 * MiB, null)],
       },
       { replica: '10.0.0.4:6379', level: 'none', latest: null, windows: [] },
+      { replica: '10.0.0.5:6379', level: 'unobserved', latest: null, windows: [] },
     ];
 
     render(<ReplicationDivergencePanel replicas={replicas} />);
@@ -44,7 +45,8 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getByText('8s')).toBeInTheDocument();
     expect(screen.getByText('Not catching up')).toBeInTheDocument();
     expect(screen.getByText('In sync')).toBeInTheDocument();
-    expect(screen.getAllByText('collecting')).toHaveLength(2);
+    expect(screen.getByText('Not observed')).toBeInTheDocument();
+    expect(screen.getAllByText('collecting')).toHaveLength(3);
   });
 
   it('formats gap sizes across units', () => {

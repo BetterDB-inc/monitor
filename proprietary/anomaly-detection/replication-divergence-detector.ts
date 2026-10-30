@@ -19,10 +19,13 @@ export const DIVERGENCE_HISTORY_WINDOWS = 120;
 export const DIVERGENCE_STALE_ACK_SEC = 10;
 export const DIVERGENCE_PERSIST_BACKLOG = 1000;
 export const DIVERGENCE_ORPHAN_PAGE_SIZE = 500;
+export const DIVERGENCE_HISTORY_QUERY_WINDOWS = 2880;
 export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
 export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
+export type ReplicaObservedLevel = DivergenceLevel | 'unobserved';
+export type OrphanAssessment = 'pending' | 'diverging' | 'caught_up' | 'unobserved';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
 
 export interface DivergenceWindow {
@@ -68,6 +71,15 @@ export interface DivergenceConnectionState {
   staleGaps: Map<string, number>;
   rateHistory: number[];
   replicas: Map<string, ReplicaDivergenceState>;
+  observed: Set<string>;
+  closedWindowCount: number;
+  lastWindowEnd: number | null;
+}
+
+export interface OrphanedDivergence {
+  eventIds: Set<string>;
+  sinceWindow: number;
+  claimed: boolean;
 }
 
 export interface DivergenceFinding {
@@ -94,7 +106,7 @@ export type DivergenceOutcome = DivergenceFinding | DivergenceRecovery;
 
 export interface ReplicaDivergenceHistory {
   replica: string;
-  level: DivergenceLevel;
+  level: ReplicaObservedLevel;
   latest: DivergenceWindow | null;
   windows: DivergenceWindow[];
 }
@@ -113,6 +125,9 @@ export function createDivergenceState(): DivergenceConnectionState {
     staleGaps: new Map(),
     rateHistory: [],
     replicas: new Map(),
+    observed: new Set(),
+    closedWindowCount: 0,
+    lastWindowEnd: null,
   };
 }
 
@@ -334,6 +349,8 @@ function closeWindow(
   rate: number | null,
 ): DivergenceOutcome[] {
   const outcomes: DivergenceOutcome[] = [];
+  state.closedWindowCount++;
+  state.lastWindowEnd = end;
   if (rate !== null) {
     state.rateHistory.push(rate);
     if (state.rateHistory.length > DIVERGENCE_HISTORY_WINDOWS) state.rateHistory.shift();
@@ -384,6 +401,7 @@ export function observeDivergence(
     state.windowStart = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
+    state.observed = new Set();
     return [...state.replicas.values()].flatMap((replica) => dropReplica(state, replica));
   }
   const outcomes: DivergenceOutcome[] = [];
@@ -395,6 +413,7 @@ export function observeDivergence(
     state.windowStart = sample.timestamp;
   }
 
+  state.observed = new Set(sample.replicas.filter((line) => line.state === 'online').map((line) => line.addr));
   for (const line of sample.replicas) {
     if (line.state === 'online' && isStaleAck(line)) state.staleGaps.set(line.addr, line.gapBytes);
     if (!isTracked(line)) continue;
@@ -405,6 +424,34 @@ export function observeDivergence(
   }
 
   return outcomes;
+}
+
+export function replicaObservedLevel(
+  state: DivergenceConnectionState | undefined,
+  addr: string,
+): ReplicaObservedLevel {
+  const level = state?.replicas.get(addr)?.level ?? 'none';
+  if (level !== 'none') return level;
+  return state?.observed.has(addr) ? 'none' : 'unobserved';
+}
+
+export function assessOrphanedReplica(
+  state: DivergenceConnectionState,
+  addr: string,
+  sinceWindow: number,
+): OrphanAssessment {
+  const replica = state.replicas.get(addr);
+  if (replica && replica.level !== 'none') return 'diverging';
+  if (!state.observed.has(addr)) {
+    const notPrimary = state.windowStart === null;
+    const absent = state.closedWindowCount - sinceWindow >= DIVERGENCE_RECOVERED_WINDOWS;
+    return notPrimary || absent ? 'unobserved' : 'pending';
+  }
+  const recent = (replica?.windows ?? []).slice(-DIVERGENCE_RECOVERED_WINDOWS);
+  if (recent.length < DIVERGENCE_RECOVERED_WINDOWS) return 'pending';
+  if (recent[recent.length - 1].end !== state.lastWindowEnd) return 'pending';
+  const steady = recent.every((window, i) => i === 0 || contiguous(recent[i - 1], window));
+  return steady && !recent.some(isBehind) ? 'caught_up' : 'pending';
 }
 
 export function drainClosedWindows(state: DivergenceConnectionState): ClosedDivergenceWindow[] {

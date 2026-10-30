@@ -11,7 +11,10 @@ import { ConnectionContext } from '@app/common/services/multi-connection-poller'
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
-import { DIVERGENCE_ORPHAN_PAGE_SIZE } from '../replication-divergence-detector';
+import {
+  DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_ORPHAN_PAGE_SIZE,
+} from '../replication-divergence-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -6945,10 +6948,11 @@ describe('AnomalyService', () => {
         connectionId: 'conn-1',
         startTime: T0,
         endTime: T0 + 600_000,
+        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
       });
       expect(history.map((h) => [h.replica, h.level, h.windows.length])).toEqual([
         ['10.0.0.2:6379', 'warning', 5],
-        ['10.0.0.9:6379', 'none', 1],
+        ['10.0.0.9:6379', 'unobserved', 1],
       ]);
       expect(history[0].windows[0]).toEqual({
         start: T0,
@@ -6981,17 +6985,24 @@ describe('AnomalyService', () => {
       expect(replica.latest?.gapBytes).toBe(4 * MiB);
     });
 
-    it('resolves divergence events left open by a previous run, once per connection', async () => {
-      storage.getAnomalyEvents.mockResolvedValueOnce([
-        {
-          id: 'old-1',
-          metricType: MetricType.REPLICATION_DIVERGENCE,
-          resolved: false,
-          message: 'WARNING: Replica 10.0.0.9:6379 is 8.0 MiB behind the primary; the gap grew.',
-        },
-      ]);
+    const orphan = (id: string, addr: string) => ({
+      id,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      resolved: false,
+      message: `WARNING: Replica ${addr} is 8.0 MiB behind the primary; the gap grew.`,
+    });
+    const restartRecoveries = () =>
+      (webhookEventsProService as any).dispatchReplicationRecovered.mock.calls
+        .map(([data]: [{ replica: string; reason: string }]) => data)
+        .filter((data: { reason: string }) => data.reason === 'resolved_after_restart');
 
-      await feed([2, 4], T0);
+    it('reads open events once and closes them when the replica has left', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
+
+      const t = await feed([2], T0);
+      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalled();
+
+      await feed([4, 6, 8], t);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
       expect(storage.getAnomalyEvents).toHaveBeenCalledWith({
@@ -6999,16 +7010,40 @@ describe('AnomalyService', () => {
         metricType: MetricType.REPLICATION_DIVERGENCE,
         resolved: false,
         limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        offset: 0,
       });
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
-      expect((webhookEventsProService as any).dispatchReplicationRecovered).toHaveBeenCalledWith(
+      expect(restartRecoveries()).toEqual([
         expect.objectContaining({
           replica: '10.0.0.9:6379',
           reason: 'resolved_after_restart',
           gapBytes: null,
           connectionId: 'conn-1',
         }),
-      );
+      ]);
+    });
+
+    it('keeps an orphaned event open until the replica has caught up', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      const t = await feed([8, 8, 8, 8], T0);
+      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalled();
+      expect(restartRecoveries()).toEqual([]);
+
+      await feed([0, 0, 0, 0], t);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(1);
+      expect(restartRecoveries()).toHaveLength(1);
+    });
+
+    it('closes an orphaned event without a recovery when the replica alerts again', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      await feed([6, 8, 10, 12, 14, 16], T0);
+
+      expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('warning');
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect(restartRecoveries()).toEqual([]);
     });
 
     it('sends no recovered webhook for an orphaned event something else already resolved', async () => {
@@ -7017,97 +7052,82 @@ describe('AnomalyService', () => {
       ]);
       storage.resolveOpenAnomaly.mockResolvedValueOnce(false);
 
-      await feed([2], T0);
+      await feed([2, 4, 6, 8], T0);
 
-      expect((webhookEventsProService as any).dispatchReplicationRecovered).not.toHaveBeenCalled();
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(1);
+      expect(restartRecoveries()).toEqual([]);
     });
 
-    it('pages through more orphaned events than one query returns', async () => {
+    it('pages past a full page of tracked events to reach older orphans', async () => {
       const page = (prefix: string, count: number) =>
-        Array.from({ length: count }, (_, i) => ({
-          id: `${prefix}-${i}`,
-          metricType: MetricType.REPLICATION_DIVERGENCE,
-          resolved: false,
-          message: '',
-        }));
+        Array.from({ length: count }, (_, i) => orphan(`${prefix}-${i}`, '10.0.0.9:6379'));
       storage.getAnomalyEvents
         .mockResolvedValueOnce(page('a', DIVERGENCE_ORPHAN_PAGE_SIZE))
         .mockResolvedValueOnce(page('b', 3));
 
-      await feed([2, 4], T0);
+      await feed([2, 4, 6, 8], T0);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      expect(storage.getAnomalyEvents).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: DIVERGENCE_ORPHAN_PAGE_SIZE }),
+      );
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(DIVERGENCE_ORPHAN_PAGE_SIZE + 3);
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
+      expect(restartRecoveries()).toHaveLength(1);
     });
 
     it('sends one recovered webhook per replica, none for a replica still diverging', async () => {
-      const orphan = (id: string, addr: string) => ({
-        id,
-        metricType: MetricType.REPLICATION_DIVERGENCE,
-        resolved: false,
-        message: `WARNING: Replica ${addr} is 8.0 MiB behind the primary; the gap grew.`,
-      });
       let calls = 0;
       storage.getAnomalyEvents.mockImplementation(async () => {
         calls++;
         if (calls < 16) throw new Error('db down');
         return calls === 16
-          ? [orphan('live-old', '10.0.0.2:6379'), orphan('a-warn', '10.0.0.9:6379'), orphan('a-crit', '10.0.0.9:6379')]
+          ? [
+              orphan('live-old', '10.0.0.2:6379'),
+              orphan('a-warn', '10.0.0.9:6379'),
+              orphan('a-crit', '10.0.0.9:6379'),
+            ]
           : [];
       });
 
-      await feed([2, 4, 6, 8, 10, 12], T0);
+      await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
 
       expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('warning');
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
-      const restartRecoveries = (webhookEventsProService as any).dispatchReplicationRecovered.mock.calls
-        .map(([data]: [{ replica: string; reason: string }]) => data)
-        .filter((data: { reason: string }) => data.reason === 'resolved_after_restart');
-      expect(restartRecoveries.map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
+      expect(restartRecoveries().map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
     });
 
-    it('sends no second recovered webhook for a replica when a failed sweep is retried', async () => {
-      const orphan = (id: string) => ({
-        id,
-        metricType: MetricType.REPLICATION_DIVERGENCE,
-        resolved: false,
-        message: 'WARNING: Replica 10.0.0.9:6379 is 8.0 MiB behind the primary; the gap grew.',
-      });
-      storage.getAnomalyEvents
-        .mockResolvedValueOnce([orphan('a-warn'), orphan('a-crit')])
-        .mockResolvedValueOnce([orphan('a-crit')]);
+    it('sends no second recovered webhook when closing a replica\'s events is retried', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        orphan('a-warn', '10.0.0.9:6379'),
+        orphan('a-crit', '10.0.0.9:6379'),
+      ]);
       storage.resolveOpenAnomaly.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
 
-      await feed([2], T0);
+      await feed([2, 4, 6, 8], T0);
 
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
-      expect((webhookEventsProService as any).dispatchReplicationRecovered).toHaveBeenCalledTimes(1);
-      expect((service as any).divergenceOrphansNotified.has('conn-1')).toBe(false);
+      expect(restartRecoveries()).toHaveLength(1);
+      expect((service as any).divergenceOrphans.has('conn-1')).toBe(false);
     });
 
-    it('leaves a superseded event it could not resolve to the retry, not the sweep', async () => {
-      storage.getAnomalyEvents.mockRejectedValue(new Error('db down'));
-      const t = await feed([2, 4, 6, 8, 10, 12], T0);
-      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
-      storage.resolveAnomaly.mockImplementation(async (id: string) => {
-        if (id === warningId) throw new Error('db down');
-        return true;
-      });
-      const next = await feed([130, 140, 150], t);
-      storage.getAnomalyEvents.mockResolvedValue([
+    it('reports a replica with only stored windows as unobserved', async () => {
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
         {
-          id: warningId,
-          metricType: MetricType.REPLICATION_DIVERGENCE,
-          resolved: false,
-          message: 'WARNING: Replica 10.0.0.2:6379 is 12.0 MiB behind the primary; the gap grew.',
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
         },
       ]);
 
-      await feed([160], next);
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
 
-      expect((service as any).divergenceSuperseded.get('conn-1')).toEqual(new Set([warningId]));
-      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalledWith(warningId, expect.any(Number));
+      expect(replica.level).toBe('unobserved');
     });
 
     it('retries the orphan sweep on the next poll when storage cannot be read', async () => {
