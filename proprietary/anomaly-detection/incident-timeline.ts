@@ -71,6 +71,15 @@ export const FLAT_BASELINE_RECOVERY_TOLERANCE = 0.05;
 
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
 
+export const UNTRACKED_RECOVERY_METRICS: ReadonlySet<MetricType> = new Set([
+  MetricType.REPLICATION_ROLE,
+  MetricType.CLUSTER_STATE,
+  MetricType.CONNECTION_CHURN,
+  MetricType.REJECTED_CONNECTIONS,
+  MetricType.EVICTED_CLIENTS,
+  MetricType.SLOWLOG_LAST_ID,
+]);
+
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {
   [AnomalySeverity.INFO]: 0,
   [AnomalySeverity.WARNING]: 1,

@@ -6950,15 +6950,36 @@ describe('AnomalyService', () => {
         anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
       ];
       storage.getCorrelatedGroups.mockRejectedValue(new Error('db down'));
-      storage.getAnomalyEvents.mockResolvedValue(
-        members.map((m) => ({ ...m, anomalyType: 'spike' })),
-      );
+      const giveUpAt = now + 60 * MIN;
       (service as any).recentAnomalies.push(...members);
 
       for (let i = 0; i < 4; i++) await (service as any).tickIncidentTimelines(now + i * 1000);
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
 
-      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(3);
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'c', timestamp: giveUpAt - 2 * MIN }),
+        anomaly({ id: 'd', timestamp: giveUpAt - MIN, metricType: MetricType.MEMORY_USED }),
+      );
+      await (service as any).tickIncidentTimelines(giveUpAt);
+
       expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports a one-shot state event as unknown rather than degraded', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.REPLICATION_ROLE }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          openSignals: [],
+          unknownSignals: [MetricType.REPLICATION_ROLE],
+        }),
+      );
     });
 
     it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
@@ -6967,7 +6988,7 @@ describe('AnomalyService', () => {
         anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.COMMAND_P99 }),
         anomaly({
           timestamp: now - 15 * MIN,
-          metricType: MetricType.CLUSTER_STATE,
+          metricType: MetricType.RAFT_HEALTH,
           connectionId: 'conn-2',
         }),
       );
@@ -6979,7 +7000,7 @@ describe('AnomalyService', () => {
       );
       expect(byConn['conn-1'].status).toBe('recovered');
       expect(byConn['conn-2']).toEqual(
-        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.CLUSTER_STATE] }),
+        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.RAFT_HEALTH] }),
       );
     });
 
@@ -7100,9 +7121,9 @@ describe('AnomalyService', () => {
       });
 
       it('keeps a sustained signal open when the next firing follows straight on', () => {
-        withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
+        withBuffer([...baseline(T - 30_000), [T + 10_000, 900]]);
 
-        expect(probe()(signal({ until: T + MIN }))).toBeNull();
+        expect(probe()(signal({ until: T + 30_000 }))).toBeNull();
       });
 
       it('does not know whether an old signal recovered before it fired again', () => {
@@ -7129,9 +7150,42 @@ describe('AnomalyService', () => {
         expect(probe()(signal({ metricType: MetricType.CONNECTION_CHURN }))).toBeUndefined();
       });
 
-      it('keeps a state signal with no buffer open', () => {
+      it('keeps a self-resolving state signal with no buffer open', () => {
         expect(
-          probe()(signal({ connectionId: 'gone', metricType: MetricType.CLUSTER_STATE })),
+          probe()(signal({ connectionId: 'gone', metricType: MetricType.RAFT_HEALTH })),
+        ).toBeNull();
+      });
+
+      it.each([
+        MetricType.REPLICATION_ROLE,
+        MetricType.CLUSTER_STATE,
+        MetricType.CONNECTION_CHURN,
+        MetricType.REJECTED_CONNECTIONS,
+        MetricType.EVICTED_CLIENTS,
+        MetricType.SLOWLOG_LAST_ID,
+      ])('reports %s as unknown when nothing tracks its recovery', (metricType) => {
+        expect(probe()(signal({ connectionId: 'gone', metricType }))).toBeUndefined();
+      });
+
+      it('reports a re-fired signal as unknown once its buffer has slid past it', () => {
+        const buffer = new MetricBuffer(MetricType.CONNECTION_CHURN, 300, 2);
+        baseline(T + 60 * MIN).forEach(([ts, value]) => buffer.addSample(value, ts));
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTION_CHURN, buffer]]));
+
+        expect(
+          probe()(signal({ metricType: MetricType.CONNECTION_CHURN, until: T + 30_000 })),
+        ).toBeUndefined();
+      });
+
+      it('keeps a point-in-time signal open when it re-fired before settling', () => {
+        expect(
+          probe()(
+            signal({
+              connectionId: 'gone',
+              metricType: MetricType.COMMAND_P99,
+              until: T + 30_000,
+            }),
+          ),
         ).toBeNull();
       });
 

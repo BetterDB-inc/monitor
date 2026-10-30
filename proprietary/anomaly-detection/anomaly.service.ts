@@ -37,6 +37,7 @@ import {
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
   FLAT_BASELINE_RECOVERY_TOLERANCE,
   POINT_IN_TIME_METRICS,
+  UNTRACKED_RECOVERY_METRICS,
   RecoveryProbe,
   incidentStartOf,
   matchSequence,
@@ -230,7 +231,6 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
-const MAX_SEQUENCE_DEDUPE_SEED_ATTEMPTS = 3;
 
 @Injectable()
 export class AnomalyService
@@ -254,7 +254,7 @@ export class AnomalyService
   private liveIncidents: IncidentTimeline[] = [];
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
-  private sequenceDedupeSeedFailures = 0;
+  private sequenceDedupeSeedFailedAt: number | null = null;
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5457,12 +5457,17 @@ export class AnomalyService
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => {
     const settledAt = signal.since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
-    if (signal.until !== null && signal.until <= settledAt) return null;
     const buffer = this.buffers.get(signal.connectionId)?.get(signal.metricType);
     const samples = buffer?.isReady() ? buffer.getSamples() : [];
     if (!buffer || samples.length === 0 || samples[0].timestamp > settledAt) {
-      if (POINT_IN_TIME_METRICS.has(signal.metricType)) return settledAt;
-      return !buffer && METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) ? null : undefined;
+      if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
+        return signal.until !== null && signal.until <= settledAt ? null : settledAt;
+      }
+      return !buffer &&
+        METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) &&
+        !UNTRACKED_RECOVERY_METRICS.has(signal.metricType)
+        ? null
+        : undefined;
     }
     const warningZ =
       this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??
@@ -5487,14 +5492,12 @@ export class AnomalyService
     const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
     if (!seeded) {
-      this.sequenceDedupeSeedFailures++;
-      if (this.sequenceDedupeSeedFailures < MAX_SEQUENCE_DEDUPE_SEED_ATTEMPTS) {
+      this.sequenceDedupeSeedFailedAt ??= now;
+      if (now - this.sequenceDedupeSeedFailedAt < windowMs) {
         this.sequenceDedupeSeed = null;
         return;
       }
-      this.logger.warn(
-        `Sequence group dedupe seed failed ${this.sequenceDedupeSeedFailures} times; emitting without it`,
-      );
+      this.logger.warn('Sequence group dedupe seed kept failing; emitting without it');
       this.sequenceDedupeSeed = Promise.resolve(true);
     }
 
