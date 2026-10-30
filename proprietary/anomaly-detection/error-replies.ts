@@ -6,7 +6,6 @@ export const ERROR_REPLIES_TOP_LIMIT = 3;
 export const ERROR_REPLIES_WARNING_PER_POLL = 200;
 export const ERROR_REPLIES_CRITICAL_PER_POLL = 2000;
 export const ERROR_REPLIES_MIN_PER_POLL = 20;
-export const ERROR_REPLIES_MAX_GAP_POLLS = 3;
 
 export interface ErrorstatDelta {
   prefix: string;
@@ -14,10 +13,8 @@ export interface ErrorstatDelta {
 }
 
 export function errorRepliesPerPoll(delta: number, elapsedMs: number, intervalMs: number): number {
-  if (elapsedMs <= ERROR_REPLIES_MAX_GAP_POLLS * intervalMs) {
-    return delta;
-  }
-  return Math.round((delta * intervalMs) / elapsedMs);
+  const polls = Math.max(1, Math.round(elapsedMs / intervalMs));
+  return Math.round(delta / polls);
 }
 
 export function readErrorstatCounts(errorstats: ErrorStatsInfo | undefined): Map<string, number> {

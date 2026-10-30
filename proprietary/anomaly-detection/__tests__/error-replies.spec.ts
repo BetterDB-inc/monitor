@@ -103,8 +103,13 @@ describe('error replies helpers', () => {
   });
 
   describe('errorRepliesPerPoll', () => {
-    it('keeps the delta when polls arrive on time', () => {
-      expect(errorRepliesPerPoll(900, 3000, 1000)).toBe(900);
+    it('keeps the delta when a poll arrives on time or a little late', () => {
+      expect(errorRepliesPerPoll(900, 1000, 1000)).toBe(900);
+      expect(errorRepliesPerPoll(900, 1400, 1000)).toBe(900);
+    });
+
+    it('spreads the delta over a short gap', () => {
+      expect(errorRepliesPerPoll(450, 3000, 1000)).toBe(150);
     });
 
     it('spreads the delta over the polls a gap covered', () => {
