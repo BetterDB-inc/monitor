@@ -26,6 +26,7 @@ interface WindowSpec {
   state?: string;
   lagSec?: number | null;
   present?: boolean;
+  offset?: number;
 }
 
 class Harness {
@@ -41,7 +42,7 @@ class Harness {
               key: 'slave0',
               addr: ADDR,
               state: spec.state ?? 'online',
-              offset: 0,
+              offset: spec.offset ?? 1,
               lagSec: spec.lagSec === undefined ? 0 : spec.lagSec,
               gapBytes: spec.gap,
             },
@@ -325,6 +326,25 @@ describe('observeDivergence window timing', () => {
 });
 
 describe('observeDivergence', () => {
+  it('ignores a replica in initial sync that has not acked an offset', () => {
+    const harness = new Harness();
+
+    const out = harness.windows(
+      Array.from({ length: 6 }, () => ({ gap: 500 * MiB, rate: MiB, lagSec: 30, offset: 0 })),
+    );
+
+    expect(divergences(out)).toEqual([]);
+    expect(harness.state.replicas.has(ADDR)).toBe(false);
+  });
+
+  it('ignores an unacked replica before its lag goes stale', () => {
+    const harness = new Harness();
+
+    harness.windows(Array.from({ length: 3 }, () => ({ gap: 500 * MiB, rate: MiB, lagSec: 2, offset: 0 })));
+
+    expect(harness.state.replicas.has(ADDR)).toBe(false);
+  });
+
   it('ignores samples from replicas', () => {
     const state = createDivergenceState();
     const sample: ReplicationStreamSample = {

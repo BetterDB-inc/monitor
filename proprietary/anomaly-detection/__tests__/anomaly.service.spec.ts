@@ -6839,7 +6839,7 @@ describe('AnomalyService', () => {
         bytesPerSecEwma: MiB,
         replBacklogHistlen: null,
         replicas: [
-          { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 0, lagSec: 0, gapBytes },
+          { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 1, lagSec: 0, gapBytes },
         ],
       };
     }

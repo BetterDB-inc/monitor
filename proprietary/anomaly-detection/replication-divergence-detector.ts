@@ -158,8 +158,12 @@ function isStaleAck(line: ReplicationStreamSample['replicas'][number]): boolean 
   return line.lagSec !== null && line.lagSec > DIVERGENCE_STALE_ACK_SEC;
 }
 
+function isStreaming(line: ReplicationStreamSample['replicas'][number]): boolean {
+  return line.state === 'online' && line.offset > 0;
+}
+
 function isTracked(line: ReplicationStreamSample['replicas'][number]): boolean {
-  return line.state === 'online' && !isStaleAck(line);
+  return isStreaming(line) && !isStaleAck(line);
 }
 
 function createReplicaState(addr: string): ReplicaDivergenceState {
@@ -446,9 +450,9 @@ export function observeDivergence(
   }
   state.windowSamples++;
 
-  state.observed = new Set(sample.replicas.filter((line) => line.state === 'online').map((line) => line.addr));
+  state.observed = new Set(sample.replicas.filter(isStreaming).map((line) => line.addr));
   for (const line of sample.replicas) {
-    if (line.state === 'online' && isStaleAck(line)) state.staleGaps.set(line.addr, line.gapBytes);
+    if (isStreaming(line) && isStaleAck(line)) state.staleGaps.set(line.addr, line.gapBytes);
     if (!isTracked(line)) continue;
     const acc = state.accumulators.get(line.addr) ?? { gaps: [], lastRate: null };
     acc.gaps.push(line.gapBytes);
