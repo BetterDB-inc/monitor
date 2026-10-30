@@ -213,4 +213,42 @@ describe('observeDivergence', () => {
     const gone = h.windows([{ gap: 0, rate: MiB, present: false }, { gap: 0, rate: MiB, present: false }]);
     expect(gone.flat()).toEqual([{ kind: 'cleared', addr: ADDR, eventId: 'evt-warning', gapBytes: null }]);
   });
+
+  it('keeps emitting cleared for a dropped replica until it is acknowledged', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const absent = { gap: 0, rate: MiB, present: false };
+    const unacked = h.windows([absent, absent, absent], false);
+    expect(unacked.flat().map((o) => o.kind)).toEqual(['cleared', 'cleared']);
+
+    acknowledgeRecovery(h.state, ADDR);
+    expect(h.windows([absent, absent]).flat()).toEqual([]);
+    expect(h.state.replicas.size).toBe(0);
+  });
+
+  it('clears active findings when the node stops being a primary', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const demoted = (): ReplicationStreamSample => ({
+      timestamp: 1_800_000_000_000,
+      role: 'replica',
+      replid: null,
+      masterReplOffset: 0,
+      bytesPerSec: MiB,
+      bytesPerSecEwma: MiB,
+      replBacklogHistlen: null,
+      replicas: [],
+    });
+    expect(observeDivergence(h.state, demoted(), WINDOW_MS)).toEqual([
+      { kind: 'cleared', addr: ADDR, eventId: 'evt-warning', gapBytes: null },
+    ]);
+    expect(observeDivergence(h.state, demoted(), WINDOW_MS)).toHaveLength(1);
+
+    acknowledgeRecovery(h.state, ADDR);
+    expect(observeDivergence(h.state, demoted(), WINDOW_MS)).toEqual([]);
+    expect(h.state.replicas.size).toBe(0);
+    expect(h.state.windowStart).toBeNull();
+  });
 });
