@@ -3139,7 +3139,9 @@ export class AnomalyService
     state.maxPollGapMs = retryAmplificationMaxPollGap(this.getIntervalMs());
 
     const connectionEvents = this.recentAnomalies.filter((a) => {
-      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp;
+      const minorCpuSpike =
+        a.metricType === MetricType.CPU_UTILIZATION && a.severity !== AnomalySeverity.CRITICAL;
+      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !minorCpuSpike;
     });
     const recentEvents = connectionEvents
       .filter((a) => {
@@ -3207,6 +3209,7 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
+    if (event.persisted !== true) return;
     acknowledgeRetryAmplificationFinding(state, finding);
   }
 

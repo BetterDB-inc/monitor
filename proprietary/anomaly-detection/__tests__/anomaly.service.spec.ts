@@ -3350,16 +3350,26 @@ describe('AnomalyService', () => {
   });
 
   describe('retry amplification', () => {
-    async function runRetry(opts: { failFirstEmit?: boolean; p99Once?: boolean } = {}) {
+    async function runRetry(
+      opts: {
+        failFirstEmit?: boolean;
+        p99Once?: boolean;
+        realEmit?: boolean;
+        cpuSeverity?: AnomalySeverity;
+      } = {},
+    ) {
       const recorded: any[] = [];
       let failures = opts.failFirstEmit ? 1 : 0;
-      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
-        if (failures > 0) {
-          failures -= 1;
-          throw new Error('storage down');
-        }
-        recorded.push(a);
-      });
+      if (!opts.realEmit) {
+        jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+          if (failures > 0) {
+            failures -= 1;
+            throw new Error('storage down');
+          }
+          a.persisted = true;
+          recorded.push(a);
+        });
+      }
       let ts = 1_000_000;
       let commands = 1_000_000;
       let errors = 0;
@@ -3372,6 +3382,16 @@ describe('AnomalyService', () => {
             id: `p99-${w}`,
             timestamp: ts + 5_000,
             metricType: MetricType.COMMAND_P99,
+            connectionId: 'conn-1',
+            resolved: false,
+          });
+        }
+        if (hot && opts.cpuSeverity) {
+          (service as any).recentAnomalies.push({
+            id: `cpu-${w}`,
+            timestamp: ts + 5_000,
+            metricType: MetricType.CPU_UTILIZATION,
+            severity: opts.cpuSeverity,
             connectionId: 'conn-1',
             resolved: false,
           });
@@ -3477,6 +3497,31 @@ describe('AnomalyService', () => {
 
       expect(errorsCaught).toHaveLength(1);
       expect(recorded).toHaveLength(1);
+    });
+
+    it('re-emits a finding whose storage write failed', async () => {
+      const retryWrites = () =>
+        storage.saveAnomalyEvent.mock.calls.filter(
+          ([e]: [any]) => e.metricType === MetricType.RETRY_AMPLIFICATION,
+        ).length;
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('storage down'))
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+
+      expect(retryWrites()).toBe(2);
+    });
+
+    it('treats only a critical CPU event as saturation', async () => {
+      const warning = await runRetry({ cpuSeverity: AnomalySeverity.WARNING });
+      expect(warning.recorded.map((e) => e.severity)).toEqual([AnomalySeverity.WARNING]);
+    });
+
+    it('escalates on a critical CPU event', async () => {
+      const critical = await runRetry({ cpuSeverity: AnomalySeverity.CRITICAL });
+      expect(critical.recorded.at(-1).severity).toBe(AnomalySeverity.CRITICAL);
     });
 
     it('drops the per-connection state when the connection is removed', async () => {
