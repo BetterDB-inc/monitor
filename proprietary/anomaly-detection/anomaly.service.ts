@@ -5637,12 +5637,16 @@ export class AnomalyService
   ): Promise<StoredCorrelatedGroup[]> {
     if (siblings.length === 0) return [];
     const pageSize = 10_000;
-    const maxWanted = pattern ? MAX_INVOLVED_GROUP_IDS : Math.min(limit, MAX_INVOLVED_GROUP_IDS);
-    const enough = (wanted: Set<string>) => wanted.size >= maxWanted;
-    const wanted = new Set<string>();
+    const chunkSize = 500;
+    const seen = new Set<string>();
+    const found = new Map<string, StoredCorrelatedGroup>();
+    const inWindow = (g: StoredCorrelatedGroup) =>
+      g.timestamp >= startTime && (endTime === undefined || g.timestamp <= endTime);
     for (
       let offset = 0;
-      !enough(wanted) && offset < MAX_SCANNED_CALLER_EVENTS;
+      found.size < limit &&
+      seen.size < MAX_INVOLVED_GROUP_IDS &&
+      offset < MAX_SCANNED_CALLER_EVENTS;
       offset += pageSize
     ) {
       const page = await this.storage.getAnomalyEvents({
@@ -5652,32 +5656,28 @@ export class AnomalyService
         limit: pageSize,
         offset,
       });
+      const candidates: string[] = [];
       for (const e of page) {
-        if (enough(wanted)) break;
-        if (e.correlationId && !known.has(e.correlationId)) wanted.add(e.correlationId);
+        if (seen.size >= MAX_INVOLVED_GROUP_IDS) break;
+        if (!e.correlationId || known.has(e.correlationId) || seen.has(e.correlationId)) continue;
+        seen.add(e.correlationId);
+        candidates.push(e.correlationId);
       }
-      if (page.length < pageSize) break;
-    }
-    if (wanted.size === 0) return [];
-    const ids = [...wanted];
-    const chunkSize = 500;
-    const chunks = Array.from({ length: Math.ceil(ids.length / chunkSize) }, (_, i) =>
-      ids.slice(i * chunkSize, (i + 1) * chunkSize),
-    );
-    const found: StoredCorrelatedGroup[] = [];
-    for (const id of siblings) {
-      for (const chunk of chunks) {
-        found.push(
-          ...(await this.storage.getCorrelatedGroups({
+      for (let i = 0; i < candidates.length && found.size < limit; i += chunkSize) {
+        const chunk = candidates.slice(i, i + chunkSize);
+        for (const id of siblings) {
+          const groups = await this.storage.getCorrelatedGroups({
             pattern: pattern as string,
             correlationIds: chunk,
             limit: chunk.length,
             connectionId: id,
-          })),
-        );
+          });
+          for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
+        }
       }
+      if (page.length < pageSize) break;
     }
-    return found;
+    return [...found.values()];
   }
 
   async getRecentCorrelatedGroups(
