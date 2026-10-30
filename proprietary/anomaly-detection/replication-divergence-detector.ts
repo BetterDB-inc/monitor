@@ -51,6 +51,7 @@ export interface ReplicaDivergenceState {
   addr: string;
   windows: DivergenceWindow[];
   level: DivergenceLevel;
+  dispatchedLevel: DivergenceLevel;
   eventId: string | null;
   spanStart: number | null;
   baselineRate: number | null;
@@ -171,6 +172,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     addr,
     windows: [],
     level: 'none',
+    dispatchedLevel: 'none',
     eventId: null,
     spanStart: null,
     baselineRate: null,
@@ -244,7 +246,7 @@ function evaluateReplica(
 
   if (!isBehind(last)) {
     replica.subside = null;
-    if (replica.level === 'none') return null;
+    if (replica.level === 'none' && replica.dispatchedLevel === 'none') return null;
     replica.belowFloorStreak++;
     if (replica.belowFloorStreak < DIVERGENCE_RECOVERED_WINDOWS) return null;
     return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes: last.gapBytes };
@@ -516,10 +518,18 @@ export function acknowledgeDivergence(
   replica.spanStart = finding.spanStart;
 }
 
+export function claimDivergenceDispatch(state: DivergenceConnectionState, finding: DivergenceFinding): boolean {
+  const replica = state.replicas.get(finding.addr);
+  if (!replica || LEVEL_RANK[finding.level] <= LEVEL_RANK[replica.dispatchedLevel]) return false;
+  replica.dispatchedLevel = finding.level;
+  return true;
+}
+
 export function acknowledgeRecovery(state: DivergenceConnectionState, addr: string): void {
   const replica = state.replicas.get(addr);
   if (!replica) return;
   replica.level = 'none';
+  replica.dispatchedLevel = 'none';
   replica.eventId = null;
   replica.spanStart = null;
   replica.baselineRate = null;

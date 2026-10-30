@@ -164,6 +164,7 @@ import {
   OrphanedDivergence,
   ReplicaDivergenceHistory,
   acknowledgeDivergence,
+  claimDivergenceDispatch,
   assessOrphanedReplica,
   acknowledgeRecovery,
   createDivergenceState,
@@ -6049,32 +6050,36 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
     await this.addAnomaly(event, ctx);
+
+    if (claimDivergenceDispatch(state, finding)) {
+      this.webhookEventsProService
+        ?.dispatchReplicationDivergence({
+          replica: finding.addr,
+          level: finding.level,
+          reason: finding.reason,
+          gapBytes: finding.gapBytes,
+          secondsBehind: finding.secondsBehind,
+          bytesPerSec: finding.bytesPerSec,
+          slopeBytesPerWindow: finding.slopeBytesPerWindow,
+          windowCount: finding.windowCount,
+          correlatedSignals: relatedMetrics,
+          message,
+          timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch replication.divergence webhook', err);
+        });
+    }
+
+    if (event.persisted !== true) return;
     acknowledgeDivergence(state, finding, event.id);
     if (previousEventId && (await this.resolveAnomalyOutcome(previousEventId)) === 'retry') {
       const pending = this.divergenceSuperseded.get(ctx.connectionId) ?? new Set<string>();
       pending.add(previousEventId);
       this.divergenceSuperseded.set(ctx.connectionId, pending);
     }
-
-    this.webhookEventsProService
-      ?.dispatchReplicationDivergence({
-        replica: finding.addr,
-        level: finding.level,
-        reason: finding.reason,
-        gapBytes: finding.gapBytes,
-        secondsBehind: finding.secondsBehind,
-        bytesPerSec: finding.bytesPerSec,
-        slopeBytesPerWindow: finding.slopeBytesPerWindow,
-        windowCount: finding.windowCount,
-        correlatedSignals: relatedMetrics,
-        message,
-        timestamp,
-        instance: { host: ctx.host, port: ctx.port },
-        connectionId: ctx.connectionId,
-      })
-      .catch((err) => {
-        this.logger.error('Failed to dispatch replication.divergence webhook', err);
-      });
   }
 
   private async resolveReplicationDivergence(

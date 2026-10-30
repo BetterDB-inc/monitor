@@ -7186,5 +7186,56 @@ describe('AnomalyService', () => {
       expect(attempts.length).toBe(2);
       expect((service as any).divergenceSuperseded.has('conn-1')).toBe(false);
     });
+
+    it('retries an unsaved finding without sending its webhook again', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+      await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
+
+      const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+      const saved = storage.saveAnomalyEvent.mock.calls.map(([event]: [{ id: string }]) => event.id);
+      expect(saved).toHaveLength(2);
+      expect(replica.eventId).toBe(saved[1]);
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual(['warning']);
+    });
+
+    it('keeps the superseded event open until the escalation is saved', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+      const afterOutage = await feed([130, 140, 150], t);
+
+      const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+      expect(replica.eventId).toBe(warningId);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalledWith(warningId, expect.anything());
+
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await feed([160, 170], afterOutage);
+
+      expect(replica.eventId).not.toBe(warningId);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(warningId, expect.anything());
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual([
+        'warning',
+        'critical',
+      ]);
+    });
+
+    it('reports recovery for a finding that was sent but never saved', async () => {
+      const recoveredHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationRecovered = recoveredHook;
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      await feed([0, 0, 0, 0], t);
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+      expect(recoveredHook).toHaveBeenCalledWith(expect.objectContaining({ reason: 'caught_up' }));
+    });
   });
 });
