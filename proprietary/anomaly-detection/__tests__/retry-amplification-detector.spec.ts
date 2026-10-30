@@ -7,6 +7,7 @@ import {
   readRetryAmplificationTrigger,
   RetryAmplificationFinding,
   RetryAmplificationState,
+  RETRY_AMP_ARM_WINDOWS,
   RETRY_AMP_WINDOW_MS,
 } from '../retry-amplification-detector';
 import { MetricType } from '../types';
@@ -456,6 +457,27 @@ describe('retry amplification detector', () => {
         baseline: null,
         lastEpisode: null,
       });
+    });
+
+    it('reports the baseline once armed', () => {
+      const state = createRetryAmplificationState();
+      state.coldWindows = Array.from({ length: RETRY_AMP_ARM_WINDOWS }, (_, i) => ({
+        start: i * RETRY_AMP_WINDOW_MS,
+        opsPerSec: 1000,
+        connectedClients: 50,
+        cmdsPerClient: 20,
+        errorRate: null,
+        churnPerSec: null,
+        latencyEvent: false,
+        saturationMetrics: [],
+      }));
+
+      expect(describeRetryAmplificationState(state)).toEqual(
+        expect.objectContaining({
+          armed: true,
+          baseline: expect.objectContaining({ opsPerSec: 1000, cmdsPerClient: 20 }),
+        }),
+      );
     });
 
     it('reports a fresh state as unarmed', () => {
