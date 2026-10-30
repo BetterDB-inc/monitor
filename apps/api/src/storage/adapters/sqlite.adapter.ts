@@ -2627,6 +2627,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = excluded.correlation_id,
+        related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         resolved = excluded.resolved,
         resolved_at = excluded.resolved_at,
         duration_ms = excluded.duration_ms

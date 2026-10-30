@@ -45,7 +45,11 @@ describe.each([
 
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual(
-      expect.objectContaining({ correlationId: 'grp-1', message: 'P99 regression' }),
+      expect.objectContaining({
+        correlationId: 'grp-1',
+        relatedMetrics: ['cluster_state'],
+        message: 'P99 regression',
+      }),
     );
   });
 });
