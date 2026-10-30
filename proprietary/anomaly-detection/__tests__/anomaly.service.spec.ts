@@ -6707,6 +6707,12 @@ describe('AnomalyService', () => {
         expect(probe()(signal({ until: T + 2 * MIN }))).toBeNull();
       });
 
+      it('keeps a sustained signal open when the next firing follows straight on', () => {
+        withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
+
+        expect(probe()(signal({ until: T + MIN }))).toBeNull();
+      });
+
       it('infers recovery for an old signal that fired again after the buffer window', () => {
         withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
 
@@ -6718,6 +6724,19 @@ describe('AnomalyService', () => {
 
         expect(probe()(signal())).toBe(T + 61 * MIN);
       });
+    });
+
+    it('looks an incident up in a bounded window around its start', async () => {
+      const spy = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([]);
+
+      await service.getIncidentTimeline('1700000000000-0123456789abcdef', 'conn-1');
+
+      expect(spy).toHaveBeenCalledWith(
+        'conn-1',
+        1_700_000_000_000,
+        1_700_000_000_000 + 60 * MIN,
+        Number.MAX_SAFE_INTEGER,
+      );
     });
 
     it('only lists incidents that reach into the requested window', async () => {
@@ -6795,6 +6814,9 @@ describe('AnomalyService', () => {
       );
 
       expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ startTime: t, limit: 1000 }),
+      );
     });
 
     it('includes memory-only events older than the cache TTL in history', async () => {

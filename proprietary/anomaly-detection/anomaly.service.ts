@@ -5468,6 +5468,7 @@ export class AnomalyService
     const backInBand = observed.find((s) => inBand(s.value));
     if (backInBand) return backInBand.timestamp;
     if (observed.length > 0 || signal.until === null) return null;
+    if (signal.until - signal.since <= DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs) return null;
     return settledAt;
   };
 
@@ -5582,10 +5583,11 @@ export class AnomalyService
     connectionId?: string,
     startTime?: number,
   ): Promise<IncidentTimeline | null> {
+    const startedAt = incidentStartOf(incidentId);
     const timelines = await this.getIncidentTimelines(
       connectionId,
-      incidentStartOf(incidentId) ?? startTime,
-      undefined,
+      startedAt ?? startTime,
+      startedAt === null ? undefined : startedAt + 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
       Number.MAX_SAFE_INTEGER,
     );
     return timelines.find((t) => t.incidentId === incidentId) ?? null;
@@ -5803,6 +5805,7 @@ export class AnomalyService
           startTime: group.timestamp,
           endTime: group.timestamp + rule.maxSpanMs,
           connectionId: id,
+          limit: 1000,
         }),
       ),
     );
