@@ -252,7 +252,7 @@ export class AnomalyService
   );
   private liveIncidents: IncidentTimeline[] = [];
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
-  private sequenceDedupeSeed: Promise<void> | null = null;
+  private sequenceDedupeSeed: Promise<boolean> | null = null;
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5481,9 +5481,13 @@ export class AnomalyService
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
+    const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
     const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
+    if (!seeded) {
+      this.sequenceDedupeSeed = null;
+      return;
+    }
 
     for (const [key, at] of this.sequenceGroupedAnomalies) {
       if (at < now - windowMs) this.sequenceGroupedAnomalies.delete(key);
@@ -5849,9 +5853,9 @@ export class AnomalyService
     return groups.slice(0, limit);
   }
 
-  private async seedSequenceDedupe(since: number): Promise<void> {
+  private async seedSequenceDedupe(since: number): Promise<boolean> {
     const patterns = new Set(getSequenceRules().map((r) => r.pattern));
-    if (patterns.size === 0) return;
+    if (patterns.size === 0) return true;
     try {
       const groups = await this.storage.getCorrelatedGroups({ startTime: since, limit: 1000 });
       for (const group of groups) {
@@ -5861,10 +5865,12 @@ export class AnomalyService
           this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${member.id}`, member.timestamp);
         }
       }
+      return true;
     } catch (error) {
       this.logger.warn(
         `Failed to seed sequence group dedupe: ${error instanceof Error ? error.message : error}`,
       );
+      return false;
     }
   }
 

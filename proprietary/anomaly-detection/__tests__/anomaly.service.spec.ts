@@ -6867,6 +6867,42 @@ describe('AnomalyService', () => {
       expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
     });
 
+    it('retries the sequence dedupe seed after storage fails, without re-emitting', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      const members = [
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+      storage.getCorrelatedGroups.mockRejectedValueOnce(new Error('db down')).mockResolvedValue([
+        {
+          correlationId: 'grp-before-restart',
+          timestamp: now - 2 * MIN,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+        },
+      ]);
+      storage.getAnomalyEvents.mockResolvedValue(
+        members.map((m) => ({ ...m, anomalyType: 'spike' })),
+      );
+      (service as any).recentAnomalies.push(...members);
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(2);
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+      expect(service.getLiveIncidentTimelines()).toHaveLength(1);
+    });
+
     it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
