@@ -42,6 +42,12 @@ describe('computeConnectionChurn', () => {
     expect(sample.retainedRatio).toBeCloseTo(0.1);
   });
 
+  it('counts no retained connections when the population shrinks', () => {
+    const sample = computeConnectionChurn(reading(0, 1_000, 0), reading(1_000, 500, 1_000));
+
+    expect(sample.retainedRatio).toBe(0);
+  });
+
   it('measures against at least one new connection', () => {
     const sample = computeConnectionChurn(reading(10, 0, 0), reading(10, 3, 1_000));
 
@@ -52,6 +58,12 @@ describe('computeConnectionChurn', () => {
 describe('isChurnWithFlatPopulation', () => {
   it('flags high churn while connected clients stay flat', () => {
     const sample = computeConnectionChurn(reading(0, 100, 0), reading(500, 102, 1_000));
+
+    expect(isChurnWithFlatPopulation(sample)).toBe(true);
+  });
+
+  it('flags high churn while connected clients fall', () => {
+    const sample = computeConnectionChurn(reading(0, 1_000, 0), reading(1_000, 500, 1_000));
 
     expect(isChurnWithFlatPopulation(sample)).toBe(true);
   });

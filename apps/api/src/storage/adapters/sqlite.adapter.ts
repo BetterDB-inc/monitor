@@ -2650,7 +2650,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         source_host, source_port, connection_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        correlation_id = excluded.correlation_id,
+        correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         resolved = excluded.resolved,
         resolved_at = excluded.resolved_at,
@@ -2693,6 +2693,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
+        related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
+        resolved = excluded.resolved,
+        resolved_at = excluded.resolved_at,
+        duration_ms = excluded.duration_ms
     `);
 
     const insertMany = this.db.transaction((events: StoredAnomalyEvent[], connId: string) => {

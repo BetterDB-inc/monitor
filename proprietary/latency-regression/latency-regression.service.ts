@@ -181,7 +181,13 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       return;
     }
 
-    this.anomalyEventSink?.ingestExternalAnomaly(event);
+    try {
+      this.anomalyEventSink?.ingestExternalAnomaly(event);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to hand latency regression event to the anomaly sink: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     if (this.webhookEventsProService) {
       this.webhookEventsProService
