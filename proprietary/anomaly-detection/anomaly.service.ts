@@ -154,6 +154,7 @@ import { ReplicationStreamSample, ReplicationStreamTracker } from './replication
 import {
   DIVERGENCE_CORRELATED_METRICS,
   DIVERGENCE_FLOOR_BYTES,
+  DIVERGENCE_ORPHAN_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
   DivergenceRecovery,
@@ -5762,17 +5763,22 @@ export class AnomalyService
 
   private async resolveOrphanedDivergenceEvents(ctx: ConnectionContext): Promise<void> {
     try {
-      const open = await this.storage.getAnomalyEvents({
-        connectionId: ctx.connectionId,
-        metricType: MetricType.REPLICATION_DIVERGENCE,
-        resolved: false,
-      });
-      const tracked = new Set(
+      const seen = new Set(
         [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])].map((r) => r.eventId),
       );
-      for (const event of open) {
-        if (tracked.has(event.id)) continue;
-        if ((await this.resolveAnomalyOutcome(event.id)) === 'retry') return;
+      for (;;) {
+        const open = await this.storage.getAnomalyEvents({
+          connectionId: ctx.connectionId,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          resolved: false,
+          limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        });
+        const orphans = open.filter((event) => !seen.has(event.id));
+        for (const event of orphans) {
+          seen.add(event.id);
+          if ((await this.resolveAnomalyOutcome(event.id)) === 'retry') return;
+        }
+        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE || orphans.length === 0) break;
       }
       this.divergenceOrphansSwept.add(ctx.connectionId);
     } catch (err) {

@@ -18,6 +18,7 @@ export const DIVERGENCE_RECOVERED_WINDOWS = 2;
 export const DIVERGENCE_HISTORY_WINDOWS = 120;
 export const DIVERGENCE_STALE_ACK_SEC = 10;
 export const DIVERGENCE_PERSIST_BACKLOG = 1000;
+export const DIVERGENCE_ORPHAN_PAGE_SIZE = 500;
 export const DIVERGENCE_STALE_ESCALATE_WINDOWS = 2;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';

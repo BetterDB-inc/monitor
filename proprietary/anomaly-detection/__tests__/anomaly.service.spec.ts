@@ -11,6 +11,7 @@ import { ConnectionContext } from '@app/common/services/multi-connection-poller'
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
+import { DIVERGENCE_ORPHAN_PAGE_SIZE } from '../replication-divergence-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -6647,8 +6648,27 @@ describe('AnomalyService', () => {
         connectionId: 'conn-1',
         metricType: MetricType.REPLICATION_DIVERGENCE,
         resolved: false,
+        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
       });
       expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+    });
+
+    it('pages through more orphaned events than one query returns', async () => {
+      const page = (prefix: string, count: number) =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${prefix}-${i}`,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          resolved: false,
+        }));
+      storage.getAnomalyEvents
+        .mockResolvedValueOnce(page('a', DIVERGENCE_ORPHAN_PAGE_SIZE))
+        .mockResolvedValueOnce(page('b', 3));
+
+      await feed([2, 4], T0);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      expect(storage.resolveAnomaly).toHaveBeenCalledTimes(DIVERGENCE_ORPHAN_PAGE_SIZE + 3);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
     });
 
     it('retries the orphan sweep on the next poll when storage cannot be read', async () => {
