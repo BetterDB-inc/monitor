@@ -990,7 +990,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
               ${PG_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
          FROM client_snapshots
         WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND captured_at - age * 1000 >= $2
+          AND captured_at - age::bigint * 1000 >= $2
         GROUP BY COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
       [connectionId, since, until],
     );

@@ -523,5 +523,16 @@ describePostgres('client analytics rollups — postgres', () => {
         sortGroups(await memory.getNewClientConnections(connectionId, since, until)),
       );
     });
+
+    it('handles clients connected for longer than 32-bit milliseconds allow', async () => {
+      const connectionId = 'conn-old-client';
+      const [template] = rows;
+      await pg.saveClientSnapshot(
+        [{ ...template, id: 0, clientId: 'old', age: 3_000_000, capturedAt: since, connectionId }],
+        connectionId,
+      );
+
+      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+    });
   });
 });
