@@ -381,7 +381,7 @@ Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling
 
 #### replication.recovered (Pro)
 
-`reason` is `caught_up` when the replica's gap stays below the floor for two windows. It is `resolved_after_restart` when the monitor restarts and closes a divergence the previous run left open; `gapBytes` is then `null`, and the divergence alerts again if it is still there.
+`reason` is `caught_up` when the replica's gap stays below the floor for two windows. It is `resolved_after_restart` when the monitor restarts and closes a divergence the previous run left open; `gapBytes` is then `null`, and the divergence alerts again if it is still there. A restart sends at most one per replica, and none when the event was already resolved elsewhere or the replica is diverging again.
 
 ```json
 {
