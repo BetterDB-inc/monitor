@@ -1,6 +1,5 @@
-export const CHURN_FLAT_POPULATION_RATIO = 0.1;
+export const CHURN_MAX_RETAINED_RATIO = 0.1;
 export const CHURN_MIN_CONNECTS_PER_SEC = 10;
-export const CHURN_POPULATION_WINDOW_MS = 60_000;
 
 export interface ConnectionChurnReading {
   totalReceived: number;
@@ -12,19 +11,18 @@ export interface ConnectionChurnSample {
   timestamp: number;
   connectsPerSec: number | null;
   connectedClients: number;
-  clientsDeltaRatio: number | null;
+  retainedRatio: number | null;
 }
 
 export function computeConnectionChurn(
   prev: ConnectionChurnReading | undefined,
   curr: ConnectionChurnReading,
-  populationBaseline: number | undefined = prev?.connectedClients,
 ): ConnectionChurnSample {
   const sample: ConnectionChurnSample = {
     timestamp: curr.timestamp,
     connectsPerSec: null,
     connectedClients: curr.connectedClients,
-    clientsDeltaRatio: null,
+    retainedRatio: null,
   };
   if (!prev) return sample;
 
@@ -32,23 +30,17 @@ export function computeConnectionChurn(
   if (dtSec <= 0 || curr.totalReceived < prev.totalReceived) return sample;
 
   sample.connectsPerSec = (curr.totalReceived - prev.totalReceived) / dtSec;
-  const baseline = populationBaseline ?? prev.connectedClients;
-  sample.clientsDeltaRatio = Math.abs(curr.connectedClients - baseline) / Math.max(1, baseline);
+  sample.retainedRatio =
+    Math.abs(curr.connectedClients - prev.connectedClients) /
+    Math.max(1, curr.totalReceived - prev.totalReceived);
   return sample;
-}
-
-export function trimPopulationWindow(
-  readings: ConnectionChurnReading[],
-  now: number,
-): ConnectionChurnReading[] {
-  return readings.filter((r) => r.timestamp >= now - CHURN_POPULATION_WINDOW_MS);
 }
 
 export function isChurnWithFlatPopulation(sample: ConnectionChurnSample): boolean {
   return (
     sample.connectsPerSec !== null &&
-    sample.clientsDeltaRatio !== null &&
+    sample.retainedRatio !== null &&
     sample.connectsPerSec >= CHURN_MIN_CONNECTS_PER_SEC &&
-    sample.clientsDeltaRatio < CHURN_FLAT_POPULATION_RATIO
+    sample.retainedRatio < CHURN_MAX_RETAINED_RATIO
   );
 }

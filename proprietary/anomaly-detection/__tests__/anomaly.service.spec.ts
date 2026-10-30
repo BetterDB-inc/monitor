@@ -3296,15 +3296,27 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
-    it('does not alert on a pool that grows a little on every poll', async () => {
+    it('does not alert on a pool that grows steadily, whatever the pace per poll', async () => {
       const { recorded } = await runChurn([
         ...baseline,
-        { connectsPerSec: 400, clients: 105 },
-        { connectsPerSec: 420, clients: 110 },
-        { connectsPerSec: 410, clients: 115 },
+        { connectsPerSec: 400, clients: 500 },
+        { connectsPerSec: 420, clients: 920 },
+        { connectsPerSec: 410, clients: 1_330 },
       ]);
 
       expect(recorded).toHaveLength(0);
+    });
+
+    it('alerts on a reconnect storm right after the pool stepped to a new size', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 200, clients: 300 },
+        { connectsPerSec: 400, clients: 300 },
+        { connectsPerSec: 420, clients: 300 },
+        { connectsPerSec: 410, clients: 300 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
     });
 
     it('does not alert on two flat spikes separated by a gated sample', async () => {
@@ -3326,7 +3338,7 @@ describe('AnomalyService', () => {
         expect.objectContaining({
           connectsPerSec: 30,
           connectedClients: 100,
-          clientsDeltaRatio: 0,
+          retainedRatio: 0,
         }),
       );
     });
