@@ -3277,12 +3277,59 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
+    it('does not alert on two flat-population spikes separated by normal polls', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 21, clients: 100 },
+        { connectsPerSec: 20, clients: 100 },
+        { connectsPerSec: 22, clients: 100 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('does not alert on a pool that grows steadily, whatever the pace per poll', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 500 },
+        { connectsPerSec: 420, clients: 920 },
+        { connectsPerSec: 410, clients: 1_330 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('alerts on a reconnect storm right after the pool stepped to a new size', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 200, clients: 300 },
+        { connectsPerSec: 400, clients: 300 },
+        { connectsPerSec: 420, clients: 300 },
+        { connectsPerSec: 410, clients: 300 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+    });
+
+    it('does not alert on two flat spikes separated by a gated sample', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 5, clients: 100 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
     it('feeds the per-second rate, not the lifetime counter, and exposes the sample', async () => {
       const { buffers } = await runChurn([{ connectsPerSec: 30, clients: 100 }]);
 
       expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
       expect(service.getConnectionChurnSample('conn-1')).toEqual(
-        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, clientsDeltaRatio: 0 }),
+        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, retainedRatio: 0 }),
       );
     });
   });

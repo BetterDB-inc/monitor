@@ -1591,7 +1591,12 @@ export class AnomalyService
     const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
     const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
     buffer.addSample(sample.connectsPerSec, timestamp);
-    if (!isChurnWithFlatPopulation(sample)) return;
+    const elevated =
+      buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
+    if (!elevated || !isChurnWithFlatPopulation(sample)) {
+      this.resetSpikeRun(detector, buffer, timestamp);
+      return;
+    }
 
     const anomaly = detector.detect(buffer, sample.connectsPerSec, timestamp);
     if (!anomaly) return;
@@ -1603,6 +1608,10 @@ export class AnomalyService
       `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
     await this.addAnomaly(anomaly, ctx);
+  }
+
+  private resetSpikeRun(detector: SpikeDetector, buffer: MetricBuffer, timestamp: number): void {
+    detector.detect(buffer, buffer.getMean(), timestamp);
   }
 
   getConnectionChurnSample(connectionId: string): ConnectionChurnSample | undefined {
