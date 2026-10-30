@@ -32,7 +32,7 @@ class Harness {
   readonly state: DivergenceConnectionState = createDivergenceState();
   t = 1_700_000_000_000;
 
-  private sample(spec: WindowSpec): ReplicationStreamSample {
+  sample(spec: WindowSpec): ReplicationStreamSample {
     const replicas: ReplicaOffset[] =
       spec.present === false
         ? []
@@ -100,84 +100,231 @@ describe('divergenceWindowMs', () => {
   });
 });
 
+interface TimingStep {
+  after: number;
+  gap: number;
+  lagSec?: number;
+  role?: 'replica';
+  restart?: boolean;
+}
+
+interface TimingRow {
+  name: string;
+  steps: TimingStep[];
+  windows: [number, number][];
+  chain: number;
+  openedAt: number | null;
+  alerts: string[];
+}
+
+const polls = (count: number, after: number, gap: (i: number) => number, lagSec?: number): TimingStep[] =>
+  Array.from({ length: count }, (_, i) => ({ after, gap: gap(i), lagSec }));
+
+const flat = () => 8;
+
+const TIMING_ROWS: TimingRow[] = [
+  {
+    name: 'regular polling closes contiguous windows',
+    steps: polls(7, 10_000, flat),
+    windows: [
+      [10_000, 40_000],
+      [40_000, 70_000],
+    ],
+    chain: 2,
+    openedAt: 70_000,
+    alerts: [],
+  },
+  {
+    name: '4426209170: polls under a window apart keep it open until it has 3 samples',
+    steps: polls(7, 20_000, flat),
+    windows: [
+      [20_000, 80_000],
+      [80_000, 140_000],
+    ],
+    chain: 2,
+    openedAt: 140_000,
+    alerts: [],
+  },
+  {
+    name: 'a gap of exactly one window is still polling',
+    steps: [...polls(4, 10_000, flat), ...polls(3, 30_000, flat)],
+    windows: [
+      [10_000, 40_000],
+      [40_000, 130_000],
+    ],
+    chain: 2,
+    openedAt: 130_000,
+    alerts: [],
+  },
+  {
+    name: '4426209182: growth does not carry across an outage',
+    steps: [
+      ...polls(3, 10_000, () => 8),
+      ...polls(3, 10_000, () => 10),
+      ...polls(3, 10_000, () => 12),
+      { after: 300_000, gap: 14 },
+      ...polls(2, 10_000, () => 14),
+      ...polls(3, 10_000, () => 16),
+      ...polls(3, 10_000, () => 18),
+      { after: 10_000, gap: 20 },
+    ],
+    windows: [
+      [10_000, 40_000],
+      [40_000, 70_000],
+      [390_000, 420_000],
+      [420_000, 450_000],
+      [450_000, 480_000],
+    ],
+    chain: 3,
+    openedAt: 480_000,
+    alerts: [],
+  },
+  {
+    name: '4426393171: an outage seals a full window with 3 samples at its last sample',
+    steps: [...polls(3, 20_000, flat), { after: 300_000, gap: 8 }],
+    windows: [[20_000, 60_000]],
+    chain: 1,
+    openedAt: 360_000,
+    alerts: [],
+  },
+  {
+    name: '4426393171: polls just over a window apart still close windows and alert',
+    steps: polls(14, 31_000, (i) => 8 + 2 * i),
+    windows: [
+      [62_000, 155_000],
+      [155_000, 248_000],
+      [248_000, 341_000],
+      [341_000, 434_000],
+    ],
+    chain: 4,
+    openedAt: 434_000,
+    alerts: ['growth'],
+  },
+  {
+    name: '4426472012: an outage discards a window it cut short',
+    steps: [...polls(3, 1_000, flat), { after: 300_000, gap: 8 }],
+    windows: [],
+    chain: 0,
+    openedAt: 303_000,
+    alerts: [],
+  },
+  {
+    name: '4426472029: a blackout during slow polling restarts the chain',
+    steps: [...polls(9, 40_000, flat), { after: 600_000, gap: 8 }, ...polls(3, 40_000, flat)],
+    windows: [
+      [80_000, 200_000],
+      [200_000, 320_000],
+      [960_000, 1_080_000],
+    ],
+    chain: 1,
+    openedAt: 1_080_000,
+    alerts: [],
+  },
+  {
+    name: 'a gap of at most twice the last one stays polling',
+    steps: [...polls(2, 40_000, flat), { after: 80_000, gap: 8 }, ...polls(2, 40_000, flat)],
+    windows: [[80_000, 240_000]],
+    chain: 1,
+    openedAt: 240_000,
+    alerts: [],
+  },
+  {
+    name: 'two equal blackouts in a row read as slow polling',
+    steps: [...polls(2, 10_000, flat), ...polls(4, 300_000, flat)],
+    windows: [[320_000, 1_220_000]],
+    chain: 1,
+    openedAt: 1_220_000,
+    alerts: [],
+  },
+  {
+    name: 'an unacked replica warns over contiguous windows',
+    steps: polls(7, 10_000, () => 2, 30),
+    windows: [],
+    chain: 0,
+    openedAt: 70_000,
+    alerts: ['not_acking'],
+  },
+  {
+    name: 'an outage restarts the unacked streak',
+    steps: [
+      ...polls(4, 10_000, () => 2, 30),
+      { after: 300_000, gap: 2, lagSec: 30 },
+      ...polls(3, 10_000, () => 2, 30),
+    ],
+    windows: [],
+    chain: 0,
+    openedAt: 370_000,
+    alerts: [],
+  },
+  {
+    name: 'a detector restart drops the open window and the chain',
+    steps: [
+      ...polls(3, 10_000, () => 2),
+      ...polls(3, 10_000, () => 8),
+      ...polls(3, 10_000, () => 16),
+      { after: 10_000, gap: 24, restart: true },
+      ...polls(2, 10_000, () => 24),
+      ...polls(3, 10_000, () => 32),
+      ...polls(1, 10_000, () => 40),
+    ],
+    windows: [
+      [100_000, 130_000],
+      [130_000, 160_000],
+    ],
+    chain: 2,
+    openedAt: 160_000,
+    alerts: [],
+  },
+  {
+    name: 'losing the primary role drops the open window and the chain',
+    steps: [
+      ...polls(4, 10_000, flat),
+      { after: 10_000, gap: 8, role: 'replica' },
+      ...polls(4, 10_000, flat),
+    ],
+    windows: [[60_000, 90_000]],
+    chain: 1,
+    openedAt: 90_000,
+    alerts: [],
+  },
+];
+
+describe('observeDivergence window timing', () => {
+  it.each(TIMING_ROWS)('$name', ({ steps, windows, chain, openedAt, alerts }) => {
+    const start = 1_700_000_000_000;
+    let harness = new Harness();
+    let t = start;
+    const outcomes: DivergenceOutcome[] = [];
+
+    for (const step of steps) {
+      t += step.after;
+      if (step.restart) harness = new Harness();
+      harness.t = t;
+      const spec = { gap: step.gap * MiB, rate: MiB, lagSec: step.lagSec };
+      const sample = { ...harness.sample(spec), role: step.role ?? ('primary' as const) };
+      const emitted = observeDivergence(harness.state, sample, WINDOW_MS);
+      for (const o of emitted) {
+        if (o.kind === 'divergence') acknowledgeDivergence(harness.state, o, `evt-${o.level}`);
+        else acknowledgeRecovery(harness.state, o.addr);
+      }
+      outcomes.push(...emitted);
+    }
+
+    const closed = harness.state.replicas.get(ADDR)?.windows ?? [];
+    let trailing = closed.length > 0 ? 1 : 0;
+    while (trailing > 0 && trailing < closed.length) {
+      const at = closed.length - trailing;
+      if (closed[at - 1].end !== closed[at].start) break;
+      trailing++;
+    }
+    expect(closed.map((w) => [w.start - start, w.end - start])).toEqual(windows);
+    expect(trailing).toBe(chain);
+    expect(harness.state.windowStart === null ? null : harness.state.windowStart - start).toBe(openedAt);
+    expect(divergences([outcomes]).map((f) => f.reason)).toEqual(alerts);
+  });
+});
+
 describe('observeDivergence', () => {
-  it('keeps a window open until it has enough samples when polls run slow', () => {
-    const harness = new Harness();
-
-    for (const gap of [2, 3, 4, 5, 6, 7, 8]) harness.poll({ gap: gap * MiB, rate: MiB }, 20_000);
-
-    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
-    expect(windows).toHaveLength(2);
-    expect(windows[0].end - windows[0].start).toBe(60_000);
-    expect(windows[0].end).toBe(windows[1].start);
-  });
-
-  it('starts a new chain when polling resumes after an outage', () => {
-    const harness = new Harness();
-    const before = harness.windows([
-      { gap: 2 * MiB, rate: MiB },
-      { gap: 8 * MiB, rate: MiB },
-      { gap: 16 * MiB, rate: MiB },
-    ]);
-    harness.skip(300_000);
-
-    const after = harness.windows([
-      { gap: 24 * MiB, rate: MiB },
-      { gap: 32 * MiB, rate: MiB },
-      { gap: 40 * MiB, rate: MiB },
-    ]);
-
-    expect(divergences([...before, ...after]).filter((f) => f.reason === 'growth')).toEqual([]);
-  });
-
-  it('seals a full window with enough samples when an outage interrupts it', () => {
-    const harness = new Harness();
-    for (const gap of [8, 9, 10]) harness.poll({ gap: gap * MiB, rate: MiB }, 20_000);
-    const lastSampleAt = harness.t - 20_000;
-    harness.skip(300_000);
-
-    harness.poll({ gap: 11 * MiB, rate: MiB }, POLL_MS);
-
-    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
-    expect(windows).toHaveLength(1);
-    expect(windows[0].end).toBe(lastSampleAt);
-    expect(windows[0].gapBytes).toBe(9 * MiB);
-  });
-
-  it('discards a window an outage cut short', () => {
-    const harness = new Harness();
-    harness.window({ gap: 8 * MiB, rate: MiB }, true);
-    for (const gap of [8, 9, 10]) harness.poll({ gap: gap * MiB, rate: MiB }, POLL_MS);
-    harness.skip(300_000);
-
-    harness.poll({ gap: 11 * MiB, rate: MiB }, POLL_MS);
-
-    expect(harness.state.replicas.get(ADDR)?.windows).toHaveLength(1);
-  });
-
-  it('keeps detecting when polls stay slower than a window', () => {
-    const harness = new Harness();
-    const outcomes: DivergenceOutcome[][] = [];
-
-    for (let gap = 8; gap < 40; gap += 2) outcomes.push(harness.poll({ gap: gap * MiB, rate: MiB }, 40_000));
-
-    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
-    expect(windows[0].end).toBe(windows[1].start);
-    expect(divergences(outcomes).map((f) => f.reason)).toContain('growth');
-  });
-
-  it('restarts the chain when an outage interrupts slow polling', () => {
-    const harness = new Harness();
-    for (let i = 0; i < 9; i++) harness.poll({ gap: 8 * MiB, rate: MiB }, 40_000);
-    harness.skip(600_000);
-
-    for (let i = 0; i < 3; i++) harness.poll({ gap: 8 * MiB, rate: MiB }, 40_000);
-
-    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
-    expect(windows.length).toBeGreaterThan(0);
-    expect(windows.every((w) => w.end - w.start < 600_000)).toBe(true);
-  });
-
   it('ignores samples from replicas', () => {
     const state = createDivergenceState();
     const sample: ReplicationStreamSample = {
