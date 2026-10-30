@@ -227,6 +227,15 @@ describe('observeDivergence', () => {
     expect(h.state.replicas.size).toBe(0);
   });
 
+  it('starts a fresh series when a cleared replica comes back', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+    h.windows([{ gap: 0, rate: MiB, present: false }]);
+
+    const back = h.windows([10, 12, 14, 16].map((m) => ({ gap: m * MiB, rate: MiB })));
+    expect(divergences(back)).toEqual([]);
+  });
+
   it('clears active findings when the node stops being a primary', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
