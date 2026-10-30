@@ -740,6 +740,15 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return true;
   }
 
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    const event = this.anomalyEvents.find((e) => e.id === id);
+    if (!event || event.resolved) return false;
+    event.resolved = true;
+    event.resolvedAt = resolvedAt;
+    event.durationMs = resolvedAt - event.timestamp;
+    return true;
+  }
+
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.anomalyEvents.length;
     if (connectionId) {

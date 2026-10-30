@@ -5815,9 +5815,9 @@ export class AnomalyService
 
   private async resolveOrphanedDivergenceEvents(ctx: ConnectionContext): Promise<void> {
     try {
-      const seen = new Set(
-        [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])].map((r) => r.eventId),
-      );
+      const replicas = [...(this.divergenceState.get(ctx.connectionId)?.replicas.values() ?? [])];
+      const seen = new Set(replicas.map((r) => r.eventId));
+      const notified = new Set(replicas.filter((r) => r.level !== 'none').map((r) => r.addr));
       for (;;) {
         const open = await this.storage.getAnomalyEvents({
           connectionId: ctx.connectionId,
@@ -5828,9 +5828,13 @@ export class AnomalyService
         const orphans = open.filter((event) => !seen.has(event.id));
         for (const event of orphans) {
           seen.add(event.id);
-          const outcome = await this.resolveAnomalyOutcome(event.id);
-          if (outcome === 'retry') return;
-          if (outcome === 'resolved') this.dispatchOrphanRecovered(event, ctx);
+          const claimed = await this.storage.resolveOpenAnomaly(event.id, Date.now());
+          const cached = this.recentAnomalies.find((a) => a.id === event.id);
+          if (cached) cached.resolved = true;
+          const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+          if (!claimed || notified.has(replica)) continue;
+          notified.add(replica);
+          this.dispatchOrphanRecovered(replica, ctx);
         }
         if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE || orphans.length === 0) break;
       }
@@ -5844,8 +5848,7 @@ export class AnomalyService
     }
   }
 
-  private dispatchOrphanRecovered(event: StoredAnomalyEvent, ctx: ConnectionContext): void {
-    const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+  private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
     this.dispatchReplicationRecovered(ctx, {
       replica,
       reason: 'resolved_after_restart',

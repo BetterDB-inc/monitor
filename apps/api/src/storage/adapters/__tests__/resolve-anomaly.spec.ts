@@ -48,4 +48,15 @@ describe.each([
   it('returns false only when no anomaly with that id exists', async () => {
     expect(await storage.resolveAnomaly('does-not-exist', 1_700_000_100_000)).toBe(false);
   });
+
+  it('resolveOpenAnomaly reports only the call that resolved the row', async () => {
+    await storage.saveAnomalyEvent(event('evt-1'), CONN);
+
+    expect(await storage.resolveOpenAnomaly('evt-1', 1_700_000_100_000)).toBe(true);
+    expect(await storage.resolveOpenAnomaly('evt-1', 1_700_000_200_000)).toBe(false);
+    expect(await storage.resolveOpenAnomaly('does-not-exist', 1_700_000_100_000)).toBe(false);
+
+    const [stored] = await storage.getAnomalyEvents({ connectionId: CONN });
+    expect(stored).toMatchObject({ resolved: true, resolvedAt: 1_700_000_100_000 });
+  });
 });

@@ -609,6 +609,11 @@ export interface StoragePort {
    * false only when no anomaly with that id exists.
    */
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
+  /**
+   * Resolve an anomaly only if it is still open. Returns true only when this
+   * call resolved it, so a caller can tell it apart from one already resolved.
+   */
+  resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;

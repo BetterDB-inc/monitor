@@ -2850,6 +2850,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = this.db.prepare('SELECT 1 FROM anomaly_events WHERE id = ?').get(id);
     return existing !== undefined;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db
+      .prepare(
+        `UPDATE anomaly_events
+         SET resolved = 1, resolved_at = ?, duration_ms = ? - timestamp
+         WHERE id = ? AND resolved = 0`,
+      )
+      .run(resolvedAt, resolvedAt, id);
+    return result.changes > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');

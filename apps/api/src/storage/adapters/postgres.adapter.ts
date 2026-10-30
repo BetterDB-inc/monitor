@@ -2962,6 +2962,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = await this.pool.query('SELECT 1 FROM anomaly_events WHERE id = $1', [id]);
     return (existing.rowCount ?? 0) > 0;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `UPDATE anomaly_events
+       SET resolved = true, resolved_at = $2, duration_ms = $2 - timestamp
+       WHERE id = $1 AND resolved = false`,
+      [id, resolvedAt],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
