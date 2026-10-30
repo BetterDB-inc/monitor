@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { KV_CACHE_SAMPLE_COUNTER_FIELDS } from './kv-cache-sample-columns';
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
+import { globMatches } from '../../session-explorer/glob-match';
 import {
   approxOtelSpanBytes,
   otelSpanByteCap,
@@ -335,9 +336,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     if (options.addr) {
       if (options.addr.includes('%')) {
-        const pattern = options.addr.replace(/%/g, '.*');
-        const regex = new RegExp(pattern);
-        filtered = filtered.filter((c) => regex.test(c.addr));
+        // `%` is the only wildcard; everything else is escaped so it stays literal.
+        // A linear-time glob (not a `.*` regex) so runs like `%a%a%a…` can't backtrack.
+        const pattern = `*${options.addr
+          .split('%')
+          .map((part) => part.replace(/[*?[\\]/g, '\\$&'))
+          .join('*')}*`;
+        filtered = filtered.filter((c) => globMatches(pattern, c.addr));
       } else {
         filtered = filtered.filter((c) => c.addr === options.addr);
       }

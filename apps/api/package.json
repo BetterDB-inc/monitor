@@ -74,7 +74,7 @@
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@types/better-sqlite3": "^7.6.13",
     "apache-arrow": "^21.1.0",
-    "better-auth": "1.7.2",
+    "better-auth": "1.7.14",
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",

@@ -12,13 +12,14 @@
     "@langchain/langgraph-checkpoint": "^1.0.0",
     "@langchain/openai": "^1.4.0",
     "iovalkey": "^0.3.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "tsx": "^4.19.0"
   },
   "overrides": {
     "uuid@<11.1.1": "11.1.1",
-    "uuid@13.0.0": "13.0.1"
+    "uuid@13.0.0": "13.0.1",
+    "zod": "$zod"
   }
 }
