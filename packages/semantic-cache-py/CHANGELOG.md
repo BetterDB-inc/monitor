@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-30
+
 ### Fixed
 
 - **`flush()` could delete another cache's keys.** The cache name was put into
