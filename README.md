@@ -242,7 +242,7 @@ The certificate is passed to the TLS socket exactly as supplied, so its subject 
 
 Cluster and Sentinel nodes discovered from a seed connection reuse the seed's CA, client certificate and authentication mode. Server certificate verification is always on; there is no option to disable it.
 
-**Rotation.** File-sourced material (`BETTERDB_TLS_CERT_DIR` paths, and the `DB_TLS_*_FILE` paths of the env-configured connection) is re-read whenever the connection reconnects, so replacing the files on disk takes effect without a restart; use `POST /connections/{id}/reconnect` to force it. While `DB_HOST` is set, the env-configured default connection and the nodes discovered from it are rebuilt from the current `DB_*` settings on every start, so a changed password, `DB_TLS`, certificate paths or `DB_AUTH_MODE` always win over the stored copy. Pasted PEM is fixed at save time; re-create the connection to rotate it.
+**Rotation.** File-sourced material (`BETTERDB_TLS_CERT_DIR` paths, and the `DB_TLS_*_FILE` paths of the env-configured connection) is re-read whenever the connection reconnects, so replacing the files on disk takes effect without a restart; use `POST /connections/{id}/reconnect` to force it. While `DB_HOST` is set, the env-configured default connection and the nodes auto-registered from it are rebuilt from the current `DB_*` settings on every start, so a changed username, password, `DB_TLS`, certificate paths or `DB_AUTH_MODE` always win over the stored copy (connections you created yourself keep their own settings, even when they were adopted into the default's topology). Pasted PEM is fixed at save time; re-create the connection to rotate it.
 
 ### SSH Tunnels
 

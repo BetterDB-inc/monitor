@@ -69,7 +69,9 @@ function readAllowlistedFile(filePath: string, label: string): Buffer {
   const resolved = path.resolve(baseDir, filePath);
   const contains = (candidate: string): boolean => {
     const rel = path.relative(baseDir, candidate);
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    // Reject only a leading `..` path segment: a file literally named
+    // `..client.pem` inside the directory is fine.
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
   };
   if (!contains(resolved)) {
     throw new Error(`${label} path '${filePath}' must resolve inside ${TLS_CERT_DIR_ENV}`);
@@ -77,7 +79,13 @@ function readAllowlistedFile(filePath: string, label: string): Buffer {
   if (!fs.existsSync(resolved)) {
     throw new Error(`${label} file '${filePath}' not found in ${TLS_CERT_DIR_ENV}`);
   }
-  const realResolved = fs.realpathSync(resolved);
+  let realResolved: string;
+  try {
+    realResolved = fs.realpathSync(resolved);
+  } catch {
+    // A raw ENOENT/EACCES would carry the absolute server path.
+    throw new Error(`Could not read ${label} file '${filePath}' in ${TLS_CERT_DIR_ENV}`);
+  }
   if (!contains(realResolved)) {
     throw new Error(`${label} path '${filePath}' escapes ${TLS_CERT_DIR_ENV} via a symlink`);
   }

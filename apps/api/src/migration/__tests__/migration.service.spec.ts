@@ -570,6 +570,31 @@ describe('MigrationService cluster analysis', () => {
     expect((job.incompatibilities ?? []).some(i => i.title === 'Source master unreachable')).toBe(false);
   });
 
+  it('verifies cluster masters dialled by IP against the hostname they announce', async () => {
+    const registry = createMockRegistry();
+    readyReplicationCommands(registry);
+    registry.getConfig.mockReturnValue({ id: 'conn-1', name: 'Test', host: 'cache.internal', port: 6379, tls: true, createdAt: Date.now() });
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '1' },
+      server: {},
+      persistence: {},
+    });
+    registry.mockAdapter.getClusterNodes.mockResolvedValue([
+      { id: 'a', address: '10.0.0.1:6379@16379', hostname: 'node-a.internal', flags: ['master'], slots: [[0, 8191]] },
+      { id: 'b', address: '10.0.0.2:6379@16379', flags: ['master'], slots: [[8192, 16383]] },
+    ]);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetProfile: 'elasticache_serverless' });
+    await waitForTerminal(service, id);
+
+    const byHost = new Map(nodeClients.map(c => [c.host, c.options.tls as { servername?: string } | undefined]));
+    expect(byHost.get('10.0.0.1')?.servername).toBe('node-a.internal');
+    expect(byHost.get('10.0.0.2')?.servername).toBeUndefined();
+  });
+
   it('reports a master whose connect never settles as unreachable', async () => {
     jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'queueMicrotask'] });
     const registry = createMockRegistry();

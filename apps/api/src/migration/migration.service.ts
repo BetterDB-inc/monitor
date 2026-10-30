@@ -262,7 +262,7 @@ export class MigrationService {
             client = new Valkey({
               host,
               port,
-              ...nodeClientAuthOptions(config ?? {}, host),
+              ...nodeClientAuthOptions(config ?? {}, host, master.hostname),
               ...NODE_CONNECT_OPTIONS,
               connectionName: 'BetterDB-Migration-Analysis',
             });

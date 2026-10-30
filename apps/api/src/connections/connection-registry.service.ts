@@ -331,8 +331,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * effect on restart, and it never persists a record derived from a failed
    * decrypt (the password comes from the environment, not from storage).
    *
-   * Nodes auto-registered from the env default inherit its TLS flag, material
-   * and auth mode the same way, so they present the rotated certificate too.
+   * Nodes auto-registered from the env default inherit its credentials, TLS
+   * flag, material and auth mode the same way, so they authenticate with the
+   * rotated password and present the rotated certificate too. Adopted children
+   * (user-created connections matched into the topology) keep their own settings.
+   *
+   * A record whose stored secrets failed to decrypt is always rebuilt: the
+   * environment supplies every secret, so this is the recovery path for a
+   * changed ENCRYPTION_KEY and it must not depend on the env password happening
+   * to differ from the (now unreadable) stored one.
    */
   private async syncWithEnvironment(config: DatabaseConnectionConfig): Promise<DatabaseConnectionConfig> {
     if (!process.env.DB_HOST) {
@@ -346,16 +353,23 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       ? { ...dbConfig.tlsConfig, secretsEncrypted: false }
       : undefined;
 
+    const decryptFailed = config.credentialStatus === 'decryption_failed';
+    const sameCredentials =
+      !decryptFailed &&
+      (config.username ?? '') === (dbConfig.username ?? '') &&
+      (config.password ?? '') === (dbConfig.password ?? '');
+    const sameTls =
+      (config.tls ?? false) === (dbConfig.tls ?? false) &&
+      sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
+      (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+
     let synced: DatabaseConnectionConfig;
     if (config.id === ENV_DEFAULT_ID) {
       const same =
+        sameCredentials &&
+        sameTls &&
         config.host === dbConfig.host &&
-        config.port === dbConfig.port &&
-        (config.username ?? '') === (dbConfig.username ?? '') &&
-        (config.password ?? '') === (dbConfig.password ?? '') &&
-        (config.tls ?? false) === (dbConfig.tls ?? false) &&
-        sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
-        (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+        config.port === dbConfig.port;
       if (same) {
         return config;
       }
@@ -375,26 +389,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         updatedAt: Date.now(),
       };
       this.logger.log('Default connection updated from the environment (DB_* settings changed since it was stored)');
-    } else if (config.membership?.seedId === ENV_DEFAULT_ID) {
-      const same =
-        (config.tls ?? false) === (dbConfig.tls ?? false) &&
-        sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
-        (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
-      if (same) {
+    } else if (config.membership?.seedId === ENV_DEFAULT_ID && config.membership.origin === 'auto') {
+      if (sameCredentials && sameTls) {
         return config;
       }
+      // Same derivation as addManagedChild: the env default carries no separate
+      // data-node credentials, so children authenticate exactly like the seed.
       synced = {
         ...config,
+        username: dbConfig.username,
+        password: dbConfig.password,
+        passwordEncrypted: false,
         tls: dbConfig.tls ?? false,
         tlsConfig: envTlsConfig,
         authMode: dbConfig.authMode,
+        credentialStatus: 'unknown',
+        credentialError: undefined,
         updatedAt: Date.now(),
       };
-      if (config.credentialStatus === 'decryption_failed' && !config.passwordEncrypted) {
-        synced.credentialStatus = 'unknown';
-        synced.credentialError = undefined;
-      }
-      this.logger.log(`${config.name}: TLS settings updated from the environment (follows the default connection)`);
+      this.logger.log(`${config.name}: credentials and TLS settings updated from the environment (follows the default connection)`);
     } else {
       return config;
     }

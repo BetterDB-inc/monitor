@@ -38,16 +38,25 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
         const nodesRaw = await discoveryClient.call('CLUSTER', 'NODES') as string;
         const masters = parseClusterMasters(nodesRaw);
         log(job, maxLogLines, `Cluster mode: ${masters.length} master(s) detected`);
-        for (const { host, port } of masters) {
+        for (const { host, port, hostname } of masters) {
           const client = new Valkey({
             host,
             port,
-            ...nodeClientAuthOptions(sourceConfig, host),
+            ...nodeClientAuthOptions(sourceConfig, host, hostname),
             lazyConnect: true,
+            connectTimeout: 10_000,
+            commandTimeout: 15_000,
             connectionName: 'BetterDB-Migration-Source',
           });
-          await client.connect();
+          // Register before connecting: a client whose first dial fails keeps
+          // reconnecting in the background unless the outer cleanup quits it.
           sourceClients.push(client);
+          try {
+            await client.connect();
+          } catch (err) {
+            client.disconnect();
+            throw err;
+          }
         }
       } finally {
         await discoveryClient.quit();
@@ -157,16 +166,21 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
 
 // ── Helpers ──
 
-function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number }> {
-  const results: Array<{ host: string; port: number }> = [];
+export function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number; hostname?: string }> {
+  const results: Array<{ host: string; port: number; hostname?: string }> = [];
   for (const line of nodesRaw.split('\n')) {
     if (!line.trim()) continue;
     const parts = line.split(' ');
     const flags = parts[2] ?? '';
     if (!flags.includes('master')) continue;
     if (flags.includes('fail') || flags.includes('noaddr')) continue;
-    // address format: host:port@clusterport (host may be IPv6, e.g. [::1]:6379@16379)
-    const addrPart = (parts[1] ?? '').split('@')[0];
+    // address format: host:port@clusterport[,hostname] (host may be IPv6, e.g.
+    // [::1]:6379@16379). The optional trailing hostname is the one the node
+    // announces (cluster-announce-hostname) and is what its certificate names.
+    const addressField = parts[1] ?? '';
+    const commaIdx = addressField.indexOf(',');
+    const hostname = commaIdx === -1 ? undefined : addressField.slice(commaIdx + 1) || undefined;
+    const addrPart = (commaIdx === -1 ? addressField : addressField.slice(0, commaIdx)).split('@')[0];
     const lastColon = addrPart.lastIndexOf(':');
     let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
     const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
@@ -175,7 +189,7 @@ function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: numb
       host = host.slice(1, -1);
     }
     if (host && !isNaN(port)) {
-      results.push({ host, port });
+      results.push(hostname ? { host, port, hostname } : { host, port });
     }
   }
   return results;

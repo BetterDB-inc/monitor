@@ -293,6 +293,82 @@ describe('ConnectionRegistry TLS material', () => {
       expect(storage.saveConnection.mock.calls.some(([c]) => c.id === 'child' && c.tlsConfig?.cert === ROTATED_CERT)).toBe(true);
     });
 
+    it('rotates the credentials of nodes auto-registered from the default, but not of adopted ones', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ username: 'default', password: 'old-password' }),
+        saved({
+          id: 'auto-child',
+          name: 'Default · 10.0.0.2:6379',
+          host: '10.0.0.2',
+          isDefault: false,
+          tls: false,
+          username: 'default',
+          password: 'old-password',
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n2', origin: 'auto', source: 'cluster' },
+        }),
+        saved({
+          id: 'adopted-child',
+          name: 'My own node',
+          host: '10.0.0.3',
+          isDefault: false,
+          tls: false,
+          username: 'own-user',
+          password: 'own-password',
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n3', origin: 'adopted', source: 'cluster' },
+        }),
+      ]);
+      Object.assign(database, { username: 'monitor', password: 'rotated-password' });
+
+      await registry.onModuleInit();
+
+      expect(registry.getConfig('auto-child')).toMatchObject({ username: 'monitor', password: 'rotated-password', host: '10.0.0.2' });
+      const persistedChild = storage.saveConnection.mock.calls.find(([c]) => c.id === 'auto-child')?.[0];
+      expect(persistedChild).toBeDefined();
+      expect(enc.decrypt(persistedChild!.password!)).toBe('rotated-password');
+      expect(registry.getConfig('adopted-child')).toMatchObject({ username: 'own-user', password: 'own-password' });
+      expect(storage.saveConnection.mock.calls.some(([c]) => c.id === 'adopted-child')).toBe(false);
+    });
+
+    it('never nulls an auto-registered child ciphertext after a failed decrypt: the environment supplies the password', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ tlsConfig: encryptedTls() }),
+        saved({
+          id: 'child',
+          name: 'Default · 10.0.0.2:6379',
+          host: '10.0.0.2',
+          isDefault: false,
+          password: 'not-ciphertext',
+          passwordEncrypted: true,
+          tlsConfig: encryptedTls(),
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n2', origin: 'auto', source: 'cluster' },
+        }),
+      ]);
+      Object.assign(database, { password: 'env-password', tls: true, tlsConfig: { source: 'inline', cert: ROTATED_CERT, key: PRIVATE_KEY } });
+
+      await registry.onModuleInit();
+
+      const child = registry.getConfig('child');
+      expect(child?.password).toBe('env-password');
+      expect(child?.credentialStatus).toBe('valid');
+      const persisted = storage.saveConnection.mock.calls.find(([c]) => c.id === 'child')?.[0];
+      expect(persisted?.password).toBeTruthy();
+      expect(enc.decrypt(persisted!.password!)).toBe('env-password');
+    });
+
+    it('rebuilds the default after a failed decrypt even when DB_PASSWORD is empty', async () => {
+      storage.getConnections.mockResolvedValue([envDefault({ password: 'not-ciphertext', passwordEncrypted: true })]);
+      database.password = '';
+
+      await registry.onModuleInit();
+
+      const config = registry.getConfig(ENV_DEFAULT_ID);
+      expect(config?.credentialStatus).toBe('valid');
+      expect(config?.password ?? '').toBe('');
+      const persisted = storage.saveConnection.mock.calls.at(-1)![0];
+      expect(persisted.id).toBe(ENV_DEFAULT_ID);
+      expect(persisted.passwordEncrypted ?? false).toBe(false);
+    });
+
     it('leaves UI-added connections alone', async () => {
       storage.getConnections.mockResolvedValue([saved({ tlsConfig: encryptedTls() })]);
       database.tls = true;

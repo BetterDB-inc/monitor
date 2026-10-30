@@ -14,6 +14,7 @@ interface ClusterNodeLike {
   flags: string[];
   slots: number[][];
   address?: string; // host:port@bus
+  hostname?: string; // announced hostname (cluster-announce-hostname), when any
 }
 
 /** The bits of a source adapter this module needs. */
@@ -90,7 +91,9 @@ export async function probeSourceFunctionsClusterAware(
         client = new Valkey({
           host,
           port,
-          ...nodeClientAuthOptions(config, host),
+          // CLUSTER NODES reports IPs; verify against the hostname the node
+          // announces so a DNS-only certificate still validates.
+          ...nodeClientAuthOptions(config, host, master.hostname),
           ...NODE_CONNECT_OPTIONS,
           maxRetriesPerRequest: 1,
         });

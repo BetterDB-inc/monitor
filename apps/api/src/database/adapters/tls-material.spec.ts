@@ -1,5 +1,12 @@
 import * as fs from 'fs';
 import * as os from 'os';
+
+// realpathSync is wrapped so one test can make it fail on the file itself; every
+// other call goes straight to the real implementation.
+jest.mock('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return { ...actual, realpathSync: jest.fn(actual.realpathSync) };
+});
 import * as path from 'path';
 import {
   TLS_CERT_DIR_ENV,
@@ -82,6 +89,35 @@ describe('resolveTlsMaterial', () => {
       expect(message).toMatch(/must resolve inside BETTERDB_TLS_CERT_DIR/);
       expect(message).toContain(caPath);
       expect(message).not.toContain(certDir);
+    }
+  });
+
+  it('accepts a file whose name merely starts with two dots', () => {
+    fs.writeFileSync(path.join(certDir, '..client.pem'), CERT);
+    expect(resolveTlsMaterial({ source: 'file', certPath: '..client.pem' }).cert?.toString()).toBe(CERT);
+    expect(() => resolveTlsMaterial({ source: 'file', certPath: '..' })).toThrow(/must resolve inside/);
+  });
+
+  it('sanitises a realpath failure on the file itself', () => {
+    const actual = jest.requireActual<typeof import('fs')>('fs');
+    const spy = fs.realpathSync as unknown as jest.Mock;
+    spy
+      .mockImplementationOnce(actual.realpathSync) // the directory itself
+      .mockImplementationOnce((target: fs.PathLike) => {
+        throw Object.assign(new Error(`EACCES: permission denied, realpath '${String(target)}'`), { code: 'EACCES' });
+      });
+    try {
+      let message = '';
+      try {
+        resolveTlsMaterial({ source: 'file', certPath: 'client.crt' });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/Could not read Client certificate file 'client.crt'/);
+      expect(message).not.toContain(certDir);
+    } finally {
+      spy.mockReset();
+      spy.mockImplementation(actual.realpathSync);
     }
   });
 

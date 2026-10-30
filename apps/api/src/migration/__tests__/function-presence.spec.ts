@@ -114,6 +114,20 @@ describe('probeSourceFunctionsClusterAware', () => {
     }
   });
 
+  it('verifies a master dialled by IP against the hostname it announces', async () => {
+    const nodes = [{ flags: ['master'], address: '10.0.0.1:6379@16379', hostname: 'node-1.internal' }];
+    const iovalkey = jest.requireMock('iovalkey') as jest.Mock;
+    let seen: { tls?: { servername?: string } } | undefined;
+    iovalkey.mockImplementationOnce((opts: { host: string; port: number; tls?: { servername?: string } }) => {
+      seen = opts;
+      const client = { host: opts.host, port: opts.port, connect: jest.fn().mockResolvedValue(undefined), quit: jest.fn(), disconnect: jest.fn(), call: jest.fn().mockResolvedValue([]) };
+      constructed.push(client);
+      return client;
+    });
+    await probeSourceFunctionsClusterAware(makeAdapter(nodes), { tls: true }, true);
+    expect(seen?.tls?.servername).toBe('node-1.internal');
+  });
+
   it('falls back to the seed when masters cannot be enumerated', async () => {
     const adapter = {
       getClient: jest.fn().mockReturnValue({ call: jest.fn().mockResolvedValue([['library_name', 'lib']]) }),
