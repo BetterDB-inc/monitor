@@ -25,6 +25,7 @@ import {
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
 import { DETECTOR_DEFAULTS } from '@app/anomaly/anomaly.types';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
+import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
 import { ExternalMetricsStore } from '@app/external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '@app/external-metrics/external-metrics.adapter';
 
@@ -51,6 +52,7 @@ describe('AnomalyService', () => {
     storage = {
       saveAnomalyEvent: jest.fn().mockResolvedValue(undefined),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
+      getNewClientConnections: jest.fn().mockResolvedValue([]),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       resolveAnomaly: jest.fn().mockResolvedValue(true),
@@ -3694,10 +3696,68 @@ describe('AnomalyService', () => {
         { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: endTime },
         { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt: endTime },
       ]);
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockResolvedValue([{ name: 'worker', user: 'default', ip: '10.0.0.1', count: 2 }]);
 
       const { recorded } = await runRetry();
 
       expect(recorded[0].message).toContain('Top clients: name worker (2 reconnects).');
+    });
+
+    it('counts early reconnects when the snapshot read hits its row limit', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      const history = new MemoryAdapter();
+      let seeded = false;
+      const seed = async (startTime: number, endTime: number) => {
+        if (seeded) return;
+        seeded = true;
+        const row = (clientId: string, name: string, age: number, capturedAt: number) => ({
+          id: 0,
+          clientId,
+          addr: `10.0.0.1:${clientId}`,
+          name,
+          user: 'default',
+          db: 0,
+          cmd: 'get',
+          age,
+          idle: 0,
+          flags: 'N',
+          sub: 0,
+          psub: 0,
+          qbuf: 0,
+          qbufFree: 0,
+          obl: 0,
+          oll: 0,
+          omem: 0,
+          capturedAt,
+          sourceHost: 'h',
+          sourcePort: 1,
+          connectionId: 'conn-1',
+        });
+        await history.saveClientSnapshot(
+          [row('early-1', 'retrier', 0, startTime), row('early-2', 'retrier', 0, startTime)],
+          'conn-1',
+        );
+        const pool = Array.from({ length: RETRY_AMP_SNAPSHOT_LIMIT + 1 }, (_, i) =>
+          row(`pool-${i}`, 'pool', 1_000_000, endTime),
+        );
+        await history.saveClientSnapshot(pool, 'conn-1');
+      };
+      storage.getClientSnapshots = jest.fn().mockImplementation(async (options) => {
+        await seed(options.startTime, options.endTime);
+        return history.getClientSnapshots(options);
+      });
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockImplementation(async (connectionId, since, until) => {
+          await seed(since, until);
+          return history.getNewClientConnections(connectionId, since, until);
+        });
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Top clients: name retrier (2 reconnects).');
     });
 
     it('still emits when both attribution sources fail', async () => {

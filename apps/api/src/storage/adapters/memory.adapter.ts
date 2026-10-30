@@ -15,6 +15,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -368,6 +369,28 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const offset = options.offset ?? 0;
 
     return filtered.slice(offset, offset + limit);
+  }
+
+  async getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]> {
+    const groups = new Map<string, { group: NewClientConnectionGroup; ids: Set<string> }>();
+    for (const snapshot of this.clientSnapshots) {
+      if (snapshot.connectionId !== connectionId) continue;
+      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
+      if (snapshot.capturedAt - snapshot.age * 1000 < since) continue;
+      const ip = clientAddrIp(snapshot.addr);
+      const key = JSON.stringify([snapshot.name, snapshot.user, ip]);
+      const entry = groups.get(key) ?? {
+        group: { name: snapshot.name, user: snapshot.user, ip, count: 0 },
+        ids: new Set<string>(),
+      };
+      entry.ids.add(snapshot.clientId);
+      groups.set(key, entry);
+    }
+    return [...groups.values()].map(({ group, ids }) => ({ ...group, count: ids.size }));
   }
 
   async getClientTimeSeries(

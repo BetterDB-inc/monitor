@@ -1,3 +1,5 @@
+import type { NewClientConnectionGroup } from '@betterdb/shared';
+
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
@@ -48,8 +50,7 @@ export interface AttributionInput {
   first: ClientCommandSnapshot | null;
   latest: ClientCommandSnapshot | null;
   snapshots: ClientSnapshotEntry[];
-  snapshotIntervalMs: number;
-  episodeStart: number;
+  newConnections: NewClientConnectionGroup[];
   limit?: number;
 }
 
@@ -58,21 +59,32 @@ interface ContributorAccumulator {
   keyKind: ContributorKeyKind;
   commands: number;
   lifetimeRate: number;
-  newClientIds: Set<string>;
+  newConnections: number;
   latestClientIds: Set<string>;
+}
+
+function hostKey(
+  name: string,
+  user: string,
+  host: string,
+): {
+  key: string;
+  keyKind: ContributorKeyKind;
+} {
+  if (name) return { key: name, keyKind: 'name' };
+  if (user && user !== 'default') return { key: user, keyKind: 'user' };
+  return { key: host, keyKind: 'ip' };
 }
 
 export function contributorKey(client: { name: string; user: string; addr: string }): {
   key: string;
   keyKind: ContributorKeyKind;
 } {
-  if (client.name) return { key: client.name, keyKind: 'name' };
-  if (client.user && client.user !== 'default') return { key: client.user, keyKind: 'user' };
   const host =
     client.addr.lastIndexOf(':') > 0
       ? client.addr.slice(0, client.addr.lastIndexOf(':'))
       : client.addr;
-  return { key: host, keyKind: 'ip' };
+  return hostKey(client.name, client.user, host);
 }
 
 function parseTotalCommands(value: unknown): number | null {
@@ -109,7 +121,7 @@ function accumulatorFor(
       ...identity,
       commands: 0,
       lifetimeRate: 0,
-      newClientIds: new Set(),
+      newConnections: 0,
       latestClientIds: new Set(),
     };
     map.set(id, acc);
@@ -139,26 +151,17 @@ function addCommandGrowth(
 
 function addReconnects(
   map: Map<string, ContributorAccumulator>,
+  groups: NewClientConnectionGroup[],
   snapshots: ClientSnapshotEntry[],
-  snapshotIntervalMs: number,
-  episodeStart: number,
 ): void {
+  for (const group of groups) {
+    accumulatorFor(map, hostKey(group.name, group.user, group.ip)).newConnections += group.count;
+  }
   if (snapshots.length === 0) return;
-  const captures = [...new Set(snapshots.map((s) => s.capturedAt))].sort((a, b) => a - b);
-  const latestCapture = captures[captures.length - 1];
-  const previousCapture = new Map(
-    captures.map((capturedAt, i) => [
-      capturedAt,
-      i === 0 ? capturedAt - snapshotIntervalMs : captures[i - 1],
-    ]),
-  );
+  const latestCapture = snapshots.reduce((max, s) => Math.max(max, s.capturedAt), 0);
   for (const snapshot of snapshots) {
-    const acc = accumulatorFor(map, contributorKey(snapshot));
-    const connectedAt = snapshot.capturedAt - snapshot.age * 1000;
-    if (connectedAt > previousCapture.get(snapshot.capturedAt)! && connectedAt >= episodeStart) {
-      acc.newClientIds.add(snapshot.clientId);
-    }
-    if (snapshot.capturedAt === latestCapture) acc.latestClientIds.add(snapshot.clientId);
+    if (snapshot.capturedAt !== latestCapture) continue;
+    accumulatorFor(map, contributorKey(snapshot)).latestClientIds.add(snapshot.clientId);
   }
 }
 
@@ -170,7 +173,7 @@ export function rankRetryAmplificationContributors(
     input.first !== null &&
     input.latest !== null &&
     addCommandGrowth(map, input.first, input.latest);
-  addReconnects(map, input.snapshots, input.snapshotIntervalMs, input.episodeStart);
+  addReconnects(map, input.newConnections, input.snapshots);
 
   const contributors = [...map.values()].map((acc) => {
     const growth = hasCommandRates && acc.lifetimeRate > 0 ? acc.commands / acc.lifetimeRate : null;
@@ -178,7 +181,7 @@ export function rankRetryAmplificationContributors(
       key: acc.key,
       keyKind: acc.keyKind,
       commandRateGrowth: growth,
-      newConnections: acc.newClientIds.size,
+      newConnections: acc.newConnections,
       connections: acc.latestClientIds.size,
     };
   });

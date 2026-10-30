@@ -32,6 +32,7 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -974,6 +975,31 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const result = await this.pool.query(query, params);
     return result.rows.map((row) => this.mappers.mapClientRow(row));
+  }
+
+  async getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
+              ${PG_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
+          AND captured_at - age * 1000 >= $2
+        GROUP BY COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
+      [connectionId, since, until],
+    );
+    return result.rows.map((row) => ({
+      name: row.name,
+      user: row.user_name,
+      ip: row.ip,
+      count: Number(row.count),
+    }));
   }
 
   async getClientTimeSeries(

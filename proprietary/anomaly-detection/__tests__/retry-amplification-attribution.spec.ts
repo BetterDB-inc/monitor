@@ -84,8 +84,7 @@ describe('retry amplification attribution', () => {
         first,
         latest,
         snapshots: [],
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
+        newConnections: [],
       });
 
       expect(ranked.map((c) => c.key)).toEqual(['checkout', 'search']);
@@ -101,13 +100,16 @@ describe('retry amplification attribution', () => {
         snap({ clientId: 'd', name: 'cron', age: 5000, capturedAt: 120_000 }),
         snap({ clientId: 'e', addr: '10.9.9.9:1', age: 1, capturedAt: 120_000 }),
       ];
+      const newConnections = [
+        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 3 },
+        { name: '', user: 'default', ip: '10.9.9.9', count: 1 },
+      ];
 
       const ranked = rankRetryAmplificationContributors({
         first: readClientCommandCounts([client({ id: '1' })], 0),
         latest: null,
         snapshots,
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
+        newConnections,
       });
 
       expect(ranked).toEqual([
@@ -141,8 +143,7 @@ describe('retry amplification attribution', () => {
         first,
         latest,
         snapshots: [snap({ clientId: '9', name: 'api', age: 4, capturedAt: 10_000 })],
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
+        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
       });
 
       expect(ranked).toEqual([
@@ -150,34 +151,39 @@ describe('retry amplification attribution', () => {
       ]);
     });
 
-    it('counts a client that connected between two late captures as new', () => {
+    it('groups new connections by contributor key and adds across addresses', () => {
       const ranked = rankRetryAmplificationContributors({
         first: null,
         latest: null,
-        snapshots: [
-          snap({ clientId: '1', name: 'api', age: 500, capturedAt: 100_000 }),
-          snap({ clientId: '2', name: 'api', age: 70, capturedAt: 190_000 }),
+        snapshots: [],
+        newConnections: [
+          { name: 'api', user: 'default', ip: '10.0.0.1', count: 2 },
+          { name: 'api', user: 'default', ip: '10.0.0.2', count: 3 },
+          { name: '', user: 'svc', ip: '10.0.0.3', count: 1 },
+          { name: '', user: 'default', ip: '[::1]', count: 1 },
         ],
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
       });
 
-      expect(ranked[0].newConnections).toBe(1);
+      expect(ranked.map((c) => [c.key, c.keyKind, c.newConnections])).toEqual([
+        ['api', 'name', 5],
+        ['[::1]', 'ip', 1],
+        ['svc', 'user', 1],
+      ]);
     });
 
-    it('does not count a connection opened before the episode as new', () => {
+    it('counts live connections from the latest capture only', () => {
       const ranked = rankRetryAmplificationContributors({
         first: null,
         latest: null,
         snapshots: [
-          snap({ clientId: '1', name: 'api', age: 30, capturedAt: 100_000 }),
-          snap({ clientId: '2', name: 'api', age: 10, capturedAt: 100_000 }),
+          snap({ clientId: '1', name: 'api', capturedAt: 100_000 }),
+          snap({ clientId: '2', name: 'api', capturedAt: 160_000 }),
+          snap({ clientId: '3', name: 'api', capturedAt: 160_000 }),
         ],
-        snapshotIntervalMs: 60_000,
-        episodeStart: 80_000,
+        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
       });
 
-      expect(ranked[0].newConnections).toBe(1);
+      expect(ranked[0].connections).toBe(2);
     });
 
     it('ignores clients that reset or vanished between snapshots and caps the list', () => {
@@ -202,8 +208,7 @@ describe('retry amplification attribution', () => {
         first,
         latest,
         snapshots: [],
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
+        newConnections: [],
       });
 
       expect(ranked).toHaveLength(5);
@@ -237,8 +242,7 @@ describe('retry amplification attribution', () => {
         first,
         latest,
         snapshots,
-        snapshotIntervalMs: 60_000,
-        episodeStart: 0,
+        newConnections: [{ name: 'retrier', user: 'default', ip: '10.0.0.1', count: 2 }],
       });
 
       expect(ranked).toHaveLength(5);
@@ -261,8 +265,7 @@ describe('retry amplification attribution', () => {
           first,
           latest,
           snapshots: [],
-          snapshotIntervalMs: 60_000,
-          episodeStart: 0,
+          newConnections: [],
         }),
       ).toEqual([]);
     });
@@ -273,8 +276,7 @@ describe('retry amplification attribution', () => {
           first: null,
           latest: null,
           snapshots: [],
-          snapshotIntervalMs: 60_000,
-          episodeStart: 0,
+          newConnections: [],
         }),
       ).toEqual([]);
     });

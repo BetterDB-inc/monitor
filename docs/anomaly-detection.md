@@ -358,7 +358,7 @@ An episode ends after 2 cold windows, or when the monitor misses samples for lon
 
 **Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
 - Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting clients at 1.3× or more of their lifetime rate
-- Reconnect counts from the stored client snapshots
+- Reconnect counts from the stored client snapshots, across the whole episode
 
 `CLIENT LIST` is read once when a run reaches two hot windows, then once per finding. A failed first read is retried on later polls, up to three attempts in total. Each read is capped by `ANOMALY_INFO_TIMEOUT_MS`. Reconnects come from snapshots taken on the client-analytics interval (60s by default). A client that connects, retries and disconnects between two captures does not appear, so short-lived retry connections can be undercounted. The reconnect rate in the trigger still includes them.
 

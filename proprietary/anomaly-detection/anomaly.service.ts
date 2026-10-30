@@ -3415,14 +3415,18 @@ export class AnomalyService
   ): Promise<RetryAmplificationContributor[] | null> {
     const latest = (await this.readClientCommandCounts(ctx, timestamp)) ?? null;
     let snapshots: Awaited<ReturnType<StoragePort['getClientSnapshots']>> = [];
+    let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
     try {
-      snapshots = await this.storage.getClientSnapshots({
-        connectionId: ctx.connectionId,
-        startTime: episodeStart,
-        endTime: timestamp,
-        limit: RETRY_AMP_SNAPSHOT_LIMIT,
-      });
+      [snapshots, newConnections] = await Promise.all([
+        this.storage.getClientSnapshots({
+          connectionId: ctx.connectionId,
+          startTime: episodeStart,
+          endTime: timestamp,
+          limit: RETRY_AMP_SNAPSHOT_LIMIT,
+        }),
+        this.storage.getNewClientConnections(ctx.connectionId, episodeStart, timestamp),
+      ]);
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
@@ -3435,9 +3439,7 @@ export class AnomalyService
       first: firstSnapshot,
       latest,
       snapshots,
-      episodeStart,
-      snapshotIntervalMs:
-        this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs || 60_000,
+      newConnections,
     });
   }
 
