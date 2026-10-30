@@ -3362,7 +3362,7 @@ describe('AnomalyService', () => {
         p99Once?: boolean;
         coolWindows?: number;
         realEmit?: boolean;
-        cpuSeverity?: AnomalySeverity;
+        cpuEvent?: Record<string, unknown>;
       } = {},
     ) {
       const recorded: any[] = [];
@@ -3393,14 +3393,14 @@ describe('AnomalyService', () => {
             resolved: false,
           });
         }
-        if (hot && opts.cpuSeverity) {
+        if (hot && opts.cpuEvent) {
           (service as any).recentAnomalies.push({
             id: `cpu-${w}`,
             timestamp: ts + 5_000,
             metricType: MetricType.CPU_UTILIZATION,
-            severity: opts.cpuSeverity,
             connectionId: 'conn-1',
             resolved: false,
+            ...opts.cpuEvent,
           });
         }
         for (let i = 0; i < 60; i++) {
@@ -3726,14 +3726,35 @@ describe('AnomalyService', () => {
       expect(retryWrites()).toBe(2);
     });
 
-    it('treats only a critical CPU event as saturation', async () => {
-      const warning = await runRetry({ cpuSeverity: AnomalySeverity.WARNING });
-      expect(warning.recorded.map((e) => e.severity)).toEqual([AnomalySeverity.WARNING]);
+    it('retries a failing write once per window, not on every poll', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+      await runRetry({ realEmit: true });
+
+      const writes = storage.saveAnomalyEvent.mock.calls.filter(
+        ([e]: [any]) => e.metricType === MetricType.RETRY_AMPLIFICATION,
+      ).length;
+      expect(writes).toBeGreaterThan(1);
+      expect(writes).toBeLessThanOrEqual(6);
     });
 
-    it('escalates on a critical CPU event', async () => {
-      const critical = await runRetry({ cpuSeverity: AnomalySeverity.CRITICAL });
-      expect(critical.recorded.at(-1).severity).toBe(AnomalySeverity.CRITICAL);
+    it('ignores a relative CPU move, even a critical one', async () => {
+      const { recorded } = await runRetry({
+        cpuEvent: { severity: AnomalySeverity.CRITICAL, anomalyType: AnomalyType.DROP },
+      });
+
+      expect(recorded.map((e) => e.severity)).toEqual([AnomalySeverity.WARNING]);
+    });
+
+    it('escalates on control-plane saturation', async () => {
+      const { recorded } = await runRetry({
+        cpuEvent: {
+          severity: AnomalySeverity.CRITICAL,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+        },
+      });
+
+      expect(recorded.at(-1).severity).toBe(AnomalySeverity.CRITICAL);
     });
 
     it('drops the per-connection state when the connection is removed', async () => {

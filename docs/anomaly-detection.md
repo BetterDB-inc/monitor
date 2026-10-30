@@ -350,7 +350,7 @@ Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for r
 Runs that end within 3 windows are recorded as transient.
 
 - **WARNING** when the run qualifies
-- **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Critical CPU, rejected-connection and lockout-risk events count for 5 minutes.
+- **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.
 
 **Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
 

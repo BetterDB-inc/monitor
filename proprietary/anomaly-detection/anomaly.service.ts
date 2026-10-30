@@ -418,6 +418,7 @@ export class AnomalyService
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
   >();
   private retryAmplificationAttributed = new Map<string, string>();
+  private retryAmplificationLastEmit = new Map<string, number>();
   private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -800,6 +801,7 @@ export class AnomalyService
     this.retryAmplificationFirstClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.retryAmplificationAttributed.delete(connectionId);
+    this.retryAmplificationLastEmit.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
@@ -3165,9 +3167,9 @@ export class AnomalyService
     state.maxPollGapMs = retryAmplificationMaxPollGap(this.getIntervalMs());
 
     const connectionEvents = this.recentAnomalies.filter((a) => {
-      const minorCpuSpike =
-        a.metricType === MetricType.CPU_UTILIZATION && a.severity !== AnomalySeverity.CRITICAL;
-      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !minorCpuSpike;
+      const relativeCpuMove =
+        a.metricType === MetricType.CPU_UTILIZATION && !isControlPlaneSaturationEvent(a);
+      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !relativeCpuMove;
     });
     const recentEvents = connectionEvents
       .filter((a) => {
@@ -3232,6 +3234,9 @@ export class AnomalyService
       }
     }
     if (finding === null) return;
+    const lastEmit = this.retryAmplificationLastEmit.get(ctx.connectionId);
+    if (lastEmit !== undefined && timestamp - lastEmit < RETRY_AMP_WINDOW_MS) return;
+    this.retryAmplificationLastEmit.set(ctx.connectionId, timestamp);
 
     const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
     const attributionKey = `${attributionStart}:${finding.level}`;
@@ -3264,6 +3269,7 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     if (event.persisted !== true) return;
+    this.retryAmplificationLastEmit.delete(ctx.connectionId);
     acknowledgeRetryAmplificationFinding(state, finding);
     this.retryAmplificationAttributed.delete(ctx.connectionId);
 

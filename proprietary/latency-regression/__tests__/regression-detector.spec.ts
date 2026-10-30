@@ -403,6 +403,31 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(sim.detector.isDegraded()).toBe(false);
   });
 
+  it('forgets an earlier recovery when a new regression is flagged', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    const step = (getP99: number, hmgetP99: number) => {
+      sim.addSample(getP99, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(hmgetP99, '8.1.0');
+    };
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(2500, 1000);
+    step(1000, 1000);
+    expect(sim.detector.isDegraded()).toBe(false);
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(1000, 2500);
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    sim.callsPerMin.set('hmget', 0);
+    step(1000, 2500);
+
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
   it('drops a flagged command from the verdict once it loses eligibility', () => {
     const sim = new Sim();
     sim.callsPerMin.set('get', 120);
