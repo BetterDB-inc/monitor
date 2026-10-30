@@ -70,6 +70,8 @@ import {
   ResyncEscalationState,
   backlogCoverageRecovered,
   backlogCoverageSec,
+  resyncEventReplica,
+  resyncSettled,
   createBacklogCoverageState,
   createResyncEscalationState,
   observeResyncEscalation,
@@ -152,9 +154,12 @@ import { detectLaggingPromotion, ReplPeer } from './lagging-promotion-detector';
 import { detectHostnameStaleness, hostnameStalenessSignature } from './hostname-staleness-detector';
 import {
   detectReplicaSlotState,
+  replicaSlotEventId,
+  replicaSlotEventSignature,
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
+import { SUSTAINED_DEGRADATION_MESSAGE } from '../latency-regression/regression-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
@@ -288,6 +293,21 @@ interface ConnectionPersistenceState {
   // Latch so a persisting error status fires once, re-armed by a later ok.
   rdbErrorReported?: boolean;
   aofErrorReported?: boolean;
+}
+
+const ADOPTED_METRICS: MetricType[] = [
+  MetricType.CLIENT_SATURATION,
+  MetricType.BACKLOG_COVERAGE_RISK,
+  MetricType.RESYNC_ESCALATION,
+  MetricType.RESHARD_SHARD_SKEW,
+  MetricType.REPLICA_SLOT_STATE,
+  MetricType.RAFT_HEALTH,
+];
+
+interface TrackedResyncEvent {
+  id: string;
+  addr: string | null;
+  since: number;
 }
 
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
@@ -466,12 +486,14 @@ export class AnomalyService
   private backlogCoverageEventIds = new Map<string, string>();
   private staleBacklogEventIds = new Map<string, string[]>();
   private openEventsAdopted = new Set<string>();
+  private adoptedReshardEventIds = new Map<string, string>();
+  private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
-  private removedConnectionEvents = new Set<string>();
+  private eventsToClose = new Set<string>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
@@ -811,6 +833,8 @@ export class AnomalyService
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
     this.openEventsAdopted.delete(connectionId);
+    this.adoptedReshardEventIds.delete(connectionId);
+    this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
     this.clientSaturationEventIds.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
@@ -1739,7 +1763,7 @@ export class AnomalyService
     timestamp: number,
   ): Promise<void> {
     await this.adoptOpenEvents(ctx);
-    await this.resolveRemovedConnectionEvents();
+    await this.resolveEventsToClose();
 
     const connected = this.parseNumber(info.connected_clients);
     const maxClients = this.parseNumber(info.maxclients);
@@ -1813,28 +1837,93 @@ export class AnomalyService
     else eventIds.delete(connectionId);
   }
 
+  private reclaimRemovedConnection(connectionId: string): boolean {
+    if (!this.connectionRegistry.getConfig(connectionId)) return false;
+    this.removedConnectionSweeps.delete(connectionId);
+    return true;
+  }
+
   private async adoptOpenEvents(ctx: ConnectionContext): Promise<void> {
-    if (this.openEventsAdopted.has(ctx.connectionId)) return;
-    this.removedConnectionSweeps.delete(ctx.connectionId);
+    const { connectionId } = ctx;
+    if (this.openEventsAdopted.has(connectionId)) return;
+    if (!this.reclaimRemovedConnection(connectionId)) return;
     try {
-      const saturation = await this.readOpenEvents(ctx.connectionId, MetricType.CLIENT_SATURATION);
-      const backlog = await this.readOpenEvents(ctx.connectionId, MetricType.BACKLOG_COVERAGE_RISK);
-      const tracked = this.clientSaturationEventIds.get(ctx.connectionId) ?? [];
-      const untracked = saturation.map((e) => e.id).filter((id) => !tracked.includes(id));
-      if (untracked.length > 0) {
-        this.clientSaturationEventIds.set(ctx.connectionId, [...tracked, ...untracked]);
+      const open = new Map<MetricType, StoredAnomalyEvent[]>();
+      for (const metricType of ADOPTED_METRICS) {
+        open.set(metricType, await this.readOpenEvents(connectionId, metricType));
       }
-      const current = this.backlogCoverageEventIds.get(ctx.connectionId);
-      const stale = backlog.map((e) => e.id).filter((id) => id !== current);
-      if (stale.length > 0) this.staleBacklogEventIds.set(ctx.connectionId, stale);
-      this.openEventsAdopted.add(ctx.connectionId);
+      if (!this.connectionRegistry.getConfig(connectionId)) return;
+      const rows = (metricType: MetricType) => open.get(metricType) ?? [];
+
+      const tracked = this.clientSaturationEventIds.get(connectionId) ?? [];
+      const untracked = rows(MetricType.CLIENT_SATURATION)
+        .map((e) => e.id)
+        .filter((id) => !tracked.includes(id));
+      if (untracked.length > 0) {
+        this.clientSaturationEventIds.set(connectionId, [...tracked, ...untracked]);
+      }
+
+      const current = this.backlogCoverageEventIds.get(connectionId);
+      const stale = rows(MetricType.BACKLOG_COVERAGE_RISK)
+        .map((e) => e.id)
+        .filter((id) => id !== current);
+      if (stale.length > 0) this.staleBacklogEventIds.set(connectionId, stale);
+
+      this.adoptResyncEvents(connectionId, rows(MetricType.RESYNC_ESCALATION));
+      this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
+      this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
+      if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
+        this.raftLeaderlessActive.set(connectionId, true);
+      }
+      this.openEventsAdopted.add(connectionId);
     } catch (err) {
       this.logger.warn(
-        `Failed to read open saturation and backlog events for ${ctx.connectionName}: ${
+        `Failed to read open events for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
     }
+  }
+
+  private adoptResyncEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const tracked = this.resyncEscalationEvents.get(connectionId) ?? [];
+    const untracked = open
+      .filter((e) => !tracked.some((t) => t.id === e.id))
+      .map((e) => ({ id: e.id, addr: resyncEventReplica(e.message), since: e.timestamp }));
+    if (untracked.length > 0) {
+      this.resyncEscalationEvents.set(connectionId, [...tracked, ...untracked]);
+    }
+  }
+
+  private adoptReshardEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const [newest, ...older] = [...open].sort((a, b) => b.timestamp - a.timestamp);
+    if (newest) this.adoptedReshardEventIds.set(connectionId, newest.id);
+    for (const event of older) this.eventsToClose.add(event.id);
+  }
+
+  private claimAdoptedReshardEvent(connectionId: string, shardId: string): void {
+    const id = this.adoptedReshardEventIds.get(connectionId);
+    if (!id) return;
+    this.adoptedReshardEventIds.delete(connectionId);
+    const eventIds = this.reshardSkewEventIds.get(connectionId) ?? new Map<string, string>();
+    const signature = reshardSkewSignature({ shardId });
+    if (eventIds.has(signature)) this.eventsToClose.add(id);
+    else eventIds.set(signature, id);
+    this.reshardSkewEventIds.set(connectionId, eventIds);
+  }
+
+  private adoptReplicaSlotEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const eventIds = this.replicaSlotEventIds.get(connectionId) ?? new Map<string, string>();
+    for (const event of [...open].sort((a, b) => a.timestamp - b.timestamp)) {
+      const signature = replicaSlotEventSignature(event.id, connectionId);
+      const previous = signature === null ? undefined : eventIds.get(signature);
+      if (signature === null) this.eventsToClose.add(event.id);
+      else if (previous !== event.id) {
+        if (previous) this.eventsToClose.add(previous);
+        eventIds.set(signature, event.id);
+      }
+    }
+    if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
   }
 
   /**
@@ -4514,6 +4603,7 @@ export class AnomalyService
     try {
       const self = nodes.find((n) => n.flags.includes('myself'));
       const clusterKey = clusterKeyFromNodes(nodes);
+      if (self) this.claimAdoptedReshardEvent(ctx.connectionId, self.id);
       const findings: ReshardSkewFinding[] = [];
       if (self?.flags.includes('master')) {
         const finding = await this.evaluateOwnReshardSkew(
@@ -4535,7 +4625,7 @@ export class AnomalyService
         ctx,
         timestamp,
         findings,
-        signatureOf: reshardSkewSignature,
+        signatureOf: (finding) => reshardSkewSignature(finding),
         firstSeenByConn: this.reshardSkewFirstSeen,
         activeByConn: this.activeReshardSkews,
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * this.getIntervalMs(),
@@ -5270,7 +5360,7 @@ export class AnomalyService
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
         buildEvent: (a, signature) => ({
-          id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
+          id: replicaSlotEventId(ctx.connectionId, signature, timestamp),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
@@ -5860,6 +5950,12 @@ export class AnomalyService
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
         const quietAt = signal.since + POINT_IN_TIME_QUIET_MS;
         if (signal.until !== null && signal.until <= quietAt) return null;
+        if (
+          !this.buffers.has(signal.connectionId) ||
+          !signal.message.startsWith(SUSTAINED_DEGRADATION_MESSAGE)
+        ) {
+          return undefined;
+        }
         return signal.now < quietAt ? undefined : quietAt;
       }
       return !buffer && RESOLVER_BACKED_METRICS.has(signal.metricType) ? null : undefined;
@@ -6065,7 +6161,10 @@ export class AnomalyService
     limit = 50,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
-    const from = Math.max(startTime ?? now - 24 * 60 * 60_000, now - MAX_INCIDENT_LOOKBACK_MS);
+    const from = Math.max(
+      startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
+      now - MAX_INCIDENT_LOOKBACK_MS,
+    );
     const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
@@ -6629,6 +6728,7 @@ export class AnomalyService
     if (backlogCoverageRecovered(coverageSec)) {
       await this.settleEvents(this.staleBacklogEventIds, ctx.connectionId);
     }
+    await this.settleResyncEvents(sample, ctx.connectionId);
 
     if (sample.role !== 'primary') {
       this.resyncEscalation.delete(ctx.connectionId);
@@ -6642,8 +6742,32 @@ export class AnomalyService
     const state = this.resyncEscalation.get(ctx.connectionId) ?? createResyncEscalationState();
     this.resyncEscalation.set(ctx.connectionId, state);
     for (const escalation of observeResyncEscalation(state, sample, counters, coverageSec)) {
-      await this.addAnomaly(this.buildResyncEscalationEvent(ctx, sample, escalation), ctx);
+      const event = this.buildResyncEscalationEvent(ctx, sample, escalation);
+      await this.addAnomaly(event, ctx);
+      this.resyncEscalationEvents.set(ctx.connectionId, [
+        ...(this.resyncEscalationEvents.get(ctx.connectionId) ?? []),
+        { id: event.id, addr: escalation.addr, since: event.timestamp },
+      ]);
     }
+  }
+
+  private async settleResyncEvents(
+    sample: ReplicationStreamSample,
+    connectionId: string,
+  ): Promise<void> {
+    const tracked = this.resyncEscalationEvents.get(connectionId);
+    if (!tracked) return;
+    const pending: TrackedResyncEvent[] = [];
+    for (const event of tracked) {
+      if (
+        !resyncSettled(sample, event.addr, event.since) ||
+        (await this.resolveAnomalyOutcome(event.id)) === 'retry'
+      ) {
+        pending.push(event);
+      }
+    }
+    if (pending.length > 0) this.resyncEscalationEvents.set(connectionId, pending);
+    else this.resyncEscalationEvents.delete(connectionId);
   }
 
   private async emitBacklogCoverageRisk(
@@ -6720,9 +6844,12 @@ export class AnomalyService
       stdDev: 0,
       zScore: 0,
       threshold: 0,
-      message:
-        `Replica ${escalation.addr} came back after ${seconds.toFixed(0)}s and could not resume ` +
-        `from the backlog (${counters}; backlog coverage at disconnect ${coverage}).`,
+      message: escalation.syncState
+        ? `Replica ${escalation.addr} could not resume from the backlog and is in a full resync ` +
+          `(state ${escalation.syncState}, ${seconds.toFixed(0)}s after it disconnected; ` +
+          `backlog coverage at disconnect ${coverage}).`
+        : `Replica ${escalation.addr} came back after ${seconds.toFixed(0)}s and could not resume ` +
+          `from the backlog (${counters}; backlog coverage at disconnect ${coverage}).`,
       resolved: false,
       connectionId: ctx.connectionId,
     };
@@ -6734,9 +6861,9 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
-    this.removedConnectionSweeps.delete(ctx.connectionId);
+    this.reclaimRemovedConnection(ctx.connectionId);
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
-    await this.resolveRemovedConnectionEvents();
+    await this.resolveEventsToClose();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
     if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
@@ -6908,7 +7035,7 @@ export class AnomalyService
           open.push(...(await this.readOpenEvents(connectionId, metricType)));
         }
         if (!this.removedConnectionSweeps.delete(connectionId)) continue;
-        for (const event of open) this.removedConnectionEvents.add(event.id);
+        for (const event of open) this.eventsToClose.add(event.id);
       } catch (err) {
         this.logger.warn(
           `Failed to read open events of removed connection ${connectionId}: ${
@@ -6919,10 +7046,10 @@ export class AnomalyService
     }
   }
 
-  private async resolveRemovedConnectionEvents(): Promise<void> {
+  private async resolveEventsToClose(): Promise<void> {
     await this.sweepRemovedConnections();
-    for (const id of this.removedConnectionEvents) {
-      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedConnectionEvents.delete(id);
+    for (const id of this.eventsToClose) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.eventsToClose.delete(id);
     }
   }
 
@@ -6933,6 +7060,10 @@ export class AnomalyService
       ...(this.clientSaturationEventIds.get(connectionId) ?? []),
       ...(backlogEventId ? [backlogEventId] : []),
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
+      ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
+      ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
+      this.adoptedReshardEventIds.get(connectionId),
+      ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
       ...[...(state?.replicas.values() ?? [])].flatMap((r) => [r.eventId, ...r.unsavedEventIds]),
       ...(this.divergenceSuperseded.get(connectionId) ?? []),
       ...[...(this.divergenceOrphans.get(connectionId)?.values() ?? [])].flatMap((o) => [
@@ -6940,16 +7071,13 @@ export class AnomalyService
       ]),
     ];
     for (const id of ids) {
-      if (id) this.removedConnectionEvents.add(id);
+      if (id) this.eventsToClose.add(id);
     }
-    const unswept = [
+    this.removedConnectionSweeps.set(connectionId, [
       ...(this.divergenceOrphansSwept.has(connectionId) ? [] : [MetricType.REPLICATION_DIVERGENCE]),
-      ...(this.openEventsAdopted.has(connectionId)
-        ? []
-        : [MetricType.CLIENT_SATURATION, MetricType.BACKLOG_COVERAGE_RISK]),
-    ];
-    if (unswept.length > 0) this.removedConnectionSweeps.set(connectionId, unswept);
-    this.resolveRemovedConnectionEvents().catch((err) => {
+      ...(this.openEventsAdopted.has(connectionId) ? [MetricType.RAFT_HEALTH] : ADOPTED_METRICS),
+    ]);
+    this.resolveEventsToClose().catch((err) => {
       this.logger.error('Failed to resolve events of a removed connection', err);
     });
   }

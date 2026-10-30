@@ -120,6 +120,6 @@ export function evaluateReshardSkew(
   };
 }
 
-export function reshardSkewSignature(finding: ReshardSkewFinding): string {
+export function reshardSkewSignature(finding: Pick<ReshardSkewFinding, 'shardId'>): string {
   return `reshard_skew:${finding.shardId}`;
 }

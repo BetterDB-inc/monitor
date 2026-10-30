@@ -119,6 +119,54 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidents.map((i) => i.startedAt)).toEqual([T0, T0 + MIN]);
     });
 
+    it('keeps a late event inside the incident whose stored start follows it', () => {
+      const late = event({ timestamp: T0 - 10_000 });
+      const start = event({ timestamp: T0 });
+      const stored = boundary(T0, start.id);
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [late, start],
+        T0 + MIN,
+        neverRecovers,
+        [stored],
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].startedAt).toBe(T0);
+      expect(incidents[0].incidentId).toBe(incidentIdFor('conn-a', start.id, T0));
+      expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual([late.id, start.id]);
+    });
+
+    it('keeps an earlier incident apart when a quiet gap precedes the stored start', () => {
+      const earlier = event({ timestamp: T0 - 10 * MIN });
+      const start = event({ timestamp: T0 });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [earlier, start],
+        T0 + MIN,
+        neverRecovers,
+        [boundary(T0, start.id)],
+      );
+
+      expect(incidents.map((i) => i.startedAt)).toEqual([T0 - 10 * MIN, T0]);
+      expect(incidents[1].incidentId).toBe(incidentIdFor('conn-a', start.id, T0));
+      expect(incidents[0].incidentId).toBe(incidentIdFor('conn-a', earlier.id, T0 - 10 * MIN));
+    });
+
+    it('keeps an incident at the span cap apart from the stored start after it', () => {
+      const chain = Array.from({ length: 31 }, (_, i) => event({ timestamp: T0 + i * MIN }));
+      const start = event({ timestamp: T0 + 31 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [...chain, start],
+        T0 + 32 * MIN,
+        neverRecovers,
+        [boundary(T0 + 31 * MIN, start.id)],
+      );
+
+      expect(incidents[incidents.length - 1].entries.map((e) => e.anomalyId)).toEqual([start.id]);
+    });
+
     it('does not reuse a boundary id after a quiet gap', () => {
       const head = event({ timestamp: T0 });
       const tail = event({ timestamp: T0 + 10 * MIN });

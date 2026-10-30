@@ -3720,6 +3720,10 @@ describe('AnomalyService', () => {
       service.getRecentEvents().filter((e) => e.metricType === MetricType.CLIENT_SATURATION);
 
     describe('rows left open by an earlier run', () => {
+      beforeEach(() => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+      });
+
       const openRows = (rows: Record<string, string[]>) =>
         storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
           offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
@@ -6999,7 +7003,7 @@ describe('AnomalyService', () => {
           AnomalyService,
           {
             provide: ConnectionRegistry,
-            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn() },
+            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn(), getConfig: jest.fn() },
           },
           { provide: 'STORAGE_CLIENT', useValue: storage },
           {
@@ -7313,10 +7317,51 @@ describe('AnomalyService', () => {
       );
     });
 
-    it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
+    it('reports a quiet upgrade regression as unknown because nothing can re-fire it', async () => {
+      const now = Date.now();
+      (service as any).buffers.set('conn-1', new Map());
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          message: 'P99 latency regression after upgrade 8.0.0 -> 9.0.0: GET 2x.',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          unknownSignals: [MetricType.COMMAND_P99],
+        }),
+      );
+    });
+
+    it('reports a quiet regression as unknown once its connection is gone', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
-        anomaly({ timestamp: now - 40 * MIN, metricType: MetricType.COMMAND_P99 }),
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          message: 'Sustained P99 latency degradation: GET 2x.',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery.status).toBe('unknown');
+    });
+
+    it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
+      const now = Date.now();
+      (service as any).buffers.set('conn-1', new Map());
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          message: 'Sustained P99 latency degradation: GET 2x.',
+        }),
         anomaly({
           timestamp: now - 40 * MIN,
           metricType: MetricType.RAFT_HEALTH,
@@ -7382,6 +7427,17 @@ describe('AnomalyService', () => {
       const incidents = await service.getIncidentTimelines('conn-1');
 
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('anchors the default window on endTime', async () => {
+      const end = Date.now() - 3 * 24 * 60 * MIN;
+      storage.getAnomalyEvents.mockResolvedValue([
+        { ...anomaly({ timestamp: end - 60 * MIN }), id: 'then' },
+      ]);
+
+      const incidents = await service.getIncidentTimelines('conn-1', undefined, end);
+
+      expect(incidents.map((i) => i.entries[0].anomalyId)).toEqual(['then']);
     });
 
     it('widens the history read back to a stored start before the window', async () => {
@@ -7836,6 +7892,7 @@ describe('AnomalyService', () => {
             MetricType.REPLICATION_DIVERGENCE,
             MetricType.BACKLOG_COVERAGE_RISK,
             MetricType.CLIENT_SATURATION,
+            MetricType.RESYNC_ESCALATION,
           ].sort(),
         );
         for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
@@ -7868,14 +7925,22 @@ describe('AnomalyService', () => {
       });
 
       it('leaves a point-in-time signal unknown until its cooldown has passed', () => {
-        const p99 = { connectionId: 'gone', metricType: MetricType.COMMAND_P99 };
+        (service as any).buffers.set('conn-1', new Map());
+        const p99 = {
+          metricType: MetricType.COMMAND_P99,
+          message: 'Sustained P99 latency degradation: GET 2x.',
+        };
 
         expect(probe()(signal({ ...p99, now: T + 15 * MIN }))).toBeUndefined();
         expect(probe()(signal({ ...p99, now: T + 31 * MIN - 1 }))).toBeUndefined();
       });
 
       it('recovers a point-in-time signal once the cooldown passes without a re-fire', () => {
-        const p99 = { connectionId: 'gone', metricType: MetricType.COMMAND_P99 };
+        (service as any).buffers.set('conn-1', new Map());
+        const p99 = {
+          metricType: MetricType.COMMAND_P99,
+          message: 'Sustained P99 latency degradation: GET 2x.',
+        };
 
         expect(probe()(signal({ ...p99, now: T + 31 * MIN }))).toBe(T + 31 * MIN);
         expect(probe()(signal({ ...p99, until: T + 40 * MIN, now: T + 41 * MIN }))).toBe(
@@ -8247,6 +8312,7 @@ describe('AnomalyService', () => {
     async function pollPrimary(stats: {
       bytes: number;
       replica?: boolean;
+      replicaState?: string;
       syncFull?: number;
       histlen?: number;
     }): Promise<void> {
@@ -8260,7 +8326,9 @@ describe('AnomalyService', () => {
           master_repl_offset: String(offset),
           repl_backlog_histlen: String(stats.histlen ?? 1_000_000),
           connected_slaves: stats.replica === false ? '0' : '1',
-          ...(stats.replica === false ? {} : { slave0: REPLICA }),
+          ...(stats.replica === false
+            ? {}
+            : { slave0: REPLICA.replace('online', stats.replicaState ?? 'online') }),
         },
         clients: { connected_clients: '10', blocked_clients: '0' },
         memory: { used_memory: '1000000' },
@@ -8318,6 +8386,10 @@ describe('AnomalyService', () => {
     });
 
     describe('rows left open by an earlier run', () => {
+      beforeEach(() => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+      });
+
       const openBacklogRows = (...ids: string[]) =>
         storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
           metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
@@ -8365,6 +8437,7 @@ describe('AnomalyService', () => {
     });
 
     it('does not hold the current event as stale after a failed read', async () => {
+      (service as any).connectionRegistry.getConfig.mockReturnValue({});
       storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
       for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
       const [raised] = events(MetricType.BACKLOG_COVERAGE_RISK);
@@ -8375,6 +8448,69 @@ describe('AnomalyService', () => {
       for (let i = 0; i < 40; i += 1) await pollPrimary({ bytes: 2000 });
 
       expect(storage.resolveAnomaly.mock.calls.map(([id]) => id)).toEqual([raised.id]);
+    });
+
+    describe('resync escalation resolution', () => {
+      const resyncs = () => events(MetricType.RESYNC_ESCALATION);
+
+      it('names the sync state and resolves when the replica is online', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replicaState: 'wait_bgsave' });
+
+        expect(resyncs()).toHaveLength(1);
+        expect(resyncs()[0].message).toContain('wait_bgsave');
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000 });
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('resolves an escalation raised at online on the next poll', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replica: false });
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replicaState: 'wait_bgsave' });
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000 });
+
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('adopts a row left open by an earlier run', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [
+                {
+                  id: 'old-1',
+                  timestamp: clock,
+                  message: 'Replica 10.0.0.2:6379 came back after 5s and could not resume',
+                },
+              ]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+        await pollPrimary({ bytes: 2000 });
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      });
     });
 
     it('keeps a superseded event whose resolve failed until coverage recovers', async () => {
@@ -9143,6 +9279,10 @@ describe('AnomalyService', () => {
         });
 
         describe('saturation and backlog rows', () => {
+          beforeEach(() => {
+            (service as any).connectionRegistry.getConfig.mockReturnValue({});
+          });
+
           const openRows = (rows: Record<string, string[]>) =>
             storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
               offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
@@ -9195,7 +9335,8 @@ describe('AnomalyService', () => {
               storage.getAnomalyEvents.mock.calls.filter(
                 ([opts]) =>
                   opts.connectionId === 'conn-9' &&
-                  opts.metricType !== MetricType.REPLICATION_DIVERGENCE,
+                  opts.metricType !== MetricType.REPLICATION_DIVERGENCE &&
+                  opts.metricType !== MetricType.RAFT_HEALTH,
               ).length;
             const reads = adoptionReads();
 
@@ -9204,6 +9345,151 @@ describe('AnomalyService', () => {
 
             expect(resolvedIds()).toEqual(expect.arrayContaining(['backlog-1', 'sat-1']));
             expect(adoptionReads()).toBe(reads);
+          });
+
+          describe('every resolver-backed metric', () => {
+            const row = (id: string, timestamp = T0) => ({ id, timestamp, message: 'msg' });
+            const slotId = (signature: string, at: number) =>
+              `conn-9-replica-slot-state-${signature}-${at}`;
+            const ctx = { ...mockCtx, connectionId: 'conn-9' };
+            const adopt = () => (service as any).adoptOpenEvents(ctx);
+            const rowsBy = (byMetric: Record<string, unknown[]>) =>
+              storage.getAnomalyEvents.mockImplementation(
+                async ({ metricType, offset }) => (offset ? [] : (byMetric[metricType] ?? [])),
+              );
+            const gate = (signature: string | null, eventIdsByConn: unknown) =>
+              (service as any).applyTopologyPersistenceGate({
+                ctx,
+                timestamp: T0,
+                findings: signature ? [signature] : [],
+                signatureOf: (s: string) => s,
+                firstSeenByConn: new Map(),
+                activeByConn: new Map(),
+                minPersistMs: 0,
+                eventIdsByConn,
+                buildEvent: () => {
+                  throw new Error('duplicate event');
+                },
+              });
+
+            it('tracks a replica slot row under its signature until it clears', async () => {
+              rowsBy({
+                [MetricType.REPLICA_SLOT_STATE]: [row(slotId('abc|stale|1,2', T0))],
+              });
+              await adopt();
+              const ids = (service as any).replicaSlotEventIds;
+
+              storage.getAnomalyEvents.mockResolvedValue([row(slotId('abc|stale|1,2', T0))]);
+              await gate('abc|stale|1,2', ids);
+              expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+              await gate(null, ids);
+              expect(resolvedIds()).toEqual([slotId('abc|stale|1,2', T0)]);
+            });
+
+            it('closes an older duplicate and a slot row it cannot place', async () => {
+              rowsBy({
+                [MetricType.REPLICA_SLOT_STATE]: [
+                  row(slotId('abc|stale|1', T0 + 1), T0 + 1),
+                  row(slotId('abc|stale|1', T0), T0),
+                  row('not-a-slot-id'),
+                ],
+              });
+              await adopt();
+              await (service as any).resolveEventsToClose();
+
+              expect(resolvedIds()).toEqual([slotId('abc|stale|1', T0), 'not-a-slot-id'].sort());
+            });
+
+            it('does not raise a second reshard event for a row left open', async () => {
+              rowsBy({
+                [MetricType.RESHARD_SHARD_SKEW]: [row('old-new', T0 + 1), row('old-old', T0)],
+              });
+              await adopt();
+              await (service as any).resolveEventsToClose();
+              expect(resolvedIds()).toEqual(['old-old']);
+
+              (service as any).claimAdoptedReshardEvent('conn-9', 'shard-a');
+              storage.getAnomalyEvents.mockResolvedValue([row('old-new', T0 + 1)]);
+              const ids = (service as any).reshardSkewEventIds;
+              await gate('reshard_skew:shard-a', ids);
+              expect(resolvedIds()).toEqual(['old-old']);
+
+              await gate(null, ids);
+              expect(resolvedIds()).toEqual(['old-new', 'old-old']);
+            });
+
+            it('closes a row adopted for a shard that already tracks an event', async () => {
+              (service as any).reshardSkewEventIds.set(
+                'conn-9',
+                new Map([['reshard_skew:shard-a', 'live-1']]),
+              );
+              (service as any).adoptedReshardEventIds.set('conn-9', 'old-1');
+
+              (service as any).claimAdoptedReshardEvent('conn-9', 'shard-a');
+              await (service as any).resolveEventsToClose();
+
+              expect(resolvedIds()).toEqual(['old-1']);
+              expect((service as any).reshardSkewEventIds.get('conn-9').size).toBe(1);
+            });
+
+            it('adopts nothing when the connection is removed during the read', async () => {
+              rowsBy({ [MetricType.CLIENT_SATURATION]: [row('sat-1')] });
+              (service as any).connectionRegistry.getConfig
+                .mockReturnValueOnce({})
+                .mockReturnValue(undefined);
+
+              await adopt();
+
+              expect((service as any).openEventsAdopted.size).toBe(0);
+              expect((service as any).clientSaturationEventIds.size).toBe(0);
+            });
+
+            it('marks a raft outage left open so a healthy poll resolves it', async () => {
+              rowsBy({
+                [MetricType.RAFT_HEALTH]: [{ ...row('raft-1'), severity: AnomalySeverity.CRITICAL }],
+              });
+
+              await adopt();
+
+              expect((service as any).raftLeaderlessActive.get('conn-9')).toBe(true);
+            });
+
+            it('leaves the raft flag alone for a warning row', async () => {
+              rowsBy({
+                [MetricType.RAFT_HEALTH]: [{ ...row('raft-1'), severity: AnomalySeverity.WARNING }],
+              });
+
+              await adopt();
+
+              expect((service as any).raftLeaderlessActive.get('conn-9')).toBeUndefined();
+            });
+
+            it('closes every tracked row on removal', async () => {
+              (service as any).reshardSkewEventIds.set('conn-9', new Map([['a', 'reshard-1']]));
+              (service as any).replicaSlotEventIds.set('conn-9', new Map([['b', 'slot-1']]));
+              (service as any).adoptedReshardEventIds.set('conn-9', 'reshard-2');
+              (service as any).resyncEscalationEvents.set('conn-9', [
+                { id: 'resync-1', addr: 'a:1', since: T0 },
+              ]);
+
+              (service as any).onConnectionRemoved('conn-9');
+              await flush();
+
+              expect(resolvedIds()).toEqual(
+                expect.arrayContaining(['reshard-1', 'reshard-2', 'resync-1', 'slot-1']),
+              );
+            });
+
+            it('sweeps raft rows of a removed connection even after adoption', async () => {
+              await adopt();
+              rowsBy({ [MetricType.RAFT_HEALTH]: [row('raft-1')] });
+
+              (service as any).onConnectionRemoved('conn-9');
+              await flush();
+
+              expect(resolvedIds()).toEqual(['raft-1']);
+            });
           });
 
           it('leaves them to the connection when it comes back', async () => {
@@ -9219,7 +9505,21 @@ describe('AnomalyService', () => {
           });
         });
 
+        it('does not let a poll in flight during removal cancel the sweep', async () => {
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          storage.getAnomalyEvents.mockResolvedValue([{ id: 'old-1' }]);
+          await (service as any).detectClientSaturation({}, mockCtx, T0);
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect((service as any).openEventsAdopted.size).toBe(0);
+        });
+
         it('leaves the rows to the connection when it comes back', async () => {
+          (service as any).connectionRegistry.getConfig.mockReturnValue({});
           storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
           (service as any).onConnectionRemoved('conn-1');
           await flush();
@@ -9238,14 +9538,14 @@ describe('AnomalyService', () => {
 
         (service as any).onConnectionRemoved('conn-1');
         await new Promise((resolve) => setImmediate(resolve));
-        expect((service as any).removedConnectionEvents.has(eventId)).toBe(true);
+        expect((service as any).eventsToClose.has(eventId)).toBe(true);
 
         await (service as any).detectReplicationDivergence(sample(T0 + 600_000, 0), {
           ...mockCtx,
           connectionId: 'conn-2',
         });
 
-        expect((service as any).removedConnectionEvents.size).toBe(0);
+        expect((service as any).eventsToClose.size).toBe(0);
       });
     });
 
@@ -9420,7 +9720,7 @@ describe('AnomalyService', () => {
         });
 
         expect(attempt.resolved).toBe(true);
-        expect((service as any).removedConnectionEvents.size).toBe(0);
+        expect((service as any).eventsToClose.size).toBe(0);
       });
 
       it('keeps a retried event in its correlated group', async () => {

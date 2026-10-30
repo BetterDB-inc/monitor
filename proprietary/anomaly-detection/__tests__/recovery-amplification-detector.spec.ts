@@ -8,6 +8,8 @@ import {
   createBacklogCoverageState,
   createResyncEscalationState,
   observeResyncEscalation,
+  resyncEventReplica,
+  resyncSettled,
   stepBacklogCoverage,
 } from '../recovery-amplification-detector';
 import { getSequenceRules } from '../sequence-rules';
@@ -129,6 +131,7 @@ describe('observeResyncEscalation', () => {
       coverageSec: 40,
       fullSyncs: 1,
       partialSyncErrors: 0,
+      syncState: null,
     });
     expect(observeResyncEscalation(state, back(T0 + 32_000), counters(2), 40)).toEqual([]);
   });
@@ -166,9 +169,152 @@ describe('observeResyncEscalation', () => {
       timestamp: T0 + 1000,
       replicas: [{ ...sample().replicas[0], state: 'send_bulk' }],
     });
-    observeResyncEscalation(state, syncing, counters(1), 40);
 
-    expect(observeResyncEscalation(state, back(T0 + 2000), counters(1), 40)).toHaveLength(1);
+    expect(observeResyncEscalation(state, syncing, counters(1), 40)).toHaveLength(1);
+    expect(observeResyncEscalation(state, back(T0 + 2000), counters(1), 40)).toEqual([]);
+  });
+
+  describe('while the replica is syncing', () => {
+    const REPLICA_A = '10.0.0.2:6379';
+    const REPLICA_B = '10.0.0.3:6379';
+    const line = (addr: string, state: string) => ({
+      ...sample().replicas[0],
+      addr,
+      state,
+    });
+    const at = (timestamp: number, ...replicas: ReplicationStreamSample['replicas']) =>
+      sample({ timestamp, replicas });
+
+    it.each(['wait_bgsave', 'send_bulk'])('emits when the replica enters %s', (syncState) => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, back(T0), counters(), 40);
+      observeResyncEscalation(state, gone(T0 + 1000), counters(), null);
+
+      const [escalation] = observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_A, syncState)),
+        counters(),
+        null,
+      );
+
+      expect(escalation).toMatchObject({
+        addr: REPLICA_A,
+        syncState,
+        disconnectedForMs: 2000,
+        coverageSec: 40,
+      });
+    });
+
+    it('reports a resync that outlasts the escalation window', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, back(T0), counters(), 40);
+      observeResyncEscalation(state, gone(T0 + 1000), counters(), null);
+      const syncing = at(T0 + 2000, line(REPLICA_A, 'send_bulk'));
+
+      expect(observeResyncEscalation(state, syncing, counters(1), null)).toHaveLength(1);
+
+      const late = at(T0 + 2 * RESYNC_ESCALATION_WINDOW_MS, line(REPLICA_A, 'send_bulk'));
+      expect(observeResyncEscalation(state, late, counters(1), null)).toEqual([]);
+    });
+
+    it('precedes the cost of serving the resync', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, back(T0), counters(), 40);
+      const syncing = at(T0 + 1000, line(REPLICA_A, 'wait_bgsave'));
+      const [{ addr }] = observeResyncEscalation(state, syncing, counters(1), null);
+      const rule = getSequenceRules().find(
+        (r) => r.pattern === AnomalyPattern.RECOVERY_AMPLIFICATION,
+      )!;
+      const entries: IncidentTimelineEntry[] = [
+        [MetricType.RESYNC_ESCALATION, syncing.timestamp],
+        [MetricType.FORK_MEMORY_RISK, syncing.timestamp],
+      ].map(([metricType, timestamp]) => ({
+        anomalyId: `${metricType}`,
+        connectionId: addr,
+        timestamp: timestamp as number,
+        metricType: metricType as MetricType,
+        severity: AnomalySeverity.WARNING,
+        message: '',
+        recoveredAt: null,
+      }));
+
+      expect(matchSequence(entries, rule)).toHaveLength(2);
+    });
+
+    it('does not blame a partial resume on the full sync of another replica', () => {
+      const state = createResyncEscalationState();
+      const online = at(T0, line(REPLICA_A, 'online'), line(REPLICA_B, 'online'));
+      observeResyncEscalation(state, online, counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+
+      const b = observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_B, 'wait_bgsave')),
+        counters(1, 0, 1),
+        null,
+      );
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_A, 'online'), line(REPLICA_B, 'send_bulk')),
+        counters(1, 1, 1),
+        null,
+      );
+
+      expect(b.map((e) => e.addr)).toEqual([REPLICA_B]);
+      expect(a).toEqual([]);
+    });
+
+    it('still blames a replica whose own failure moved the counters past that', () => {
+      const state = createResyncEscalationState();
+      const online = at(T0, line(REPLICA_A, 'online'), line(REPLICA_B, 'online'));
+      observeResyncEscalation(state, online, counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+      observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_B, 'wait_bgsave')),
+        counters(1),
+        null,
+      );
+
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_A, 'online'), line(REPLICA_B, 'send_bulk')),
+        counters(2),
+        null,
+      );
+
+      expect(a).toMatchObject([{ addr: REPLICA_A, fullSyncs: 1 }]);
+    });
+  });
+
+  describe('resyncSettled', () => {
+    const line = (state: string) => ({ ...sample().replicas[0], state });
+
+    it('waits for the replica to reach online', () => {
+      expect(
+        resyncSettled(sample({ replicas: [line('send_bulk')] }), '10.0.0.2:6379', T0 - 1),
+      ).toBe(false);
+      expect(resyncSettled(sample({ replicas: [line('online')] }), '10.0.0.2:6379', T0 - 1)).toBe(
+        true,
+      );
+    });
+
+    it('settles a replica that never came back once the window has passed', () => {
+      expect(resyncSettled(sample({ replicas: [] }), '10.0.0.2:6379', T0 - 1)).toBe(false);
+      expect(
+        resyncSettled(
+          sample({ replicas: [] }),
+          '10.0.0.2:6379',
+          T0 - RESYNC_ESCALATION_WINDOW_MS - 1,
+        ),
+      ).toBe(true);
+    });
+
+    it('settles when the node is no longer a primary', () => {
+      expect(
+        resyncSettled(sample({ role: 'replica', replicas: [] }), '10.0.0.2:6379', T0 - 1),
+      ).toBe(true);
+    });
   });
 
   it('forgets a disconnect that outlasts the escalation window', () => {
@@ -221,6 +367,20 @@ describe('recovery amplification rule', () => {
     ];
 
     expect(matchSequence(entries, rule())).toHaveLength(2);
+  });
+
+  it('ignores a cost on another connection', () => {
+    const entries = [
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      { ...entry(MetricType.FORK_MEMORY_RISK, T0 + 60_000), connectionId: 'other-shard' },
+    ];
+
+    expect(matchSequence(entries, rule())).toBeNull();
+  });
+
+  it('reads the replica back from a stored message', () => {
+    expect(resyncEventReplica('Replica 10.0.0.2:6379 came back after 5s')).toBe('10.0.0.2:6379');
+    expect(resyncEventReplica('nothing useful')).toBeNull();
   });
 
   it('ignores a cost that came before the resync or outside the span', () => {

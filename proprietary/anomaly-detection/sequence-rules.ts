@@ -4,6 +4,7 @@ export interface SequenceRule {
   pattern: AnomalyPattern;
   steps: MetricType[][];
   maxSpanMs: number;
+  sameConnection?: boolean;
   diagnosis: string;
   recommendations: string[];
 }

@@ -10,6 +10,8 @@ export const BACKLOG_COVERAGE_MIN_BYTES_PER_SEC = 1024;
 export const RESYNC_ESCALATION_WINDOW_MS = 5 * 60_000;
 export const RECOVERY_AMPLIFICATION_MAX_SPAN_MS = 10 * 60_000;
 
+const FULL_SYNC_REPLICA_STATES: ReadonlySet<string> = new Set(['wait_bgsave', 'send_bulk']);
+
 export type BacklogCoverageLevel = 'none' | 'warning' | 'critical';
 
 const LEVEL_RANK: Record<BacklogCoverageLevel, number> = { none: 0, warning: 1, critical: 2 };
@@ -80,6 +82,7 @@ interface PendingDisconnect {
   disconnectAt: number;
   coverageSec: number | null;
   counters: SyncCounters;
+  attributedFullSyncs: number;
 }
 
 export interface ResyncEscalationState {
@@ -87,6 +90,7 @@ export interface ResyncEscalationState {
   pending: Map<string, PendingDisconnect>;
   counters: SyncCounters | null;
   coverageSec: number | null;
+  attributedFullSyncs: number;
 }
 
 export interface ResyncEscalation {
@@ -95,10 +99,17 @@ export interface ResyncEscalation {
   coverageSec: number | null;
   fullSyncs: number;
   partialSyncErrors: number;
+  syncState: string | null;
 }
 
 export function createResyncEscalationState(): ResyncEscalationState {
-  return { online: new Set(), pending: new Map(), counters: null, coverageSec: null };
+  return {
+    online: new Set(),
+    pending: new Map(),
+    counters: null,
+    coverageSec: null,
+    attributedFullSyncs: 0,
+  };
 }
 
 function movedSince(before: SyncCounters, after: SyncCounters): SyncCounters {
@@ -124,10 +135,26 @@ export function observeResyncEscalation(
       disconnectAt: sample.timestamp,
       coverageSec: state.coverageSec,
       counters: baseline,
+      attributedFullSyncs: state.attributedFullSyncs,
     });
   }
 
   const escalations: ResyncEscalation[] = [];
+  for (const { addr, state: syncState } of sample.replicas) {
+    const disconnect = state.pending.get(addr);
+    if (!disconnect || !FULL_SYNC_REPLICA_STATES.has(syncState)) continue;
+    state.pending.delete(addr);
+    state.attributedFullSyncs += 1;
+    escalations.push({
+      addr,
+      disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
+      coverageSec: disconnect.coverageSec,
+      fullSyncs: 1,
+      partialSyncErrors: 0,
+      syncState,
+    });
+  }
+
   for (const [addr, disconnect] of state.pending) {
     if (sample.timestamp - disconnect.disconnectAt > RESYNC_ESCALATION_WINDOW_MS) {
       state.pending.delete(addr);
@@ -136,13 +163,17 @@ export function observeResyncEscalation(
     if (!online.has(addr)) continue;
     state.pending.delete(addr);
     const moved = movedSince(disconnect.counters, counters);
-    if (moved.full > 0 || moved.partialErr > 0) {
+    const attributed = state.attributedFullSyncs - disconnect.attributedFullSyncs;
+    const fullSyncs = moved.full - attributed;
+    const partialSyncErrors = moved.partialErr - attributed;
+    if (fullSyncs > 0 || partialSyncErrors > 0) {
       escalations.push({
         addr,
         disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
         coverageSec: disconnect.coverageSec,
-        fullSyncs: moved.full,
-        partialSyncErrors: moved.partialErr,
+        fullSyncs: Math.max(0, fullSyncs),
+        partialSyncErrors: Math.max(0, partialSyncErrors),
+        syncState: null,
       });
     }
   }
@@ -151,6 +182,22 @@ export function observeResyncEscalation(
   state.counters = counters;
   if (coverageSec !== null) state.coverageSec = coverageSec;
   return escalations;
+}
+
+export function resyncSettled(
+  sample: ReplicationStreamSample,
+  addr: string | null,
+  since: number,
+): boolean {
+  if (sample.role !== 'primary') return true;
+  const replica = sample.replicas.find((r) => r.addr === addr);
+  return replica
+    ? replica.state === 'online'
+    : sample.timestamp - since > RESYNC_ESCALATION_WINDOW_MS;
+}
+
+export function resyncEventReplica(message: string): string | null {
+  return /^Replica (\S+) /.exec(message)?.[1] ?? null;
 }
 
 registerSequenceRule({
@@ -166,6 +213,7 @@ registerSequenceRule({
     ],
   ],
   maxSpanMs: RECOVERY_AMPLIFICATION_MAX_SPAN_MS,
+  sameConnection: true,
   diagnosis:
     'A replica disconnect outran the replication backlog and forced a full resync, and the primary then took the fork, memory or output-buffer cost of serving it.',
   recommendations: [

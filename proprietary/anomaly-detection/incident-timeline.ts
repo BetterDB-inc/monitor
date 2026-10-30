@@ -71,6 +71,7 @@ export interface RecoverySignal {
   baseline: number;
   stdDev: number;
   now: number;
+  message: string;
 }
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
@@ -91,6 +92,7 @@ export const RESOLVER_BACKED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.CLIENT_SATURATION,
+  MetricType.RESYNC_ESCALATION,
 ]);
 
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {
@@ -129,6 +131,7 @@ export function matchSequence(
         (e) =>
           !matched.includes(e) &&
           step.includes(e.metricType) &&
+          (!rule.sameConnection || e.connectionId === first.connectionId) &&
           e.timestamp >= previous.timestamp &&
           e.timestamp - first.timestamp <= rule.maxSpanMs,
       );
@@ -254,6 +257,17 @@ export class IncidentTimelineBuilder {
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
       const last = current[current.length - 1];
+      if (
+        first &&
+        !start &&
+        stored?.anomalyId === event.id &&
+        stored !== used &&
+        event.timestamp - last.timestamp <= this.opts.gapMs &&
+        event.timestamp - first.timestamp <= this.opts.maxSpanMs
+      ) {
+        start = stored;
+        used = stored;
+      }
       if (
         first &&
         ((stored !== undefined && stored !== used) ||
@@ -382,6 +396,7 @@ export class IncidentTimelineBuilder {
       baseline: first.baseline,
       stdDev: first.stdDev,
       now,
+      message: event.message,
     });
   }
 
