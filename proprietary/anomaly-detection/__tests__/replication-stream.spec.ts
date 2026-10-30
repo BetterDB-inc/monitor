@@ -127,11 +127,43 @@ describe('ReplicationStreamTracker', () => {
       primaryInfo({
         master_replid: REPLID_B,
         master_replid2: REPLID_A,
+        second_repl_offset: '5001',
         master_repl_offset: '6000',
       }),
       T0 + 1000,
     )!;
     expect(promoted.bytesPerSec).toBe(1000);
+  });
+
+  it('re-baselines when the old history ran past second_repl_offset', () => {
+    const tracker = new ReplicationStreamTracker();
+    tracker.observe('c1', primaryInfo({ master_repl_offset: '5000' }), T0);
+    const promoted = tracker.observe(
+      'c1',
+      primaryInfo({
+        master_replid: REPLID_B,
+        master_replid2: REPLID_A,
+        second_repl_offset: '4001',
+        master_repl_offset: '6000',
+      }),
+      T0 + 1000,
+    )!;
+    expect(promoted.bytesPerSec).toBeNull();
+  });
+
+  it('re-baselines on a replid2 match without second_repl_offset', () => {
+    const tracker = new ReplicationStreamTracker();
+    tracker.observe('c1', primaryInfo({ master_repl_offset: '5000' }), T0);
+    const promoted = tracker.observe(
+      'c1',
+      primaryInfo({
+        master_replid: REPLID_B,
+        master_replid2: REPLID_A,
+        master_repl_offset: '6000',
+      }),
+      T0 + 1000,
+    )!;
+    expect(promoted.bytesPerSec).toBeNull();
   });
 
   it('skips the rate when no time has passed', () => {

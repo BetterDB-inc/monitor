@@ -6247,6 +6247,23 @@ describe('AnomalyService', () => {
       expect(sample!.replicas).toEqual([
         expect.objectContaining({ addr: '10.0.0.2:6379', gapBytes: 1000 }),
       ]);
+
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        replication: {
+          role: 'master',
+          master_replid: 'a'.repeat(40),
+          master_repl_offset: '7000',
+          repl_backlog_histlen: '6144',
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=6500,lag=0',
+        },
+      });
+      await poll();
+
+      const next = service.getReplicationStreamSample('conn-1');
+      expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogHistlen: 6144 });
+      expect(next!.bytesPerSec).not.toBeNull();
+      expect(next!.replicas[0].gapBytes).toBe(500);
     });
   });
 });

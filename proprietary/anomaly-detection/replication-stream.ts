@@ -83,9 +83,14 @@ export class ReplicationStreamTracker {
 
     const replid = info.master_replid || null;
     const prev = this.baselines.get(connectionId);
+    const secondReplOffset = toFiniteNumber(info.second_repl_offset);
     const continuesHistory =
       prev !== undefined &&
-      (prev.replid === replid || (prev.replid !== null && info.master_replid2 === prev.replid));
+      (prev.replid === replid ||
+        (prev.replid !== null &&
+          info.master_replid2 === prev.replid &&
+          secondReplOffset !== null &&
+          prev.offset <= secondReplOffset));
 
     let bytesPerSec: number | null = null;
     let ewma: number | null = null;
