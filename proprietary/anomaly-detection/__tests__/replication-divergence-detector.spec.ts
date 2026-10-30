@@ -173,6 +173,40 @@ describe('observeDivergence', () => {
     expect(divergences(after)).toEqual([]);
   });
 
+  it('does not raise the ceiling on a burst that drains after writes drop', () => {
+    const h = new Harness();
+    const out = h.windows([
+      { gap: 60 * MiB, rate: 10 * MiB },
+      { gap: 40 * MiB, rate: 0.1 * MiB },
+      { gap: 20 * MiB, rate: 0.1 * MiB },
+      { gap: 5 * MiB, rate: 0.1 * MiB },
+      { gap: 0, rate: 0.1 * MiB },
+      { gap: 0, rate: 0.1 * MiB },
+    ]);
+    expect(divergences(out)).toEqual([]);
+  });
+
+  it('does not escalate a steady drain that will clear soon', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+    h.windows([22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })));
+
+    const draining = h.windows([28, 25, 22, 19, 16, 13, 10, 7].map((m) => ({ gap: m * MiB, rate: MiB })));
+    expect(divergences(draining)).toEqual([]);
+  });
+
+  it('keeps an active finding open while the replica ack goes stale', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const stale = h.windows(Array.from({ length: 3 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 })));
+    expect(stale.flat()).toEqual([]);
+    expect(h.state.replicas.get(ADDR)?.level).toBe('warning');
+
+    const gone = h.windows([{ gap: 0, rate: MiB, present: false }, { gap: 0, rate: MiB, present: false }]);
+    expect(gone.flat().map((o) => o.kind)).toEqual(['cleared']);
+  });
+
   it('escalates on gap alone when writes stop and the replica applies nothing', () => {
     const h = new Harness();
     const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 4 * MiB, rate: 0 })));
