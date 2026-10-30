@@ -230,6 +230,7 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const MAX_SEQUENCE_DEDUPE_SEED_ATTEMPTS = 3;
 
 @Injectable()
 export class AnomalyService
@@ -253,6 +254,7 @@ export class AnomalyService
   private liveIncidents: IncidentTimeline[] = [];
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
+  private sequenceDedupeSeedFailures = 0;
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5485,8 +5487,15 @@ export class AnomalyService
     const live = this.recentAnomalies.filter((a) => a.timestamp >= now - windowMs);
     this.liveIncidents = this.incidentTimelineBuilder.build(live, now, this.incidentRecoveryProbe);
     if (!seeded) {
-      this.sequenceDedupeSeed = null;
-      return;
+      this.sequenceDedupeSeedFailures++;
+      if (this.sequenceDedupeSeedFailures < MAX_SEQUENCE_DEDUPE_SEED_ATTEMPTS) {
+        this.sequenceDedupeSeed = null;
+        return;
+      }
+      this.logger.warn(
+        `Sequence group dedupe seed failed ${this.sequenceDedupeSeedFailures} times; emitting without it`,
+      );
+      this.sequenceDedupeSeed = Promise.resolve(true);
     }
 
     for (const [key, at] of this.sequenceGroupedAnomalies) {
