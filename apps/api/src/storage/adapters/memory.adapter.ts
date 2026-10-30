@@ -21,6 +21,7 @@ import {
   StoredBulkDeleteAudit,
   BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
+  AnomalyEventCursor,
   AnomalyQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
@@ -705,8 +706,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
 
+    const direction = options.order === 'asc' ? 1 : -1;
+    const compare = (a: AnomalyEventCursor, b: AnomalyEventCursor) =>
+      direction * (a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const { after } = options;
+    if (after) filtered = filtered.filter((e) => compare(e, after) > 0);
+
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(compare)
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 

@@ -210,6 +210,11 @@ export interface StoredCorrelatedGroup {
   connectionId?: string;
 }
 
+export interface AnomalyEventCursor {
+  timestamp: number;
+  id: string;
+}
+
 export interface AnomalyQueryOptions {
   startTime?: number;
   endTime?: number;
@@ -221,6 +226,8 @@ export interface AnomalyQueryOptions {
   offset?: number;
   connectionId?: string;
   correlationIds?: string[];
+  order?: 'asc' | 'desc';
+  after?: AnomalyEventCursor;
 }
 
 export interface AnomalyStats {

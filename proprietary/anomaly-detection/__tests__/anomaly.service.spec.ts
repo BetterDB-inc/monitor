@@ -7274,8 +7274,10 @@ describe('AnomalyService', () => {
       );
       registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'node-2' }]);
       const t = Date.now() - 30 * MIN;
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-2'
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId, order }: any) =>
+        order === 'asc'
+          ? []
+          : connectionId === 'node-2'
           ? [
               {
                 ...anomaly({ id: 'n2', timestamp: t + 1000, connectionId: 'node-2' }),
@@ -7644,6 +7646,56 @@ describe('AnomalyService', () => {
       });
     });
 
+    it('reads the next firing with one ascending query', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const first = { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' };
+      const later = { ...anomaly({ id: 'later', timestamp: t + 2 * 60 * MIN }), anomalyType: 'spike' };
+      storage.getAnomalyEvents.mockImplementation(async ({ order, startTime, endTime }: any) => {
+        if (order === 'asc') return [later];
+        return startTime <= t && (!endTime || t <= endTime) ? [first] : [];
+      });
+
+      const [listed] = await service.getIncidentTimelines('conn-1', t);
+      storage.getAnomalyEvents.mockClear();
+
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      const ascending = storage.getAnomalyEvents.mock.calls.filter(
+        ([options]: any[]) => options.order === 'asc',
+      );
+      expect(ascending).toHaveLength(1);
+      expect(ascending[0][0]).toMatchObject({ limit: 1, metricType: MetricType.CONNECTIONS });
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(['first']);
+    });
+
+    it('pages incident history by cursor, not offset', async () => {
+      const t = Date.now() - 60 * MIN;
+      const rows = Array.from({ length: 1500 }, (_, i) => ({
+        ...anomaly({ id: `e-${String(i).padStart(4, '0')}`, timestamp: t + i }),
+        anomalyType: 'spike',
+      })).reverse();
+      storage.getAnomalyEvents.mockImplementation(async ({ after, offset, limit }: any) => {
+        expect(offset).toBeUndefined();
+        const start = after ? rows.findIndex((r) => r.id === after.id) + 1 : 0;
+        return rows.slice(start, start + limit);
+      });
+
+      const [incident] = await service.getIncidentTimelines('conn-1', t, undefined, 1);
+
+      expect(incident.entries).toHaveLength(1500);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+    });
+
+    it('clamps the incident lookback to thirty days', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      const now = Date.now();
+
+      await service.getIncidentTimelines('conn-1', now - 365 * 24 * 60 * MIN);
+
+      const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
+      expect(startTime).toBeGreaterThanOrEqual(now - 30 * 24 * 60 * MIN - 30 * MIN);
+    });
+
     it('finds an incident that a long chain split off at the max span', async () => {
       const t = Date.now() - 3 * 60 * MIN;
       const stored = Array.from({ length: 36 }, (_, i) => ({
@@ -7688,15 +7740,18 @@ describe('AnomalyService', () => {
     });
 
     const pagedStorage = (rows: any[]) => {
-      const newestFirst = [...rows].sort((a, b) => b.timestamp - a.timestamp);
+      const newestFirst = [...rows].sort(
+        (a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+      );
       storage.getAnomalyEvents.mockImplementation(
-        async ({ startTime, endTime, limit = 100, offset = 0 }: any) =>
-          newestFirst
-            .filter(
-              (e) =>
-                (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
-            )
-            .slice(offset, offset + limit),
+        async ({ startTime, endTime, limit = 100, order, after }: any) => {
+          const matching = newestFirst.filter(
+            (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+          );
+          const ordered = order === 'asc' ? matching.reverse() : matching;
+          const start = after ? ordered.findIndex((e) => e.id === after.id) + 1 : 0;
+          return ordered.slice(start, start + limit);
+        },
       );
     };
 
@@ -7724,8 +7779,8 @@ describe('AnomalyService', () => {
         ...anomaly({ id: `event-${id}`, timestamp: t }),
         anomalyType: 'spike',
       });
-      storage.getAnomalyEvents.mockImplementation(async ({ offset = 0 }: any) =>
-        offset === 0 ? Array.from({ length: 1000 }, (_, i) => row(i)) : [row(999), row(1000)],
+      storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
+        after ? [row(999), row(1000)] : Array.from({ length: 1000 }, (_, i) => row(i)),
       );
 
       const events = await (service as any).anomaliesInRange(['conn-1'], t, undefined);
@@ -7737,9 +7792,11 @@ describe('AnomalyService', () => {
     it('warns and stops paging at the scan cap', async () => {
       const t = Date.now() - 3 * 60 * MIN;
       const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
-      storage.getAnomalyEvents.mockImplementation(async ({ offset = 0 }: any) =>
+      const pageStart = (after?: { id: string }) =>
+        after ? Number(after.id.split('-').pop()) + 1 : 0;
+      storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
         Array.from({ length: 1000 }, (_, i) => ({
-          ...anomaly({ id: `event-${offset + i}`, timestamp: t }),
+          ...anomaly({ id: `event-${pageStart(after) + i}`, timestamp: t }),
           anomalyType: 'spike',
         })),
       );
@@ -7755,9 +7812,12 @@ describe('AnomalyService', () => {
       const t = Date.now() - 3 * 60 * MIN;
       jest.spyOn((service as any).logger, 'warn').mockImplementation();
       storage.getAnomalyEvents.mockImplementation(
-        async ({ connectionId, offset = 0 }: { connectionId: string; offset?: number }) =>
+        async ({ connectionId, after }: { connectionId: string; after?: { id: string } }) =>
           Array.from({ length: 1000 }, (_, i) => ({
-            ...anomaly({ id: `${connectionId}-${offset + i}`, timestamp: t }),
+            ...anomaly({
+              id: `${connectionId}-${(after ? Number(after.id.split('-').pop()) + 1 : 0) + i}`,
+              timestamp: t,
+            }),
             anomalyType: 'spike',
           })),
       );

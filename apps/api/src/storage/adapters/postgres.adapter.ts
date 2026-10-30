@@ -2863,6 +2863,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    if (options.after) {
+      const past = direction === 'ASC' ? '>' : '<';
+      const time = paramIndex++;
+      conditions.push(
+        `(timestamp ${past} $${time} OR (timestamp = $${time} AND id ${past} $${paramIndex++}))`,
+      );
+      params.push(options.after.timestamp, options.after.id);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2877,7 +2886,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         source_host, source_port, connection_id
       FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp ${direction}, id ${direction}
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );

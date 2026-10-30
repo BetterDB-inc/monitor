@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, Param, HttpCode, HttpStatus, UseGuards, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Post, Query, Param, HttpCode, HttpStatus, UseGuards, NotFoundException } from '@nestjs/common';
 import { ApiHeader } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
@@ -13,6 +13,15 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
+
+export function parseIncidentTime(name: string, value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new BadRequestException(`${name} must be a positive epoch time in milliseconds`);
+  }
+  return parsed;
+}
 
 @Controller('anomaly')
 export class AnomalyController {
@@ -163,8 +172,8 @@ export class AnomalyController {
   ): Promise<IncidentTimeline[]> {
     return this.anomalyService.getIncidentTimelines(
       connectionId,
-      startTime ? parseInt(startTime, 10) : undefined,
-      endTime ? parseInt(endTime, 10) : undefined,
+      parseIncidentTime('startTime', startTime),
+      parseIncidentTime('endTime', endTime),
       limit ? parseInt(limit, 10) : 50,
     );
   }
@@ -181,7 +190,7 @@ export class AnomalyController {
     const incident = await this.anomalyService.getIncidentTimeline(
       incidentId,
       connectionId,
-      startTime ? parseInt(startTime, 10) : undefined,
+      parseIncidentTime('startTime', startTime),
     );
     if (!incident) throw new NotFoundException(`Incident ${incidentId} not found`);
     return incident;

@@ -2781,6 +2781,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('resolved = ?');
       params.push(options.resolved ? 1 : 0);
     }
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    if (options.after) {
+      const past = direction === 'ASC' ? '>' : '<';
+      conditions.push(`(timestamp ${past} ? OR (timestamp = ? AND id ${past} ?))`);
+      params.push(options.after.timestamp, options.after.timestamp, options.after.id);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2789,7 +2795,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp ${direction}, id ${direction}
       LIMIT ? OFFSET ?
     `;
 

@@ -3,6 +3,7 @@ import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/comm
 import { ConfigService } from '@nestjs/config';
 import {
   StoragePort,
+  AnomalyEventCursor,
   StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '@app/common/interfaces/storage-port.interface';
@@ -285,6 +286,7 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 
 @Injectable()
 export class AnomalyService
@@ -5895,7 +5897,8 @@ export class AnomalyService
     endTime?: number,
     limit = 50,
   ): Promise<IncidentTimeline[]> {
-    const from = startTime ?? Date.now() - 24 * 60 * 60_000;
+    const now = Date.now();
+    const from = Math.max(startTime ?? now - 24 * 60 * 60_000, now - MAX_INCIDENT_LOOKBACK_MS);
     const events = await this.loadIncidentEvents(
       connectionId,
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
@@ -5939,27 +5942,38 @@ export class AnomalyService
         metricType: entry.metricType,
       });
     }
-    const budget = { rows: MAX_SCANNED_CALLER_EVENTS };
     const later = await Promise.all(
-      [...signals.values()].map(async (signal) => {
-        const after = await this.anomaliesInRange(
-          [signal.connectionId],
-          windowEnd + 1,
-          undefined,
-          signal.metricType,
-          budget,
-        );
-        return after.reduce<AnomalyEvent | null>(
-          (first, e) =>
-            e.timestamp > windowEnd && (first === null || e.timestamp < first.timestamp)
-              ? e
-              : first,
-          null,
-        );
-      }),
+      [...signals.values()].map((signal) =>
+        this.nextFiring(signal.connectionId, signal.metricType, windowEnd),
+      ),
     );
     const next = later.filter((e): e is AnomalyEvent => e !== null);
     return next.length > 0 ? find([...events, ...next]) : draft;
+  }
+
+  private async nextFiring(
+    connectionId: string,
+    metricType: MetricType,
+    after: number,
+  ): Promise<AnomalyEvent | null> {
+    const [stored] = await this.storage.getAnomalyEvents({
+      startTime: after + 1,
+      metricType,
+      connectionId,
+      order: 'asc',
+      limit: 1,
+    });
+    const candidates = [
+      ...(stored ? [this.storedToAnomalyEvent(stored)] : []),
+      ...this.recentAnomalies.filter(
+        (e) =>
+          e.timestamp > after && e.metricType === metricType && e.connectionId === connectionId,
+      ),
+    ];
+    return candidates.reduce<AnomalyEvent | null>(
+      (first, e) => (first === null || e.timestamp < first.timestamp ? e : first),
+      null,
+    );
   }
 
   private async loadIncidentEvents(
@@ -5975,12 +5989,11 @@ export class AnomalyService
     connectionIds: Array<string | undefined>,
     startTime: number,
     endTime: number | undefined,
-    metricType?: MetricType,
-    budget = { rows: MAX_SCANNED_CALLER_EVENTS },
   ): Promise<AnomalyEvent[]> {
+    const budget = { rows: MAX_SCANNED_CALLER_EVENTS };
     const batches = await Promise.all(
       connectionIds.map((connectionId) =>
-        this.storedAnomaliesInRange(connectionId, startTime, endTime, metricType, budget),
+        this.storedAnomaliesInRange(connectionId, startTime, endTime, budget),
       ),
     );
     const scope = new Set(connectionIds);
@@ -5988,7 +6001,6 @@ export class AnomalyService
       (e) =>
         e.timestamp >= startTime &&
         (!endTime || e.timestamp <= endTime) &&
-        (!metricType || e.metricType === metricType) &&
         (scope.has(undefined) || scope.has(e.connectionId)),
     );
     return [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
@@ -5998,23 +6010,23 @@ export class AnomalyService
     connectionId: string | undefined,
     startTime: number,
     endTime: number | undefined,
-    metricType: MetricType | undefined,
     budget: { rows: number },
   ): Promise<AnomalyEvent[]> {
     const pageSize = 1000;
     const events: AnomalyEvent[] = [];
-    for (let offset = 0; budget.rows > 0; offset += pageSize) {
+    let after: AnomalyEventCursor | undefined;
+    while (budget.rows > 0) {
       const page = await this.storage.getAnomalyEvents({
         startTime,
         endTime,
-        metricType: metricType as string,
         connectionId,
         limit: pageSize,
-        offset,
+        after,
       });
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
       budget.rows -= page.length;
       if (page.length < pageSize) return events;
+      after = page[page.length - 1];
     }
     this.logger.warn(
       `Incident history for ${connectionId ?? 'all connections'} stopped at ${events.length} events`,
