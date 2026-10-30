@@ -247,6 +247,9 @@ function dropReplica(
     state.replicas.delete(replica.addr);
     return [];
   }
+  replica.windows = [];
+  replica.subside = null;
+  replica.belowFloorStreak = 0;
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
