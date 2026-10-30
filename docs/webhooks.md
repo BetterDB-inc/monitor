@@ -361,6 +361,8 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 
 Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`.
 
+Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
+
 ```json
 {
   "replica": "10.0.0.2:6379",
