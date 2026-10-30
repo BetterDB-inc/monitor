@@ -543,7 +543,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
             // close() ending the build connection is expected, not a failure.
             if (this.closing) return;
             console.warn(
-              `Building the client analytics indexes failed: ${
+              `Building the background indexes failed: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             );
@@ -1693,8 +1693,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
-      CREATE INDEX IF NOT EXISTS idx_anomaly_events_scope ON anomaly_events(scope_id, timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_correlated_groups_scope ON correlated_anomaly_groups(scope_id, timestamp DESC);
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
@@ -5644,7 +5642,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   /**
    * Build the (connection_id, captured_at) indexes every bounded client
-   * analytics and audit read relies on. Called fire-and-forget from
+   * analytics and audit read relies on, and the anomaly correlation scope
+   * indexes. Called fire-and-forget from
    * initialize(): on a multi-million-row table the build takes minutes, and
    * CONCURRENTLY keeps writers flowing while it runs. Until it completes,
    * isClientSnapshotIndexReady() reports false.
@@ -5660,6 +5659,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const indexes: Array<[string, string, string]> = [
       ['idx_client_connection_captured', 'client_snapshots', 'connection_id, captured_at'],
       ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
+      ['idx_anomaly_events_scope', 'anomaly_events', 'scope_id, timestamp DESC'],
+      ['idx_correlated_groups_scope', 'correlated_anomaly_groups', 'scope_id, timestamp DESC'],
     ];
     if (this.closing) return;
     // A dedicated connection, not a pooled one, so close() can end it
