@@ -620,8 +620,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
-    this.anomalyEvents.push({ ...event, connectionId });
+    this.upsertAnomalyEvent({ ...event, connectionId });
     return event.id;
+  }
+
+  private upsertAnomalyEvent(event: StoredAnomalyEvent): void {
+    const idx = this.anomalyEvents.findIndex((e) => e.id === event.id);
+    if (idx < 0) {
+      this.anomalyEvents.push(event);
+      return;
+    }
+    const existing = this.anomalyEvents[idx];
+    this.anomalyEvents[idx] = {
+      ...existing,
+      correlationId: event.correlationId ?? existing.correlationId,
+      relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
+      resolved: event.resolved,
+      resolvedAt: event.resolvedAt,
+      durationMs: event.durationMs,
+    };
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -660,7 +677,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number> {
     for (const event of events) {
-      this.anomalyEvents.push({ ...event, connectionId });
+      this.upsertAnomalyEvent({ ...event, connectionId });
     }
     return events.length;
   }
