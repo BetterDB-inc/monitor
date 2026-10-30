@@ -330,6 +330,32 @@ Each condition fires once per episode and the tracking state clears when the chi
 
 ---
 
+### RETRY_AMPLIFICATION
+
+**Triggers**: Commands per client keep climbing while connected clients stay flat and the server is under stress (a P99 latency regression, an error-reply burst or connection churn)
+
+**What it means**: Clients are retrying failed or slow calls, and the retries add load that makes the server slower, which causes more retries. Unlike a transient retry burst, this loop does not settle on its own.
+
+**Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. A window is hot when:
+- Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
+- Connected clients stay within ±15% of baseline
+- At least one stress signal is present: a P99 regression (counted for 30 min after the event, matching how often the latency detector re-emits), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+
+A run of hot windows is classified once it reaches 3 windows. Load must not be falling, and it must move with stress *inside the run*: Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, load that keeps climbing window over window. Runs that end within 3 windows are recorded as transient.
+
+- **WARNING** when the run qualifies
+- **CRITICAL** when saturation (load, CPU, rejected connections, client saturation or lockout risk) is active in the latest window
+
+**Limitations**: The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
+
+**Recommended actions**:
+- Add exponential backoff with jitter and a retry budget
+- Put a circuit breaker in front of the instance
+- Set client timeouts above the observed P99
+- Throttle the clients whose command rate grew the most, then shed load until latency recovers
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern

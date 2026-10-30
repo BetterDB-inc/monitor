@@ -15,6 +15,9 @@ export const RETRY_AMP_STRESS_RATIO = 3;
 export const RETRY_AMP_ERROR_FLOOR_PER_SEC = 1;
 export const RETRY_AMP_CHURN_FLOOR_PER_SEC = 1;
 export const RETRY_AMP_MIN_CORRELATION = 0.5;
+export const RETRY_AMP_STRESS_HOLD_MS = 30 * 60_000;
+export const RETRY_AMP_SATURATION_HOLD_MS = 5 * 60_000;
+export const RETRY_AMP_POLL_GAP_MULTIPLIER = 3;
 
 export const RETRY_AMP_STRESS_METRICS: readonly MetricType[] = [MetricType.COMMAND_P99];
 export const RETRY_AMP_SATURATION_METRICS: readonly MetricType[] = [
@@ -42,6 +45,8 @@ export interface RetryAmplificationSample {
   totalErrorReplies: number | null;
   connectsPerSec: number | null;
   recentEvents: RetryAmplificationEventRef[];
+  stressActive?: boolean;
+  activeSaturation?: MetricType[];
 }
 
 export interface RetryAmplificationWindow {
@@ -108,6 +113,7 @@ export interface RetryAmplificationFinding {
 }
 
 export interface RetryAmplificationState {
+  maxPollGapMs: number;
   last: LastReading | null;
   window: OpenWindow | null;
   closing: OpenWindow | null;
@@ -131,8 +137,16 @@ const TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
 
 const TRIGGER_PATTERN = /Trigger: ([^.]+)\./;
 
-export function createRetryAmplificationState(): RetryAmplificationState {
+export function retryAmplificationMaxPollGap(pollIntervalMs: number): number {
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) return RETRY_AMP_MAX_POLL_GAP_MS;
+  return Math.max(RETRY_AMP_MAX_POLL_GAP_MS, pollIntervalMs * RETRY_AMP_POLL_GAP_MULTIPLIER);
+}
+
+export function createRetryAmplificationState(
+  maxPollGapMs: number = RETRY_AMP_MAX_POLL_GAP_MS,
+): RetryAmplificationState {
   return {
+    maxPollGapMs,
     last: null,
     window: null,
     closing: null,
@@ -269,18 +283,29 @@ function slope(values: number[]): number {
   return den === 0 ? 0 : num / den;
 }
 
-function coMovement(run: RetryAmplificationWindow[], base: WindowBaseline): number | null {
-  const load = [base.cmdsPerClient, ...run.map((w) => w.cmdsPerClient)];
+interface CoMovement {
+  r: number;
+  sustainedLatency: boolean;
+}
+
+function coMovement(run: RetryAmplificationWindow[]): CoMovement | null {
+  const load = run.map((w) => w.cmdsPerClient);
   const series: Array<Array<number | null>> = [
-    [0, ...run.map((w) => (w.latencyEvent ? 1 : 0))],
-    [base.errorRate ?? 0, ...run.map((w) => w.errorRate)],
-    [base.churnPerSec ?? 0, ...run.map((w) => w.churnPerSec)],
+    run.map((w) => w.errorRate),
+    run.map((w) => w.churnPerSec),
   ];
-  let best: number | null = null;
+  let best: CoMovement | null = null;
   for (const s of series) {
     if (s.some((v) => v === null)) continue;
     const r = pearson(load, s as number[]);
-    if (r !== null && (best === null || r > best)) best = r;
+    if (r !== null && (best === null || r > best.r)) best = { r, sustainedLatency: false };
+  }
+  if (run[run.length - 1].latencyEvent) {
+    const r = pearson(
+      load,
+      load.map((_, i) => i),
+    );
+    if (r !== null && (best === null || r > best.r)) best = { r, sustainedLatency: true };
   }
   return best;
 }
@@ -321,6 +346,7 @@ function buildMessage(
   loadRatio: number,
   correlation: number,
   clients: number,
+  sustainedLatency: boolean,
 ): string {
   const minutes = (windows * RETRY_AMP_WINDOW_MS) / 60_000;
   const outcome =
@@ -330,7 +356,10 @@ function buildMessage(
   return (
     `${level === 'critical' ? 'CRITICAL' : 'WARNING'}: Retry amplification — commands per ` +
     `client at ${loadRatio.toFixed(1)}× baseline for ${minutes} min while connected clients ` +
-    `stay flat at ~${Math.round(clients)}; load is rising with stress ` +
+    `stay flat at ~${Math.round(clients)}; ` +
+    (sustainedLatency
+      ? 'load keeps climbing under a sustained latency regression '
+      : 'load is rising with stress ') +
     `(r=${correlation.toFixed(2)}). Trigger: ${TRIGGER_LABEL[trigger]}. ${outcome}`
   );
 }
@@ -349,8 +378,9 @@ function classifyRun(
   if (run.length < RETRY_AMP_MIN_WINDOWS) return null;
   const loads = run.map((w) => w.cmdsPerClient);
   if (slope(loads) < 0) return null;
-  const correlation = coMovement(run, base);
-  if (correlation === null || correlation < RETRY_AMP_MIN_CORRELATION) return null;
+  const movement = coMovement(run);
+  if (movement === null || movement.r < RETRY_AMP_MIN_CORRELATION) return null;
+  const correlation = movement.r;
 
   const latest = run[run.length - 1];
   const level = latest.saturationMetrics.length > 0 ? 'critical' : 'warning';
@@ -371,6 +401,7 @@ function classifyRun(
       loadRatio,
       correlation,
       latest.connectedClients,
+      movement.sustainedLatency,
     ),
     timestamp,
   };
@@ -476,7 +507,9 @@ export function evaluateRetryAmplification(
     isUsable(last.totalCommands) &&
     sample.totalCommands < last.totalCommands
   ) {
-    Object.assign(state, createRetryAmplificationState(), { lastEpisode: state.lastEpisode });
+    Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
+      lastEpisode: state.lastEpisode,
+    });
   }
 
   if (state.window === null) {
@@ -513,11 +546,13 @@ export function evaluateRetryAmplification(
     open.churnCount += 1;
   }
   markEvents(open, sample.recentEvents);
+  if (sample.stressActive) open.latencyEvent = true;
+  for (const m of sample.activeSaturation ?? []) open.saturationMetrics.add(m);
 
   const prev = state.last;
   if (prev !== null) {
     const dt = sample.timestamp - prev.timestamp;
-    if (dt > 0 && dt <= RETRY_AMP_MAX_POLL_GAP_MS) {
+    if (dt > 0 && dt <= state.maxPollGapMs) {
       open.coveredMs += dt;
       if (isUsable(sample.totalCommands) && isUsable(prev.totalCommands)) {
         open.commands += sample.totalCommands - prev.totalCommands;
