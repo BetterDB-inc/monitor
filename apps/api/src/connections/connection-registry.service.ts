@@ -180,8 +180,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       for (const config of savedConnections) {
-        // Decrypt password if encrypted
-        const decryptedConfig = this.decryptConfig(config);
+        // Decrypt password if encrypted; the env-owned default also re-reads its
+        // TLS material from the environment so certificate rotation takes effect.
+        const decryptedConfig = await this.refreshEnvDefaultTlsFromEnv(this.decryptConfig(config));
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {
@@ -285,13 +286,70 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return authErrorPatterns.some(pattern => pattern.test(errorMsg));
   }
 
-  private assertValidExternalRequest(request: CreateConnectionRequest): void {
+  /** Why an OTLP push (external) request is invalid, or null when it is fine. Shared by test and save. */
+  private externalRequestRejection(request: CreateConnectionRequest): string | null {
     if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.tlsConfig || request.authMode === 'certificate' || request.sshTunnel?.enabled) {
-      throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
+      return 'OTLP push connections take no credentials, TLS or SSH tunnel';
+    }
+    return null;
+  }
+
+  private assertValidExternalRequest(request: CreateConnectionRequest): void {
+    const rejection = this.externalRequestRejection(request);
+    if (rejection) {
+      throw new Error(rejection);
     }
     if (this.findIdByHostPort(request.host, request.port)) {
       throw new Error(`A connection for ${request.host}:${request.port} already exists`);
     }
+  }
+
+  /**
+   * The env-configured default connection is persisted once (so it survives a
+   * restart without DB_HOST), but its TLS material and auth mode keep following
+   * the environment while DB_HOST is set: a rotated DB_TLS_*_FILE or a changed
+   * DB_AUTH_MODE must win over the copy stored at first connect, or the
+   * connection would keep presenting an expired certificate. Only the TLS
+   * material and auth mode are refreshed here; host, port and password keep the
+   * existing persisted-once behaviour. The refreshed record is persisted so the
+   * stored copy never lags the environment.
+   */
+  private async refreshEnvDefaultTlsFromEnv(config: DatabaseConnectionConfig): Promise<DatabaseConnectionConfig> {
+    if (config.id !== ENV_DEFAULT_ID || !process.env.DB_HOST) {
+      return config;
+    }
+    const dbConfig = this.configService.get('database');
+    if (!dbConfig) {
+      return config;
+    }
+    const stripFlag = (tls: DatabaseConnectionConfig['tlsConfig']) => {
+      if (!tls) return undefined;
+      const { secretsEncrypted: _ignored, ...rest } = tls;
+      return rest;
+    };
+    const unchanged =
+      JSON.stringify(stripFlag(config.tlsConfig) ?? null) === JSON.stringify(stripFlag(dbConfig.tlsConfig) ?? null) &&
+      (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+    if (unchanged) {
+      return config;
+    }
+    const refreshed: DatabaseConnectionConfig = {
+      ...config,
+      tlsConfig: dbConfig.tlsConfig ? { ...dbConfig.tlsConfig, secretsEncrypted: false } : undefined,
+      authMode: dbConfig.authMode,
+      updatedAt: Date.now(),
+    };
+    // The stale stored key may have failed to decrypt; the env now supplies
+    // fresh material, so a TLS-only decryption failure no longer applies.
+    if (refreshed.credentialStatus === 'decryption_failed' && !config.passwordEncrypted) {
+      refreshed.credentialStatus = 'unknown';
+      refreshed.credentialError = undefined;
+    }
+    this.logger.log('Refreshed the default connection\'s TLS material and auth mode from the environment');
+    await this.storage.saveConnection(this.encryptConfig(refreshed)).catch((err) => {
+      this.logger.warn(`Failed to persist refreshed TLS material for the default connection: ${err instanceof Error ? err.message : err}`);
+    });
+    return refreshed;
   }
 
   private async createEnvDefaultConnection(): Promise<void> {
@@ -539,12 +597,20 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    */
   private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
     const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
-    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, (message) =>
-      this.logger.error(`${config.name}: ${message}`),
-    );
+    let tlsError: string | undefined;
+    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, (message) => {
+      tlsError = message;
+      this.logger.error(`${config.name}: ${message}`);
+    });
+    // A dropped TLS client key is a credential-decryption failure just like a
+    // dropped password: the connection cannot authenticate until ENCRYPTION_KEY
+    // is fixed, and reconnect() only re-reads storage for decryption_failed.
+    const tlsFailure: Pick<DatabaseConnectionConfig, 'credentialStatus' | 'credentialError'> = tlsError
+      ? { credentialStatus: 'decryption_failed', credentialError: tlsError }
+      : {};
 
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown' };
+      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown', ...tlsFailure };
     }
 
     if (!this.encryption) {
@@ -556,6 +622,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -566,9 +633,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
         credentialStatus: 'unknown', // Will be validated on connection attempt
+        ...tlsFailure,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
@@ -578,6 +647,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -855,7 +925,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async testConnection(request: CreateConnectionRequest): Promise<TestConnectionResponse> {
     if (request.connectionType === 'external') {
-      return { success: true, message: 'Waiting for first OTLP sample' };
+      // Same rule as addConnection, so a test cannot pass for a config save rejects.
+      const rejection = this.externalRequestRejection(request);
+      return rejection ? { success: false, error: rejection } : { success: true, message: 'Waiting for first OTLP sample' };
     }
     try {
       assertAuthConfig(request);

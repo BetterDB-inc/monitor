@@ -32,6 +32,9 @@ function readPemFromEnv(name: string): string | undefined {
 }
 
 function envTlsConfig(): TlsConfig | undefined {
+  // The files are TLS material; a non-TLS deployment must not fail to start
+  // because a stale DB_TLS_*_FILE path is still set in its environment.
+  if (!isTrueFlag(process.env.DB_TLS)) return undefined;
   const ca = readPemFromEnv('DB_TLS_CA_FILE');
   const cert = readPemFromEnv('DB_TLS_CERT_FILE');
   const key = readPemFromEnv('DB_TLS_KEY_FILE');

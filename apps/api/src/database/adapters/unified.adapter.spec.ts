@@ -1,7 +1,11 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
   QUIT_TIMEOUT_MS,
+  WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
 
@@ -778,5 +782,71 @@ describe('UnifiedDatabaseAdapter — TLS material and certificate auth', () => {
 
     call.mockImplementationOnce(() => Promise.reject(new Error("ERR unknown command 'ACL'")));
     await expect(probe.call(adapter)).resolves.toBeUndefined();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', () => {
+  const CERT_A = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
+  const CERT_B = '-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-rotation-'));
+    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT_A);
+    fs.writeFileSync(path.join(certDir, 'client.key'), KEY);
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+    jest.useRealTimers();
+  });
+
+  it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    const client = adapter.getClient();
+    expect(client.options.tls?.cert?.toString()).toBe(CERT_A);
+
+    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT_B);
+    client.emit('reconnecting');
+
+    expect(client.options.tls?.cert?.toString()).toBe(CERT_B);
+    // SNI survives the refresh.
+    expect(client.options.tls?.servername).toBe('db.example.com');
+  });
+
+  it('keeps the previously loaded material when the rotated file is unreadable', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    const client = adapter.getClient();
+    fs.rmSync(path.join(certDir, 'client.crt'));
+    client.emit('reconnecting');
+    expect(client.options.tls?.cert?.toString()).toBe(CERT_A);
+  });
+
+  it('gives up on ACL WHOAMI after the deadline instead of hanging connect()', async () => {
+    jest.useFakeTimers();
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => new Promise<never>(() => undefined));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+
+    const pending = probe.call(adapter);
+    jest.advanceTimersByTime(WHOAMI_TIMEOUT_MS + 1);
+    await expect(pending).resolves.toBeUndefined();
   });
 });

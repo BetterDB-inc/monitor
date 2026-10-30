@@ -55,6 +55,8 @@ import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
 import { assertAuthConfig, clientCredentials, resolveTlsMaterial, type TlsMaterialOptions } from './tls-material';
+import { withTimeout } from '../../common/utils/with-timeout';
+import type { ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
@@ -82,6 +84,10 @@ export interface UnifiedDatabaseAdapterConfig {
 }
 
 export const QUIT_TIMEOUT_MS = 2_000;
+// Upper bound on the best-effort ACL WHOAMI probe after connect. The client
+// has no commandTimeout, so without this a server that stops answering after
+// capability detection would leave connect() (and every Test Connection) hung.
+export const WHOAMI_TIMEOUT_MS = 5_000;
 
 // Minimum per-database share of the key-analytics sample budget (capped at the
 // database's own key count), so a small database next to a huge sibling still
@@ -189,10 +195,34 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // An auto-registered node reached by IP also accepts a certificate
       // issued for the hostname its cluster announces for it.
       // Custom CA and client certificate (mutual TLS) ride on the same object.
-      tls: this.config.tls
-        ? { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial }
-        : undefined,
+      tls: this.tlsOptions(),
     });
+  }
+
+  /** The full `tls` option for a new socket: SNI/identity plus the current material. */
+  private tlsOptions(): ConnectionOptions | undefined {
+    if (!this.config.tls) return undefined;
+    return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.currentTlsMaterial() };
+  }
+
+  /**
+   * File-sourced material is re-read every time a socket is about to open, so a
+   * rotated certificate on disk is picked up by reconnects, the CLI client and
+   * tunnel re-establishment without rebuilding the adapter. A read failure keeps
+   * the previously loaded material rather than breaking a working connection.
+   * Inline material never changes after construction.
+   */
+  private currentTlsMaterial(): TlsMaterialOptions {
+    if (this.config.tls && this.config.tlsConfig?.source === 'file' && !this.tlsSetupError) {
+      try {
+        this.tlsMaterial = resolveTlsMaterial(this.config.tlsConfig);
+      } catch (error) {
+        this.logger.warn(
+          `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    }
+    return this.tlsMaterial;
   }
 
   private initClient(): void {
@@ -217,6 +247,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     client.on('close', () => {
       if (this._client !== client) return;
       this.connected = false;
+    });
+
+    // iovalkey reads `options.tls` when it opens each socket, so refreshing it
+    // here lets an automatic reconnect present a rotated certificate from disk.
+    client.on('reconnecting', () => {
+      if (this._client !== client) return;
+      const tls = this.tlsOptions();
+      if (tls) client.options.tls = tls;
+    });
+
+    // After an automatic reconnect the server may map the session to a
+    // different ACL user (rotated certificate, changed ACL); refresh the cached
+    // identity so list() does not keep reporting the previous one.
+    client.on('ready', () => {
+      if (this._client !== client) return;
+      void this.probeAuthenticatedUser(client).then((user) => {
+        if (this._client === client) this.authenticatedUser = user;
+      });
     });
   }
 
@@ -337,9 +385,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * undefined. In certificate mode this is the only way to see whether the
    * certificate mapped to the intended user or fell back to `default`.
    */
-  private async probeAuthenticatedUser(): Promise<string | undefined> {
+  private async probeAuthenticatedUser(client: Valkey = this.client): Promise<string | undefined> {
     try {
-      const reply = await this.client.call('ACL', 'WHOAMI');
+      const reply = await withTimeout(client.call('ACL', 'WHOAMI'), WHOAMI_TIMEOUT_MS, 'ACL WHOAMI timed out');
       return typeof reply === 'string' && reply !== '' ? reply : undefined;
     } catch {
       return undefined;

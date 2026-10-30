@@ -315,7 +315,9 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
       username: parsed.value.username || prev.username,
       password: parsed.value.password || prev.password,
       dbIndex: parsed.value.dbIndex,
-      tls: parsed.value.tls,
+      // Certificate auth only works over TLS (and the checkbox is locked), so a
+      // pasted redis:// URL must not switch it off in that mode.
+      tls: prev.authMode === 'certificate' ? true : parsed.value.tls,
     }));
     setTestResult(null);
   };
@@ -400,12 +402,14 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
           port: formData.port,
           username: usesCertificateAuth ? undefined : formData.username || undefined,
           password: usesCertificateAuth ? undefined : formData.password || undefined,
-          nodeUsername: testResult?.isSentinel
+          // Discovered data nodes inherit certificate auth, so node credentials
+          // would never be sent; do not store them in that mode.
+          nodeUsername: testResult?.isSentinel && !usesCertificateAuth
             ? formData.nodeNoUsername
               ? ''
               : formData.nodeUsername || undefined
             : undefined,
-          nodePassword: testResult?.isSentinel ? formData.nodePassword || undefined : undefined,
+          nodePassword: testResult?.isSentinel && !usesCertificateAuth ? formData.nodePassword || undefined : undefined,
           dbIndex: formData.dbIndex,
           tls: formData.tls,
           tlsConfig: buildTlsConfigPayload(formData.tls, formData.tlsCfg),
@@ -1162,7 +1166,7 @@ export function ConnectionSelector({ isCloudMode }: { isCloudMode?: boolean }) {
                   </div>
                 )}
 
-                {testResult?.success && testResult.isSentinel && (
+                {testResult?.success && testResult.isSentinel && !usesCertificateAuth && (
                   <details className="border rounded-md">
                     <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
                       Data node credentials

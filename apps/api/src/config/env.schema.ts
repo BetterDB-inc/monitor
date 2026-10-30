@@ -84,7 +84,12 @@ export const envSchema = z
     DB_TLS_KEY_PASSPHRASE: z.string().optional(),
     // `certificate` sends no AUTH; the server maps the client certificate to an
     // ACL user (Valkey tls-auth-clients-user). Requires DB_TLS and a cert + key.
-    DB_AUTH_MODE: z.enum(['password', 'certificate']).optional(),
+    // Normalised (trim + lowercase) so `Certificate` or a trailing newline from a
+    // secret store validates the same way configuration.ts reads it.
+    DB_AUTH_MODE: z.preprocess(
+      (value) => (typeof value === 'string' ? value.trim().toLowerCase() || undefined : value),
+      z.enum(['password', 'certificate']).optional(),
+    ),
     // Directory that server-side TLS files referenced by UI-added connections
     // must live in (mirrors BETTERDB_SSH_KEY_DIR). Unset disables file paths.
     BETTERDB_TLS_CERT_DIR: z.string().optional(),

@@ -242,6 +242,8 @@ The certificate is passed to the TLS socket exactly as supplied, so its subject 
 
 Cluster and Sentinel nodes discovered from a seed connection reuse the seed's CA, client certificate and authentication mode. Server certificate verification is always on; there is no option to disable it.
 
+**Rotation.** File-sourced material is re-read every time a socket is opened, including automatic reconnects, so replacing the files inside `BETTERDB_TLS_CERT_DIR` takes effect without rebuilding the connection. The env-configured default connection re-reads `DB_TLS_*_FILE` and `DB_AUTH_MODE` on every restart and replaces its stored copy. Pasted PEM is fixed at save time; re-create the connection to rotate it.
+
 ### SSH Tunnels
 
 Connections can reach a database through an SSH bastion/jump host instead of connecting directly — useful for Valkey/Redis in a private subnet, ElastiCache, or MemoryDB. Enable **Connect via SSH tunnel** when adding a connection and provide the SSH host, port, and username. A single hop is supported.

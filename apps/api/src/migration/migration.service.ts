@@ -255,13 +255,21 @@ export class MigrationService {
             continue;
           }
 
-          const client = new Valkey({
-            host,
-            port,
-            ...nodeClientAuthOptions(config ?? {}),
-            ...NODE_CONNECT_OPTIONS,
-            connectionName: 'BetterDB-Migration-Analysis',
-          });
+          // Resolving TLS material (file reads) can throw; that must mark this
+          // master unreachable, not fail the whole analysis job.
+          let client: Valkey;
+          try {
+            client = new Valkey({
+              host,
+              port,
+              ...nodeClientAuthOptions(config ?? {}),
+              ...NODE_CONNECT_OPTIONS,
+              connectionName: 'BetterDB-Migration-Analysis',
+            });
+          } catch {
+            unreachableMasters.push(`${host}:${port}`);
+            continue;
+          }
           tempClients.push(client);
           try {
             await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
