@@ -1,6 +1,6 @@
 import {
   describeErrorstatDeltas,
-  errorRepliesPerPoll,
+  errorRepliesPerSecond,
   readErrorstatCounts,
   topErrorstatDeltas,
 } from '../error-replies';
@@ -111,23 +111,28 @@ describe('error replies helpers', () => {
     });
   });
 
-  describe('errorRepliesPerPoll', () => {
+  describe('errorRepliesPerSecond', () => {
     it('keeps the delta when a poll arrives on time or early', () => {
-      expect(errorRepliesPerPoll(900, 1000, 1000)).toBe(900);
-      expect(errorRepliesPerPoll(900, 400, 1000)).toBe(900);
+      expect(errorRepliesPerSecond(900, 1000, 1000)).toBe(900);
+      expect(errorRepliesPerSecond(900, 400, 1000)).toBe(900);
     });
 
     it('moves smoothly as a poll runs late', () => {
-      expect(errorRepliesPerPoll(1400, 1400, 1000)).toBe(1000);
-      expect(errorRepliesPerPoll(1600, 1600, 1000)).toBe(1000);
+      expect(errorRepliesPerSecond(1400, 1400, 1000)).toBe(1000);
+      expect(errorRepliesPerSecond(1600, 1600, 1000)).toBe(1000);
     });
 
     it('spreads the delta over a short gap', () => {
-      expect(errorRepliesPerPoll(450, 3000, 1000)).toBe(150);
+      expect(errorRepliesPerSecond(450, 3000, 1000)).toBe(150);
     });
 
     it('spreads the delta over the polls a gap covered', () => {
-      expect(errorRepliesPerPoll(6000, 6000, 1000)).toBe(1000);
+      expect(errorRepliesPerSecond(6000, 6000, 1000)).toBe(1000);
+    });
+
+    it('does not depend on the poll interval', () => {
+      expect(errorRepliesPerSecond(5000, 5000, 5000)).toBe(1000);
+      expect(errorRepliesPerSecond(5000, 5000, 1000)).toBe(1000);
     });
   });
 });

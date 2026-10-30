@@ -3898,7 +3898,7 @@ describe('AnomalyService', () => {
       return buffers.get(MetricType.ERROR_REPLIES);
     };
 
-    it('feeds the per-poll delta, not the lifetime counter', async () => {
+    it('feeds the per-second rate, not the lifetime counter', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
       await poll();
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('512'));
@@ -3913,7 +3913,21 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
     });
 
-    it('scales the delta to one poll when polling resumes after a gap', async () => {
+    it('keeps the same rate when the poll interval changes', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(5000);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      now += 5000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('600'));
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorBuffer().getLatest()).toBe(100);
+    });
+
+    it('scales the delta to a rate when polling resumes after a gap', async () => {
       let now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));

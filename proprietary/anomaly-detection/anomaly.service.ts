@@ -122,10 +122,10 @@ import {
   ErrorStatsInfo,
 } from '@app/common/types/metrics.types';
 import {
-  ERROR_REPLIES_CRITICAL_PER_POLL,
-  errorRepliesPerPoll,
-  ERROR_REPLIES_MIN_PER_POLL,
-  ERROR_REPLIES_WARNING_PER_POLL,
+  ERROR_REPLIES_CRITICAL_PER_SEC,
+  errorRepliesPerSecond,
+  ERROR_REPLIES_MIN_PER_SEC,
+  ERROR_REPLIES_WARNING_PER_SEC,
   describeErrorstatDeltas,
   readErrorstatCounts,
   topErrorstatDeltas,
@@ -3148,10 +3148,10 @@ export class AnomalyService
       return;
     }
     const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
-    const errorsDelta =
+    const errorsPerSec =
       lastErrors === undefined
         ? 0
-        : errorRepliesPerPoll(
+        : errorRepliesPerSecond(
             Math.max(0, currentErrors - lastErrors.value),
             timestamp - lastErrors.timestamp,
             this.getIntervalMs(),
@@ -3173,20 +3173,20 @@ export class AnomalyService
           {
             warningZScore: 3,
             criticalZScore: 5,
-            warningThreshold: ERROR_REPLIES_WARNING_PER_POLL,
-            criticalThreshold: ERROR_REPLIES_CRITICAL_PER_POLL,
+            warningThreshold: ERROR_REPLIES_WARNING_PER_SEC,
+            criticalThreshold: ERROR_REPLIES_CRITICAL_PER_SEC,
             consecutiveRequired: 2,
             cooldownMs: 60000,
           },
-          { minValue: ERROR_REPLIES_MIN_PER_POLL, thresholdOverridesBelowMean: true },
+          { minValue: ERROR_REPLIES_MIN_PER_SEC, thresholdOverridesBelowMean: true },
         ),
       );
     }
 
     const errorsBuffer = buffers.get(MetricType.ERROR_REPLIES)!;
     const errorsDetector = detectors.get(MetricType.ERROR_REPLIES)!;
-    errorsBuffer.addSample(errorsDelta, timestamp);
-    const anomaly = errorsDetector.detect(errorsBuffer, errorsDelta, timestamp);
+    errorsBuffer.addSample(errorsPerSec, timestamp);
+    const anomaly = errorsDetector.detect(errorsBuffer, errorsPerSec, timestamp);
     if (anomaly === null) {
       return;
     }

@@ -3,17 +3,21 @@ import { ErrorStatsInfo } from '@app/common/types/metrics.types';
 const ERRORSTAT_PREFIX = 'errorstat_';
 
 export const ERROR_REPLIES_TOP_LIMIT = 3;
-export const ERROR_REPLIES_WARNING_PER_POLL = 200;
-export const ERROR_REPLIES_CRITICAL_PER_POLL = 2000;
-export const ERROR_REPLIES_MIN_PER_POLL = 20;
+export const ERROR_REPLIES_WARNING_PER_SEC = 200;
+export const ERROR_REPLIES_CRITICAL_PER_SEC = 2000;
+export const ERROR_REPLIES_MIN_PER_SEC = 20;
 
 export interface ErrorstatDelta {
   prefix: string;
   delta: number;
 }
 
-export function errorRepliesPerPoll(delta: number, elapsedMs: number, intervalMs: number): number {
-  return Math.round((delta * intervalMs) / Math.max(elapsedMs, intervalMs));
+export function errorRepliesPerSecond(
+  delta: number,
+  elapsedMs: number,
+  intervalMs: number,
+): number {
+  return Math.round((delta * 1000) / Math.max(elapsedMs, intervalMs));
 }
 
 export function readErrorstatCounts(errorstats: ErrorStatsInfo | undefined): Map<string, number> {
