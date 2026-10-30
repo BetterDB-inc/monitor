@@ -1560,8 +1560,7 @@ export class AnomalyService
     const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
     const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
     buffer.addSample(sample.connectsPerSec, timestamp);
-    const elevated =
-      buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
+    const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
     if (!elevated || !isChurnWithFlatPopulation(sample)) {
       this.resetSpikeRun(detector, buffer, timestamp);
       return;
@@ -1944,7 +1943,7 @@ export class AnomalyService
     'Loop starvation like this is most often blocking hostname resolution on the ' +
     'Sentinel main loop (resolve-hostnames yes against FQDN targets), but a clock ' +
     'step (NTP), VM pause or live migration, CPU throttling or host overload stall ' +
-    'the loop the same way, and the INFO round-trip also includes this monitor\'s own ' +
+    "the loop the same way, and the INFO round-trip also includes this monitor's own " +
     'event-loop and network latency. If it is DNS, address monitored/announced targets ' +
     'by IP or serve those names from a local cache (peers resolving announced FQDNs are ' +
     'the ones that stall); otherwise check the host clock, scheduling and CPU.';
@@ -2156,7 +2155,9 @@ export class AnomalyService
     if (looksDown) {
       return false;
     }
-    return message.includes('timeout') || message.includes('timed out') || message.includes('etimedout');
+    return (
+      message.includes('timeout') || message.includes('timed out') || message.includes('etimedout')
+    );
   }
 
   private buildSentinelLoopStallEvent(
@@ -5622,6 +5623,52 @@ export class AnomalyService
     return groups.slice(0, limit);
   }
 
+  private async siblingGroupsInvolving(
+    connectionId: string,
+    siblings: string[],
+    known: Set<string>,
+    startTime: number,
+    endTime: number | undefined,
+    pattern: AnomalyPattern | undefined,
+    limit: number,
+  ): Promise<StoredCorrelatedGroup[]> {
+    if (siblings.length === 0) return [];
+    const events = await this.storage.getAnomalyEvents({
+      startTime: startTime - this.correlationIntervalMs,
+      endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+      connectionId,
+      limit: 10_000,
+    });
+    const wanted = new Map<string, number>();
+    for (const e of [...events].sort((a, b) => b.timestamp - a.timestamp)) {
+      if (wanted.size >= limit) break;
+      if (e.correlationId && !known.has(e.correlationId) && !wanted.has(e.correlationId)) {
+        wanted.set(e.correlationId, e.timestamp);
+      }
+    }
+    if (wanted.size === 0) return [];
+    const times = [...wanted.values()];
+    const from = Math.max(startTime, Math.min(...times) - this.correlationIntervalMs);
+    const to = Math.min(endTime ?? Infinity, Math.max(...times) + this.correlationIntervalMs);
+    const pageSize = 1000;
+    const found: StoredCorrelatedGroup[] = [];
+    for (const id of siblings) {
+      for (let offset = 0; wanted.size > found.length; offset += pageSize) {
+        const page = await this.storage.getCorrelatedGroups({
+          startTime: from,
+          endTime: to,
+          pattern: pattern as string,
+          limit: pageSize,
+          offset,
+          connectionId: id,
+        });
+        found.push(...page.filter((g) => wanted.has(g.correlationId)));
+        if (page.length < pageSize) break;
+      }
+    }
+    return found;
+  }
+
   async getRecentCorrelatedGroups(
     startTime?: number,
     endTime?: number,
@@ -5641,31 +5688,29 @@ export class AnomalyService
     }
 
     const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
-    const storedByScope = await Promise.all(
-      connectionIds.map((id) =>
+    const own = await Promise.all(
+      (connectionId ? [connectionId] : connectionIds).map((id) =>
         this.storage.getCorrelatedGroups({
           startTime,
           endTime,
           pattern: pattern as string,
-          limit: id === connectionId ? limit : Math.max(limit, 1000),
+          limit,
           connectionId: id,
         }),
       ),
     );
-    const involved = connectionId
-      ? new Set(
-          (
-            await this.storage.getAnomalyEvents({
-              startTime: startTime - this.correlationIntervalMs,
-              endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
-              connectionId,
-              limit: 10_000,
-            })
-          ).map((a) => a.correlationId),
+    const found = connectionId
+      ? await this.siblingGroupsInvolving(
+          connectionId,
+          connectionIds.filter((id): id is string => !!id && id !== connectionId),
+          new Set(own.flat().map((s) => s.correlationId)),
+          startTime,
+          endTime,
+          pattern,
+          limit,
         )
-      : null;
-    const stored = [...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values()]
-      .filter((s) => !involved || s.connectionId === connectionId || involved.has(s.correlationId))
+      : [];
+    const stored = [...new Map([...own.flat(), ...found].map((s) => [s.correlationId, s])).values()]
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, limit);
 
