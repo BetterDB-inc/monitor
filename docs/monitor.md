@@ -100,22 +100,35 @@ deltas are shown for both captures side by side.
 
 ## Session-boundary INFO counters
 
-Every capture that opens MONITOR samples `INFO` on each captured node twice:
-once just before MONITOR opens and once right after it stops (so the probe
-itself is never captured). If MONITOR fails to open, only the start sample is
-taken and the node is reported with no end sample. Each sample is one default `INFO` command, which carries both the
+Every capture that opens MONITOR samples `INFO` on each captured node twice.
+Each node's start sample is taken immediately before its own MONITOR open, and
+its end sample immediately after its own stop (so the probe itself is never
+captured), so each node's window matches its captured traffic. If MONITOR fails
+to open, only the start sample is taken and the node is reported with no end
+sample. Each sample is one default `INFO` command, which carries both the
 `# Stats` counters and `# Server` `run_id` / `uptime_in_seconds`. The
 cross-reference panel shows the difference for 16 monotonic counters —
 commands processed, connections received/rejected, keyspace hits/misses,
 expired and evicted keys, network bytes in, error replies, ACL denials
 (auth / command / key / channel) and full/partial resyncs — plus
 commands/sec and the keyspace hit ratio over the window. Fan-out captures
-sum across primaries.
+sum across primaries; commands/sec is the sum of each node's own rate
+(its delta over its own span).
 
 - Each sample has a 2 s budget and fails open: a slow or unreachable node
-  never fails the capture and is reported as not measured. Start samples
-  run in parallel before the session row is created, so starting a capture
-  can take up to 2 s longer when a node is slow or unreachable.
+  never fails the capture and is reported as not measured. In a fan-out
+  capture each node is sampled and then opened independently and in parallel,
+  so a slow node does not delay the others, and the session row is created
+  before any sampling. The end probe is additionally bounded by the writer
+  (3 s).
+- The MONITOR open is bounded at 10 s. A node that does not answer fails the
+  capture (or, in a fan-out, that node's segment) with
+  `monitor_open_failed: MONITOR open timed out after 10000 ms`, the duplicate
+  connection is closed, and the connection is free again for new starts,
+  schedules, triggers and stops.
+- A node is measured only when at least one counter appears in both of its
+  samples. A node with no parsable `# Stats` (a proxy, restricted `INFO`) is
+  not measured, so coverage is `partial` or `unavailable`, never `complete`.
 - Restarts and stat resets: a node whose `run_id` changed, or whose
   `uptime_in_seconds` ended lower than its start uptime plus the elapsed
   capture time, restarted during the window. Uptime is compared against the
@@ -149,6 +162,9 @@ sum across primaries.
   open yet) waits for the start to finish and then stops it. A stop requested
   while MONITOR is still opening returns after at most 5 s; the capture stops
   as soon as the open completes.
+  In that case `DELETE /api/monitor/sessions/:id` returns **202** with
+  `{ ...session, stopPending: true }` (the open finishes within 10 s), and the
+  UI keeps showing "Stopping…" until the session leaves `running`.
 - While a capture is starting, a second start on the same connection is
   rejected with `409 Conflict`. Scheduled captures treat the connection as busy
   and skip (recorded in `lastSkipReason`); triggered captures are queued and

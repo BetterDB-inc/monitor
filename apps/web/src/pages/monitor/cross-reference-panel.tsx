@@ -105,7 +105,14 @@ export function CrossReferenceSections({ result }: { result: CrossReferenceResul
           title="INFO counters during capture"
           subtitle="INFO stats sampled at session start and end"
         >
-          <CounterDeltasTable deltas={result.counterDeltas} baseline={result.baselineCounterDeltas} />
+          {result.counterDeltas ? (
+            <CounterDeltasTable
+              deltas={result.counterDeltas}
+              baseline={result.baselineCounterDeltas}
+            />
+          ) : (
+            <Empty text={COUNTERS_NOT_RECORDED} />
+          )}
         </Section>
       </div>
     </div>
@@ -231,7 +238,15 @@ function RegressionsList({ regressions }: { regressions: CrossReferenceSlowlogRe
   );
 }
 
-function unavailableCountersNote(deltas: CrossReferenceResult['counterDeltas']): string | null {
+const COUNTERS_NOT_RECORDED = 'INFO counters were not recorded for this capture.';
+
+/** `deltas` can be missing when the API predates counter deltas; render it as unavailable. */
+function unavailableCountersNote(
+  deltas: CrossReferenceResult['counterDeltas'] | undefined,
+): string | null {
+  if (deltas === undefined) {
+    return COUNTERS_NOT_RECORDED;
+  }
   if (deltas.coverage !== 'unavailable') {
     return null;
   }
@@ -241,7 +256,7 @@ function unavailableCountersNote(deltas: CrossReferenceResult['counterDeltas']):
   if (deltas.pending === 'capture_interrupted') {
     return 'INFO counters were not recorded: the capture was interrupted before it ended.';
   }
-  return 'INFO counters were not recorded for this capture.';
+  return COUNTERS_NOT_RECORDED;
 }
 
 function AclDeltas({ result }: { result: CrossReferenceResult }) {

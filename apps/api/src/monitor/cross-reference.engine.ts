@@ -22,25 +22,25 @@ const HOT_KEY_TOP_K = 50;
 export interface CrossReferenceInput {
   sessionId: string;
   baseline: BaselineWindow;
+  /** Pre-read row; when given, the engine does not read it again. */
+  session?: StoredCaptureSession;
   /**
-   * Whether a live capture in this process owns the session. Used only for a
-   * `running` row, to tell a capture in progress from one orphaned by an API
-   * restart. When omitted, a `running` row is reported as `capture_running`.
+   * Whether a live capture owned the session, evaluated BEFORE the row was read
+   * (so a capture that finalizes in between can't be misreported as interrupted).
+   * Only used for a `running` row. Omitted → treated as live.
    */
-  isSessionLive?: (sessionId: string) => boolean;
+  sessionLive?: boolean;
 }
 
 /** Why counter deltas are not final yet; undefined once the session row has ended. */
 function pendingCounters(
   session: StoredCaptureSession,
-  isSessionLive: ((sessionId: string) => boolean) | undefined,
+  sessionLive: boolean | undefined,
 ): CaptureCounterDeltas['pending'] {
   if (session.status !== 'running') {
     return undefined;
   }
-  return isSessionLive !== undefined && !isSessionLive(session.id)
-    ? 'capture_interrupted'
-    : 'capture_running';
+  return sessionLive === false ? 'capture_interrupted' : 'capture_running';
 }
 
 export interface NewShape {
@@ -132,7 +132,7 @@ export class CrossReferenceEngine {
   ) {}
 
   async compute(input: CrossReferenceInput): Promise<CrossReferenceResult> {
-    const session = await this.storage.getCaptureSession(input.sessionId);
+    const session = input.session ?? (await this.storage.getCaptureSession(input.sessionId));
     if (!session) {
       throw new Error(`Session ${input.sessionId} not found`);
     }
@@ -182,11 +182,9 @@ export class CrossReferenceEngine {
       sessionStartMs,
       sessionEndMs,
     );
-    // The capture may have finalized while chunks and baselines were read.
-    const latest = (await this.storage.getCaptureSession(session.id).catch(() => null)) ?? session;
     const counterDeltas = computeCounterDeltas(
-      latest.counterSnapshots,
-      pendingCounters(latest, input.isSessionLive),
+      session.counterSnapshots,
+      pendingCounters(session, input.sessionLive),
     );
 
     return {
@@ -220,19 +218,25 @@ export class CrossReferenceEngine {
    * source for shapes and hot keys; returns the same result shape as
    * {@link compute}; slowlog regressions and the audit-entry count stay empty (they
    * are scoped to connection history), while INFO counter deltas are reported for
-   * both captures.
+   * both captures. Pre-read rows and their liveness (evaluated before the read)
+   * can be passed in `opts`; a row that is passed is not read again.
    */
   async computeCaptureDiff(
     sessionId: string,
     baselineSessionId: string,
-    isSessionLive?: (sessionId: string) => boolean,
+    opts: {
+      session?: StoredCaptureSession;
+      baselineSession?: StoredCaptureSession;
+      sessionLive?: boolean;
+      baselineLive?: boolean;
+    } = {},
   ): Promise<CrossReferenceResult> {
     if (sessionId === baselineSessionId) {
       throw new Error('Cannot diff a capture against itself');
     }
     const [session, baselineSession] = await Promise.all([
-      this.storage.getCaptureSession(sessionId),
-      this.storage.getCaptureSession(baselineSessionId),
+      opts.session ?? this.storage.getCaptureSession(sessionId),
+      opts.baselineSession ?? this.storage.getCaptureSession(baselineSessionId),
     ]);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
@@ -251,18 +255,13 @@ export class CrossReferenceEngine {
 
     const newShapes = computeNewShapes(capturedLines, baselineShapes);
     const hotKeyDelta = computeHotKeyDelta(capturedLines, baselineKeyCounts);
-    // Either capture may have finalized while chunks were read.
-    const [latest, latestBaseline] = await Promise.all([
-      this.storage.getCaptureSession(sessionId).catch(() => null),
-      this.storage.getCaptureSession(baselineSessionId).catch(() => null),
-    ]);
     const counterDeltas = computeCounterDeltas(
-      (latest ?? session).counterSnapshots,
-      pendingCounters(latest ?? session, isSessionLive),
+      session.counterSnapshots,
+      pendingCounters(session, opts.sessionLive),
     );
     const baselineCounterDeltas = computeCounterDeltas(
-      (latestBaseline ?? baselineSession).counterSnapshots,
-      pendingCounters(latestBaseline ?? baselineSession, isSessionLive),
+      baselineSession.counterSnapshots,
+      pendingCounters(baselineSession, opts.baselineLive),
     );
 
     return {

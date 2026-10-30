@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { CaptureSessionPatch, StoragePort } from '../common/interfaces/storage-port.interface';
+import { withTimeout } from '../common/utils/with-timeout';
 import type { CounterSampleOutcome } from './capture-counters';
 
 /**
@@ -57,9 +58,12 @@ export interface CaptureWriterOptions {
    * exactly once inside terminate(), right after the MONITOR source is
    * stopped (so the probe's own INFO is never captured as a line) and before
    * the write queue drains (so slow storage does not stretch the window).
-   * Its outcome is returned on {@link CaptureWriterResult.endSample}.
+   * Its outcome is returned on {@link CaptureWriterResult.endSample}. The writer
+   * bounds this by `endSampleTimeoutMs`; a timeout records `{ sample: null, error }`.
    */
   endSampler?: () => Promise<CounterSampleOutcome>;
+  /** Upper bound the writer waits for `endSampler`. Defaults to {@link END_SAMPLE_TIMEOUT_MS}. */
+  endSampleTimeoutMs?: number;
   /**
    * Single-writer sessions only: extra fields merged into the writer's own
    * finalize `updateCaptureSession` patch, built from the end-sample outcome
@@ -82,6 +86,9 @@ export interface CaptureWriterResult {
   /** Outcome of the endSampler probe; undefined when the writer had none. */
   endSample?: CounterSampleOutcome | null;
 }
+
+/** Upper bound the writer waits for endSampler, independent of the sampler's own timeout. */
+export const END_SAMPLE_TIMEOUT_MS = 3_000;
 
 const DEFAULT_FLUSH_INTERVAL_MS = 1000;
 const DEFAULT_FLUSH_LINE_THRESHOLD = 5000;
@@ -121,6 +128,7 @@ export class CaptureWriter {
   private readonly nodeId?: string;
   private readonly skipSessionFinalize: boolean;
   private readonly endSampler?: () => Promise<CounterSampleOutcome>;
+  private readonly endSampleTimeoutMs: number;
   private readonly buildFinalizePatch?: CaptureWriterOptions['buildFinalizePatch'];
 
   private buffer: string[] = [];
@@ -165,6 +173,7 @@ export class CaptureWriter {
     this.chunkIndex = opts.startChunkIndex ?? 0;
     this.skipSessionFinalize = opts.skipSessionFinalize ?? false;
     this.endSampler = opts.endSampler;
+    this.endSampleTimeoutMs = opts.endSampleTimeoutMs ?? END_SAMPLE_TIMEOUT_MS;
     this.buildFinalizePatch = opts.buildFinalizePatch;
 
     this.donePromise = new Promise((resolve) => {
@@ -339,6 +348,10 @@ export class CaptureWriter {
       this.logger.warn(`source.stop threw: ${(err as Error).message}`);
     }
 
+    // The window ends when MONITOR stops: take endedAt before the end probe
+    // and the queue drain so neither stretches the recorded duration.
+    const endedAt = this.now();
+
     // Kick the end-of-window probe now: after MONITOR is stopped (its INFO is
     // never captured) and before draining the write queue (slow storage must
     // not stretch the sampled window).
@@ -354,7 +367,6 @@ export class CaptureWriter {
     }
 
     const endSample = await endSamplePromise;
-    const endedAt = this.now();
 
     if (!this.skipSessionFinalize) {
       try {
@@ -398,9 +410,11 @@ export class CaptureWriter {
     if (sampler === undefined) {
       return Promise.resolve(null);
     }
-    return Promise.resolve()
-      .then(() => sampler())
-      .catch((err: unknown) => {
+    return withTimeout(
+      Promise.resolve().then(() => sampler()),
+      this.endSampleTimeoutMs,
+      `End-of-window counter sample timed out after ${this.endSampleTimeoutMs} ms`,
+    ).catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         this.logger.warn(`End-of-window counter sample threw: ${message}`);
         return { sample: null, error: message };

@@ -637,6 +637,48 @@ describe('CaptureWriter end-of-window counter sample', () => {
     expect(patch.status).toBe('completed');
   });
 
+  it('takes endedAt right after source.stop(), before the end probe advances the clock', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    let clock = 100;
+    const writer = makeWriter(source, storage, {
+      now: () => clock,
+      endSampler: async () => {
+        clock = 5000;
+        return OUTCOME;
+      },
+    });
+
+    const done = writer.start();
+    writer.stop();
+    const result = await done;
+
+    expect(result.endedAt).toBe(100);
+    expect(storage.updateCaptureSession).toHaveBeenCalledWith(
+      SESSION_ID,
+      expect.objectContaining({ endedAt: 100 }),
+    );
+  });
+
+  it('bounds a hung endSampler and still finalizes', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const writer = makeWriter(source, storage, {
+      endSampleTimeoutMs: 20,
+      endSampler: () => new Promise(() => undefined),
+    });
+
+    const done = writer.start();
+    source.end();
+    const result = await done;
+
+    expect(storage.updateCaptureSession).toHaveBeenCalledTimes(1);
+    expect(result.endSample).toEqual({
+      sample: null,
+      error: 'End-of-window counter sample timed out after 20 ms',
+    });
+  });
+
   it('no hooks means unchanged behavior', async () => {
     const source = new FakeSource();
     const storage = makeStorage();

@@ -609,6 +609,18 @@ describe('CrossReferenceEngine.compute', () => {
     });
   });
 
+  it('computeCaptureDiff does not read sessions that are passed in', async () => {
+    const storage = makeStorage();
+    const engine = new CrossReferenceEngine(storage);
+    await engine.computeCaptureDiff(SESSION_ID, 'session-b', {
+      session: { ...baseSession(), id: SESSION_ID },
+      baselineSession: { ...baseSession(), id: 'session-b' },
+      sessionLive: false,
+      baselineLive: true,
+    });
+    expect(storage.getCaptureSession).not.toHaveBeenCalled();
+  });
+
   it('reports unavailable counter deltas and null ACL counters for legacy sessions', async () => {
     const engine = new CrossReferenceEngine(makeStorage());
     const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
@@ -642,35 +654,37 @@ describe('CrossReferenceEngine.compute', () => {
     const result = await engine.compute({
       sessionId: SESSION_ID,
       baseline: '24h',
-      isSessionLive: () => true,
+      sessionLive: true,
     });
     expect(result.counterDeltas.coverage).toBe('unavailable');
     expect(result.counterDeltas.pending).toBe('capture_running');
   });
 
-  it('derives counter status from a fresh read when the capture finalizes mid-compute', async () => {
-    const running = { ...baseSession(), status: 'running' as const, endedAt: undefined };
-    const completed = {
-      ...baseSession(),
-      ...withCounters([
-        {
-          start: { capturedAt: 1_000, counters: { rejected_connections: 0 } },
-          end: { capturedAt: 6_000, counters: { rejected_connections: 2 } },
-        },
-      ]),
-    };
-    const storage = makeStorage({ session: running });
-    (storage.getCaptureSession as jest.Mock)
-      .mockResolvedValueOnce(running)
-      .mockResolvedValueOnce(completed);
+  it('reads the session once per compute, and not at all when it is passed in', async () => {
+    const storage = makeStorage();
     const engine = new CrossReferenceEngine(storage);
+    await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+    expect(storage.getCaptureSession).toHaveBeenCalledTimes(1);
+
+    const passed = makeStorage();
+    await new CrossReferenceEngine(passed).compute({
+      sessionId: SESSION_ID,
+      baseline: '24h',
+      session: baseSession(),
+    });
+    expect(passed.getCaptureSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the pre-read session for the counter status instead of re-reading', async () => {
+    const running = { ...baseSession(), status: 'running' as const, endedAt: undefined };
+    const engine = new CrossReferenceEngine(makeStorage({ session: baseSession() }));
     const result = await engine.compute({
       sessionId: SESSION_ID,
       baseline: '24h',
-      isSessionLive: () => true,
+      session: running,
+      sessionLive: true,
     });
-    expect(result.counterDeltas.coverage).toBe('complete');
-    expect(result.counterDeltas).not.toHaveProperty('pending');
+    expect(result.counterDeltas.pending).toBe('capture_running');
   });
 
   it('marks a running session with no live capture as capture_interrupted', async () => {
@@ -679,7 +693,7 @@ describe('CrossReferenceEngine.compute', () => {
     const result = await engine.compute({
       sessionId: SESSION_ID,
       baseline: '24h',
-      isSessionLive: () => false,
+      sessionLive: false,
     });
     expect(result.counterDeltas.pending).toBe('capture_interrupted');
   });
@@ -696,7 +710,7 @@ describe('CrossReferenceEngine.compute', () => {
     const result = await engine.compute({
       sessionId: SESSION_ID,
       baseline: '24h',
-      isSessionLive: () => false,
+      sessionLive: false,
     });
     expect(result.counterDeltas).not.toHaveProperty('pending');
   });

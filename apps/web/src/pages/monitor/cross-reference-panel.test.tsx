@@ -56,6 +56,14 @@ describe('CrossReferenceSections', () => {
     expect(screen.queryByText(/follow-up PR/)).toBeNull();
   });
 
+  it('does not crash and shows the unavailable text when counterDeltas is missing', () => {
+    const r = result() as Partial<CrossReferenceResult>;
+    delete r.counterDeltas;
+    expect(() => render(<CrossReferenceSections result={r as CrossReferenceResult} />)).not.toThrow();
+    expect(screen.getByTestId('counter-deltas-section')).toBeTruthy();
+    expect(screen.getAllByText('INFO counters were not recorded for this capture.').length).toBeGreaterThan(0);
+  });
+
   it('tells a running capture that counters arrive when it ends', () => {
     render(
       <CrossReferenceSections

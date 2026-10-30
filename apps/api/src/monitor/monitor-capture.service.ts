@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
+import { CaptureCounterSnapshots, CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
 import {
   CaptureSessionQueryOptions,
   CaptureSessionSource,
@@ -9,9 +9,10 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { withTimeout } from '../common/utils/with-timeout';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
-import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
+import { MONITOR_OPEN_TIMEOUT_MS, createIovalkeyMonitorSource } from './iovalkey-monitor-source';
 import {
   CounterSampleOutcome,
   CounterSampleReader,
@@ -75,6 +76,14 @@ interface ActiveSession {
   donePromise: Promise<unknown>;
 }
 
+/** A start in flight for a connection: created before the row is saved, cleared when it settles. */
+interface PendingStart {
+  sessionId: string;
+  /** Resolves when startSession settles (started or failed). Never rejects. */
+  settled: Promise<void>;
+  stopRequested: boolean;
+}
+
 interface ActiveWriter {
   writer: CaptureWriter;
   nodeId?: string;
@@ -96,11 +105,8 @@ export type MonitorSourceFactory = (
 export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
-  private readonly starting = new Set<string>();
-  /** Session id → resolves when its startSession call settles (started or failed). */
-  private readonly startingById = new Map<string, Promise<void>>();
-  /** Sessions with a stop requested while still starting; applied once MONITOR is open. */
-  private readonly stopRequested = new Set<string>();
+  /** connectionId → in-flight start. Created before the row is saved. */
+  private readonly pendingStarts = new Map<string, PendingStart>();
   private monitorSourceFactory: MonitorSourceFactory;
   private counterSampleReader: CounterSampleReader;
 
@@ -131,8 +137,11 @@ export class MonitorCaptureService {
       // Default INFO (no section argument) carries both # Stats and # Server
       // (run_id, uptime_in_seconds, used for restart detection) in one command,
       // on every server version.
+      // Timestamp before the command is sent: the reply reflects the server no
+      // earlier than this, so uptime never reads as older than capturedAt.
+      const capturedAt = Date.now();
       const infoText = await client.info();
-      return sampleFromInfoText(infoText, Date.now());
+      return sampleFromInfoText(infoText, capturedAt);
     };
   }
 
@@ -148,6 +157,35 @@ export class MonitorCaptureService {
 
   private sampleCounters(connectionId: string, nodeId?: string): Promise<CounterSampleOutcome> {
     return readCounterSample(this.counterSampleReader, connectionId, nodeId);
+  }
+
+  /**
+   * Open a MONITOR source, bounded. The default source bounds itself; the
+   * backstop here also covers a custom factory that never settles, so a hung
+   * open can never hold the connection. A source that arrives after the
+   * backstop fired is stopped.
+   */
+  private openSource(connectionId: string, targetNodeId?: string): Promise<MonitorSource> {
+    const opening = Promise.resolve().then(() =>
+      this.monitorSourceFactory(connectionId, targetNodeId),
+    );
+    return withTimeout(
+      opening,
+      MONITOR_OPEN_TIMEOUT_MS + 1_000,
+      `MONITOR open timed out after ${MONITOR_OPEN_TIMEOUT_MS} ms`,
+    ).catch((err: Error) => {
+      opening.then(
+        (late) => {
+          try {
+            late.stop();
+          } catch {
+            // Ignore — the late source is being discarded.
+          }
+        },
+        () => undefined,
+      );
+      throw err;
+    });
   }
 
   listSessions(options: CaptureSessionQueryOptions = {}): Promise<StoredCaptureSession[]> {
@@ -166,17 +204,20 @@ export class MonitorCaptureService {
    */
   async startSession(input: StartSessionInput): Promise<StoredCaptureSession> {
     const { connectionId } = input;
-    if (this.active.has(connectionId) || this.starting.has(connectionId)) {
+    if (this.active.has(connectionId) || this.pendingStarts.has(connectionId)) {
       throw new ConflictException(
         `A capture session is already active on connection ${connectionId}`,
       );
     }
-    this.starting.add(connectionId);
-    let startingSessionId: string | undefined;
+    // Reserve the connection synchronously, before any await. The id is fixed
+    // here so a stop for this session can find the pending start.
+    const sessionId = randomUUID();
     let markSettled!: () => void;
     const settled = new Promise<void>((resolve) => {
       markSettled = resolve;
     });
+    const pending: PendingStart = { sessionId, settled, stopRequested: false };
+    this.pendingStarts.set(connectionId, pending);
 
     try {
       const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
@@ -190,25 +231,6 @@ export class MonitorCaptureService {
         ? undefined
         : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
 
-      // Start samples are taken before any MONITOR connection opens so the
-      // window never includes traffic from before the capture. Fail-open and
-      // bounded (2 s per node, in parallel).
-      const startTargets = isFanOut
-        ? await Promise.all(
-            fanOutNodes.map(async (n) => ({
-              nodeId: n.id,
-              address: n.address,
-              outcome: await this.sampleCounters(connectionId, n.id),
-            })),
-          )
-        : [
-            {
-              nodeId: input.targetNodeId,
-              address: targetNode,
-              outcome: await this.sampleCounters(connectionId, input.targetNodeId),
-            },
-          ];
-
       const initialSegments: CaptureNodeSegment[] = isFanOut
         ? fanOutNodes.map((n) => ({
             nodeId: n.id,
@@ -220,7 +242,7 @@ export class MonitorCaptureService {
         : [];
 
       const session: StoredCaptureSession = {
-        id: randomUUID(),
+        id: sessionId,
         connectionId,
         status: 'running',
         source: input.source ?? 'manual',
@@ -234,13 +256,12 @@ export class MonitorCaptureService {
         lineCap,
         targetNode,
         nodeSegments: isFanOut ? initialSegments : undefined,
-        counterSnapshots: buildStartSnapshots(startTargets),
       };
 
+      // Start counter samples are taken per node right before its own MONITOR
+      // open (see the start* methods); the finalize patch writes the snapshots.
       // From here the row is visible to clients, so a stop for this id can
-      // arrive before MONITOR is open; stopSession waits on `settled`.
-      startingSessionId = session.id;
-      this.startingById.set(session.id, settled);
+      // arrive before MONITOR is open; stopSession waits on `pending.settled`.
       await this.storage.saveCaptureSession(session, connectionId);
 
       const started = isFanOut
@@ -249,16 +270,12 @@ export class MonitorCaptureService {
 
       // A stop that timed out waiting for this start is applied now that the
       // writers are live.
-      if (this.stopRequested.delete(session.id)) {
-        this.stopActive(this.findActiveById(session.id));
+      if (pending.stopRequested) {
+        this.stopActive(this.findActiveById(sessionId));
       }
       return started;
     } finally {
-      this.starting.delete(connectionId);
-      if (startingSessionId !== undefined) {
-        this.startingById.delete(startingSessionId);
-        this.stopRequested.delete(startingSessionId);
-      }
+      this.pendingStarts.delete(connectionId);
       markSettled();
     }
   }
@@ -270,9 +287,15 @@ export class MonitorCaptureService {
     byteCap: number,
     lineCap: number,
   ): Promise<StoredCaptureSession> {
+    // Sampled immediately before this node's own open so the window matches its traffic.
+    const startOutcome = await this.sampleCounters(session.connectionId, targetNodeId);
+    const startSnapshots = buildStartSnapshots([
+      { nodeId: targetNodeId, address: session.targetNode, outcome: startOutcome },
+    ]);
+
     let monitorSource: MonitorSource;
     try {
-      monitorSource = await this.monitorSourceFactory(session.connectionId, targetNodeId);
+      monitorSource = await this.openSource(session.connectionId, targetNodeId);
     } catch (err) {
       this.logger.error(
         `Failed to open MONITOR on ${session.connectionId}: ${(err as Error).message}`,
@@ -281,7 +304,7 @@ export class MonitorCaptureService {
         status: 'failed',
         endedAt: Date.now(),
         terminationReason: `monitor_open_failed: ${(err as Error).message}`,
-        counterSnapshots: withEndSamples(session.counterSnapshots, new Map()),
+        counterSnapshots: withEndSamples(startSnapshots, new Map()),
       });
       throw err;
     }
@@ -296,7 +319,7 @@ export class MonitorCaptureService {
       endSampler: () => this.sampleCounters(session.connectionId, targetNodeId),
       buildFinalizePatch: (endSample) => ({
         counterSnapshots: withEndSamples(
-          session.counterSnapshots,
+          startSnapshots,
           new Map(endSample === null ? [] : [[counterNodeKey(targetNodeId), endSample]]),
         ),
       }),
@@ -345,23 +368,37 @@ export class MonitorCaptureService {
     const segmentPromises: Array<Promise<void>> = [];
     const endSamples = new Map<string, CounterSampleOutcome>();
 
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      let source: MonitorSource;
-      try {
-        source = await this.monitorSourceFactory(session.connectionId, node.id);
-      } catch (err) {
+    // Per node: sample, then open. Nodes run in parallel so a slow node does not
+    // delay another node's window. Each node's start sample is taken immediately
+    // before its own MONITOR open, and its end sample immediately after its own
+    // stop, so each node's window matches its captured traffic.
+    const opened = await Promise.all(
+      nodes.map(async (node) => {
+        const startOutcome = await this.sampleCounters(session.connectionId, node.id);
+        try {
+          const source = await this.openSource(session.connectionId, node.id);
+          return { node, startOutcome, source, error: undefined };
+        } catch (err) {
+          return { node, startOutcome, source: undefined, error: err as Error };
+        }
+      }),
+    );
+    const startSnapshots = buildStartSnapshots(
+      opened.map((o) => ({ nodeId: o.node.id, address: o.node.address, outcome: o.startOutcome })),
+    );
+
+    for (let i = 0; i < opened.length; i++) {
+      const { node, source, error } = opened[i];
+      if (source === undefined) {
         // Failing to open MONITOR on ONE node does not kill the session — mark
         // that segment failed up front and keep going with the others.
         const seg = segments.get(node.id);
         if (seg) {
           seg.status = 'failed';
           seg.endedAt = Date.now();
-          seg.terminationReason = `monitor_open_failed: ${(err as Error).message}`;
+          seg.terminationReason = `monitor_open_failed: ${error?.message}`;
         }
-        this.logger.warn(
-          `Fan-out: failed to open MONITOR on ${node.address}: ${(err as Error).message}`,
-        );
+        this.logger.warn(`Fan-out: failed to open MONITOR on ${node.address}: ${error?.message}`);
         continue;
       }
 
@@ -409,7 +446,7 @@ export class MonitorCaptureService {
     }
 
     const finalize = Promise.all(segmentPromises)
-      .then(() => this.finalizeFanOutSession(session, segments, endSamples))
+      .then(() => this.finalizeFanOutSession(session, segments, startSnapshots, endSamples))
       .finally(() => {
         this.active.delete(session.connectionId);
       });
@@ -428,6 +465,7 @@ export class MonitorCaptureService {
   private async finalizeFanOutSession(
     session: StoredCaptureSession,
     segments: Map<string, CaptureNodeSegment>,
+    startSnapshots: CaptureCounterSnapshots,
     endSamples: ReadonlyMap<string, CounterSampleOutcome>,
   ): Promise<void> {
     const segmentList = Array.from(segments.values());
@@ -449,7 +487,7 @@ export class MonitorCaptureService {
         lineCount: totalLines,
         terminationReason: reason,
         nodeSegments: segmentList,
-        counterSnapshots: withEndSamples(session.counterSnapshots, endSamples),
+        counterSnapshots: withEndSamples(startSnapshots, endSamples),
       });
     } catch (err) {
       this.logger.error(`Fan-out finalize failed: ${(err as Error).message}`);
@@ -534,39 +572,32 @@ export class MonitorCaptureService {
    * Stop a running session by ID. If found in the active map, stops every
    * writer (fan-out captures have N) and awaits the aggregate finalize.
    */
-  async stopSession(id: string): Promise<StoredCaptureSession | null> {
-    // A stop that arrives while the session is still starting (row saved,
-    // MONITOR not open yet) waits for the start to settle and then stops it,
-    // instead of being dropped and letting the capture run its full duration.
-    const starting = this.startingById.get(id);
-    if (starting !== undefined) {
-      this.stopRequested.add(id);
-      let timer: NodeJS.Timeout | undefined;
-      const settled = await Promise.race([
-        starting.then(
-          () => true,
-          () => true,
-        ),
-        new Promise<false>((resolve) => {
-          timer = setTimeout(() => resolve(false), STOP_WAIT_FOR_START_MS);
-        }),
-      ]);
-      clearTimeout(timer);
-      if (!settled) {
-        // Start is stalled; it will stop itself as soon as MONITOR opens (see startSession).
+  async stopSession(
+    id: string,
+  ): Promise<{ session: StoredCaptureSession | null; stopPending: boolean }> {
+    // A stop that arrives while the session is still starting (MONITOR not open
+    // yet) waits for the start to settle and then stops it, instead of being
+    // dropped and letting the capture run its full duration. If the open is
+    // still stalled after the wait, the start applies the stop itself as soon
+    // as MONITOR opens (see startSession) and the caller is told it is pending.
+    const pending = this.findPendingBySessionId(id);
+    if (pending) {
+      pending.stopRequested = true;
+      try {
+        await withTimeout(pending.settled, STOP_WAIT_FOR_START_MS, 'stop wait timed out');
+      } catch {
         this.logger.warn(
           `Stop for ${id} requested while MONITOR is still opening; it will stop when the open completes`,
         );
-        return this.storage.getCaptureSession(id);
+        return { session: await this.storage.getCaptureSession(id), stopPending: true };
       }
-      this.stopRequested.delete(id);
     }
     const active = this.findActiveById(id);
     if (active) {
       this.stopActive(active);
       await active.donePromise;
     }
-    return this.storage.getCaptureSession(id);
+    return { session: await this.storage.getCaptureSession(id), stopPending: false };
   }
 
   private stopActive(active: ActiveSession | undefined): void {
@@ -587,7 +618,7 @@ export class MonitorCaptureService {
 
   /** True while a session on the connection is active or still starting. */
   hasActiveSessionOn(connectionId: string): boolean {
-    return this.active.has(connectionId) || this.starting.has(connectionId);
+    return this.active.has(connectionId) || this.pendingStarts.has(connectionId);
   }
 
   /**
@@ -596,7 +627,14 @@ export class MonitorCaptureService {
    * (for example the API restarted mid-capture).
    */
   isSessionLive(sessionId: string): boolean {
-    return this.startingById.has(sessionId) || this.findActiveById(sessionId) !== undefined;
+    return this.findPendingBySessionId(sessionId) !== undefined || this.findActiveById(sessionId) !== undefined;
+  }
+
+  private findPendingBySessionId(sessionId: string): PendingStart | undefined {
+    for (const p of this.pendingStarts.values()) {
+      if (p.sessionId === sessionId) return p;
+    }
+    return undefined;
   }
 
   private findActiveById(sessionId: string): ActiveSession | undefined {

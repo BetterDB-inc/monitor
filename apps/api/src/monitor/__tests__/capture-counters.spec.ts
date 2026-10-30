@@ -5,7 +5,6 @@ import {
   buildStartSnapshots,
   computeCounterDeltas,
   counterNodeKey,
-  deriveCounterRates,
   extractCaptureCounters,
   readCounterSample,
   sampleFromInfoText,
@@ -311,13 +310,89 @@ describe('computeCounterDeltas', () => {
   });
 });
 
-describe('deriveCounterRates', () => {
-  it('returns null rates for a zero-length window or zero lookups', () => {
-    const deltas = computeCounterDeltas(undefined).deltas;
-    deltas.total_commands_processed = 10;
-    deltas.keyspace_hits = 0;
-    deltas.keyspace_misses = 0;
-    expect(deriveCounterRates(deltas, 0)).toEqual({ commandsPerSec: null, keyspaceHitRatio: null });
+describe('computeCounterDeltas derived rates and measured nodes', () => {
+  const START = 1_700_000_000_000;
+  function snaps(nodes: CaptureCounterSnapshots['nodes']): CaptureCounterSnapshots {
+    return { version: 1, nodes };
+  }
+
+  it('sums each node commands/sec instead of dividing by the longest span', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        {
+          nodeId: 'A',
+          start: sample(START, { total_commands_processed: 0 }),
+          end: sample(START + 10_000, { total_commands_processed: 1_000 }),
+        },
+        {
+          nodeId: 'B',
+          start: sample(START, { total_commands_processed: 0 }),
+          end: sample(START + 5_000, { total_commands_processed: 500 }),
+        },
+      ]),
+    );
+    expect(d.derived.commandsPerSec).toBe(200);
+    expect(d.deltas.total_commands_processed).toBe(1_500);
+    expect(d.windowMs).toBe(10_000);
+  });
+
+  it('excludes a zero-span node from the rate; a lone zero-span node gives null', () => {
+    const zero = {
+      start: sample(START, { total_commands_processed: 0 }),
+      end: sample(START, { total_commands_processed: 7 }),
+    };
+    const lone = computeCounterDeltas(snaps([zero]));
+    expect(lone.derived.commandsPerSec).toBeNull();
+    expect(lone.deltas.total_commands_processed).toBe(7);
+
+    const mixed = computeCounterDeltas(
+      snaps([
+        { nodeId: 'A', ...zero },
+        {
+          nodeId: 'B',
+          start: sample(START, { total_commands_processed: 0 }),
+          end: sample(START + 5_000, { total_commands_processed: 500 }),
+        },
+      ]),
+    );
+    expect(mixed.derived.commandsPerSec).toBe(100);
+  });
+
+  it('returns a null hit ratio for zero lookups', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        {
+          start: sample(START, { keyspace_hits: 5, keyspace_misses: 5 }),
+          end: sample(START + 1_000, { keyspace_hits: 5, keyspace_misses: 5 }),
+        },
+      ]),
+    );
+    expect(d.derived.keyspaceHitRatio).toBeNull();
+  });
+
+  it('does not measure a node whose samples carry no counters (proxy, restricted INFO)', () => {
+    const d = computeCounterDeltas(
+      snaps([{ start: sample(START, {}), end: sample(START + 5_000, {}) }]),
+    );
+    expect(d.coverage).toBe('unavailable');
+    expect(d.nodesMeasured).toBe(0);
+    expect(d.nodesTotal).toBe(1);
+  });
+
+  it('is partial when one fan-out node has no parsable stats', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        { nodeId: 'A', start: sample(START, {}), end: sample(START + 5_000, {}) },
+        {
+          nodeId: 'B',
+          start: sample(START, { evicted_keys: 0 }),
+          end: sample(START + 5_000, { evicted_keys: 2 }),
+        },
+      ]),
+    );
+    expect(d.coverage).toBe('partial');
+    expect(d.nodesMeasured).toBe(1);
+    expect(d.deltas.evicted_keys).toBe(2);
   });
 });
 
@@ -453,7 +528,7 @@ describe('computeCounterDeltas restart detection', () => {
   });
 
   it('does not flag uptime jitter within the slack', () => {
-    const slackSec = 2; // mirrors UPTIME_SLACK_SEC in capture-counters.ts
+    const slackSec = 3; // mirrors UPTIME_SLACK_SEC in capture-counters.ts
     const d = computeCounterDeltas(
       snaps([
         node(
@@ -468,6 +543,40 @@ describe('computeCounterDeltas restart detection', () => {
     );
     expect(d.resets).toEqual([]);
     expect(d.coverage).toBe('complete');
+  });
+
+  it('does not flag a restart when the start INFO reply was slow and the server has no run_id', () => {
+    // The start reply took 2 s, so its uptime reads 2 s ahead of capturedAt.
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 1_002 },
+          {
+            capturedAt: START + 60_000,
+            counters: { total_commands_processed: 200 },
+            uptimeSec: 1_060,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets).toEqual([]);
+    expect(d.coverage).toBe('complete');
+  });
+
+  it('still flags a real restart without run_id', () => {
+    const d = computeCounterDeltas(
+      snaps([
+        node(
+          { capturedAt: START, counters: { total_commands_processed: 100 }, uptimeSec: 1_000 },
+          {
+            capturedAt: START + 60_000,
+            counters: { total_commands_processed: 5 },
+            uptimeSec: 10,
+          },
+        ),
+      ]),
+    );
+    expect(d.resets[0]?.reason).toBe('restart');
   });
 
   it('keeps summing the other nodes when one restarts', () => {

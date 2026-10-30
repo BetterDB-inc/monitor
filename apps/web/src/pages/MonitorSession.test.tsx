@@ -229,6 +229,44 @@ describe('MonitorSession — stop session', () => {
   });
 });
 
+describe('MonitorSession — stop pending while MONITOR is opening', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useQuery).mockReturnValue({
+      data: BASE_SESSION,
+      isLoading: false,
+      error: null,
+    } as ReturnType<typeof useQuery>);
+  });
+
+  it('keeps "Stopping…" and the dialog open until the session leaves running', async () => {
+    mockStopSession.mockResolvedValueOnce({ ...BASE_SESSION, stopPending: true });
+    const { rerender } = render(<MonitorSession />);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+
+    await waitFor(() => {
+      expect(mockInvalidateQueries).toHaveBeenCalledWith({
+        queryKey: ['monitor', 'session', 'session-abc'],
+      });
+    });
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stopping…' })).toBeDisabled();
+
+    // The refetched row has ended: the dialog closes.
+    vi.mocked(useQuery).mockReturnValue({
+      data: { ...BASE_SESSION, status: 'completed' },
+      isLoading: false,
+      error: null,
+    } as ReturnType<typeof useQuery>);
+    rerender(<MonitorSession />);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: 'Stopping…' })).not.toBeInTheDocument();
+  });
+});
+
 describe('MonitorSession — refetch when the capture ends', () => {
   beforeEach(() => {
     vi.clearAllMocks();

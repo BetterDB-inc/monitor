@@ -180,22 +180,8 @@ function nodeLabel(node: CaptureNodeCounterSnapshot): string {
   return node.address ?? node.nodeId ?? 'instance';
 }
 
-export function deriveCounterRates(
-  deltas: Record<CaptureCounterName, number | null>,
-  windowMs: number | null,
-): CaptureCounterDeltas['derived'] {
-  const commands = deltas.total_commands_processed;
-  const commandsPerSec =
-    commands !== null && windowMs !== null && windowMs > 0 ? commands / (windowMs / 1000) : null;
-  const hits = deltas.keyspace_hits;
-  const misses = deltas.keyspace_misses;
-  const keyspaceHitRatio =
-    hits !== null && misses !== null && hits + misses > 0 ? hits / (hits + misses) : null;
-  return { commandsPerSec, keyspaceHitRatio };
-}
-
-/** Slack for uptime_in_seconds (whole seconds, sampled independently of capturedAt). */
-const UPTIME_SLACK_SEC = 2;
+/** uptime is whole seconds and read up to COUNTER_SAMPLE_TIMEOUT_MS after capturedAt. */
+const UPTIME_SLACK_SEC = Math.ceil(COUNTER_SAMPLE_TIMEOUT_MS / 1000) + 1;
 
 /**
  * True when the process behind a node restarted between its two samples:
@@ -220,7 +206,10 @@ function restartedBetween(start: CaptureCounterSample, end: CaptureCounterSample
  * Turn stored start/end samples into per-counter deltas summed across nodes.
  *
  * - A node is measured only when it has both samples, end.capturedAt >= start.capturedAt,
- *   and it neither restarted nor reset its stats in between.
+ *   it neither restarted nor reset its stats in between, and at least one counter appears
+ *   in both samples (a proxy or restricted INFO with no parsable `# Stats` is not measured).
+ * - commandsPerSec is the sum of each node's own rate (delta / its own span); windowMs is
+ *   the longest span and is for display only.
  * - Restart: run_id changed or uptime_in_seconds fell (see restartedBetween). Reset: any
  *   counter went backwards. CONFIG RESETSTAT zeroes every stat at once, so one decreasing
  *   counter excludes the whole node from every sum (and from the hit ratio), and the
@@ -247,6 +236,8 @@ export function computeCounterDeltas(
   let ratioHits = 0;
   let ratioMisses = 0;
   let ratioNodes = 0;
+  let cmdRateSum = 0;
+  let cmdRateNodes = 0;
 
   for (const node of nodes) {
     const start = node.start;
@@ -269,6 +260,13 @@ export function computeCounterDeltas(
       continue;
     }
 
+    const sharedCounters = CAPTURE_COUNTER_FIELDS.filter(
+      (field) => start.counters[field] !== undefined && end.counters[field] !== undefined,
+    );
+    if (sharedCounters.length === 0) {
+      continue;
+    }
+
     measured += 1;
     const span = end.capturedAt - start.capturedAt;
     windowMs = windowMs === null ? span : Math.max(windowMs, span);
@@ -281,6 +279,13 @@ export function computeCounterDeltas(
       }
       deltas[field] = (deltas[field] ?? 0) + (after - before);
       reportedBy.set(field, (reportedBy.get(field) ?? 0) + 1);
+    }
+
+    const cmdBefore = start.counters.total_commands_processed;
+    const cmdAfter = end.counters.total_commands_processed;
+    if (cmdBefore !== undefined && cmdAfter !== undefined && span > 0) {
+      cmdRateSum += (cmdAfter - cmdBefore) / (span / 1000);
+      cmdRateNodes += 1;
     }
 
     const hitsBefore = start.counters.keyspace_hits;
@@ -311,9 +316,11 @@ export function computeCounterDeltas(
     coverage = 'partial';
   }
 
-  const derived = deriveCounterRates(deltas, windowMs);
-  derived.keyspaceHitRatio =
-    ratioNodes > 0 && ratioHits + ratioMisses > 0 ? ratioHits / (ratioHits + ratioMisses) : null;
+  const derived: CaptureCounterDeltas['derived'] = {
+    commandsPerSec: cmdRateNodes > 0 ? cmdRateSum : null,
+    keyspaceHitRatio:
+      ratioNodes > 0 && ratioHits + ratioMisses > 0 ? ratioHits / (ratioHits + ratioMisses) : null,
+  };
 
   const result: CaptureCounterDeltas = {
     coverage,

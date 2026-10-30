@@ -226,8 +226,9 @@ export const monitorApi = {
     });
   },
 
-  stopSession: (id: string): Promise<StoredCaptureSession> => {
-    return fetchApi<StoredCaptureSession>(`/monitor/sessions/${encodeURIComponent(id)}`, {
+  /** `stopPending` is set when MONITOR is still opening: the stop is applied once it completes (HTTP 202). */
+  stopSession: (id: string): Promise<StoredCaptureSession & { stopPending?: boolean }> => {
+    return fetchApi<StoredCaptureSession & { stopPending?: boolean }>(`/monitor/sessions/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },
