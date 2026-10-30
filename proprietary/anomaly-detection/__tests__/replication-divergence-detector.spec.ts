@@ -228,9 +228,51 @@ describe('observeDivergence', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
 
-    const stale = divergences(h.windows(Array.from({ length: 4 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
+    const stale = divergences(h.windows(Array.from({ length: 5 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
     expect(stale).toHaveLength(1);
-    expect(stale[0]).toMatchObject({ level: 'critical', reason: 'not_acking', gapBytes: 8 * MiB });
+    expect(stale[0]).toMatchObject({ level: 'critical', reason: 'not_acking', gapBytes: 10 * MiB });
+  });
+
+  it('flags a replica that stops acking while it looked healthy', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+
+    const stale = h.windows([2, 4, 6, 8, 10].map((m) => ({ gap: m * MiB, rate: MiB, lagSec: 30 })));
+    expect(divergences(stale).map((f) => [f.level, f.reason, f.gapBytes / MiB])).toEqual([
+      ['warning', 'not_acking', 4],
+      ['critical', 'not_acking', 8],
+    ]);
+  });
+
+  it('stays quiet on a stale ack while the primary takes no writes', () => {
+    const h = new Harness();
+    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 2 * MiB, rate: 0, lagSec: 30 })));
+    expect(out.flat()).toEqual([]);
+  });
+
+  it('does not judge the ceiling across an untracked window', () => {
+    const h = new Harness();
+    const out = h.windows([
+      { gap: 125 * MiB, rate: MiB },
+      { gap: 125 * MiB, rate: MiB, lagSec: 30 },
+      { gap: 130 * MiB, rate: MiB },
+      { gap: 0, rate: MiB },
+      { gap: 0, rate: MiB },
+    ]);
+    expect(divergences(out)).toEqual([]);
+  });
+
+  it('does not count below-floor windows on both sides of a stale period', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 0].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const out = h.windows([
+      { gap: 0, rate: MiB, lagSec: 30 },
+      { gap: 0, rate: MiB },
+      { gap: 0, rate: MiB },
+      { gap: 0, rate: MiB },
+    ]);
+    expect(out.map((w) => w.map((o) => o.kind))).toEqual([[], [], [], ['recovered']]);
   });
 
   it('restarts the recovery grace when tracking resumes after a stale ack', () => {
@@ -274,11 +316,10 @@ describe('observeDivergence', () => {
     expect(h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]).flat()).toEqual([]);
   });
 
-  it('skips replicas that are not online or have a stale ack', () => {
+  it('skips replicas that are not online', () => {
     const h = new Harness();
     const syncing = h.windows([2, 4, 6, 8, 10].map((m) => ({ gap: m * MiB, rate: MiB, state: 'send_bulk' })));
-    const stale = h.windows([2, 4, 6, 8, 10].map((m) => ({ gap: m * MiB, rate: MiB, lagSec: 30 })));
-    expect([...syncing, ...stale].flat()).toEqual([]);
+    expect(syncing.flat()).toEqual([]);
   });
 
   it('clears an active replica that drops out instead of reporting recovery', () => {
