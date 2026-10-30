@@ -165,6 +165,7 @@ import {
   ReplicaDivergenceHistory,
   acknowledgeDivergence,
   claimDivergenceDispatch,
+  divergenceRetryId,
   assessOrphanedReplica,
   acknowledgeRecovery,
   createDivergenceState,
@@ -399,6 +400,7 @@ export class AnomalyService
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
+  private removedDivergenceEvents = new Set<string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -5398,21 +5400,44 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       resolved: anomaly.resolved || false,
-      resolvedAt: undefined,
-      durationMs: undefined,
+      resolvedAt: anomaly.resolvedAt,
+      durationMs: anomaly.resolvedAt === undefined ? undefined : anomaly.resolvedAt - anomaly.timestamp,
       sourceHost: ctx?.host || this.configService.get('database.host'),
       sourcePort: ctx?.port || this.configService.get('database.port'),
       connectionId: ctx?.connectionId || anomaly.connectionId,
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    retryOf?: Pick<AnomalyEvent, 'id'>,
+  ): Promise<void> {
+    if (retryOf) {
+      this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
+    }
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
+    if (!retryOf) this.countAnomaly(anomaly, ctx);
+
+    try {
+      const connectionId = ctx?.connectionId || anomaly.connectionId;
+      if (connectionId) {
+        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+        // Mark durable so resolution goes storage-first; a save failure (e.g. a
+        // string id rejected by the Postgres UUID PK) leaves it memory-only.
+        anomaly.persisted = true;
+      }
+    } catch (err) {
+      this.logger.error('Failed to persist anomaly event:', err);
+    }
+  }
+
+  private countAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): void {
     // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
     // or the OTLP dispatch must never abort recording/persisting the anomaly, and
     // must never propagate out of addAnomaly (that would let one detector's emit
@@ -5447,18 +5472,6 @@ export class AnomalyService
       );
     } catch (err) {
       this.logger.error('Failed to dispatch anomaly OTLP event:', err);
-    }
-
-    try {
-      const connectionId = ctx?.connectionId || anomaly.connectionId;
-      if (connectionId) {
-        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
-        // Mark durable so resolution goes storage-first; a save failure (e.g. a
-        // string id rejected by the Postgres UUID PK) leaves it memory-only.
-        anomaly.persisted = true;
-      }
-    } catch (err) {
-      this.logger.error('Failed to persist anomaly event:', err);
     }
   }
 
@@ -5883,6 +5896,7 @@ export class AnomalyService
     ctx: ConnectionContext,
   ): Promise<void> {
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
+    await this.resolveRemovedDivergenceEvents();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
     if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
@@ -6033,13 +6047,21 @@ export class AnomalyService
     await this.resolveSupersededDivergenceEvents(connectionId);
   }
 
+  private async resolveRemovedDivergenceEvents(): Promise<void> {
+    for (const id of this.removedDivergenceEvents) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
+    }
+  }
+
   private dismissUnsavedDivergenceCopies(connectionId: string): void {
     const state = this.divergenceState.get(connectionId);
     if (!state) return;
-    const unsaved = new Set([...state.replicas.keys()].flatMap((addr) => takeUnsavedDivergence(state, addr)));
-    for (const anomaly of this.recentAnomalies) {
-      if (unsaved.has(anomaly.id) && !anomaly.persisted) anomaly.resolved = true;
+    for (const addr of state.replicas.keys()) {
+      for (const id of takeUnsavedDivergence(state, addr)) this.removedDivergenceEvents.add(id);
     }
+    this.resolveRemovedDivergenceEvents().catch((err) => {
+      this.logger.error('Failed to resolve divergence events of a removed connection', err);
+    });
   }
 
   private async emitReplicationDivergence(
@@ -6062,8 +6084,10 @@ export class AnomalyService
     ];
     const isCritical = finding.level === 'critical';
     const message = describeDivergence(finding);
+    const retryId = divergenceRetryId(state, finding);
+    const attempt = retryId ? this.recentAnomalies.find((a) => a.id === retryId) : undefined;
     const event: AnomalyEvent = {
-      id: randomUUID(),
+      id: retryId ?? randomUUID(),
       timestamp,
       metricType: MetricType.REPLICATION_DIVERGENCE,
       anomalyType: AnomalyType.SPIKE,
@@ -6077,10 +6101,12 @@ export class AnomalyService
       resolved: false,
       connectionId: ctx.connectionId,
       relatedMetrics,
+      correlationId: attempt?.correlationId,
+      persisted: attempt?.persisted,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, retryId ? { id: retryId } : undefined);
 
     if (claimDivergenceDispatch(state, finding)) {
       this.webhookEventsProService
@@ -6322,6 +6348,7 @@ export class AnomalyService
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = Date.now();
       return 'resolved';
     }
 
@@ -6367,6 +6394,7 @@ export class AnomalyService
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
         continue;
       }
       let persisted = false;

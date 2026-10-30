@@ -531,6 +531,7 @@ export function acknowledgeDivergence(
   replica.level = finding.level;
   replica.eventId = eventId;
   replica.spanStart = finding.spanStart;
+  replica.unsavedEventIds = replica.unsavedEventIds.filter((id) => id !== eventId);
 }
 
 export function claimDivergenceDispatch(state: DivergenceConnectionState, finding: DivergenceFinding): boolean {
@@ -541,13 +542,22 @@ export function claimDivergenceDispatch(state: DivergenceConnectionState, findin
   return true;
 }
 
+export function divergenceRetryId(
+  state: DivergenceConnectionState,
+  finding: DivergenceFinding,
+): string | null {
+  const replica = state.replicas.get(finding.addr);
+  if (!replica || LEVEL_RANK[finding.level] > LEVEL_RANK[replica.dispatchedLevel]) return null;
+  return replica.unsavedEventIds.at(-1) ?? null;
+}
+
 export function trackUnsavedDivergence(
   state: DivergenceConnectionState,
   addr: string,
   eventId: string,
 ): void {
   const replica = state.replicas.get(addr);
-  if (!replica) return;
+  if (!replica || replica.unsavedEventIds.includes(eventId)) return;
   replica.unsavedEventIds = [...replica.unsavedEventIds, eventId].slice(-DIVERGENCE_PERSIST_BACKLOG);
 }
 
