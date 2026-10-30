@@ -118,6 +118,7 @@ describe('AnomalyService', () => {
           useValue: {
             list: jest.fn().mockReturnValue([]),
             get: jest.fn(),
+            getConfig: jest.fn().mockReturnValue(null),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -5895,6 +5896,49 @@ describe('AnomalyService', () => {
       expect((service as any).sentinelLastProbe.has('conn-1')).toBe(false);
       expect((service as any).sentinelDriftFirstSeen.has('conn-1')).toBe(false);
       expect((service as any).activeSentinelDrifts.has('conn-1')).toBe(false);
+    });
+  });
+
+  describe('correlation scope', () => {
+    it('groups cluster members under their seed connection', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
+        id === 'node-2' ? { id, membership: { seedId: 'seed-1' } } : { id },
+      );
+
+      expect((service as any).correlationScopeOf('node-2')).toBe('seed-1');
+      expect((service as any).correlationScopeOf('standalone')).toBe('standalone');
+      expect((service as any).correlationScopeOf(undefined)).toBe('');
+    });
+
+    it('keeps a different cluster in its own correlated group', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({
+        id,
+        membership: { seedId: id.startsWith('a-') ? 'seed-a' : 'seed-b' },
+      }));
+      const base = 1_000_000;
+      const event = (id: string, connectionId: string, timestamp: number) => ({
+        id,
+        timestamp,
+        metricType: MetricType.CONNECTIONS,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 0,
+        message: '',
+        resolved: false,
+        connectionId,
+      });
+
+      const groups = (service as any).correlator.correlate([
+        event('1', 'a-node-1', base),
+        event('2', 'a-node-2', base + 1000),
+        event('3', 'b-node-1', base + 2000),
+      ]);
+
+      expect(groups.map((g: { anomalies: unknown[] }) => g.anomalies.length)).toEqual([2, 1]);
     });
   });
 

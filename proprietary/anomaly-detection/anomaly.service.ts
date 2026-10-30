@@ -478,7 +478,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly clusterDiscovery?: ClusterDiscoveryService,
   ) {
     super(connectionRegistry);
-    this.correlator = new Correlator(this.correlationIntervalMs);
+    this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
+      this.correlationScopeOf(anomaly.connectionId),
+    );
     this.metricExtractors = this.initializeMetricExtractors();
 
     // Validated and defaulted by the Zod env schema (env.schema.ts), so a typo
@@ -5324,6 +5326,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
     }
+  }
+
+  private correlationScopeOf(connectionId: string | undefined): string {
+    if (!connectionId) return '';
+    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
   private async correlateAnomalies(): Promise<void> {

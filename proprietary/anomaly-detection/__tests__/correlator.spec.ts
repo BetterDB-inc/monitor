@@ -260,6 +260,58 @@ describe('Correlator', () => {
     });
   });
 
+  describe('scope partitioning', () => {
+    it('keeps anomalies from different connections in separate groups', () => {
+      const baseTime = 1000000;
+      const a1 = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.CONNECTIONS,
+        connectionId: 'conn-a',
+      });
+      const a2 = makeAnomaly({
+        timestamp: baseTime + 1000,
+        metricType: MetricType.OPS_PER_SEC,
+        connectionId: 'conn-b',
+      });
+
+      const groups = correlator.correlate([a1, a2]);
+
+      expect(groups).toHaveLength(2);
+      expect(groups.map((g) => g.anomalies[0].connectionId)).toEqual(['conn-a', 'conn-b']);
+    });
+
+    it('groups nodes that resolve to the same scope', () => {
+      const scoped = new Correlator(5000, (a) => (a.connectionId === 'node-2' ? 'seed' : a.connectionId ?? ''));
+      const baseTime = 1000000;
+      const roleChange = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.REPLICATION_ROLE,
+        connectionId: 'node-2',
+      });
+      const slowlog = makeAnomaly({
+        timestamp: baseTime + 1000,
+        metricType: MetricType.SLOWLOG_LAST_ID,
+        connectionId: 'seed',
+      });
+
+      const groups = scoped.correlate([roleChange, slowlog]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      expect(groups[0].anomalies).toHaveLength(2);
+    });
+
+    it('returns groups in chronological order across scopes', () => {
+      const baseTime = 1000000;
+      const late = makeAnomaly({ timestamp: baseTime + 3000, connectionId: 'conn-a' });
+      const early = makeAnomaly({ timestamp: baseTime, connectionId: 'conn-b' });
+
+      const groups = correlator.correlate([late, early]);
+
+      expect(groups.map((g) => g.timestamp)).toEqual([baseTime, baseTime + 3000]);
+    });
+  });
+
   describe('single metric pattern matching', () => {
     it('matches ACL_DENIED to AUTH_ATTACK pattern', () => {
       const anomaly = makeAnomaly({

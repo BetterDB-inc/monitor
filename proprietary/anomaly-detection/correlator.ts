@@ -18,12 +18,21 @@ interface PatternRule {
   check?: (anomalies: AnomalyEvent[]) => boolean;
 }
 
+export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
+
+const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
+
 export class Correlator {
   private readonly correlationWindowMs: number;
   private readonly patternRules: PatternRule[];
+  private readonly scopeOf: CorrelationScopeResolver;
 
-  constructor(correlationWindowMs: number = 5000) {
+  constructor(
+    correlationWindowMs: number = 5000,
+    scopeOf: CorrelationScopeResolver = scopeByConnection,
+  ) {
     this.correlationWindowMs = correlationWindowMs;
+    this.scopeOf = scopeOf;
     this.patternRules = this.initializePatternRules();
   }
 
@@ -318,26 +327,22 @@ export class Correlator {
     // Sort by timestamp
     const sorted = [...anomalies].sort((a, b) => a.timestamp - b.timestamp);
 
-    // Group anomalies by time windows
-    const windows: AnomalyEvent[][] = [];
-    let currentWindow: AnomalyEvent[] = [];
-    let windowStart = sorted[0].timestamp;
-
+    // Partition by topology scope first so unrelated instances alerting in the
+    // same few seconds never share a group; nodes of one cluster still do.
+    const partitions = new Map<string, AnomalyEvent[]>();
     for (const anomaly of sorted) {
-      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
-        currentWindow.push(anomaly);
+      const scope = this.scopeOf(anomaly);
+      const partition = partitions.get(scope);
+      if (partition) {
+        partition.push(anomaly);
       } else {
-        if (currentWindow.length > 0) {
-          windows.push(currentWindow);
-        }
-        currentWindow = [anomaly];
-        windowStart = anomaly.timestamp;
+        partitions.set(scope, [anomaly]);
       }
     }
 
-    if (currentWindow.length > 0) {
-      windows.push(currentWindow);
-    }
+    const windows = [...partitions.values()]
+      .flatMap((partition) => this.splitIntoWindows(partition))
+      .sort((a, b) => a[0].timestamp - b[0].timestamp);
 
     // Correlate each window
     const groups: CorrelatedAnomalyGroup[] = [];
@@ -386,6 +391,30 @@ export class Correlator {
     }
 
     return groups;
+  }
+
+  private splitIntoWindows(sorted: AnomalyEvent[]): AnomalyEvent[][] {
+    const windows: AnomalyEvent[][] = [];
+    let currentWindow: AnomalyEvent[] = [];
+    let windowStart = sorted[0].timestamp;
+
+    for (const anomaly of sorted) {
+      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
+        currentWindow.push(anomaly);
+      } else {
+        if (currentWindow.length > 0) {
+          windows.push(currentWindow);
+        }
+        currentWindow = [anomaly];
+        windowStart = anomaly.timestamp;
+      }
+    }
+
+    if (currentWindow.length > 0) {
+      windows.push(currentWindow);
+    }
+
+    return windows;
   }
 
   private detectPattern(anomalies: AnomalyEvent[]): PatternRule | null {
