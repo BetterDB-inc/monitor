@@ -3606,13 +3606,40 @@ describe('AnomalyService', () => {
       expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
     });
 
-    it('stops reporting contributors once the episode closes', async () => {
-      dbClient.getClients = jest.fn().mockResolvedValue([]);
-      storage.getClientSnapshots = jest.fn().mockResolvedValue([
-        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: 1 },
-      ]);
+    it('keeps reporting the contributors of the last episode once it closes', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        const grown = calls > 1;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       await runRetry({ coolWindows: 3 });
+
+      const status = service.getRetryAmplificationStatus('conn-1');
+      expect(status.lastEpisode).not.toBeNull();
+      expect(status.topContributors).toEqual([expect.objectContaining({ key: 'checkout' })]);
+    });
+
+    it('drops the contributors once a newer episode replaces the last one', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        const grown = calls > 1;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry({ coolWindows: 3 });
+      const state = (service as any).retryAmplificationState.get('conn-1');
+      state.lastEpisode = { ...state.lastEpisode, startedAt: state.lastEpisode.startedAt + 60_000 };
 
       expect(service.getRetryAmplificationStatus('conn-1').topContributors).toBeNull();
     });
@@ -3813,6 +3840,71 @@ describe('AnomalyService', () => {
       expect(writes).toBeLessThanOrEqual(6);
     });
 
+    describe('retried saves', () => {
+      const hotWindow = (start: number) => ({
+        start,
+        opsPerSec: 2000,
+        connectedClients: 100,
+        cmdsPerClient: 20,
+        errorRate: null,
+        churnPerSec: null,
+        latencyEvent: true,
+        saturationMetrics: [],
+      });
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000000',
+        total_error_replies: '0',
+      };
+      const armOpenEpisode = () => {
+        const { createRetryAmplificationState } = jest.requireActual(
+          '../retry-amplification-detector',
+        );
+        const state = createRetryAmplificationState();
+        state.hotRun = [hotWindow(320_000)];
+        state.pending = {
+          level: 'warning',
+          trigger: 'latency',
+          windows: 3,
+          loadRatio: 2,
+          correlation: 0.9,
+          pattern: 'rising',
+          relatedMetrics: [],
+          connectedClients: 100,
+          message: 'storm',
+          timestamp: 400_000,
+        };
+        (service as any).retryAmplificationState.set('conn-1', state);
+        dbClient.getClients = jest.fn().mockResolvedValue([]);
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+        storage.getNewClientConnections = jest.fn().mockResolvedValue([]);
+        return state;
+      };
+
+      it('keeps the first timestamp and the resolution of an unsaved attempt', async () => {
+        const state = armOpenEpisode();
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+
+        await (service as any).detectRetryAmplification(info, mockCtx, 400_000);
+        const [{ id }] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+        await service.resolveAnomaly(id);
+        state.pending = { ...state.pending, timestamp: 470_000 };
+        await (service as any).detectRetryAmplification(info, mockCtx, 470_000);
+
+        const saved = storage.saveAnomalyEvent.mock.calls.map(([e]: [any]) => e);
+        expect(saved).toHaveLength(2);
+        expect(saved[1]).toMatchObject({ id, timestamp: 400_000, resolved: true });
+        expect(saved[1].resolvedAt).toEqual(expect.any(Number));
+        expect(saved[1].durationMs).toBe(saved[1].resolvedAt - 400_000);
+      });
+    });
+
     describe('finding closed by a poll gap', () => {
       const emitAfterGap = async () => {
         const { createRetryAmplificationState } = jest.requireActual(
@@ -3935,6 +4027,25 @@ describe('AnomalyService', () => {
         expect(attempts).toBe(2);
         expect(saves()).toHaveLength(2);
         expect((loadEvents()[0] as any).persisted).toBe(true);
+      });
+
+      it('keeps the row visible to the webhook poll and carries the resolution', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(5_000);
+
+        await polls(90, 0, 40);
+        const [{ id }] = loadEvents();
+        await service.resolveAnomaly(id);
+        await polls(90, 120_000, 5);
+        clock.mockRestore();
+
+        const retry = saves()[saves().length - 1];
+        expect(saves()).toHaveLength(2);
+        expect(retry).toMatchObject({ id, resolved: true, resolvedAt: 5_000, durationMs: 0 });
+        expect(retry.timestamp).toBeGreaterThanOrEqual(120_000);
       });
 
       it('sends an escalation straight away and counts it', async () => {
@@ -7740,6 +7851,53 @@ describe('AnomalyService', () => {
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
       await poll(mockCtx);
       for (const spy of spies) expect(spy).toHaveBeenCalled();
+    });
+
+    describe('retry amplification on pushed samples', () => {
+      const sample = (i: number, load = 1, connects = 0.2) => {
+        commands += 15 * 100 * 10 * load;
+        connections += 15 * connects;
+        return [
+          ...with_(base(i), 'instantaneous_ops_per_sec', String(1000 * load)),
+          ['stats', 'total_commands_processed', String(Math.round(commands))],
+          ['stats', 'total_connections_received', String(Math.round(connections))],
+        ].map(([s, f, v]): [string, string, string] =>
+          f === 'connected_clients' ? [s, f, '100'] : [s, f, v],
+        );
+      };
+      let commands: number;
+      let connections: number;
+
+      beforeEach(() => {
+        commands = 1_000_000;
+        connections = 1_000;
+      });
+
+      it('arms at the exporter cadence', async () => {
+        for (let i = 0; i < 60; i++) {
+          push(sample(i));
+          await poll(externalCtx);
+        }
+
+        expect(service.getRetryAmplificationStatus('ext-1').armed).toBe(true);
+      });
+
+      it('finds a storm from load and churn without calling CLIENT LIST', async () => {
+        const unsupported = jest.spyOn(ExternalMetricsAdapter.prototype as any, 'unsupported');
+        for (let i = 0; i < 60; i++) {
+          push(sample(i));
+          await poll(externalCtx);
+        }
+        for (let i = 0; i < 28; i++) {
+          push(sample(60 + i, 1.5 + i * 0.05, 5 + i));
+          await poll(externalCtx);
+        }
+
+        expect(
+          service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+        expect(unsupported).not.toHaveBeenCalled();
+      });
     });
 
     it('never calls an unsupported adapter method, including across a role flip', async () => {

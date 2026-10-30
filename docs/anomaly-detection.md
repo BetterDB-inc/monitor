@@ -347,14 +347,16 @@ A run of hot windows is classified once it reaches 3 windows. It qualifies in ei
 
 Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
 
-Runs that end before reaching 3 windows are recorded as transient.
+Runs that end before reaching 3 windows are recorded as transient. A run keeps at most 120 windows: its first and its latest 119. Past that, the correlation and related metrics come from those windows, and the reported length still counts the whole run.
 
 An episode ends after 2 cold windows, or when the monitor misses samples for longer than 2 windows or 3 poll intervals, whichever is longer. Anything shorter counts as the same episode, so a brief blip does not re-alert on the same storm. After a longer gap, a storm that is still running opens a new episode, and its finding fires again after 3 hot windows. If the windows in hand at a gap qualify, the finding is still raised, dated at the end of the episode and attributed to the episode's own span from stored snapshots, without a new `CLIENT LIST`.
 
 - **WARNING** when the run qualifies
 - **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.
 
-If storage is unavailable, the finding stays as one event in memory and is retried once per window with the same ID. The `retry_amplification.detected` webhook still goes out once per level. A critical finding that falls back to warning sends no second webhook until the critical has been saved.
+If storage is unavailable, the finding stays as one event in memory and is retried once per window with the same ID. The `retry_amplification.detected` webhook still goes out for each level the run reaches. A critical finding that falls back to warning sends no second webhook until the critical has been saved.
+
+**OTLP-pushed instances**: Coverage follows the exporter's own push interval, taken from the median of the last 5 gaps between pushes, so a gap longer than 3 push intervals still counts as missed samples. Pushed metrics carry command, ops, client and connection counters but no error replies, and latency regressions are not tracked for pushed instances, so connection churn is the only stress signal there. Client attribution needs `CLIENT LIST` or stored client snapshots, and neither exists for a pushed instance, so `topContributors` is `null` there.
 
 **Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
 

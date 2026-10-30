@@ -491,9 +491,11 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 - `rising`: load rises at least 10% and moves with stress inside the run (`correlation` ≥ 0.5).
 - `step`: the last 3 windows hold at 2× baseline or more with an error-reply or reconnect burst. `correlation` is `null` for this shape.
 
-`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires once per level and re-arms after 2 normal windows.
+`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires when a run first reaches a level and each time it rises to `critical` again after falling back to `warning`. A fall to `warning` does not fire. It re-arms after 2 normal windows.
 
-`trigger` is the stress signal that showed up first: `latency`, `errors`, `churn` or `saturation`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read. The generic `anomaly.detected` event is sent as well.
+This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
+
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read. The generic `anomaly.detected` event is sent as well.
 
 ```json
 {

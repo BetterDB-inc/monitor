@@ -22,6 +22,9 @@ export const RETRY_AMP_STEP_WINDOWS = 3;
 export const RETRY_AMP_STRESS_HOLD_MS = 30 * 60_000;
 export const RETRY_AMP_SATURATION_HOLD_MS = 5 * 60_000;
 export const RETRY_AMP_POLL_GAP_MULTIPLIER = 3;
+export const RETRY_AMP_CADENCE_SAMPLES = 5;
+export const RETRY_AMP_CADENCE_MIN_SAMPLES = 3;
+export const RETRY_AMP_MAX_HOT_WINDOWS = 120;
 
 export const RETRY_AMP_STRESS_METRICS: readonly MetricType[] = [MetricType.COMMAND_P99];
 export const RETRY_AMP_SATURATION_METRICS: readonly MetricType[] = [
@@ -38,7 +41,7 @@ export const RETRY_AMP_HELD_SATURATION_METRICS: readonly MetricType[] = [
 ];
 
 export type RetryAmplificationLevel = 'none' | 'warning' | 'critical';
-export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn' | 'saturation';
+export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
 export type RetryAmplificationPattern = 'rising' | 'step';
 export type RetryAmplificationEpisodeClass = 'transient' | 'unconfirmed' | 'amplifying';
 
@@ -125,11 +128,13 @@ export interface RetryAmplificationFinding {
 
 export interface RetryAmplificationState {
   maxPollGapMs: number;
+  pushGaps: number[];
   last: LastReading | null;
   window: OpenWindow | null;
   closing: OpenWindow | null;
   coldWindows: RetryAmplificationWindow[];
   hotRun: RetryAmplificationWindow[];
+  droppedHotWindows: number;
   coldStreak: number;
   episodeLevel: RetryAmplificationLevel;
   episodeMovement: CoMovement | null;
@@ -145,7 +150,6 @@ const TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
   latency: 'a latency regression (COMMAND_P99)',
   errors: 'an error-reply burst',
   churn: 'connection churn',
-  saturation: 'saturation',
 };
 
 const LOAD_PATTERN_LABEL: Record<LoadPattern, string> = {
@@ -161,16 +165,32 @@ export function retryAmplificationMaxPollGap(pollIntervalMs: number): number {
   return Math.max(RETRY_AMP_MAX_POLL_GAP_MS, pollIntervalMs * RETRY_AMP_POLL_GAP_MULTIPLIER);
 }
 
+export function observePushCadence(
+  state: RetryAmplificationState,
+  timestamp: number,
+  pollIntervalMs: number,
+): number {
+  if (state.last !== null) {
+    state.pushGaps.push(timestamp - state.last.timestamp);
+    state.pushGaps.splice(0, state.pushGaps.length - RETRY_AMP_CADENCE_SAMPLES);
+  }
+  const pollGap = retryAmplificationMaxPollGap(pollIntervalMs);
+  if (state.pushGaps.length < RETRY_AMP_CADENCE_MIN_SAMPLES) return pollGap;
+  return Math.max(pollGap, median(state.pushGaps) * RETRY_AMP_POLL_GAP_MULTIPLIER);
+}
+
 export function createRetryAmplificationState(
   maxPollGapMs: number = RETRY_AMP_MAX_POLL_GAP_MS,
 ): RetryAmplificationState {
   return {
     maxPollGapMs,
+    pushGaps: [],
     last: null,
     window: null,
     closing: null,
     coldWindows: [],
     hotRun: [],
+    droppedHotWindows: 0,
     coldStreak: 0,
     episodeLevel: 'none',
     episodeMovement: null,
@@ -371,7 +391,6 @@ function findTrigger(
     if (w.latencyEvent) return 'latency';
     if (hasErrorStress(w, base)) return 'errors';
     if (hasChurnStress(w, base)) return 'churn';
-    if (w.saturationMetrics.length > 0) return 'saturation';
   }
   return 'latency';
 }
@@ -423,6 +442,10 @@ export function readRetryAmplificationTrigger(message: string): string | null {
   return match ? match[1] : null;
 }
 
+function hotWindowCount(state: RetryAmplificationState): number {
+  return state.hotRun.length + state.droppedHotWindows;
+}
+
 function classifyRun(
   state: RetryAmplificationState,
   base: WindowBaseline,
@@ -440,10 +463,11 @@ function classifyRun(
   const level = latest.saturationMetrics.length > 0 ? 'critical' : 'warning';
   const trigger = findTrigger(run, base);
   const loadRatio = latest.cmdsPerClient / base.cmdsPerClient;
+  const windows = hotWindowCount(state);
   return {
     level,
     trigger,
-    windows: run.length,
+    windows,
     loadRatio,
     pattern: movement.pattern === 'step' ? 'step' : 'rising',
     correlation,
@@ -452,7 +476,7 @@ function classifyRun(
     message: buildMessage(
       level,
       trigger,
-      run.length,
+      windows,
       loadRatio,
       correlation,
       latest.connectedClients,
@@ -475,12 +499,13 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
       classification,
       level: state.episodeLevel,
       trigger: findTrigger(run, base),
-      windows: run.length,
+      windows: hotWindowCount(state),
       startedAt: run[0].start,
       endedAt,
     };
   }
   state.hotRun = [];
+  state.droppedHotWindows = 0;
   state.coldStreak = 0;
   state.episodeLevel = 'none';
   state.episodeMovement = null;
@@ -524,6 +549,10 @@ function evaluateWindow(
   state.coldStreak = 0;
   if (state.hotRun.length === 0) state.notifiedLevel = 'none';
   state.hotRun.push(w);
+  if (state.hotRun.length > RETRY_AMP_MAX_HOT_WINDOWS) {
+    state.hotRun.splice(1, 1);
+    state.droppedHotWindows += 1;
+  }
   state.pending = null;
   const finding = classifyRun(state, base, timestamp);
   if (finding === null) return;
@@ -578,8 +607,12 @@ export function evaluateRetryAmplification(
     isUsable(last.totalCommands) &&
     sample.totalCommands < last.totalCommands
   ) {
+    endEpisodeAtPollGap(state, last.timestamp);
+    const { lastEpisode, pending, notifiedLevel } = state;
     Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
-      lastEpisode: state.lastEpisode,
+      lastEpisode,
+      pending,
+      notifiedLevel,
     });
   }
 
@@ -685,7 +718,7 @@ export function describeRetryAmplificationState(
     armed,
     classification,
     level: state.episodeLevel,
-    windows: state.hotRun.length,
+    windows: hotWindowCount(state),
     baseline: armed ? computeBaseline(state.coldWindows) : null,
     lastEpisode: state.lastEpisode,
   };

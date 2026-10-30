@@ -279,6 +279,48 @@ describe('SpikeDetector', () => {
       buffer.addSample(60, 33000);
       expect(detector.detect(buffer, 60, 33000)).not.toBeNull();
     });
+
+    it('lets a value that crosses the absolute threshold through the gate', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        {
+          warningThreshold: 10,
+          criticalThreshold: 2000,
+          warningZScore: 3,
+          criticalZScore: 5,
+          consecutiveRequired: 1,
+          cooldownMs: 0,
+        },
+        { minValue: 20, thresholdOverridesBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(30, i * 1000);
+      buffer.addSample(15, 30000);
+
+      const anomaly = detector.detect(buffer, 15, 30000);
+
+      expect(anomaly).toMatchObject({ severity: AnomalySeverity.WARNING, threshold: 10 });
+    });
+
+    it('still gates a value below both the floor and the absolute threshold', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        {
+          warningThreshold: 10,
+          criticalThreshold: 2000,
+          warningZScore: 3,
+          criticalZScore: 5,
+          consecutiveRequired: 1,
+          cooldownMs: 0,
+        },
+        { minValue: 20, thresholdOverridesBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(0, i * 1000);
+      buffer.addSample(5, 30000);
+
+      expect(detector.detect(buffer, 5, 30000)).toBeNull();
+    });
   });
 
   describe('consecutive sample requirement', () => {

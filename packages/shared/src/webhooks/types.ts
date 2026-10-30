@@ -372,7 +372,7 @@ export interface RetryAmplificationContributorData {
 
 export interface RetryAmplificationDetectedData {
   level: 'warning' | 'critical';
-  trigger: 'latency' | 'errors' | 'churn' | 'saturation';
+  trigger: 'latency' | 'errors' | 'churn';
   windows: number;
   loadRatio: number;
   pattern: 'rising' | 'step';

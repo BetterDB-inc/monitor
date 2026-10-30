@@ -193,6 +193,7 @@ import {
   RetryAmplificationStatus,
   describeRetryAmplificationState,
   retryAmplificationEpisodeStart,
+  observePushCadence,
   retryAmplificationMaxPollGap,
 } from './retry-amplification-detector';
 import {
@@ -3253,6 +3254,7 @@ export class AnomalyService
       threshold: (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
       message: finding.message,
       resolved: retried?.resolved ?? false,
+      resolvedAt: retried?.resolvedAt,
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -3278,7 +3280,10 @@ export class AnomalyService
       state = createRetryAmplificationState();
       this.retryAmplificationState.set(ctx.connectionId, state);
     }
-    state.maxPollGapMs = retryAmplificationMaxPollGap(this.getIntervalMs());
+    state.maxPollGapMs =
+      ctx.connectionType === 'external'
+        ? observePushCadence(state, timestamp, this.getIntervalMs())
+        : retryAmplificationMaxPollGap(this.getIntervalMs());
 
     const connectionEvents = this.recentAnomalies.filter((a) => {
       const relativeCpuMove =
@@ -3387,7 +3392,7 @@ export class AnomalyService
     const event: AnomalyEvent = {
       id: retried?.id ?? randomUUID(),
       correlationId: retried?.correlationId,
-      timestamp: closedAt ?? timestamp,
+      timestamp: closedAt ?? retried?.timestamp ?? timestamp,
       metricType: MetricType.RETRY_AMPLIFICATION,
       anomalyType: AnomalyType.SPIKE,
       severity,
@@ -3399,6 +3404,7 @@ export class AnomalyService
       message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
       relatedMetrics: finding.relatedMetrics,
       resolved: retried?.resolved ?? false,
+      resolvedAt: retried?.resolvedAt,
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -3443,6 +3449,7 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<ClientCommandSnapshot | null | undefined> {
+    if (ctx.connectionType === 'external') return undefined;
     try {
       const clients = await this.raceWithTimeout(
         ctx.client.getClients({ type: 'normal' }),
@@ -3498,9 +3505,8 @@ export class AnomalyService
     const state = this.retryAmplificationState.get(connectionId);
     const cached = this.retryAmplificationContributors.get(connectionId);
     if (state === undefined || cached === undefined) return null;
-    return retryAmplificationEpisodeStart(state) === cached.episodeStart
-      ? cached.contributors
-      : null;
+    const episodeStart = retryAmplificationEpisodeStart(state) ?? state.lastEpisode?.startedAt;
+    return episodeStart === cached.episodeStart ? cached.contributors : null;
   }
 
   getRetryAmplificationStatus(
@@ -5756,8 +5762,11 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       resolved: anomaly.resolved || false,
-      resolvedAt: undefined,
-      durationMs: undefined,
+      resolvedAt: anomaly.resolvedAt,
+      durationMs:
+        anomaly.resolvedAt === undefined
+          ? undefined
+          : Math.max(0, anomaly.resolvedAt - anomaly.timestamp),
       sourceHost: ctx?.host || this.configService.get('database.host'),
       sourcePort: ctx?.port || this.configService.get('database.port'),
       connectionId: ctx?.connectionId || anomaly.connectionId,
@@ -6346,12 +6355,14 @@ export class AnomalyService
    */
   private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
+    const resolvedAt = Date.now();
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
     // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
       return 'resolved';
     }
 
@@ -6361,7 +6372,7 @@ export class AnomalyService
     // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
     try {
-      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+      persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
       return 'retry';
@@ -6378,6 +6389,7 @@ export class AnomalyService
     // Keep the cached copy in sync with the durable store.
     if (anomaly) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
     }
 
     return 'resolved';
@@ -6397,6 +6409,7 @@ export class AnomalyService
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
         continue;
       }
       let persisted = false;
@@ -6407,6 +6420,7 @@ export class AnomalyService
       }
       if (persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
       } else {
         allResolved = false;
       }

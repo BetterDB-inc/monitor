@@ -64,14 +64,14 @@ export class SpikeDetector {
     // Determine if this is a spike or drop
     const isDrop = zScore < 0;
 
-    if (currentValue < this.options.minValue) {
-      this.consecutiveCounts.delete(this.metricType);
-      return null;
-    }
-
     const exceedsAbsolute =
       this.options.thresholdOverridesBelowMean &&
       currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
+
+    if (currentValue < this.options.minValue && !exceedsAbsolute) {
+      this.consecutiveCounts.delete(this.metricType);
+      return null;
+    }
     const countsAsDrop = isDrop && this.config.detectDrops;
 
     // Skip drops if not configured to detect them

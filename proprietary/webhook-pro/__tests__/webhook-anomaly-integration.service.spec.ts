@@ -293,6 +293,35 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
+  describe('retry_amplification', () => {
+    it('does not dispatch the generic anomaly.detected (retry_amplification.detected owns it)', async () => {
+      const anomalies: StoredAnomalyEvent[] = [
+        {
+          id: 'ra-1',
+          timestamp: Date.now(),
+          metricType: 'retry_amplification',
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 2,
+          baseline: 1,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 1.3,
+          message: 'Retry amplification',
+          resolved: false,
+          sourceHost: 'localhost',
+          sourcePort: 6379,
+        },
+      ];
+
+      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
+
+      await (service as any).checkForNewAnomalies();
+
+      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
+    });
+  });
+
   describe('error handling', () => {
     it('should handle storage errors gracefully', async () => {
       storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));

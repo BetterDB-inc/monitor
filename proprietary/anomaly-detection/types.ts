@@ -155,6 +155,7 @@ export interface AnomalyEvent {
   correlationId?: string;
   relatedMetrics?: MetricType[];
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.

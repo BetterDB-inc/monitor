@@ -3,6 +3,7 @@ import {
   createRetryAmplificationState,
   describeRetryAmplificationState,
   markRetryAmplificationNotified,
+  observePushCadence,
   retryAmplificationEpisodeStart,
   retryAmplificationMaxPollGap,
   retryAmplificationNeedsNotification,
@@ -114,6 +115,50 @@ class Driver {
 }
 
 describe('retry amplification detector', () => {
+  describe('pushed samples', () => {
+    const push = (d: Driver, count: number, everyMs = 15_000) => {
+      const gaps: number[] = [];
+      for (let i = 0; i < count; i++) {
+        gaps.push(observePushCadence(d.state, d.t, 1000));
+        d.state.maxPollGapMs = gaps[gaps.length - 1];
+        d.commands += 1000 * (everyMs / 1000);
+        d.poll(BASE);
+        d.t += everyMs;
+      }
+      return gaps;
+    };
+
+    it('widens the gap to three times the push interval once it has three gaps', () => {
+      const d = new Driver();
+
+      expect(push(d, 6)).toEqual([10_000, 10_000, 10_000, 45_000, 45_000, 45_000]);
+    });
+
+    it('keeps the cadence through a single outage', () => {
+      const d = new Driver();
+      push(d, 8);
+      d.t += 600_000;
+
+      const [gap] = push(d, 1);
+
+      expect(gap).toBe(45_000);
+      expect(d.state.window?.coveredMs).toBe(0);
+    });
+
+    it('never drops below the poll gap for a fast pusher', () => {
+      const d = new Driver();
+
+      expect(push(d, 6, 1000)).toEqual(new Array(6).fill(10_000));
+    });
+
+    it('arms from samples 15 seconds apart', () => {
+      const d = new Driver();
+      push(d, 60);
+
+      expect(describeRetryAmplificationState(d.state).armed).toBe(true);
+    });
+  });
+
   it('stays quiet while the baseline is still arming', () => {
     const d = new Driver();
     d.windows(BASE, 5);
@@ -653,6 +698,73 @@ describe('retry amplification detector', () => {
     expect(d.state.hotRun).toHaveLength(0);
     expect(d.state.coldWindows).toHaveLength(0);
     expect(d.state.pending).toBeNull();
+  });
+
+  it('closes a storm cut off by a counter reset and keeps its unsaved finding', () => {
+    const d = new Driver();
+    d.ack = false;
+    d.baseline();
+    const startedAt = d.t;
+    d.ramp(4);
+    markRetryAmplificationNotified(d.state, d.state.pending!);
+
+    d.t += 1000;
+    const finding = d.poll(BASE, [], 10);
+
+    expect(finding).toMatchObject({ level: 'warning', windows: 4 });
+    expect(d.state.hotRun).toHaveLength(0);
+    expect(d.state.coldWindows).toHaveLength(0);
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'amplifying',
+      windows: 4,
+      startedAt,
+    });
+    expect(retryAmplificationEpisodeStart(d.state)).toBe(startedAt);
+    expect(retryAmplificationNeedsNotification(d.state, finding!)).toBe(false);
+  });
+
+  describe('hot run that never goes cold twice', () => {
+    const alternate = (d: Driver, rounds: number) => {
+      for (let i = 0; i < rounds; i++) {
+        d.window(hot(2.5));
+        d.window(BASE);
+      }
+    };
+
+    it('caps the retained windows and still counts all of them', () => {
+      const d = new Driver();
+      d.baseline();
+      const startedAt = d.t;
+      d.ramp(4);
+      alternate(d, 200);
+
+      expect(d.state.hotRun.length).toBeLessThanOrEqual(120);
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+      expect(describeRetryAmplificationState(d.state)).toMatchObject({
+        classification: 'amplifying',
+        windows: 204,
+      });
+
+      d.windows(BASE, 2);
+      expect(d.state.lastEpisode).toMatchObject({
+        classification: 'amplifying',
+        trigger: 'latency',
+        windows: 204,
+        startedAt,
+      });
+    });
+
+    it('reports the full run length on a finding past the cap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      alternate(d, 200);
+      d.windows(hot(2.5, { activeSaturation: [MetricType.LOAD_SATURATION] }), 2);
+
+      const critical = d.findings[d.findings.length - 1];
+      expect(critical).toMatchObject({ level: 'critical', trigger: 'latency', windows: 205 });
+      expect(critical.message).toContain('for 205 min');
+    });
   });
 
   it('skips windows with too little coverage', () => {
