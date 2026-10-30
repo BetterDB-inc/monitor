@@ -6338,9 +6338,15 @@ describe('AnomalyService', () => {
           : [],
       );
       storage.getAnomalyEvents.mockImplementation(
-        async ({ connectionId, limit = 100, offset = 0 }: any) =>
+        async ({ connectionId, startTime, endTime, limit = 100, offset = 0 }: any) =>
           connectionId === 'node-2'
-            ? caller.slice(offset, offset + limit)
+            ? caller
+                .filter(
+                  (e) =>
+                    (!startTime || e.timestamp >= startTime) &&
+                    (!endTime || e.timestamp <= endTime),
+                )
+                .slice(offset, offset + limit)
             : connectionId === 'node-1'
               ? [member('a', 'node-1')]
               : [],
