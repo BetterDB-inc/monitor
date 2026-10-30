@@ -64,7 +64,7 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
-  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
 }

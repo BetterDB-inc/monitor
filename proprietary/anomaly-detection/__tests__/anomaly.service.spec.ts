@@ -3431,7 +3431,7 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(1);
       expect(recorded[0].metricType).toBe(MetricType.CONNECTION_CHURN);
       expect(recorded[0].connectionId).toBe('conn-1');
-      expect(recorded[0].message).toContain('connected_clients stays flat at 100');
+      expect(recorded[0].message).toContain('connected_clients does not grow (now 100)');
     });
 
     it('does not alert when the spike comes with a population jump', async () => {
@@ -7228,6 +7228,37 @@ describe('AnomalyService', () => {
       await expect(service.getIncidentTimeline(incident.incidentId, 'conn-1')).resolves.toEqual(
         incident,
       );
+    });
+
+    it('retries a sequence group whose save failed without listing it twice', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+      storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('db down'));
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(2);
+      expect(service.getRecentGroups()).toHaveLength(1);
+    });
+
+    it('keeps the first resolution time when a cached event resolves again', async () => {
+      const event = { ...anomaly({ id: 'twice' }), persisted: true };
+      (service as any).recentAnomalies.push(event);
+
+      await service.resolveAnomaly('twice');
+      const first = event.resolvedAt!;
+      const later = jest.spyOn(Date, 'now').mockReturnValue(first + MIN);
+      await service.resolveAnomaly('twice');
+      later.mockRestore();
+
+      expect(event.resolvedAt).toBe(first);
     });
 
     it('does not emit a second group when the first step ages out and a later one rematches', async () => {

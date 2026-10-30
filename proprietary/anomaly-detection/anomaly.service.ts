@@ -1631,8 +1631,8 @@ export class AnomalyService
     anomaly.connectionId = ctx.connectionId;
     anomaly.message =
       `Connection churn: ${sample.connectsPerSec.toFixed(1)} new connections/s ` +
-      `(baseline ${anomaly.baseline.toFixed(1)}/s) while connected_clients stays flat at ` +
-      `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
+      `(baseline ${anomaly.baseline.toFixed(1)}/s) while connected_clients does not grow ` +
+      `(now ${sample.connectedClients}) — clients are reconnecting instead of reusing connections`;
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
     await this.addAnomaly(anomaly, ctx);
   }
@@ -5751,7 +5751,7 @@ export class AnomalyService
         anomalies.forEach((a) =>
           this.sequenceGroupedAnomalies.set(`${match.pattern}\u0000${a.id}`, a.timestamp),
         );
-        await this.recordSequenceGroup({
+        const recorded = await this.recordSequenceGroup({
           correlationId: randomUUID(),
           timestamp: anomalies[0].timestamp,
           anomalies,
@@ -5760,16 +5760,17 @@ export class AnomalyService
           recommendations: match.recommendations,
           severity: match.severity,
         });
+        if (!recorded) {
+          anomalies.forEach((a) =>
+            this.sequenceGroupedAnomalies.delete(`${match.pattern}\u0000${a.id}`),
+          );
+        }
       }
     }
   }
 
-  private async recordSequenceGroup(group: CorrelatedAnomalyGroup): Promise<void> {
-    this.logger.warn(
-      `Sequence detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
-    );
+  private async recordSequenceGroup(group: CorrelatedAnomalyGroup): Promise<boolean> {
     const connectionId = group.anomalies[0]?.connectionId;
-    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
     if (connectionId) {
       try {
         await this.storage.saveCorrelatedGroup(
@@ -5789,8 +5790,13 @@ export class AnomalyService
         );
       } catch (err) {
         this.logger.error('Failed to persist sequence group:', err);
+        return false;
       }
     }
+    this.logger.warn(
+      `Sequence detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
+    );
+    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
     this.recentGroups.push(group);
     this.lastHourGroups.push({
       timestamp: group.timestamp,
@@ -5800,6 +5806,7 @@ export class AnomalyService
     if (this.recentGroups.length > this.maxRecentGroups) {
       this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
     }
+    return true;
   }
 
   getLiveIncidentTimelines(): IncidentTimeline[] {
@@ -6520,7 +6527,7 @@ export class AnomalyService
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
-      anomaly.resolvedAt = Date.now();
+      anomaly.resolvedAt ??= Date.now();
       return 'resolved';
     }
 
@@ -6548,7 +6555,7 @@ export class AnomalyService
     // Keep the cached copy in sync with the durable store.
     if (anomaly) {
       anomaly.resolved = true;
-      anomaly.resolvedAt = resolvedAt;
+      anomaly.resolvedAt ??= resolvedAt;
     }
 
     return 'resolved';
@@ -6568,7 +6575,7 @@ export class AnomalyService
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
-        anomaly.resolvedAt = resolvedAt;
+        anomaly.resolvedAt ??= resolvedAt;
         continue;
       }
       let persisted = false;
@@ -6579,7 +6586,7 @@ export class AnomalyService
       }
       if (persisted) {
         anomaly.resolved = true;
-        anomaly.resolvedAt = resolvedAt;
+        anomaly.resolvedAt ??= resolvedAt;
       } else {
         allResolved = false;
       }

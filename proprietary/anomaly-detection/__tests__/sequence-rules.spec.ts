@@ -31,6 +31,13 @@ describe('sequence rule registry', () => {
     expect(() => registry.registerSequenceRule(rule)).toThrow(/already registered/);
   });
 
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a maxSpanMs of %s',
+    (maxSpanMs) => {
+      expect(() => registry.registerSequenceRule({ ...rule, maxSpanMs })).toThrow(/maxSpanMs/);
+    },
+  );
+
   it('rejects a rule with an empty step', () => {
     expect(() =>
       registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC], []] }),
