@@ -6258,7 +6258,9 @@ describe('AnomalyService', () => {
           slave0: 'ip=10.0.0.2,port=6379,state=online,offset=6500,lag=0',
         },
       });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
       await poll();
+      clock.mockRestore();
 
       const next = service.getReplicationStreamSample('conn-1');
       expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogHistlen: 6144 });
