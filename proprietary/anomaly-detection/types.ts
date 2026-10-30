@@ -64,6 +64,7 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  ERROR_REPLIES = 'error_replies',
 }
 
 /**
@@ -104,6 +105,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.ERROR_REPLIES,
 ]);
 
 export enum AnomalySeverity {

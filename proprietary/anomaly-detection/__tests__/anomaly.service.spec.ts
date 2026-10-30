@@ -3216,6 +3216,117 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('error replies delta detection', () => {
+    const infoWith = (totalErrors: string, errorstats?: Record<string, { count: number }>) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        total_error_replies: totalErrors,
+      },
+      ...(errorstats ? { errorstats } : {}),
+    });
+    const errorEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.ERROR_REPLIES);
+    const errorBuffer = () => {
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      return buffers.get(MetricType.ERROR_REPLIES);
+    };
+
+    it('feeds the per-poll delta, not the lifetime counter', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('512'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(12);
+    });
+
+    it('does not create the buffer when total_error_replies is absent', async () => {
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
+    });
+
+    it('absorbs a counter reset on restart', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('900'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('3'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(0);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('fires on an error burst and names the top error types', async () => {
+      let total = 1000;
+      const stats = { ERR: 900, TIMEOUT: 100, BUSY: 0 };
+      const snapshot = () =>
+        infoWith(String(total), {
+          errorstat_ERR: { count: stats.ERR },
+          errorstat_TIMEOUT: { count: stats.TIMEOUT },
+          errorstat_BUSY: { count: stats.BUSY },
+        });
+      for (let i = 0; i < 31; i++) {
+        total += 2;
+        stats.ERR += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+      expect(errorEvents()).toHaveLength(0);
+
+      for (let i = 0; i < 2; i++) {
+        total += 3000;
+        stats.TIMEOUT += 2000;
+        stats.BUSY += 900;
+        stats.ERR += 100;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].connectionId).toBe('conn-1');
+      expect(events[0].message).toContain('top error types: TIMEOUT +2000, BUSY +900, ERR +100');
+    });
+
+    it('needs two consecutive hot polls before firing', async () => {
+      let total = 0;
+      for (let i = 0; i < 31; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      total += 5000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      total += 1;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('clears its counters when the connection is removed', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+        infoWith('10', { errorstat_ERR: { count: 10 } }),
+      );
+      await poll();
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).lastErrorReplies.has('conn-1')).toBe(false);
+      expect((service as any).lastErrorstatCounts.has('conn-1')).toBe(false);
+    });
+  });
+
   // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
   describe('client-eviction storm detection', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({

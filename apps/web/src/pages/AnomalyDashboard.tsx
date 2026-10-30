@@ -155,6 +155,7 @@ const METRIC_LABELS: Record<string, string> = {
   persistence_child: 'Persistence Child',
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
+  error_replies: 'Error Replies',
 };
 
 function formatTime(ts: number): string {
