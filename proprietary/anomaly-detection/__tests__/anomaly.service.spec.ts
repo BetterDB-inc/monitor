@@ -3217,6 +3217,74 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('connection churn', () => {
+    function runChurn(steps: Array<{ connectsPerSec: number; clients: number }>) {
+      const buffers = new Map();
+      const detectors = new Map();
+      const recorded: any[] = [];
+      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+        recorded.push(a);
+      });
+      let total = 1_000;
+      let ts = 1_000_000;
+      return (async () => {
+        await (service as any).detectConnectionChurn(
+          mockCtx,
+          { total_connections_received: String(total), connected_clients: '100' },
+          buffers,
+          detectors,
+          ts,
+        );
+        for (const step of steps) {
+          ts += 1_000;
+          total += step.connectsPerSec;
+          await (service as any).detectConnectionChurn(
+            mockCtx,
+            { total_connections_received: String(total), connected_clients: String(step.clients) },
+            buffers,
+            detectors,
+            ts,
+          );
+        }
+        return { recorded, buffers };
+      })();
+    }
+
+    const baseline = Array.from({ length: 40 }, (_, i) => ({ connectsPerSec: 20 + (i % 3), clients: 100 }));
+
+    it('alerts when the connect rate spikes while connected_clients stays flat', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 101 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].metricType).toBe(MetricType.CONNECTION_CHURN);
+      expect(recorded[0].connectionId).toBe('conn-1');
+      expect(recorded[0].message).toContain('connected_clients stays flat at 100');
+    });
+
+    it('does not alert when the spike comes with a population jump', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 160 },
+        { connectsPerSec: 420, clients: 220 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('feeds the per-second rate, not the lifetime counter, and exposes the sample', async () => {
+      const { buffers } = await runChurn([{ connectsPerSec: 30, clients: 100 }]);
+
+      expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
+      expect(service.getConnectionChurnSample('conn-1')).toEqual(
+        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, clientsDeltaRatio: 0 }),
+      );
+    });
+  });
+
   // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
   describe('client-eviction storm detection', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({

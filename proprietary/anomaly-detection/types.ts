@@ -64,6 +64,8 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
+  CONNECTION_CHURN = 'connection_churn',
 }
 
 /**
@@ -104,6 +106,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.CONNECTION_CHURN,
 ]);
 
 export enum AnomalySeverity {
