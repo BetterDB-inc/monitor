@@ -6162,7 +6162,7 @@ export class AnomalyService
         replica: recovery.addr,
         reason: 'replica_gone',
         gapBytes: null,
-        message: `Replica ${recovery.addr} is no longer online, so its divergence was closed.`,
+        message: `Replica ${recovery.addr} is no longer tracked by this node, so its divergence was closed.`,
         timestamp,
       });
       return;

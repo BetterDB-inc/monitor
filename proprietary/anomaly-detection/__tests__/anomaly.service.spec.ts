@@ -7332,6 +7332,16 @@ describe('AnomalyService', () => {
         expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
       });
 
+      it('does not claim the replica is offline when the node stops being a primary', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
+
+        expect(recoveredCalls()[0][0].message).toBe(
+          'Replica 10.0.0.2:6379 is no longer tracked by this node, so its divergence was closed.',
+        );
+      });
+
       it('sends it once, after the event closes, when the resolve has to retry', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
         storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
