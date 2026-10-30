@@ -5890,6 +5890,52 @@ export class AnomalyService
     return events.filter((e) => ids.has(e.id));
   }
 
+  private async siblingGroupsInvolving(
+    connectionId: string,
+    siblings: string[],
+    known: Set<string>,
+    startTime: number,
+    endTime: number | undefined,
+    pattern: AnomalyPattern | undefined,
+    limit: number,
+  ): Promise<StoredCorrelatedGroup[]> {
+    if (siblings.length === 0) return [];
+    const events = await this.storage.getAnomalyEvents({
+      startTime: startTime - this.correlationIntervalMs,
+      endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+      connectionId,
+      limit: 10_000,
+    });
+    const wanted = new Map<string, number>();
+    for (const e of [...events].sort((a, b) => b.timestamp - a.timestamp)) {
+      if (wanted.size >= limit) break;
+      if (e.correlationId && !known.has(e.correlationId) && !wanted.has(e.correlationId)) {
+        wanted.set(e.correlationId, e.timestamp);
+      }
+    }
+    if (wanted.size === 0) return [];
+    const times = [...wanted.values()];
+    const from = Math.max(startTime, Math.min(...times) - this.correlationIntervalMs);
+    const to = Math.min(endTime ?? Infinity, Math.max(...times) + this.correlationIntervalMs);
+    const pageSize = 1000;
+    const found: StoredCorrelatedGroup[] = [];
+    for (const id of siblings) {
+      for (let offset = 0; wanted.size > found.length; offset += pageSize) {
+        const page = await this.storage.getCorrelatedGroups({
+          startTime: from,
+          endTime: to,
+          pattern: pattern as string,
+          limit: pageSize,
+          offset,
+          connectionId: id,
+        });
+        found.push(...page.filter((g) => wanted.has(g.correlationId)));
+        if (page.length < pageSize) break;
+      }
+    }
+    return found;
+  }
+
   async getRecentCorrelatedGroups(
     startTime?: number,
     endTime?: number,
@@ -5909,39 +5955,51 @@ export class AnomalyService
     }
 
     const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
-    const storedByScope = await Promise.all(
-      connectionIds.map((id) =>
+    const siblings = connectionIds.filter((id): id is string => !!id && id !== connectionId);
+    const own = await Promise.all(
+      (connectionId ? [connectionId] : connectionIds).map((id) =>
         this.storage.getCorrelatedGroups({
           startTime,
           endTime,
           pattern: pattern as string,
-          limit: id === connectionId ? limit : Math.max(limit, 1000),
+          limit,
           connectionId: id,
         }),
       ),
     );
-    const involved = connectionId
-      ? new Set(
-          (
-            await this.storage.getAnomalyEvents({
-              startTime: startTime - this.correlationIntervalMs,
-              endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
-              connectionId,
-              limit: 10_000,
-            })
-          ).map((a) => a.correlationId),
+    const found = connectionId
+      ? await this.siblingGroupsInvolving(
+          connectionId,
+          siblings,
+          new Set(own.flat().map((s) => s.correlationId)),
+          startTime,
+          endTime,
+          pattern,
+          limit,
         )
-      : null;
-    const sequencePatterns = new Set<string>(getSequenceRules().map((r) => r.pattern));
-    const stored = [...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values()]
-      .filter(
-        (s) =>
-          !involved ||
-          s.connectionId === connectionId ||
-          involved.has(s.correlationId) ||
-          sequencePatterns.has(s.pattern),
-      )
-      .sort((a, b) => b.timestamp - a.timestamp);
+      : [];
+    const sequenceGroups = connectionId
+      ? await Promise.all(
+          siblings.flatMap((id) =>
+            getSequenceRules()
+              .filter((r) => !pattern || r.pattern === pattern)
+              .map((r) =>
+                this.storage.getCorrelatedGroups({
+                  startTime,
+                  endTime,
+                  pattern: r.pattern,
+                  limit: Math.max(limit, 1000),
+                  connectionId: id,
+                }),
+              ),
+          ),
+        )
+      : [];
+    const stored = [
+      ...new Map(
+        [...own.flat(), ...found, ...sequenceGroups.flat()].map((s) => [s.correlationId, s]),
+      ).values(),
+    ].sort((a, b) => b.timestamp - a.timestamp);
 
     const groups: CorrelatedAnomalyGroup[] = [];
     for (const s of stored) {
