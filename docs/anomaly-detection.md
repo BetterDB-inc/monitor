@@ -339,9 +339,13 @@ Each condition fires once per episode and the tracking state clears when the chi
 **Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. A window is hot when:
 - Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
 - Connected clients stay within ±15% of baseline
-- At least one stress signal is present: a P99 regression (counted for 30 min after the event, matching how often the latency detector re-emits), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped as soon as the latency guard sees the command recover), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
 
-A run of hot windows is classified once it reaches 3 windows. Load must not be falling, and it must move with stress *inside the run*: Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, load that keeps climbing window over window. Runs that end within 3 windows are recorded as transient.
+A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
+- **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, load that keeps climbing window over window. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
+- **Step**: every window is at least 2× baseline, and the latest is within 10% of the run's peak. This catches a storm that jumps up and then holds.
+
+Runs that end within 3 windows are recorded as transient.
 
 - **WARNING** when the run qualifies
 - **CRITICAL** when saturation (load, CPU, rejected connections, client saturation or lockout risk) is active in the latest window

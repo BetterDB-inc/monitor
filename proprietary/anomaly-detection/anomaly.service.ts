@@ -408,6 +408,7 @@ export class AnomalyService
   private retryAmplificationFirstClients = new Map<string, ClientCommandSnapshot | null>();
   private retryAmplificationContributors = new Map<string, RetryAmplificationContributor[] | null>();
   private retryAmplificationAttributed = new Map<string, RetryAmplificationFinding>();
+  private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -789,6 +790,7 @@ export class AnomalyService
     this.retryAmplificationFirstClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.retryAmplificationAttributed.delete(connectionId);
+    this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.activeLargeReplyOffenders.delete(connectionId);
@@ -3155,7 +3157,9 @@ export class AnomalyService
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
-    const stressActive = connectionEvents.some((a) => {
+    const stressActive =
+      this.latencyDegraded.get(ctx.connectionId) !== false &&
+      connectionEvents.some((a) => {
       return (
         !a.resolved &&
         RETRY_AMP_STRESS_METRICS.includes(a.metricType) &&
@@ -5619,6 +5623,10 @@ export class AnomalyService
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
     }
+  }
+
+  reportLatencyDegraded(connectionId: string, degraded: boolean): void {
+    this.latencyDegraded.set(connectionId, degraded);
   }
 
   ingestExternalAnomaly(event: AnomalyEvent): void {

@@ -124,6 +124,7 @@ interface SustainedState {
   lastFiredAt: number;
   /** capturedAt of the last sample counted toward `consecutive`. */
   lastCountedAt: number;
+  degraded: boolean;
 }
 
 export class RegressionDetector {
@@ -133,6 +134,7 @@ export class RegressionDetector {
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
+    for (const state of this.sustained.values()) state.degraded = false;
     if (samples.length === 0) return [];
 
     const latestByCommand = this.latestByCommand(samples);
@@ -159,6 +161,10 @@ export class RegressionDetector {
     findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
     return findings;
+  }
+
+  isDegraded(): boolean {
+    return [...this.sustained.values()].some((state) => state.degraded);
   }
 
   /**
@@ -385,8 +391,30 @@ export class RegressionDetector {
     }
 
     for (const command of eligible) {
-      const state = this.sustained.get(command) ?? { consecutive: 0, lastFiredAt: 0, lastCountedAt: -1 };
+      const state = this.sustained.get(command) ?? {
+        consecutive: 0,
+        lastFiredAt: 0,
+        lastCountedAt: -1,
+        degraded: false,
+      };
       this.sustained.set(command, state);
+
+      const baselineValues = byCommand.get(command);
+      const latest = latestByCommand.get(command);
+      const fresh = latest !== undefined && latest.capturedAt >= nowMs - STALE_SAMPLE_MS;
+      const usable =
+        fresh &&
+        baselineValues !== undefined &&
+        baselineValues.length >= SUSTAINED_MIN_BASELINE_SAMPLES;
+      const upgradeBaseline = this.upgrade?.baselines.get(command);
+      if (upgradeBaseline !== undefined) {
+        state.degraded =
+          fresh && isDegraded(latest!.p99Us, upgradeBaseline, UPGRADE_DEGRADATION_FACTOR);
+      } else {
+        state.degraded =
+          !usable ||
+          isDegraded(latest!.p99Us, median(baselineValues!), SUSTAINED_DEGRADATION_FACTOR);
+      }
 
       // Owned by an open upgrade window (the upgrade rule fires once for it) — suppress
       // sustained for this command for the window's lifetime. Commands the window has no
@@ -396,11 +424,7 @@ export class RegressionDetector {
         continue;
       }
 
-      const baselineValues = byCommand.get(command);
-      const latest = latestByCommand.get(command);
-      const fresh = latest !== undefined && latest.capturedAt >= nowMs - STALE_SAMPLE_MS;
-
-      if (!fresh || !baselineValues || baselineValues.length < SUSTAINED_MIN_BASELINE_SAMPLES) {
+      if (!usable) {
         state.consecutive = 0;
         continue;
       }
@@ -410,7 +434,7 @@ export class RegressionDetector {
       if (latest!.capturedAt <= state.lastCountedAt) continue;
       state.lastCountedAt = latest!.capturedAt;
 
-      const baseline = median(baselineValues);
+      const baseline = median(baselineValues!);
       if (!isDegraded(latest!.p99Us, baseline, SUSTAINED_DEGRADATION_FACTOR)) {
         state.consecutive = 0;
         continue;
