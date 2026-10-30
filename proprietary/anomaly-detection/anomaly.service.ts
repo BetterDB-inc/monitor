@@ -3002,6 +3002,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   ): Promise<void> {
     const currentErrors = this.parseNumber(info.total_error_replies);
     if (currentErrors === null) {
+      this.lastErrorReplies.delete(ctx.connectionId);
+      this.lastErrorstatCounts.delete(ctx.connectionId);
       return;
     }
     const lastErrors = this.lastErrorReplies.get(ctx.connectionId);

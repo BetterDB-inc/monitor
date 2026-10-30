@@ -3295,7 +3295,39 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(1);
       expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
       expect(events[0].connectionId).toBe('conn-1');
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].message).toContain('above normal');
       expect(events[0].message).toContain('top error types: TIMEOUT +2000, BUSY +900, ERR +100');
+    });
+
+    it('labels a steady rate over the absolute threshold as a spike without a z-score trigger', async () => {
+      let total = 0;
+      for (let i = 0; i < 32; i++) {
+        total += 300;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].zScore).toBeLessThan(3);
+      expect(events[0].threshold).toBe(200);
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('starts a new baseline after a poll without total_error_replies', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...infoWith('0'),
+        stats: { ...infoWith('0').stats, total_error_replies: undefined },
+      });
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5000'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(0);
     });
 
     it('needs two consecutive hot polls before firing', async () => {

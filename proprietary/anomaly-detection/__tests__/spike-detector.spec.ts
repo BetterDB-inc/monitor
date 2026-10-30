@@ -118,6 +118,50 @@ describe('SpikeDetector', () => {
       expect(result).not.toBeNull();
       expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
     });
+
+    it('labels an absolute-threshold hit with a zero z-score as a spike', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      fillBuffer(buffer, 30, 20);
+      const result = detector.detect(buffer, 20, 50000);
+      expect(result).not.toBeNull();
+      expect(result!.zScore).toBe(0);
+      expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
+      expect(result!.severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('fires the absolute threshold when the value is above it but below the mean', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      const result = detector.detect(buffer, 60, 50000);
+      expect(result).not.toBeNull();
+      expect(result!.zScore).toBeLessThan(0);
+      expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
+      expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('still ignores a below-mean value under the absolute threshold', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      expect(detector.detect(buffer, 5, 50000)).toBeNull();
+    });
   });
 
   describe('consecutive sample requirement', () => {

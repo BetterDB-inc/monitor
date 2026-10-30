@@ -51,15 +51,17 @@ export class SpikeDetector {
     const zScore = buffer.getZScore(currentValue);
 
     // Determine if this is a spike or drop
-    const isSpike = zScore > 0;
     const isDrop = zScore < 0;
 
+    const exceedsAbsolute = currentValue >= this.config.warningThreshold;
+    const countsAsDrop = isDrop && this.config.detectDrops;
+
     // Skip drops if not configured to detect them
-    if (isDrop && !this.config.detectDrops) {
+    if (isDrop && !countsAsDrop && !exceedsAbsolute) {
       return null;
     }
 
-    const absZScore = Math.abs(zScore);
+    const absZScore = isDrop && !countsAsDrop ? 0 : Math.abs(zScore);
 
     // Check Z-score thresholds
     let severity: AnomalySeverity | null = null;
@@ -111,7 +113,7 @@ export class SpikeDetector {
     this.lastAlertTime.set(this.metricType, timestamp);
     this.consecutiveCounts.delete(this.metricType); // Reset after alert
 
-    const anomalyType = isSpike ? AnomalyType.SPIKE : AnomalyType.DROP;
+    const anomalyType = countsAsDrop && !exceedsAbsolute ? AnomalyType.DROP : AnomalyType.SPIKE;
     const message = this.generateMessage(anomalyType, severity, currentValue, mean, zScore);
 
     return {
