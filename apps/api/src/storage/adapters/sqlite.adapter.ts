@@ -2672,9 +2672,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
-        resolved = excluded.resolved,
-        resolved_at = excluded.resolved_at,
-        duration_ms = excluded.duration_ms
+        resolved = MAX(anomaly_events.resolved, excluded.resolved),
+        resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
     `);
 
     stmt.run(
@@ -2716,9 +2716,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
-        resolved = excluded.resolved,
-        resolved_at = excluded.resolved_at,
-        duration_ms = excluded.duration_ms
+        resolved = MAX(anomaly_events.resolved, excluded.resolved),
+        resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
     `);
 
     const insertMany = this.db.transaction((events: StoredAnomalyEvent[], connId: string) => {
@@ -2780,6 +2780,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined) {
       conditions.push('resolved = ?');
       params.push(options.resolved ? 1 : 0);
+    }
+    if (options.correlationIds) {
+      conditions.push(
+        options.correlationIds.length > 0
+          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
+          : '1 = 0',
+      );
+      params.push(...options.correlationIds);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -4904,7 +4912,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number> {
-    if (!this.db || windows.length === 0) return 0;
+    if (!this.db) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
 
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO replication_divergence_windows

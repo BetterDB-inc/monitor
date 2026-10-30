@@ -227,3 +227,30 @@ describe.each<[string, AdapterFactory]>([
     ).toHaveLength(1);
   });
 });
+
+describe('saving replication divergence windows before initialization', () => {
+  const window = [
+    {
+      replicaAddr: '10.0.0.2:6379',
+      windowStart: 0,
+      windowEnd: 30_000,
+      gapBytes: 1,
+      bytesPerSec: 1,
+      secondsBehind: 1,
+    },
+  ];
+
+  it('throws on sqlite so the caller requeues the windows', async () => {
+    const storage = new SqliteAdapter({ filepath: ':memory:' });
+    await expect(storage.saveReplicationDivergenceWindows(window, 'conn-a')).rejects.toThrow(
+      'Database not initialized',
+    );
+  });
+
+  it('throws on postgres so the caller requeues the windows', async () => {
+    const storage = new PostgresAdapter({ connectionString: POSTGRES_DSN });
+    await expect(storage.saveReplicationDivergenceWindows(window, 'conn-a')).rejects.toThrow(
+      'Database not initialized',
+    );
+  });
+});

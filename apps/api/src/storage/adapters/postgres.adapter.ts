@@ -2746,9 +2746,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       [
         event.id,
         event.timestamp,
@@ -2823,9 +2823,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       values,
     );
 
@@ -2862,6 +2862,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined) {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
+    }
+    if (options.correlationIds) {
+      conditions.push(`correlation_id = ANY($${paramIndex++})`);
+      params.push(options.correlationIds);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -5038,7 +5042,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number> {
-    if (!this.pool || windows.length === 0) return 0;
+    if (!this.pool) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
 
     const values: unknown[] = [];
     const placeholders: string[] = [];
