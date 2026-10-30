@@ -1,11 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
-import {
-  otelSpanCap,
-  otelSpanCapCheckInterval,
-  otelSpanLowWaterMark,
-} from '../otel-span-cap';
+import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -133,7 +129,11 @@ import type {
 } from '@betterdb/shared';
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
+import {
+  clientAddrIp,
+  foldClientAnalyticsStats,
+  mapClientAnalyticsRollupRow,
+} from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
 import { WebhookSqliteRepository } from './repositories/webhook.sqlite.repository';
@@ -232,9 +232,7 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
          WHERE status = 'pending' AND target_discriminator IS NULL`,
       )
       .all() as { id: string; proposal_payload: string }[];
-    const update = db.prepare(
-      `UPDATE memory_proposals SET target_discriminator = ? WHERE id = ?`,
-    );
+    const update = db.prepare(`UPDATE memory_proposals SET target_discriminator = ? WHERE id = ?`);
     let skipped = 0;
     for (const row of pending) {
       // Parsed, not cast. A malformed legacy payload such as `{}` falls
@@ -286,16 +284,22 @@ function addMemoryProposalIntegrityColumns(db: Database.Database): void {
  * Extracted so the call-site in createSchema stays readable.
  */
 function addKvCacheCoverageColumns(db: Database.Database): void {
-  const cols = db.prepare(`PRAGMA table_info(kv_cache_footprint_snapshots)`).all() as { name: string }[];
+  const cols = db.prepare(`PRAGMA table_info(kv_cache_footprint_snapshots)`).all() as {
+    name: string;
+  }[];
   if (cols.length === 0) return;
   if (!cols.some((c) => c.name === 'primaries_scanned')) {
-    db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN primaries_scanned INTEGER NOT NULL DEFAULT 1`).run();
+    db.prepare(
+      `ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN primaries_scanned INTEGER NOT NULL DEFAULT 1`,
+    ).run();
   }
   if (!cols.some((c) => c.name === 'primaries_total')) {
     db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN primaries_total INTEGER`).run();
   }
   if (!cols.some((c) => c.name === 'evicted_keys_interval_ms')) {
-    db.prepare(`ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN evicted_keys_interval_ms INTEGER`).run();
+    db.prepare(
+      `ALTER TABLE kv_cache_footprint_snapshots ADD COLUMN evicted_keys_interval_ms INTEGER`,
+    ).run();
   }
 }
 
@@ -472,7 +476,11 @@ const COMMAND_LOG_ENTRIES_INDEXES = `
 // Rebuild spec per table, consumed by migrateConnectionIdUniqueConstraints.
 const CONNECTION_ID_UNIQUE_REBUILDS = [
   { table: 'acl_audit', columns: ACL_AUDIT_COLUMNS, indexes: ACL_AUDIT_INDEXES },
-  { table: 'slow_log_entries', columns: SLOW_LOG_ENTRIES_COLUMNS, indexes: SLOW_LOG_ENTRIES_INDEXES },
+  {
+    table: 'slow_log_entries',
+    columns: SLOW_LOG_ENTRIES_COLUMNS,
+    indexes: SLOW_LOG_ENTRIES_INDEXES,
+  },
   {
     table: 'command_log_entries',
     columns: COMMAND_LOG_ENTRIES_COLUMNS,
@@ -926,9 +934,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         if (/no such table/i.test(message)) {
           continue;
         }
-        throw new Error(`connection_id unique-constraint migration failed for ${table}: ${message}`, {
-          cause: error,
-        });
+        throw new Error(
+          `connection_id unique-constraint migration failed for ${table}: ${message}`,
+          {
+            cause: error,
+          },
+        );
       }
     }
   }
@@ -1446,13 +1457,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ? AND connection_id = ?', [
-        olderThanTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'client_snapshots',
+        'captured_at < ? AND connection_id = ?',
+        [olderThanTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ?', [olderThanTimestamp]);
+    return chunkedSqliteDelete(this.db, 'client_snapshots', 'captured_at < ?', [
+      olderThanTimestamp,
+    ]);
   }
 
   async getClientSnapshotBounds(
@@ -1473,7 +1488,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { earliest: Number(row.earliest), latest: Number(row.latest) };
   }
 
-  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+  async getClientSnapshotNextCapturedAt(
+    connectionId: string,
+    afterExclusive: number,
+  ): Promise<number | null> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -1598,7 +1616,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       throw new Error('Database not initialized');
     }
     const row = this.db
-      .prepare('SELECT MAX(last_captured_at) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .prepare(
+        'SELECT MAX(last_captured_at) AS v FROM client_analytics_rollups WHERE connection_id = ?',
+      )
       .get(connectionId) as { v: number | null } | undefined;
     return row?.v === null || row?.v === undefined ? null : Number(row.v);
   }
@@ -1608,7 +1628,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       throw new Error('Database not initialized');
     }
     const row = this.db
-      .prepare('SELECT MIN(bucket_start) AS v FROM client_analytics_rollups WHERE connection_id = ?')
+      .prepare(
+        'SELECT MIN(bucket_start) AS v FROM client_analytics_rollups WHERE connection_id = ?',
+      )
       .get(connectionId) as { v: number | null } | undefined;
     return row?.v === null || row?.v === undefined ? null : Number(row.v);
   }
@@ -1627,8 +1649,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           ORDER BY peak_connections DESC, peak_captured_at ASC
           LIMIT 1`,
       )
-      .get(connectionId, sinceBucket) as { peak_connections: number; peak_captured_at: number } | undefined;
-    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+      .get(connectionId, sinceBucket) as
+      | { peak_connections: number; peak_captured_at: number }
+      | undefined;
+    return row
+      ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) }
+      : null;
   }
 
   async pruneOldClientAnalyticsRollups(
@@ -2427,9 +2453,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     // Idempotent migration for deployments that ran the PR 19 schema before
     // cron support landed.
-    const scheduledCols = this.db
-      .prepare('PRAGMA table_info(scheduled_captures)')
-      .all() as { name: string }[];
+    const scheduledCols = this.db.prepare('PRAGMA table_info(scheduled_captures)').all() as {
+      name: string;
+    }[];
     if (!scheduledCols.some((c) => c.name === 'cron_expression')) {
       this.db.exec('ALTER TABLE scheduled_captures ADD COLUMN cron_expression TEXT');
     }
@@ -2606,9 +2632,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const limit = options.limit ?? 100;
 
     const rows = this.db
-      .prepare(
-        `SELECT * FROM bulk_delete_audits ${where} ORDER BY timestamp DESC LIMIT ?`,
-      )
+      .prepare(`SELECT * FROM bulk_delete_audits ${where} ORDER BY timestamp DESC LIMIT ?`)
       .all(...params, limit) as Array<Record<string, unknown>>;
 
     return rows.map((row) => ({
@@ -2935,6 +2959,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('pattern = ?');
       params.push(options.pattern);
     }
+    if (options.correlationIds) {
+      conditions.push(
+        options.correlationIds.length > 0
+          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
+          : '1 = 0',
+      );
+      params.push(...options.correlationIds);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
@@ -2958,13 +2990,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'correlated_anomaly_groups', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'correlated_anomaly_groups',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'correlated_anomaly_groups', 'timestamp < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'correlated_anomaly_groups', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKeyPatternSnapshots(
@@ -3088,7 +3124,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     rows.sort(
       (a, b) =>
-        b.timestamp - a.timestamp || a.db - b.db || String(a.pattern).localeCompare(String(b.pattern)),
+        b.timestamp - a.timestamp ||
+        a.db - b.db ||
+        String(a.pattern).localeCompare(String(b.pattern)),
     );
 
     return rows
@@ -3197,7 +3235,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         keyCount: row.key_count,
         memoryBytes: row.total_memory_bytes,
         avgMemoryBytes:
-          row.sampled_key_count > 0 ? Math.round(row.weighted_avg_memory / row.sampled_key_count) : 0,
+          row.sampled_key_count > 0
+            ? Math.round(row.weighted_avg_memory / row.sampled_key_count)
+            : 0,
         staleCount: row.stale_key_count ?? null,
         hotCount: row.hot_key_count ?? 0,
         coldCount: row.cold_key_count ?? 0,
@@ -3291,13 +3331,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'key_pattern_snapshots', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'key_pattern_snapshots',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'key_pattern_snapshots', 'timestamp < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'key_pattern_snapshots', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
@@ -3430,9 +3474,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     // walk every index entry for the connection on each poll.
     const where = connectionId ? 'WHERE connection_id = ?' : '';
     const params = connectionId ? [connectionId] : [];
-    const rows = this.db
-      .prepare(populatedDbsCte(where))
-      .all(...params, ...params) as Array<{ db: number | null }>;
+    const rows = this.db.prepare(populatedDbsCte(where)).all(...params, ...params) as Array<{
+      db: number | null;
+    }>;
     return rows.map((row) => row.db ?? 0);
   }
 
@@ -3456,10 +3500,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'hot_key_stats', 'captured_at < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'hot_key_stats',
+        'captured_at < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedSqliteDelete(this.db, 'hot_key_stats', 'captured_at < ?', [cutoffTimestamp]);
@@ -3762,13 +3808,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'command_log_entries', 'captured_at < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'command_log_entries',
+        'captured_at < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'command_log_entries', 'captured_at < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'command_log_entries', 'captured_at < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Snapshot Methods
@@ -3851,10 +3901,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'latency_snapshots', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'latency_snapshots',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedSqliteDelete(this.db, 'latency_snapshots', 'timestamp < ?', [cutoffTimestamp]);
@@ -3922,10 +3974,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'latency_histograms', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'latency_histograms',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedSqliteDelete(this.db, 'latency_histograms', 'timestamp < ?', [cutoffTimestamp]);
@@ -4040,10 +4094,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'memory_snapshots', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'memory_snapshots',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedSqliteDelete(this.db, 'memory_snapshots', 'timestamp < ?', [cutoffTimestamp]);
@@ -4132,7 +4188,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const row = this.db
       .prepare('SELECT * FROM scaling_readiness_settings WHERE connection_id = ?')
       .get(connectionId) as
-      | { connection_id: string; alert_enabled: number; alert_threshold: number; updated_at: number }
+      | {
+          connection_id: string;
+          alert_enabled: number;
+          alert_threshold: number;
+          updated_at: number;
+        }
       | undefined;
     if (!row) return null;
     return {
@@ -4164,7 +4225,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
     return settings;
   }
-
 
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
     return {
@@ -4240,14 +4300,34 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        s.connectionId, s.timestamp, s.detected ? 1 : 0, s.layout, s.scannedKeys, s.matchedKeys,
-        s.sampledKeys, s.scanComplete ? 1 : 0, s.primariesScanned, s.primariesTotal, s.chunksEst, s.bytesEst, s.usedMemory, s.maxmemory,
-        s.maxmemoryPolicy, s.lmcacheMemoryShare, s.noTtlRatio, s.orphanRatio, s.evictedKeysDelta, s.evictedKeysIntervalMs,
-        JSON.stringify(s.otherDbs), JSON.stringify(s.perModel),
+        s.connectionId,
+        s.timestamp,
+        s.detected ? 1 : 0,
+        s.layout,
+        s.scannedKeys,
+        s.matchedKeys,
+        s.sampledKeys,
+        s.scanComplete ? 1 : 0,
+        s.primariesScanned,
+        s.primariesTotal,
+        s.chunksEst,
+        s.bytesEst,
+        s.usedMemory,
+        s.maxmemory,
+        s.maxmemoryPolicy,
+        s.lmcacheMemoryShare,
+        s.noTtlRatio,
+        s.orphanRatio,
+        s.evictedKeysDelta,
+        s.evictedKeysIntervalMs,
+        JSON.stringify(s.otherDbs),
+        JSON.stringify(s.perModel),
       );
   }
 
-  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+  async getKvCacheFootprintSnapshots(
+    query: KvCacheFootprintQuery,
+  ): Promise<KvCacheFootprintSnapshot[]> {
     if (!this.db) throw new Error('Database not initialized');
     const from = query.from ?? 0;
     const range = [query.connectionId, from, query.to ?? Number.MAX_SAFE_INTEGER];
@@ -4281,12 +4361,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((r) => this.kvCacheSnapshotFromRow(r));
   }
 
-  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheFootprintSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'kv_cache_footprint_snapshots', 'timestamp < ? AND connection_id = ?', [cutoffTimestamp, connectionId]);
+      return chunkedSqliteDelete(
+        this.db,
+        'kv_cache_footprint_snapshots',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedSqliteDelete(this.db, 'kv_cache_footprint_snapshots', 'timestamp < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'kv_cache_footprint_snapshots', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
@@ -4301,9 +4391,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const insertAll = this.db.transaction((rows: KvCacheEngineSample[]) => {
       for (const s of rows) {
         insert.run(
-          s.engineId, s.connectionId, s.modelName, s.timestamp, s.requestedTokens, s.hitTokens,
-          s.lookupTokens, s.lookupHits, s.remoteReadBytes, s.remoteWriteBytes, s.remoteReadRequests,
-          s.remoteWriteRequests, s.remotePingErrors,
+          s.engineId,
+          s.connectionId,
+          s.modelName,
+          s.timestamp,
+          s.requestedTokens,
+          s.hitTokens,
+          s.lookupTokens,
+          s.lookupHits,
+          s.remoteReadBytes,
+          s.remoteWriteBytes,
+          s.remoteReadRequests,
+          s.remoteWriteRequests,
+          s.remotePingErrors,
         );
       }
     });
@@ -4312,7 +4412,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
     if (!this.db) throw new Error('Database not initialized');
-    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    if (query.bucketMs)
+      return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
     const { where, params } = this.kvCacheSampleFilter(query);
     params.push(query.limit ?? 50_000);
     const rows = this.db
@@ -4326,23 +4427,28 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((r) => this.kvCacheSampleFromRow(r));
   }
 
-  private getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): KvCacheEngineSample[] {
+  private getBucketedKvCacheEngineSamples(
+    query: KvCacheSampleQuery,
+    bucketMs: number,
+  ): KvCacheEngineSample[] {
     const { where, params } = this.kvCacheSampleFilter(query);
-    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
-    const rows = this.db!
-      .prepare(
-        `SELECT * FROM (
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map(
+      (column) => `SUM(${column}) AS ${column}`,
+    ).join(', ');
+    const rows = this.db!.prepare(
+      `SELECT * FROM (
            SELECT engine_id, connection_id, model_name, (timestamp / CAST(? AS INTEGER)) * CAST(? AS INTEGER) AS bucket_ts, ${sums}
            FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}
            GROUP BY engine_id, connection_id, model_name, bucket_ts
            ORDER BY bucket_ts DESC, engine_id DESC, model_name DESC LIMIT ?
          ) ORDER BY bucket_ts ASC, engine_id ASC, model_name ASC`,
-      )
-      .all(bucketMs, bucketMs, ...params, query.limit ?? 50_000) as Record<string, any>[];
+    ).all(bucketMs, bucketMs, ...params, query.limit ?? 50_000) as Record<string, any>[];
     return rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
   }
 
-  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+  async getKvCacheSampleTotals(
+    query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>,
+  ): Promise<KvCacheSampleTotals> {
     if (!this.db) throw new Error('Database not initialized');
     const { where, params } = this.kvCacheSampleFilter(query);
     const row = this.db
@@ -4354,9 +4460,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { requestedTokens: Number(row.requested), hitTokens: Number(row.hit) };
   }
 
-  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): {
+    where: string[];
+    params: unknown[];
+  } {
     const where = ['connection_id = ?', 'timestamp >= ?', 'timestamp <= ?'];
-    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+    const params: unknown[] = [
+      query.connectionId,
+      query.from ?? 0,
+      query.to ?? Number.MAX_SAFE_INTEGER,
+    ];
     if (query.engineId !== undefined) {
       where.push('engine_id = ?');
       params.push(query.engineId);
@@ -4368,12 +4481,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { where, params };
   }
 
-  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheEngineSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ? AND connection_id = ?', [cutoffTimestamp, connectionId]);
+      return chunkedSqliteDelete(
+        this.db,
+        'kv_cache_engine_samples',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'kv_cache_engine_samples', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
@@ -4401,24 +4524,41 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
          RETURNING *`,
       )
       .get(
-        e.id, e.connectionId, e.name, e.source, e.scrapeUrl, e.scrapeAuthHeader,
-        e.scrapeAuthEncrypted ? 1 : 0, e.otlpEngineId, e.enabled ? 1 : 0, e.createdAt,
-        e.lastSeenAt, e.lastError,
+        e.id,
+        e.connectionId,
+        e.name,
+        e.source,
+        e.scrapeUrl,
+        e.scrapeAuthHeader,
+        e.scrapeAuthEncrypted ? 1 : 0,
+        e.otlpEngineId,
+        e.enabled ? 1 : 0,
+        e.createdAt,
+        e.lastSeenAt,
+        e.lastError,
       ) as Record<string, any>;
     return this.kvCacheEngineFromRow(row);
   }
 
   async getKvCacheEngines(connectionId?: string): Promise<StoredKvCacheEngine[]> {
     if (!this.db) throw new Error('Database not initialized');
-    const rows = (connectionId === undefined
-      ? this.db.prepare('SELECT * FROM kv_cache_engines ORDER BY created_at ASC').all()
-      : this.db.prepare('SELECT * FROM kv_cache_engines WHERE connection_id = ? ORDER BY created_at ASC').all(connectionId)) as Record<string, any>[];
+    const rows = (
+      connectionId === undefined
+        ? this.db.prepare('SELECT * FROM kv_cache_engines ORDER BY created_at ASC').all()
+        : this.db
+            .prepare(
+              'SELECT * FROM kv_cache_engines WHERE connection_id = ? ORDER BY created_at ASC',
+            )
+            .all(connectionId)
+    ) as Record<string, any>[];
     return rows.map((r) => this.kvCacheEngineFromRow(r));
   }
 
   async getKvCacheEngine(id: string): Promise<StoredKvCacheEngine | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db.prepare('SELECT * FROM kv_cache_engines WHERE id = ?').get(id) as Record<string, any> | undefined;
+    const row = this.db.prepare('SELECT * FROM kv_cache_engines WHERE id = ?').get(id) as
+      | Record<string, any>
+      | undefined;
     return row ? this.kvCacheEngineFromRow(row) : null;
   }
 
@@ -4429,7 +4569,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db.prepare('SELECT * FROM kv_cache_settings WHERE connection_id = ?').get(connectionId) as Record<string, any> | undefined;
+    const row = this.db
+      .prepare('SELECT * FROM kv_cache_settings WHERE connection_id = ?')
+      .get(connectionId) as Record<string, any> | undefined;
     if (!row) return null;
     return {
       connectionId: row.connection_id,
@@ -4464,7 +4606,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
     if (!this.db) throw new Error('Database not initialized');
-    for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
+    for (const table of [
+      'kv_cache_footprint_snapshots',
+      'kv_cache_engine_samples',
+      'kv_cache_engines',
+      'kv_cache_settings',
+    ]) {
       await chunkedSqliteDelete(this.db, table, 'connection_id = ?', [connectionId]);
     }
   }
@@ -4637,13 +4784,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'command_stats_samples', 'captured_at < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'command_stats_samples',
+        'captured_at < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'command_stats_samples', 'captured_at < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'command_stats_samples', 'captured_at < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Stats Sample Methods (INFO latencystats)
@@ -4728,13 +4879,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'latency_stats_samples',
+        'captured_at < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveReplicationDivergenceWindows(
@@ -4861,9 +5016,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return count;
   }
 
-  async getAiCacheHistory(
-    options: AiCacheHistoryQueryOptions,
-  ): Promise<StoredAiCacheSample[]> {
+  async getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const filters: string[] = [];
@@ -4927,17 +5080,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
-  async pruneOldAiCacheSamples(
-    cutoffTimestamp: number,
-    connectionId?: string,
-  ): Promise<number> {
+  async pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'ai_cache_samples', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'ai_cache_samples',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedSqliteDelete(this.db, 'ai_cache_samples', 'timestamp < ?', [cutoffTimestamp]);
@@ -5155,9 +5307,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       // value, so a flood that stamps many spans the same millisecond still
       // makes progress (whole-trace eviction may overshoot the low-water mark —
       // the price of never splitting a trace).
-      const boundary = boundaryStmt.get(count - lowWater) as
-        | { ingested_at: number }
-        | undefined;
+      const boundary = boundaryStmt.get(count - lowWater) as { ingested_at: number } | undefined;
       if (boundary === undefined) break;
       const { changes } = evictBatch.run(boundary.ingested_at);
       if (changes === 0) break;
@@ -5277,13 +5427,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedSqliteDelete(this.db, 'vector_index_snapshots', 'timestamp < ? AND connection_id = ?', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedSqliteDelete(
+        this.db,
+        'vector_index_snapshots',
+        'timestamp < ? AND connection_id = ?',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedSqliteDelete(this.db, 'vector_index_snapshots', 'timestamp < ?', [cutoffTimestamp]);
+    return chunkedSqliteDelete(this.db, 'vector_index_snapshots', 'timestamp < ?', [
+      cutoffTimestamp,
+    ]);
   }
 
   // CVE Inspection Methods
@@ -5621,7 +5775,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if ('autoRegisterNodes' in updates) {
       setClauses.push('auto_register_nodes = ?');
-      params.push(updates.autoRegisterNodes === undefined ? null : updates.autoRegisterNodes ? 1 : 0);
+      params.push(
+        updates.autoRegisterNodes === undefined ? null : updates.autoRegisterNodes ? 1 : 0,
+      );
     }
     if ('membership' in updates) {
       setClauses.push('membership = ?');
@@ -5764,9 +5920,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getActiveMetricForecastSettings(): Promise<MetricForecastSettings[]> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
-      .prepare(
-        'SELECT * FROM metric_forecast_settings WHERE enabled = 1',
-      )
+      .prepare('SELECT * FROM metric_forecast_settings WHERE enabled = 1')
       .all() as MetricForecastSettingsRow[];
     return rows.map((row) => this.mapMetricForecastRow(row));
   }
@@ -5810,9 +5964,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getCacheProposal(id: string): Promise<StoredCacheProposal | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db
-      .prepare('SELECT * FROM cache_proposals WHERE id = ?')
-      .get(id) as CacheProposalRow | undefined;
+    const row = this.db.prepare('SELECT * FROM cache_proposals WHERE id = ?').get(id) as
+      | CacheProposalRow
+      | undefined;
     if (!row) {
       return null;
     }
@@ -5922,9 +6076,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     const result = this.db
-      .prepare(
-        `UPDATE cache_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`,
-      )
+      .prepare(`UPDATE cache_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`)
       .run(...params, ...whereParams);
     if (result.changes === 0) {
       return null;
@@ -5974,9 +6126,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCacheProposalAudit(proposalId: string): Promise<StoredCacheProposalAudit[]> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
-      .prepare(
-        'SELECT * FROM cache_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC',
-      )
+      .prepare('SELECT * FROM cache_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC')
       .all(proposalId) as CacheProposalAuditRow[];
     return rows.map((row) => this.mapCacheProposalAuditRow(row));
   }
@@ -6021,9 +6171,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getMemoryProposal(id: string): Promise<StoredMemoryProposal | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db
-      .prepare('SELECT * FROM memory_proposals WHERE id = ?')
-      .get(id) as MemoryProposalRow | undefined;
+    const row = this.db.prepare('SELECT * FROM memory_proposals WHERE id = ?').get(id) as
+      | MemoryProposalRow
+      | undefined;
     if (!row) {
       return null;
     }
@@ -6123,9 +6273,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     const result = this.db
-      .prepare(
-        `UPDATE memory_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`,
-      )
+      .prepare(`UPDATE memory_proposals SET ${sets.join(', ')} WHERE ${whereClauses.join(' AND ')}`)
       .run(...params, ...whereParams);
     if (result.changes === 0) {
       return null;
@@ -6162,9 +6310,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getMemoryProposalAudit(proposalId: string): Promise<StoredMemoryProposalAudit[]> {
     if (!this.db) throw new Error('Database not initialized');
     const rows = this.db
-      .prepare(
-        'SELECT * FROM memory_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC',
-      )
+      .prepare('SELECT * FROM memory_proposal_audit WHERE proposal_id = ? ORDER BY event_at ASC')
       .all(proposalId) as MemoryProposalAuditRow[];
     return rows.map((row) => this.mapMemoryProposalAuditRow(row));
   }
@@ -6225,10 +6371,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return row.count;
   }
 
-  async saveCaptureSession(
-    session: StoredCaptureSession,
-    connectionId: string,
-  ): Promise<string> {
+  async saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string> {
     if (!this.db) throw new Error('Database not initialized');
 
     this.db
@@ -6267,9 +6410,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
     if (!this.db) throw new Error('Database not initialized');
 
-    const row = this.db
-      .prepare('SELECT * FROM capture_sessions WHERE id = ?')
-      .get(id) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT * FROM capture_sessions WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
 
     return row ? this.mapCaptureSessionRow(row) : null;
   }
@@ -6413,7 +6556,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => ({
       sessionId: row.session_id as string,
       chunkIndex: row.chunk_index as number,
-      bytes: Buffer.isBuffer(row.bytes) ? (row.bytes as Buffer) : Buffer.from(row.bytes as ArrayBuffer),
+      bytes: Buffer.isBuffer(row.bytes)
+        ? (row.bytes as Buffer)
+        : Buffer.from(row.bytes as ArrayBuffer),
       lineCount: row.line_count as number,
       firstTs: row.first_ts as number,
       lastTs: row.last_ts as number,
@@ -6476,9 +6621,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db
-      .prepare('SELECT * FROM capture_triggers WHERE id = ?')
-      .get(id) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT * FROM capture_triggers WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
     return row ? this.mapCaptureTriggerRow(row) : null;
   }
 
@@ -6592,17 +6737,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async deleteScheduledCapture(id: string): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
-    const result = this.db
-      .prepare('DELETE FROM scheduled_captures WHERE id = ?')
-      .run(id);
+    const result = this.db.prepare('DELETE FROM scheduled_captures WHERE id = ?').run(id);
     return result.changes > 0;
   }
 
   async getScheduledCapture(id: string): Promise<StoredScheduledCapture | null> {
     if (!this.db) throw new Error('Database not initialized');
-    const row = this.db
-      .prepare('SELECT * FROM scheduled_captures WHERE id = ?')
-      .get(id) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT * FROM scheduled_captures WHERE id = ?').get(id) as
+      | Record<string, unknown>
+      | undefined;
     return row ? this.mapScheduledCaptureRow(row) : null;
   }
 
