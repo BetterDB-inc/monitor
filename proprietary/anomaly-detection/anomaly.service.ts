@@ -5554,9 +5554,75 @@ export class AnomalyService
     endTime?: number,
     limit = 50,
   ): Promise<IncidentTimeline[]> {
-    const now = Date.now();
-    const from = startTime ?? now - 24 * 60 * 60_000;
-    const loadFrom = from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    const from = startTime ?? Date.now() - 24 * 60 * 60_000;
+    const events = await this.loadIncidentEvents(
+      connectionId,
+      from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+      endTime,
+    );
+    return this.incidentTimelineBuilder
+      .build(events, Date.now(), this.incidentRecoveryProbe)
+      .filter((t) => t.lastEventAt >= from)
+      .reverse()
+      .slice(0, limit);
+  }
+
+  async getIncidentTimeline(
+    incidentId: string,
+    connectionId?: string,
+    startTime?: number,
+  ): Promise<IncidentTimeline | null> {
+    const startedAt = incidentStartOf(incidentId);
+    if (startedAt === null) {
+      const timelines = await this.getIncidentTimelines(
+        connectionId,
+        startTime,
+        undefined,
+        Number.MAX_SAFE_INTEGER,
+      );
+      return timelines.find((t) => t.incidentId === incidentId) ?? null;
+    }
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const windowEnd = startedAt + 2 * maxSpanMs;
+    const events = await this.loadIncidentEvents(connectionId, startedAt - maxSpanMs, windowEnd);
+    const find = (all: AnomalyEvent[]) =>
+      this.incidentTimelineBuilder
+        .build(all, Date.now(), this.incidentRecoveryProbe)
+        .find((t) => t.incidentId === incidentId) ?? null;
+    const draft = find(events);
+    if (!draft) return null;
+    const signals = new Map<string, { connectionId: string; metricType: MetricType }>();
+    for (const entry of draft.entries) {
+      signals.set(`${entry.connectionId}\u0000${entry.metricType}`, {
+        connectionId: entry.connectionId,
+        metricType: entry.metricType,
+      });
+    }
+    const later = await Promise.all(
+      [...signals.values()].map(async (signal) => {
+        const after = await this.getRecentAnomalies(
+          windowEnd + 1,
+          undefined,
+          undefined,
+          signal.metricType,
+          1000,
+          signal.connectionId,
+        );
+        return after.reduce<AnomalyEvent | null>(
+          (first, e) => (first === null || e.timestamp < first.timestamp ? e : first),
+          null,
+        );
+      }),
+    );
+    const next = later.filter((e): e is AnomalyEvent => e !== null);
+    return next.length > 0 ? find([...events, ...next]) : draft;
+  }
+
+  private async loadIncidentEvents(
+    connectionId: string | undefined,
+    loadFrom: number,
+    endTime: number | undefined,
+  ): Promise<AnomalyEvent[]> {
     const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
     const batches = await Promise.all(
       connectionIds.map((id) =>
@@ -5570,27 +5636,7 @@ export class AnomalyService
         (!endTime || e.timestamp <= endTime) &&
         (!connectionId || scope.has(e.connectionId)),
     );
-    const events = [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
-    return this.incidentTimelineBuilder
-      .build(events, now, this.incidentRecoveryProbe)
-      .filter((t) => t.lastEventAt >= from)
-      .reverse()
-      .slice(0, limit);
-  }
-
-  async getIncidentTimeline(
-    incidentId: string,
-    connectionId?: string,
-    startTime?: number,
-  ): Promise<IncidentTimeline | null> {
-    const startedAt = incidentStartOf(incidentId);
-    const timelines = await this.getIncidentTimelines(
-      connectionId,
-      startedAt ?? startTime,
-      startedAt === null ? undefined : startedAt + 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
-      Number.MAX_SAFE_INTEGER,
-    );
-    return timelines.find((t) => t.incidentId === incidentId) ?? null;
+    return [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
   }
 
   private scopeConnectionIds(connectionId: string): string[] {

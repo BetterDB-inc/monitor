@@ -6758,16 +6758,27 @@ describe('AnomalyService', () => {
       });
     });
 
-    it('looks an incident up in a bounded window around its start', async () => {
-      const spy = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([]);
+    it('bounds an incident detail lookup by the next firing past its window', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = [
+        { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'again', timestamp: t + 90 * MIN }), anomalyType: 'spike' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      const probe = jest.fn().mockReturnValue(null);
+      (service as any).incidentRecoveryProbe = probe;
+      const [, listed] = await service.getIncidentTimelines('conn-1', t);
 
-      await service.getIncidentTimeline('1700000000000-0123456789abcdef', 'conn-1');
+      probe.mockClear();
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
 
-      expect(spy).toHaveBeenCalledWith(
-        'conn-1',
-        1_700_000_000_000,
-        1_700_000_000_000 + 60 * MIN,
-        Number.MAX_SAFE_INTEGER,
+      expect(detail?.incidentId).toBe(listed.incidentId);
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: t, until: t + 90 * MIN }),
       );
     });
 
