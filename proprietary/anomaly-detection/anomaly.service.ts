@@ -5781,6 +5781,8 @@ export class AnomalyService
             startTime: s.timestamp - this.correlationIntervalMs,
             endTime: s.timestamp + this.correlationIntervalMs,
             connectionId: id,
+            correlationIds: [s.correlationId],
+            limit: this.maxRecentEvents,
           }),
         ),
       );
@@ -5865,12 +5867,15 @@ export class AnomalyService
     }
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([replica, windows]) => ({
-        replica,
-        level: replicaObservedLevel(state, replica),
-        latest: windows[windows.length - 1] ?? null,
-        windows,
-      }));
+      .map(([replica, windows]) => {
+        const level = replicaObservedLevel(state, replica);
+        return {
+          replica,
+          level,
+          latest: level === 'unobserved' ? null : (windows[windows.length - 1] ?? null),
+          windows,
+        };
+      });
   }
 
   private async detectReplicationDivergence(

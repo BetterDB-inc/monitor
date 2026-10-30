@@ -6198,6 +6198,33 @@ describe('AnomalyService', () => {
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
     });
 
+    it('rebuilds a group by its correlation id rather than the newest page of events', async () => {
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2'
+          ? [
+              {
+                correlationId: 'grp-own',
+                timestamp: 1_000_000,
+                pattern: 'memory_pressure',
+                severity: 'warning',
+                diagnosis: '',
+                recommendations: [],
+                anomalyCount: 1,
+                metricTypes: [],
+                connectionId: 'node-2',
+              },
+            ]
+          : [],
+      );
+      storage.getAnomalyEvents.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ correlationIds: ['grp-own'], limit: 1000 }),
+      );
+    });
+
     it('finds an older group from a busy sibling the caller took part in', async () => {
       const group = (correlationId: string, timestamp: number) => ({
         correlationId,
@@ -6983,6 +7010,26 @@ describe('AnomalyService', () => {
 
       expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
       expect(replica.latest?.gapBytes).toBe(4 * MiB);
+    });
+
+    it('does not report the last stored window as current for an unobserved replica', async () => {
+      const stored = {
+        id: 'w1',
+        connectionId: 'conn-1',
+        replicaAddr: '10.0.0.9:6379',
+        windowStart: T0,
+        windowEnd: T0 + 30_000,
+        gapBytes: 2 * MiB,
+        bytesPerSec: MiB,
+        secondsBehind: 2,
+      };
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([stored]);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.level).toBe('unobserved');
+      expect(replica.latest).toBeNull();
+      expect(replica.windows).toHaveLength(1);
     });
 
     const orphan = (id: string, addr: string) => ({
