@@ -335,7 +335,8 @@ function staleAckFinding(
   start: number,
   rate: number | null,
 ): DivergenceFinding | null {
-  if (rate === null || rate === 0) return null;
+  const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
+  if (secondsBehind === null && gapBytes < DIVERGENCE_FLOOR_BYTES) return null;
   if (replica.staleWindows === 0) replica.staleSince = start;
   replica.staleWindows++;
   const target: DivergenceLevel =
@@ -351,7 +352,7 @@ function staleAckFinding(
     level: target as Exclude<DivergenceLevel, 'none'>,
     reason: 'not_acking',
     gapBytes,
-    secondsBehind: gapBytes / rate,
+    secondsBehind,
     bytesPerSec: rate,
     slopeBytesPerWindow: 0,
     windowCount: replica.staleWindows,

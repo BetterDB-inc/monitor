@@ -344,7 +344,7 @@ Each condition fires once per episode and the tracking state clears when the chi
 - **WARNING** when the replica stays at least 30s behind for 2 windows, and **CRITICAL** at 120s
 - **CRITICAL** when the write rate is back to baseline but the gap has not closed
 - **CRITICAL** when writes have stopped but the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
-- **WARNING** after 2 windows without acknowledgements while writes continue, and **CRITICAL** after 4
+- **WARNING** after 2 windows without acknowledgements, and **CRITICAL** after 4. With writes stopped this needs a gap of at least 1 MiB
 
 Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
 

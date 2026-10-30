@@ -505,9 +505,27 @@ describe('observeDivergence', () => {
     ]);
   });
 
-  it('stays quiet on a stale ack while the primary takes no writes', () => {
+  it('flags a stale ack with a real gap while the primary takes no writes', () => {
     const h = new Harness();
     const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 2 * MiB, rate: 0, lagSec: 30 })));
+    expect(divergences(out).map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
+      ['warning', 'not_acking', null],
+      ['critical', 'not_acking', null],
+    ]);
+  });
+
+  it('flags a stale ack with a real gap while the write rate is unknown', () => {
+    const h = new Harness();
+    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 2 * MiB, rate: null, lagSec: 30 })));
+    expect(divergences(out).map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
+      ['warning', 'not_acking', null],
+      ['critical', 'not_acking', null],
+    ]);
+  });
+
+  it('stays quiet on a stale ack below the floor while the primary takes no writes', () => {
+    const h = new Harness();
+    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: MiB - 1, rate: 0, lagSec: 30 })));
     expect(out.flat()).toEqual([]);
   });
 
@@ -624,10 +642,24 @@ describe('observeDivergence', () => {
       });
     });
 
-    it('stays quiet on a stale ack once only pings are flowing', () => {
+    it('reports a replica that stops acking once only pings are flowing', () => {
       const s = new Stream();
       s.writing(9);
       s.poll(4 * MiB, 0);
+      s.lag = 30;
+
+      const findings = divergences([s.stopped(60)]);
+
+      expect(findings.map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
+        ['warning', 'not_acking', null],
+        ['critical', 'not_acking', null],
+      ]);
+      expect(describeDivergence(findings[1])).not.toContain('write rate');
+    });
+
+    it('stays quiet on a stale ack with nothing left to send', () => {
+      const s = new Stream();
+      s.writing(9);
       s.lag = 30;
 
       expect(divergences([s.stopped(60)])).toEqual([]);
