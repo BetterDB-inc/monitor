@@ -5835,9 +5835,11 @@ export class AnomalyService
   ): Array<{ replica: string; level: string; windows: DivergenceWindow[] }> {
     const state = this.divergenceState.get(connectionId);
     if (!state) return [];
+    const now = Date.now();
+    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
     return [...state.replicas.values()].map((r) => ({
       replica: r.addr,
-      level: replicaObservedLevel(state, r.addr),
+      level: replicaObservedLevel(state, r.addr, now, staleAfterMs),
       windows: [...r.windows],
     }));
   }
@@ -5882,10 +5884,12 @@ export class AnomalyService
       );
       series.set(replica.addr, windows);
     }
+    const now = Date.now();
+    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
-        const level = replicaObservedLevel(state, replica);
+        const level = replicaObservedLevel(state, replica, now, staleAfterMs);
         return {
           replica,
           level,

@@ -6876,6 +6876,10 @@ describe('AnomalyService', () => {
       (webhookEventsProService as any).dispatchReplicationRecovered = jest.fn().mockResolvedValue(undefined);
     });
 
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore?.();
+    });
+
     async function feed(gapsMiB: number[], start: number): Promise<number> {
       let t = start;
       for (const gap of gapsMiB) {
@@ -6909,6 +6913,7 @@ describe('AnomalyService', () => {
       });
 
       const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(t);
 
       expect(divergenceHook).toHaveBeenCalledTimes(1);
       expect(divergenceHook.mock.calls[0][0]).toMatchObject({
@@ -6992,7 +6997,7 @@ describe('AnomalyService', () => {
     });
 
     it('adds live windows that are newer than the stored series', async () => {
-      await feed([2, 4, 6], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([2, 4, 6], T0));
       storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
         {
           id: 'w1',
@@ -7283,6 +7288,44 @@ describe('AnomalyService', () => {
 
       expect(recoveredHook).toHaveBeenCalledTimes(1);
       expect(recoveredHook).toHaveBeenCalledWith(expect.objectContaining({ reason: 'caught_up' }));
+    });
+
+    describe('polls that stop arriving', () => {
+      const staleAfterMs = () => Math.max(30_000, 3 * (service as any).getIntervalMs());
+      const quiet = async () => {
+        const t = await feed([0, 0], T0);
+        return t - 10_000;
+      };
+
+      it('reports the replica as not observed, with no current measurement', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs() + 1);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('unobserved');
+        expect(replica.latest).toBeNull();
+        expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('unobserved');
+      });
+
+      it('stays in sync within one window', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs());
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
+
+      it('scales with the poll interval', async () => {
+        const last = await quiet();
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(60_000);
+        jest.spyOn(Date, 'now').mockReturnValue(last + 170_000);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
     });
 
     describe('replica gone', () => {
