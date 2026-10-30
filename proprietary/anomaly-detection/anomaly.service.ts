@@ -5910,7 +5910,7 @@ export class AnomalyService
     });
     const wanted = new Map<string, number>();
     for (const e of [...events].sort((a, b) => b.timestamp - a.timestamp)) {
-      if (wanted.size >= limit) break;
+      if (!pattern && wanted.size >= limit) break;
       if (e.correlationId && !known.has(e.correlationId) && !wanted.has(e.correlationId)) {
         wanted.set(e.correlationId, e.timestamp);
       }

@@ -6240,6 +6240,60 @@ describe('AnomalyService', () => {
       expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
     });
 
+    it('finds a pattern-filtered sibling group behind newer groups of other patterns', async () => {
+      const group = (correlationId: string, timestamp: number, pattern: string) => ({
+        correlationId,
+        timestamp,
+        pattern,
+        severity: 'warning',
+        diagnosis: '',
+        recommendations: [],
+        anomalyCount: 1,
+        metricTypes: [],
+        connectionId: 'node-1',
+      });
+      const sibling = [
+        ...Array.from({ length: 60 }, (_, i) => group(`other-${i}`, 3_000_000 - i, 'batch_job')),
+        group('grp-1', 1_000_000, 'memory_pressure'),
+      ];
+      storage.getCorrelatedGroups.mockImplementation(
+        async ({ connectionId, startTime, endTime, pattern, limit = 100, offset = 0 }: any) =>
+          connectionId !== 'node-1'
+            ? []
+            : sibling
+                .filter(
+                  (g) =>
+                    (!pattern || g.pattern === pattern) &&
+                    (!startTime || g.timestamp >= startTime) &&
+                    (!endTime || g.timestamp <= endTime),
+                )
+                .slice(offset, offset + limit),
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2'
+          ? [
+              ...sibling.map((g, i) => ({
+                ...member(`b-${i}`, 'node-2'),
+                correlationId: g.correlationId,
+                timestamp: g.timestamp,
+              })),
+            ]
+          : connectionId === 'node-1'
+            ? [member('a', 'node-1')]
+            : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(
+        1,
+        undefined,
+        AnomalyPattern.MEMORY_PRESSURE,
+        50,
+        'node-2',
+      );
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
     it('finds a stored group from any member of the topology', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-1'
