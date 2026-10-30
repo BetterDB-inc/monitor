@@ -3255,7 +3255,7 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
     });
 
-    it('starts a new baseline when polling resumes after a gap', async () => {
+    it('scales the delta to one poll when polling resumes after a gap', async () => {
       let now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
@@ -3265,7 +3265,41 @@ describe('AnomalyService', () => {
       await poll();
       (Date.now as jest.Mock).mockRestore();
 
-      expect(errorBuffer().getLatest()).toBe(0);
+      expect(errorBuffer().getLatest()).toBe(500);
+    });
+
+    it('keeps the errorstat baseline when a poll after a gap has no errorstats', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        now += interval;
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      now += 10 * interval;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
     });
 
     it('keeps the errorstat baseline across a poll without errorstats', async () => {

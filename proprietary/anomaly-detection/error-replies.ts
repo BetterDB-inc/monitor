@@ -13,6 +13,13 @@ export interface ErrorstatDelta {
   delta: number;
 }
 
+export function errorRepliesPerPoll(delta: number, elapsedMs: number, intervalMs: number): number {
+  if (elapsedMs <= ERROR_REPLIES_MAX_GAP_POLLS * intervalMs) {
+    return delta;
+  }
+  return Math.round((delta * intervalMs) / elapsedMs);
+}
+
 export function readErrorstatCounts(errorstats: ErrorStatsInfo | undefined): Map<string, number> {
   const counts = new Map<string, number>();
   if (errorstats === undefined) {

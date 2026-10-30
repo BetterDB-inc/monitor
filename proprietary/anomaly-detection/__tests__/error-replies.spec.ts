@@ -1,4 +1,9 @@
-import { describeErrorstatDeltas, readErrorstatCounts, topErrorstatDeltas } from '../error-replies';
+import {
+  describeErrorstatDeltas,
+  errorRepliesPerPoll,
+  readErrorstatCounts,
+  topErrorstatDeltas,
+} from '../error-replies';
 
 describe('error replies helpers', () => {
   describe('readErrorstatCounts', () => {
@@ -94,6 +99,16 @@ describe('error replies helpers', () => {
 
     it('returns null when there is nothing to report', () => {
       expect(describeErrorstatDeltas([])).toBeNull();
+    });
+  });
+
+  describe('errorRepliesPerPoll', () => {
+    it('keeps the delta when polls arrive on time', () => {
+      expect(errorRepliesPerPoll(900, 3000, 1000)).toBe(900);
+    });
+
+    it('spreads the delta over the polls a gap covered', () => {
+      expect(errorRepliesPerPoll(6000, 6000, 1000)).toBe(1000);
     });
   });
 });

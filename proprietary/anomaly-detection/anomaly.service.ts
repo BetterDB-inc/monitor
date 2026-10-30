@@ -117,7 +117,7 @@ import {
 } from '@app/common/types/metrics.types';
 import {
   ERROR_REPLIES_CRITICAL_PER_POLL,
-  ERROR_REPLIES_MAX_GAP_POLLS,
+  errorRepliesPerPoll,
   ERROR_REPLIES_MIN_PER_POLL,
   ERROR_REPLIES_WARNING_PER_POLL,
   describeErrorstatDeltas,
@@ -3009,20 +3009,19 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       return;
     }
     const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
-    const resumedAfterGap =
-      lastErrors !== undefined &&
-      timestamp - lastErrors.timestamp > ERROR_REPLIES_MAX_GAP_POLLS * this.getIntervalMs();
     const errorsDelta =
-      lastErrors === undefined || resumedAfterGap
+      lastErrors === undefined
         ? 0
-        : Math.max(0, currentErrors - lastErrors.value);
+        : errorRepliesPerPoll(
+            Math.max(0, currentErrors - lastErrors.value),
+            timestamp - lastErrors.timestamp,
+            this.getIntervalMs(),
+          );
     this.lastErrorReplies.set(ctx.connectionId, { value: currentErrors, timestamp });
 
     const currentCounts = readErrorstatCounts(errorstats);
-    const previousCounts = resumedAfterGap
-      ? undefined
-      : this.lastErrorstatCounts.get(ctx.connectionId);
-    if (errorstats !== undefined || resumedAfterGap) {
+    const previousCounts = this.lastErrorstatCounts.get(ctx.connectionId);
+    if (errorstats !== undefined) {
       this.lastErrorstatCounts.set(ctx.connectionId, currentCounts);
     }
 
