@@ -1,4 +1,4 @@
-export const CHURN_FLAT_POPULATION_RATIO = 0.1;
+export const CHURN_MAX_RETAINED_RATIO = 0.1;
 export const CHURN_MIN_CONNECTS_PER_SEC = 10;
 
 export interface ConnectionChurnReading {
@@ -11,7 +11,7 @@ export interface ConnectionChurnSample {
   timestamp: number;
   connectsPerSec: number | null;
   connectedClients: number;
-  clientsDeltaRatio: number | null;
+  retainedRatio: number | null;
 }
 
 export function computeConnectionChurn(
@@ -22,7 +22,7 @@ export function computeConnectionChurn(
     timestamp: curr.timestamp,
     connectsPerSec: null,
     connectedClients: curr.connectedClients,
-    clientsDeltaRatio: null,
+    retainedRatio: null,
   };
   if (!prev) return sample;
 
@@ -30,16 +30,17 @@ export function computeConnectionChurn(
   if (dtSec <= 0 || curr.totalReceived < prev.totalReceived) return sample;
 
   sample.connectsPerSec = (curr.totalReceived - prev.totalReceived) / dtSec;
-  sample.clientsDeltaRatio =
-    Math.abs(curr.connectedClients - prev.connectedClients) / Math.max(1, prev.connectedClients);
+  sample.retainedRatio =
+    Math.abs(curr.connectedClients - prev.connectedClients) /
+    Math.max(1, curr.totalReceived - prev.totalReceived);
   return sample;
 }
 
 export function isChurnWithFlatPopulation(sample: ConnectionChurnSample): boolean {
   return (
     sample.connectsPerSec !== null &&
-    sample.clientsDeltaRatio !== null &&
+    sample.retainedRatio !== null &&
     sample.connectsPerSec >= CHURN_MIN_CONNECTS_PER_SEC &&
-    sample.clientsDeltaRatio < CHURN_FLAT_POPULATION_RATIO
+    sample.retainedRatio < CHURN_MAX_RETAINED_RATIO
   );
 }
