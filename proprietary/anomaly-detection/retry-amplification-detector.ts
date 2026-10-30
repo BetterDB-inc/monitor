@@ -551,6 +551,14 @@ function finalizeClosing(state: RetryAmplificationState, timestamp: number): voi
   if (closed !== null) evaluateWindow(state, closed, timestamp);
 }
 
+function endEpisodeAtPollGap(state: RetryAmplificationState, lastTimestamp: number): void {
+  finalizeClosing(state, lastTimestamp);
+  state.window = null;
+  if (state.hotRun.length > 0) {
+    closeEpisode(state, lastTimestamp, computeBaseline(state.coldWindows));
+  }
+}
+
 export function evaluateRetryAmplification(
   state: RetryAmplificationState,
   sample: RetryAmplificationSample,
@@ -565,6 +573,14 @@ export function evaluateRetryAmplification(
     Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
       lastEpisode: state.lastEpisode,
     });
+  }
+
+  const episodeGapMs = Math.max(
+    state.maxPollGapMs,
+    RETRY_AMP_REARM_COLD_WINDOWS * RETRY_AMP_WINDOW_MS,
+  );
+  if (state.last !== null && sample.timestamp - state.last.timestamp > episodeGapMs) {
+    endEpisodeAtPollGap(state, state.last.timestamp);
   }
 
   if (state.window === null) {

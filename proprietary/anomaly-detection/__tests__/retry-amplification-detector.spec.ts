@@ -286,6 +286,71 @@ describe('retry amplification detector', () => {
     expect(d.findings[0].level).toBe('critical');
   });
 
+  describe('poll gaps', () => {
+    const storm = (d: Driver) => {
+      d.baseline();
+      d.ramp(4, { p99: true });
+      d.window(hot(2.1, { p99: true }));
+      expect(d.findings).toHaveLength(1);
+    };
+    const skip = (d: Driver, ms: number) => {
+      d.commands += 100_000;
+      d.t += ms;
+    };
+
+    it('ends the episode when no sample arrives for two windows', () => {
+      const d = new Driver();
+      storm(d);
+      const end = d.t - d.pollMs;
+      const startedAt = d.state.hotRun[0].start;
+
+      skip(d, 2 * RETRY_AMP_WINDOW_MS + d.pollMs + 1);
+      d.window(hot(2.2, { p99: true }));
+
+      const status = describeRetryAmplificationState(d.state);
+      expect(status.lastEpisode).toMatchObject({
+        classification: 'amplifying',
+        startedAt,
+        endedAt: end,
+      });
+      expect(status.classification).toBe('none');
+      expect(status.windows).toBe(0);
+    });
+
+    it('raises a new finding when the storm is still running after the gap', () => {
+      const d = new Driver();
+      storm(d);
+      skip(d, 5 * RETRY_AMP_WINDOW_MS);
+      d.ramp(5, { p99: true });
+      expect(d.findings).toHaveLength(2);
+      expect(d.findings[1].windows).toBe(3);
+    });
+
+    it('keeps the episode through a blip shorter than two windows', () => {
+      const d = new Driver();
+      storm(d);
+      const startedAt = d.state.hotRun[0].start;
+      skip(d, 90_000);
+      d.window(hot(2.2, { p99: true }));
+      d.window(hot(2.3, { p99: true }));
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+      expect(d.state.lastEpisode).toBeNull();
+    });
+
+    it('does not treat a long poll interval as a gap', () => {
+      const d = new Driver();
+      d.pollMs = 30_000;
+      d.state = createRetryAmplificationState(retryAmplificationMaxPollGap(180_000));
+      storm(d);
+      const startedAt = d.state.hotRun[0].start;
+      skip(d, 180_000);
+      d.window(hot(2.2, { p99: true }));
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+    });
+  });
+
   it('keeps working when the poll interval is longer than the default gap', () => {
     const slow = new Driver();
     slow.pollMs = 20_000;
