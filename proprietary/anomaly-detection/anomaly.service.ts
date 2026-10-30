@@ -36,6 +36,7 @@ import {
   IncidentTimelineBuilder,
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
   FLAT_BASELINE_RECOVERY_TOLERANCE,
+  MAX_MISSED_RECOVERY_POLLS,
   POINT_IN_TIME_METRICS,
   UNTRACKED_RECOVERY_METRICS,
   RecoveryProbe,
@@ -206,6 +207,7 @@ import {
   AnomalySummary,
   SpikeDetectorConfig,
   AnomalyEventSink,
+  MetricSample,
 } from './types';
 
 interface MetricExtractor {
@@ -5497,12 +5499,26 @@ export class AnomalyService
       this.rememberIncidentObservation(this.observedRecoveries, key, backInBand.timestamp);
       return backInBand.timestamp;
     }
+    if (!this.observedWithoutGap(samples, observedFrom, signal.until ?? signal.now)) {
+      return undefined;
+    }
     if (signal.until === null) {
       const through = samples[samples.length - 1].timestamp;
       this.rememberIncidentObservation(this.observedOpenThrough, key, through);
     }
     return null;
   };
+
+  private observedWithoutGap(samples: readonly MetricSample[], from: number, end: number): boolean {
+    const maxGapMs = MAX_MISSED_RECOVERY_POLLS * this.getIntervalMs();
+    let previous = samples[0].timestamp;
+    for (const sample of samples) {
+      if (sample.timestamp >= end) break;
+      if (sample.timestamp > from && sample.timestamp - previous > maxGapMs) return false;
+      previous = sample.timestamp;
+    }
+    return end - previous <= maxGapMs;
+  }
 
   private rememberIncidentObservation(
     observations: Map<string, number>,

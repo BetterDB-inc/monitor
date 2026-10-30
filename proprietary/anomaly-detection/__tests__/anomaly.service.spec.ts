@@ -6970,7 +6970,7 @@ describe('AnomalyService', () => {
       const start = now - 11 * MIN;
       const fill = (from: number) => {
         const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
-        for (let ts = from; ts <= from + 4 * MIN; ts += 10_000) buffer.addSample(900, ts);
+        for (let ts = from; ts <= from + 4 * MIN; ts += 1000) buffer.addSample(900, ts);
         (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
       };
       (service as any).recentAnomalies.push(
@@ -7093,9 +7093,13 @@ describe('AnomalyService', () => {
       const T = 1_700_000_000_000;
       const baseline = (start: number): Array<[number, number]> =>
         Array.from({ length: 30 }, (_, i) => [start + i * 1000, 10 + (i % 2)]);
+      const outOfBand = (start: number, seconds = 30): Array<[number, number]> =>
+        Array.from({ length: seconds }, (_, i) => [start + i * 1000, 900]);
+      let newestSample = T;
       const withBuffer = (samples: Array<[number, number]>) => {
         const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
         samples.forEach(([ts, value]) => buffer.addSample(value, ts));
+        newestSample = samples[samples.length - 1][0];
         (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
       };
 
@@ -7106,6 +7110,7 @@ describe('AnomalyService', () => {
         until: null,
         baseline: 10,
         stdDev: 1,
+        now: newestSample + 1000,
         ...overrides,
       });
 
@@ -7121,9 +7126,6 @@ describe('AnomalyService', () => {
       });
 
       describe('after the buffer slides past the settle time', () => {
-        const outOfBand = (start: number): Array<[number, number]> =>
-          Array.from({ length: 30 }, (_, i) => [start + i * 1000, 900]);
-
         it('keeps a recovery it already observed', () => {
           withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
           expect(probe()(signal())).toBe(T + 2 * MIN);
@@ -7143,31 +7145,28 @@ describe('AnomalyService', () => {
         });
 
         it('stays open while observation of the out-of-band signal is unbroken', () => {
-          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          withBuffer(outOfBand(T - 30_000, 200));
           expect(probe()(signal())).toBeNull();
 
-          withBuffer([[T + 2 * MIN, 900], ...outOfBand(T + 3 * MIN)]);
+          withBuffer(outOfBand(T + 100_000, 200));
           expect(probe()(signal())).toBeNull();
 
-          withBuffer([[T + 3 * MIN + 29_000, 900], ...outOfBand(T + 8 * MIN)]);
+          withBuffer(outOfBand(T + 250_000, 200));
 
           expect(probe()(signal())).toBeNull();
         });
 
         it('recovers when unbroken observation finds the signal back in band', () => {
-          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          withBuffer(outOfBand(T - 30_000, 200));
           probe()(signal());
 
-          withBuffer([
-            [T + 2 * MIN, 900],
-            [T + 5 * MIN, 10],
-          ]);
+          withBuffer([...outOfBand(T + 100_000, 100), [T + 200_000, 10]]);
 
-          expect(probe()(signal())).toBe(T + 5 * MIN);
+          expect(probe()(signal())).toBe(T + 200_000);
         });
 
-        it('does not know once observation has a gap', () => {
-          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+        it('does not know once the buffer has moved past what was observed', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
           probe()(signal());
 
           withBuffer(outOfBand(T + 8 * MIN));
@@ -7176,29 +7175,75 @@ describe('AnomalyService', () => {
         });
 
         it('does not keep a re-fired signal open from its own watermark', () => {
-          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          withBuffer(outOfBand(T - 30_000, 200));
           probe()(signal());
 
-          withBuffer([[T + 2 * MIN, 900], ...outOfBand(T + 3 * MIN)]);
+          withBuffer(outOfBand(T + 100_000, 200));
 
           expect(probe()(signal({ until: T + 30 * MIN }))).toBeUndefined();
+        });
+
+        it('does not know once polling stalls and the buffer freezes', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          expect(probe()(signal())).toBeNull();
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBeUndefined();
+        });
+
+        it('does not know when the buffer froze before the first probe', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBeUndefined();
+        });
+
+        it('allows a couple of late polls before calling a sample stale', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+
+          expect(probe()(signal({ now: newestSample + 3000 }))).toBeNull();
+        });
+
+        it('does not know when polling resumed with a hole inside the buffer', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal())).toBeUndefined();
+        });
+
+        it('does not know when a hole opens after what was observed', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          probe()(signal());
+
+          withBuffer([...outOfBand(T + 100_000, 100), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal())).toBeUndefined();
+        });
+
+        it('still recovers at an in-band sample after a hole', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), [T + 400_000, 10]]);
+
+          expect(probe()(signal())).toBe(T + 400_000);
+        });
+
+        it('still recovers at an in-band sample in a frozen buffer', () => {
+          withBuffer([...outOfBand(T - 30_000, 100), [T + 70_000, 10]]);
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBe(T + 70_000);
         });
       });
 
       it('stays open while no sample after the settle time is back in band', () => {
-        withBuffer([...baseline(T - 30_000), [T + MIN, 900]]);
+        withBuffer(outOfBand(T - 30_000, 200));
 
         expect(probe()(signal())).toBeNull();
       });
 
       it('judges against the pre-incident baseline, not a rolling one that drifted up', () => {
-        withBuffer(Array.from({ length: 40 }, (_, i) => [T + i * 5000, 500 + (i % 2)]));
+        withBuffer(Array.from({ length: 200 }, (_, i) => [T + i * 1000, 500 + (i % 2)]));
 
         expect(probe()(signal())).toBeNull();
       });
 
       it('judges a flat pre-incident baseline by the baseline, not a rolling z-score', () => {
-        withBuffer(Array.from({ length: 40 }, (_, i) => [T + i * 5000, 500]));
+        withBuffer(Array.from({ length: 200 }, (_, i) => [T + i * 1000, 500]));
 
         expect(probe()(signal({ stdDev: 0 }))).toBeNull();
       });
@@ -7213,13 +7258,13 @@ describe('AnomalyService', () => {
       });
 
       it('ignores samples after the signal fired again', () => {
-        withBuffer([...baseline(T - 30_000), [T + MIN, 900], [T + 3 * MIN, 10]]);
+        withBuffer([...outOfBand(T - 30_000, 150), [T + 3 * MIN, 10]]);
 
         expect(probe()(signal({ until: T + 2 * MIN }))).toBeNull();
       });
 
       it('keeps a sustained signal open when the next firing follows straight on', () => {
-        withBuffer([...baseline(T - 30_000), [T + 10_000, 900]]);
+        withBuffer(outOfBand(T - 30_000, 60));
 
         expect(probe()(signal({ until: T + 30_000 }))).toBeNull();
       });

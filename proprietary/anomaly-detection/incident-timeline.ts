@@ -63,11 +63,14 @@ export interface RecoverySignal {
   until: number | null;
   baseline: number;
   stdDev: number;
+  now: number;
 }
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
 
 export const FLAT_BASELINE_RECOVERY_TOLERANCE = 0.05;
+
+export const MAX_MISSED_RECOVERY_POLLS = 3;
 
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
 
@@ -318,6 +321,7 @@ export class IncidentTimelineBuilder {
       until,
       baseline: first.baseline,
       stdDev: first.stdDev,
+      now,
     });
   }
 
