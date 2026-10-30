@@ -12,6 +12,7 @@ function makeInfo(overrides: {
   master_repl_offset?: string;
   slave_repl_offset?: string;
   master_failover_state?: string;
+  replicas?: Record<string, string>;
 } = {}): unknown {
   return {
     memory: {
@@ -23,6 +24,7 @@ function makeInfo(overrides: {
       master_repl_offset: overrides.master_repl_offset,
       slave_repl_offset: overrides.slave_repl_offset,
       master_failover_state: overrides.master_failover_state,
+      ...overrides.replicas,
     },
   };
 }
@@ -79,12 +81,15 @@ describe('HealthGateService', () => {
     expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
   });
 
-  it('computes replication lag from master/slave offsets on a replica', async () => {
+  it('computes replication lag on a primary from the furthest-behind online replica', async () => {
     const { service } = makeService({
       info: makeInfo({
-        role: 'replica',
+        role: 'master',
         master_repl_offset: '100000000',
-        slave_repl_offset: '50000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=99000000,lag=0',
+          slave1: 'ip=10.0.0.3,port=6379,state=online,offset=50000000,lag=4',
+        },
       }),
     });
     const result = await service.evaluate(CONNECTION_ID);
@@ -92,9 +97,38 @@ describe('HealthGateService', () => {
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
-  it('does not compute lag on a primary regardless of offsets', async () => {
+  it('ignores replicas still in their initial sync', async () => {
     const { service } = makeService({
-      info: makeInfo({ role: 'master', master_repl_offset: '999999999', slave_repl_offset: '0' }),
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=100000000,lag=0',
+          slave1: 'ip=10.0.0.3,port=6379,state=wait_bgsave,offset=0,lag=0',
+        },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+  });
+
+  it('reports no lag on a primary without replicas', async () => {
+    const { service } = makeService({
+      info: makeInfo({ role: 'master', master_repl_offset: '999999999' }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+  });
+
+  it("does not read lag from a replica's own offsets", async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'replica',
+        master_repl_offset: '100000000',
+        slave_repl_offset: '50000000',
+      }),
     });
     const result = await service.evaluate(CONNECTION_ID);
     expect(result.signals.replicationLagBytes).toBe(0);

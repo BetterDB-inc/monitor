@@ -104,19 +104,35 @@ function readReplication(info: unknown): {
     return { replicationLagBytes: 0, infoFailoverInProgress: false };
   }
 
-  const isReplica = replication.role === 'slave' || replication.role === 'replica';
-  let lag = 0;
-  if (isReplica) {
-    const master = toNumber(replication.master_repl_offset);
-    const slave = toNumber(replication.slave_repl_offset);
-    lag = Math.max(0, master - slave);
-  }
+  const isPrimary = replication.role === 'master' || replication.role === 'primary';
+  const lag = isPrimary ? furthestReplicaGap(replication) : 0;
 
   const failoverState = replication.master_failover_state;
   const infoFailoverInProgress =
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
   return { replicationLagBytes: lag, infoFailoverInProgress };
+}
+
+function furthestReplicaGap(replication: Record<string, string>): number {
+  const masterOffset = toNumber(replication.master_repl_offset);
+  let gap = 0;
+  for (const [key, value] of Object.entries(replication)) {
+    if (!/^slave\d+$/.test(key) || typeof value !== 'string') {
+      continue;
+    }
+    const fields = new Map(
+      value.split(',').map((pair) => {
+        const eq = pair.indexOf('=');
+        return [pair.slice(0, eq), pair.slice(eq + 1)] as const;
+      }),
+    );
+    if (fields.get('state') !== 'online' || !fields.has('offset')) {
+      continue;
+    }
+    gap = Math.max(gap, masterOffset - toNumber(fields.get('offset')));
+  }
+  return gap;
 }
 
 function toNumber(raw: string | undefined): number {
