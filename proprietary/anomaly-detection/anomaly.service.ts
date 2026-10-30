@@ -231,6 +231,9 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
+const MAX_INVOLVED_GROUP_IDS = 5_000;
+const MAX_SCANNED_CALLER_EVENTS = 100_000;
+
 @Injectable()
 export class AnomalyService
   extends MultiConnectionPoller
@@ -5654,37 +5657,45 @@ export class AnomalyService
     limit: number,
   ): Promise<StoredCorrelatedGroup[]> {
     if (siblings.length === 0) return [];
-    const events = await this.storage.getAnomalyEvents({
-      startTime: startTime - this.correlationIntervalMs,
-      endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
-      connectionId,
-      limit: 10_000,
-    });
-    const wanted = new Map<string, number>();
-    for (const e of [...events].sort((a, b) => b.timestamp - a.timestamp)) {
-      if (!pattern && wanted.size >= limit) break;
-      if (e.correlationId && !known.has(e.correlationId) && !wanted.has(e.correlationId)) {
-        wanted.set(e.correlationId, e.timestamp);
+    const pageSize = 10_000;
+    const maxWanted = pattern ? MAX_INVOLVED_GROUP_IDS : Math.min(limit, MAX_INVOLVED_GROUP_IDS);
+    const enough = (wanted: Set<string>) => wanted.size >= maxWanted;
+    const wanted = new Set<string>();
+    for (
+      let offset = 0;
+      !enough(wanted) && offset < MAX_SCANNED_CALLER_EVENTS;
+      offset += pageSize
+    ) {
+      const page = await this.storage.getAnomalyEvents({
+        startTime: startTime - this.correlationIntervalMs,
+        endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+        connectionId,
+        limit: pageSize,
+        offset,
+      });
+      for (const e of page) {
+        if (enough(wanted)) break;
+        if (e.correlationId && !known.has(e.correlationId)) wanted.add(e.correlationId);
       }
+      if (page.length < pageSize) break;
     }
     if (wanted.size === 0) return [];
-    const times = [...wanted.values()];
-    const from = Math.max(startTime, Math.min(...times) - this.correlationIntervalMs);
-    const to = Math.min(endTime ?? Infinity, Math.max(...times) + this.correlationIntervalMs);
-    const pageSize = 1000;
+    const ids = [...wanted];
+    const chunkSize = 500;
+    const chunks = Array.from({ length: Math.ceil(ids.length / chunkSize) }, (_, i) =>
+      ids.slice(i * chunkSize, (i + 1) * chunkSize),
+    );
     const found: StoredCorrelatedGroup[] = [];
     for (const id of siblings) {
-      for (let offset = 0; wanted.size > found.length; offset += pageSize) {
-        const page = await this.storage.getCorrelatedGroups({
-          startTime: from,
-          endTime: to,
-          pattern: pattern as string,
-          limit: pageSize,
-          offset,
-          connectionId: id,
-        });
-        found.push(...page.filter((g) => wanted.has(g.correlationId)));
-        if (page.length < pageSize) break;
+      for (const chunk of chunks) {
+        found.push(
+          ...(await this.storage.getCorrelatedGroups({
+            pattern: pattern as string,
+            correlationIds: chunk,
+            limit: chunk.length,
+            connectionId: id,
+          })),
+        );
       }
     }
     return found;
