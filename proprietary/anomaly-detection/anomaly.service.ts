@@ -1560,7 +1560,12 @@ export class AnomalyService
     const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
     this.lastChurnReading.set(ctx.connectionId, reading);
     this.connectionChurnSamples.set(ctx.connectionId, sample);
-    if (sample.connectsPerSec === null) return;
+    if (sample.connectsPerSec === null) {
+      const buffer = buffers.get(MetricType.CONNECTION_CHURN);
+      const detector = detectors.get(MetricType.CONNECTION_CHURN);
+      if (buffer && detector) this.resetSpikeRun(detector, buffer, timestamp);
+      return;
+    }
 
     if (!buffers.has(MetricType.CONNECTION_CHURN)) {
       buffers.set(MetricType.CONNECTION_CHURN, new MetricBuffer(MetricType.CONNECTION_CHURN));
@@ -5642,7 +5647,10 @@ export class AnomalyService
           if (connectionId) {
             await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
             for (const anomaly of group.anomalies) {
-              await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly), connectionId);
+              await this.storage.saveAnomalyEvent(
+                this.toStoredAnomalyEvent(anomaly),
+                anomaly.connectionId ?? connectionId,
+              );
             }
           }
         } catch (err) {
@@ -5826,28 +5834,53 @@ export class AnomalyService
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
     }
 
-    const stored = await this.storage.getCorrelatedGroups({
-      startTime,
-      endTime,
-      pattern: pattern as string,
-      limit,
-      connectionId,
-    });
+    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
+    const storedByScope = await Promise.all(
+      connectionIds.map((id) =>
+        this.storage.getCorrelatedGroups({
+          startTime,
+          endTime,
+          pattern: pattern as string,
+          limit,
+          connectionId: id,
+        }),
+      ),
+    );
+    const stored = [
+      ...new Map(storedByScope.flat().map((s) => [s.correlationId, s])).values(),
+    ].sort((a, b) => b.timestamp - a.timestamp);
 
     const groups: CorrelatedAnomalyGroup[] = [];
     for (const s of stored) {
-      const storedAnomalies = await this.storage.getAnomalyEvents({
-        startTime: s.timestamp - this.correlationIntervalMs,
-        endTime: s.timestamp + this.correlationIntervalMs,
-        connectionId,
-      });
-      const correlated = storedAnomalies
-        .filter((a) => a.correlationId === s.correlationId)
-        .map((a) => this.storedToAnomalyEvent(a));
+      if (groups.length >= limit) break;
+      const storedAnomalies = await Promise.all(
+        connectionIds.map((id) =>
+          this.storage.getAnomalyEvents({
+            startTime: s.timestamp - this.correlationIntervalMs,
+            endTime: s.timestamp + this.correlationIntervalMs,
+            connectionId: id,
+          }),
+        ),
+      );
+      const correlated = [
+        ...new Map(
+          storedAnomalies
+            .flat()
+            .filter((a) => a.correlationId === s.correlationId)
+            .map((a) => [a.id, this.storedToAnomalyEvent(a)]),
+        ).values(),
+      ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
       const anomalies =
         correlated.length > 0
           ? correlated
           : await this.sequenceGroupMembers(s, s.connectionId ?? connectionId);
+      if (
+        connectionId &&
+        s.connectionId !== connectionId &&
+        !anomalies.some((a) => a.connectionId === connectionId)
+      ) {
+        continue;
+      }
 
       groups.push({
         correlationId: s.correlationId,

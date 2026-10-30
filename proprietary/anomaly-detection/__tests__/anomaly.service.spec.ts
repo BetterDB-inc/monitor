@@ -3223,7 +3223,9 @@ describe('AnomalyService', () => {
   });
 
   describe('connection churn', () => {
-    function runChurn(steps: Array<{ connectsPerSec: number; clients: number }>) {
+    function runChurn(
+      steps: Array<{ connectsPerSec: number; clients: number; counterReset?: boolean }>,
+    ) {
       const buffers = new Map();
       const detectors = new Map();
       const recorded: any[] = [];
@@ -3242,7 +3244,7 @@ describe('AnomalyService', () => {
         );
         for (const step of steps) {
           ts += 1_000;
-          total += step.connectsPerSec;
+          total = step.counterReset ? 0 : total + step.connectsPerSec;
           await (service as any).detectConnectionChurn(
             mockCtx,
             { total_connections_received: String(total), connected_clients: String(step.clients) },
@@ -3317,6 +3319,17 @@ describe('AnomalyService', () => {
       ]);
 
       expect(recorded).toHaveLength(1);
+    });
+
+    it('does not alert on two flat spikes separated by a counter reset', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 0, clients: 100, counterReset: true },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
     });
 
     it('does not alert on two flat spikes separated by a gated sample', async () => {
@@ -6112,6 +6125,83 @@ describe('AnomalyService', () => {
       ]);
 
       expect(groups.map((g: { anomalies: unknown[] }) => g.anomalies.length)).toEqual([2, 1]);
+    });
+  });
+
+  describe('correlated groups across a topology', () => {
+    const member = (id: string, connectionId: string) => ({
+      id,
+      timestamp: 1_000_000,
+      metricType: 'connections',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 1,
+      baseline: 0,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 0,
+      message: '',
+      resolved: false,
+      correlationId: 'grp-1',
+      connectionId,
+    });
+
+    beforeEach(() => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed-1' ? { id } : { id, membership: { seedId: 'seed-1' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'node-1' }, { id: 'node-2' }]);
+    });
+
+    it('saves each member anomaly under its own connection', async () => {
+      (service as any).recentAnomalies.push(
+        { ...member('a', 'node-1'), correlationId: undefined, metricType: MetricType.CONNECTIONS },
+        {
+          ...member('b', 'node-2'),
+          correlationId: undefined,
+          metricType: MetricType.CONNECTIONS,
+          timestamp: 1_001_000,
+        },
+      );
+
+      await (service as any).correlateAnomalies();
+
+      const saved = (storage.saveAnomalyEvent as jest.Mock).mock.calls.map(
+        ([e, conn]: any[]) => `${e.id}@${conn}`,
+      );
+      expect(saved).toEqual(['a@node-1', 'b@node-2']);
+    });
+
+    it('finds a stored group from any member of the topology', async () => {
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-1'
+          ? [
+              {
+                correlationId: 'grp-1',
+                timestamp: 1_000_000,
+                pattern: 'memory_pressure',
+                severity: 'warning',
+                diagnosis: '',
+                recommendations: [],
+                anomalyCount: 2,
+                metricTypes: [],
+                connectionId: 'node-1',
+              },
+            ]
+          : [],
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-1'
+          ? [member('a', 'node-1')]
+          : connectionId === 'node-2'
+            ? [member('b', 'node-2')]
+            : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(groups.map((g) => g.anomalies.map((a) => a.id))).toEqual([['a', 'b']]);
     });
   });
 
