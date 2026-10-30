@@ -8331,6 +8331,10 @@ describe('AnomalyService', () => {
       (webhookEventsProService as any).dispatchReplicationRecovered = jest.fn().mockResolvedValue(undefined);
     });
 
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore?.();
+    });
+
     async function feed(gapsMiB: number[], start: number): Promise<number> {
       let t = start;
       for (const gap of gapsMiB) {
@@ -8364,6 +8368,7 @@ describe('AnomalyService', () => {
       });
 
       const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(t);
 
       expect(divergenceHook).toHaveBeenCalledTimes(1);
       expect(divergenceHook.mock.calls[0][0]).toMatchObject({
@@ -8447,7 +8452,7 @@ describe('AnomalyService', () => {
     });
 
     it('adds live windows that are newer than the stored series', async () => {
-      await feed([2, 4, 6], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([2, 4, 6], T0));
       storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
         {
           id: 'w1',
@@ -8740,6 +8745,44 @@ describe('AnomalyService', () => {
       expect(recoveredHook).toHaveBeenCalledWith(expect.objectContaining({ reason: 'caught_up' }));
     });
 
+    describe('polls that stop arriving', () => {
+      const staleAfterMs = () => Math.max(30_000, 3 * (service as any).getIntervalMs());
+      const quiet = async () => {
+        const t = await feed([0, 0], T0);
+        return t - 10_000;
+      };
+
+      it('reports the replica as not observed, with no current measurement', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs() + 1);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('unobserved');
+        expect(replica.latest).toBeNull();
+        expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('unobserved');
+      });
+
+      it('stays in sync within one window', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs());
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
+
+      it('scales with the poll interval', async () => {
+        const last = await quiet();
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(60_000);
+        jest.spyOn(Date, 'now').mockReturnValue(last + 170_000);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
+    });
+
     describe('replica gone', () => {
       const absent = (timestamp: number) => ({ ...sample(timestamp, 0), replicas: [] });
       const offline = (timestamp: number) => {
@@ -8851,6 +8894,106 @@ describe('AnomalyService', () => {
         expect(copy.resolvedAt).toEqual(expect.any(Number));
         expect((service as any).incidentEvents.has('conn-1')).toBe(false);
         expect(incident.recovery.openSignals).not.toContain(MetricType.REPLICATION_DIVERGENCE);
+      });
+
+      it('closes superseded and restart-orphaned events when the connection is removed', async () => {
+        (service as any).divergenceSuperseded.set('conn-1', new Set(['superseded-1']));
+        (service as any).divergenceOrphans.set(
+          'conn-1',
+          new Map([
+            ['10.0.0.2:6379', { eventIds: new Set(['orphan-1']), sinceWindow: 0, claimed: false }],
+          ]),
+        );
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('superseded-1', expect.any(Number));
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('orphan-1', expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      describe('removed before the first sweep', () => {
+        const flush = () => new Promise((resolve) => setImmediate(resolve));
+        const pending = () => (service as any).removedDivergenceSweeps as Set<string>;
+        const readsFor = (connectionId: string) =>
+          storage.getAnomalyEvents.mock.calls.filter(([opts]) => opts.connectionId === connectionId);
+        const pollOther = (timestamp: number) =>
+          (service as any).detectReplicationDivergence(sample(timestamp, 0), {
+            ...mockCtx,
+            connectionId: 'conn-2',
+          });
+
+        it('closes rows left open by an earlier run', async () => {
+          storage.getAnomalyEvents.mockResolvedValueOnce([{ id: 'old-1' }, { id: 'old-2' }]);
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-2', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect(recoveredCalls()).toEqual([]);
+        });
+
+        it('retries a failed read on a later poll, then stops', async () => {
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+          expect(pending().has('conn-9')).toBe(true);
+
+          storage.getAnomalyEvents.mockResolvedValueOnce([{ id: 'old-1' }]);
+          await pollOther(T0);
+          await pollOther(T0 + 10_000);
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect(readsFor('conn-9')).toHaveLength(2);
+        });
+
+        it('stops after one read when there are no open rows', async () => {
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+          await pollOther(T0);
+
+          expect(pending().size).toBe(0);
+          expect(readsFor('conn-9')).toHaveLength(1);
+        });
+
+        it('collects every page before closing any row', async () => {
+          const page = Array.from({ length: 500 }, (_, i) => ({ id: `old-${i}` }));
+          storage.getAnomalyEvents
+            .mockResolvedValueOnce(page)
+            .mockResolvedValueOnce([{ id: 'old-last' }]);
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+
+          expect(readsFor('conn-9').map(([opts]) => opts.offset)).toEqual([0, 500]);
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-last', expect.any(Number));
+        });
+
+        it('does not read a connection that was already swept', async () => {
+          await feed([2], T0);
+          const reads = readsFor('conn-1').length;
+
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          expect(readsFor('conn-1')).toHaveLength(reads);
+        });
+
+        it('leaves the rows to the connection when it comes back', async () => {
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          await (service as any).detectReplicationDivergence(sample(T0, 0), mockCtx);
+
+          expect(pending().size).toBe(0);
+          expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+        });
       });
 
       it('keeps closing a saved event until storage accepts it after removal', async () => {
@@ -9043,6 +9186,70 @@ describe('AnomalyService', () => {
 
         expect(attempt.resolved).toBe(true);
         expect((service as any).removedDivergenceEvents.size).toBe(0);
+      });
+
+      it('keeps a retried event in its correlated group', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+
+        await feed([12, 14], t);
+
+        expect(group.anomalies).toEqual([divergenceCopies()[0]]);
+        expect(group.anomalies[0]).toBe(divergenceCopies()[0]);
+        await service.resolveGroup(group.correlationId);
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('closes a group member in storage once its retry is saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+        const [attempt] = divergenceCopies();
+        expect(attempt.persisted).toBeUndefined();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([12, 14], t);
+        await service.resolveGroup(group.correlationId);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('stamps the cached copy with the stored resolution time', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [saved] = divergenceCopies();
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+
+        await service.resolveGroup(group.correlationId);
+
+        const [, resolvedAt] = storage.resolveAnomaly.mock.calls[0];
+        expect(saved.resolvedAt).toBe(resolvedAt);
+      });
+
+      it('stamps the cached copy when one event is resolved', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [saved] = divergenceCopies();
+
+        await service.resolveAnomaly(saved.id);
+
+        const [, resolvedAt] = storage.resolveAnomaly.mock.calls[0];
+        expect(saved.resolvedAt).toBe(resolvedAt);
+      });
+
+      it('keeps a retry resolved when its attempt was resolved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        await service.resolveAnomaly(attempt.id);
+
+        await feed([12, 14], t);
+
+        expect(openCopies()).toEqual([]);
+        expect(divergenceCopies()[0].resolvedAt).toBe(attempt.resolvedAt);
       });
 
       it('shows the sent level while the event cannot be saved', async () => {

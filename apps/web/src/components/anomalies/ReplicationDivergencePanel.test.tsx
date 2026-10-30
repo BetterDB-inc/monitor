@@ -44,7 +44,7 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getByText('Diverging')).toBeInTheDocument();
     expect(screen.getByText('8.0 MiB')).toBeInTheDocument();
     expect(screen.getByText('8s')).toBeInTheDocument();
-    expect(screen.getByText('Not catching up')).toBeInTheDocument();
+    expect(screen.getByText('Critical')).toBeInTheDocument();
     expect(screen.getByText('In sync')).toBeInTheDocument();
     expect(screen.getByText('Not observed')).toBeInTheDocument();
     expect(screen.getAllByText('collecting')).toHaveLength(3);
@@ -60,6 +60,25 @@ describe('ReplicationDivergencePanel', () => {
     const { container } = render(
       <ReplicationDivergencePanel
         replicas={undefined}
+        error={
+          new PaymentRequiredError({
+            message: 'upgrade',
+            feature: 'anomalyDetection',
+            currentTier: 'community',
+            requiredTier: 'pro',
+            upgradeUrl: '/upgrade',
+          })
+        }
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('hides cached replicas when a refresh loses the license', () => {
+    const { container } = render(
+      <ReplicationDivergencePanel
+        replicas={[{ replica: '10.0.0.2:6379', level: 'none', latest: null, windows: [] }]}
         error={
           new PaymentRequiredError({
             message: 'upgrade',

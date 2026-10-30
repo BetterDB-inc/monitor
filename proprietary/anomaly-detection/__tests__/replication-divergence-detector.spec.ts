@@ -17,6 +17,7 @@ import {
   requeueClosedWindows,
   takeUnsavedDivergence,
   trackUnsavedDivergence,
+  assessOrphanedReplica,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample } from '../replication-stream';
 
@@ -589,6 +590,42 @@ describe('observeDivergence', () => {
     expect(gone.flat()).toEqual([{ kind: 'cleared', addr: ADDR, eventId: 'evt-warning', gapBytes: null }]);
   });
 
+  describe('a replica with no fresh sample', () => {
+    const quiet = () => {
+      const h = new Harness();
+      h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
+      return { h, last: h.state.lastObservedAt as number };
+    };
+
+    it('stays in sync while samples are within the limit', () => {
+      const { h, last } = quiet();
+
+      expect(replicaObservedLevel(h.state, ADDR, last + 30_000, 30_000)).toBe('none');
+    });
+
+    it('is unobserved once the last sample is older than the limit', () => {
+      const { h, last } = quiet();
+
+      expect(replicaObservedLevel(h.state, ADDR, last + 30_001, 30_000)).toBe('unobserved');
+    });
+
+    it('keeps an open alert level', () => {
+      const h = new Harness();
+      h.windows([2, 4, 6, 8, 10].map((gap) => ({ gap: gap * MiB, rate: MiB })));
+      const last = h.state.lastObservedAt as number;
+
+      expect(replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000)).toBe('warning');
+    });
+
+    it('leaves observation untouched for restart orphans', () => {
+      const { h, last } = quiet();
+
+      replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000);
+
+      expect(h.state.observed.has(ADDR)).toBe(true);
+    });
+  });
+
   describe('an alert that was sent but never saved', () => {
     function sendWithoutSaving(h: Harness): void {
       for (const gap of [2, 4, 6, 8, 10]) {
@@ -605,7 +642,14 @@ describe('observeDivergence', () => {
       sendWithoutSaving(h);
 
       expect(h.state.replicas.get(ADDR)?.level).toBe('none');
-      expect(replicaObservedLevel(h.state, ADDR)).toBe('warning');
+      expect(replicaObservedLevel(h.state, ADDR, 0, 1_000)).toBe('warning');
+    });
+
+    it('counts as diverging for an event left open by a restart', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      expect(assessOrphanedReplica(h.state, ADDR, 0)).toBe('diverging');
     });
 
     it('clears the replica when it drops out', () => {

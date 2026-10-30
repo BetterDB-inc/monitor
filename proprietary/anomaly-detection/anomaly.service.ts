@@ -469,6 +469,7 @@ export class AnomalyService
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
   private removedDivergenceEvents = new Set<string>();
+  private removedDivergenceSweeps = new Set<string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -5730,6 +5731,9 @@ export class AnomalyService
     if (retryOf) {
       this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
       this.forgetIncidentEvent(retryOf.id);
+      for (const group of this.recentGroups) {
+        group.anomalies = group.anomalies.map((a) => (a.id === retryOf.id ? anomaly : a));
+      }
     }
     this.recentAnomalies.push(anomaly);
     this.rememberIncidentEvent(anomaly);
@@ -6505,9 +6509,11 @@ export class AnomalyService
   ): Array<{ replica: string; level: string; windows: DivergenceWindow[] }> {
     const state = this.divergenceState.get(connectionId);
     if (!state) return [];
+    const now = Date.now();
+    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
     return [...state.replicas.values()].map((r) => ({
       replica: r.addr,
-      level: replicaObservedLevel(state, r.addr),
+      level: replicaObservedLevel(state, r.addr, now, staleAfterMs),
       windows: [...r.windows],
     }));
   }
@@ -6552,10 +6558,12 @@ export class AnomalyService
       );
       series.set(replica.addr, windows);
     }
+    const now = Date.now();
+    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
-        const level = replicaObservedLevel(state, replica);
+        const level = replicaObservedLevel(state, replica, now, staleAfterMs);
         return {
           replica,
           level,
@@ -6684,6 +6692,7 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
+    this.removedDivergenceSweeps.delete(ctx.connectionId);
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
     await this.resolveRemovedDivergenceEvents();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
@@ -6703,6 +6712,21 @@ export class AnomalyService
     await this.persistDivergenceWindows(state, ctx);
   }
 
+  private async readOpenDivergenceEvents(connectionId: string): Promise<StoredAnomalyEvent[]> {
+    const events: StoredAnomalyEvent[] = [];
+    for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
+      const open = await this.storage.getAnomalyEvents({
+        connectionId,
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        offset,
+      });
+      events.push(...open);
+      if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) return events;
+    }
+  }
+
   private async collectOrphanedDivergenceEvents(
     state: DivergenceConnectionState,
     ctx: ConnectionContext,
@@ -6713,27 +6737,17 @@ export class AnomalyService
         ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
       ]);
       const orphans = new Map<string, OrphanedDivergence>();
-      for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
-        const open = await this.storage.getAnomalyEvents({
-          connectionId: ctx.connectionId,
-          metricType: MetricType.REPLICATION_DIVERGENCE,
-          resolved: false,
-          limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
-          offset,
-        });
-        for (const event of open) {
-          if (seen.has(event.id)) continue;
-          seen.add(event.id);
-          const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
-          const orphan = orphans.get(replica) ?? {
-            eventIds: new Set<string>(),
-            sinceWindow: state.closedWindowCount,
-            claimed: false,
-          };
-          orphan.eventIds.add(event.id);
-          orphans.set(replica, orphan);
-        }
-        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) break;
+      for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+        const orphan = orphans.get(replica) ?? {
+          eventIds: new Set<string>(),
+          sinceWindow: state.closedWindowCount,
+          claimed: false,
+        };
+        orphan.eventIds.add(event.id);
+        orphans.set(replica, orphan);
       }
       if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
       this.divergenceOrphansSwept.add(ctx.connectionId);
@@ -6757,10 +6771,14 @@ export class AnomalyService
       if (assessment === 'pending') continue;
       try {
         for (const id of orphan.eventIds) {
-          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, Date.now())) || orphan.claimed;
+          const resolvedAt = Date.now();
+          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, resolvedAt)) || orphan.claimed;
           orphan.eventIds.delete(id);
           const cached = this.recentAnomalies.find((a) => a.id === id);
-          if (cached) cached.resolved = true;
+          if (cached) {
+            cached.resolved = true;
+            cached.resolvedAt ??= resolvedAt;
+          }
         }
       } catch (err) {
         this.logger.warn(
@@ -6836,7 +6854,24 @@ export class AnomalyService
     await this.resolveSupersededDivergenceEvents(connectionId);
   }
 
+  private async sweepRemovedConnections(): Promise<void> {
+    for (const connectionId of this.removedDivergenceSweeps) {
+      try {
+        const open = await this.readOpenDivergenceEvents(connectionId);
+        if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
+        for (const event of open) this.removedDivergenceEvents.add(event.id);
+      } catch (err) {
+        this.logger.warn(
+          `Failed to read open divergence events of removed connection ${connectionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
   private async resolveRemovedDivergenceEvents(): Promise<void> {
+    await this.sweepRemovedConnections();
     for (const id of this.removedDivergenceEvents) {
       if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
     }
@@ -6857,10 +6892,19 @@ export class AnomalyService
 
   private closeDivergenceEventsOnRemoval(connectionId: string): void {
     const state = this.divergenceState.get(connectionId);
-    if (!state) return;
-    for (const [addr, replica] of state.replicas) {
-      if (replica.eventId) this.removedDivergenceEvents.add(replica.eventId);
-      for (const id of takeUnsavedDivergence(state, addr)) this.removedDivergenceEvents.add(id);
+    for (const replica of state?.replicas.values() ?? []) {
+      for (const id of [replica.eventId, ...replica.unsavedEventIds]) {
+        if (id) this.removedDivergenceEvents.add(id);
+      }
+    }
+    for (const id of this.divergenceSuperseded.get(connectionId) ?? []) {
+      this.removedDivergenceEvents.add(id);
+    }
+    for (const orphan of this.divergenceOrphans.get(connectionId)?.values() ?? []) {
+      for (const id of orphan.eventIds) this.removedDivergenceEvents.add(id);
+    }
+    if (!this.divergenceOrphansSwept.has(connectionId)) {
+      this.removedDivergenceSweeps.add(connectionId);
     }
     this.resolveRemovedDivergenceEvents().catch((err) => {
       this.logger.error('Failed to resolve divergence events of a removed connection', err);
@@ -6901,7 +6945,8 @@ export class AnomalyService
       stdDev: 0,
       threshold: DIVERGENCE_FLOOR_BYTES,
       message,
-      resolved: false,
+      resolved: attempt?.resolved ?? false,
+      resolvedAt: attempt?.resolvedAt,
       connectionId: ctx.connectionId,
       relatedMetrics,
       correlationId: attempt?.correlationId,
@@ -7156,13 +7201,14 @@ export class AnomalyService
   private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
     const evicted = anomaly ? undefined : this.findIncidentEvent(anomalyId);
+    const resolvedAt = Date.now();
 
     // Memory-only event (never durably stored — e.g. a deterministic string id
     // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
-      anomaly.resolvedAt ??= Date.now();
+      anomaly.resolvedAt ??= resolvedAt;
       return 'resolved';
     }
 
@@ -7171,7 +7217,6 @@ export class AnomalyService
     // durable. Reporting success on an in-memory-only flip would let a client
     // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
-    const resolvedAt = Date.now();
     try {
       persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {

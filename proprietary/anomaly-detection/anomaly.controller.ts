@@ -37,7 +37,7 @@ export function parseIncidentTime(name: string, value: string | undefined): numb
 function parseTimeBound(name: string, value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+  if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed < 0) {
     throw new BadRequestException(`${name} must be a timestamp in milliseconds`);
   }
   return parsed;

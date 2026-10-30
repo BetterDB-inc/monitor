@@ -73,6 +73,7 @@ export interface DivergenceConnectionState {
   closedWindows: ClosedDivergenceWindow[];
   windowSamples: number;
   lastSampleAt: number | null;
+  lastObservedAt: number | null;
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
@@ -130,6 +131,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     closedWindows: [],
     windowSamples: 0,
     lastSampleAt: null,
+    lastObservedAt: null,
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
@@ -441,6 +443,7 @@ export function observeDivergence(
   const outage = gapMs > Math.max(windowMs, state.lastGapMs * DIVERGENCE_OUTAGE_GAP_FACTOR);
   const windowEnd = outage ? previousSampleAt : sample.timestamp;
   state.lastSampleAt = sample.timestamp;
+  state.lastObservedAt = sample.timestamp;
   state.lastGapMs = gapMs;
 
   if (
@@ -482,11 +485,14 @@ export function observeDivergence(
 export function replicaObservedLevel(
   state: DivergenceConnectionState | undefined,
   addr: string,
+  now: number,
+  staleAfterMs: number,
 ): ReplicaObservedLevel {
   const replica = state?.replicas.get(addr);
   const level = replica ? activeLevel(replica) : 'none';
   if (level !== 'none') return level;
-  return state?.observed.has(addr) ? 'none' : 'unobserved';
+  if (!state?.observed.has(addr) || state.lastObservedAt === null) return 'unobserved';
+  return now - state.lastObservedAt > staleAfterMs ? 'unobserved' : 'none';
 }
 
 export function assessOrphanedReplica(
@@ -495,7 +501,7 @@ export function assessOrphanedReplica(
   sinceWindow: number,
 ): OrphanAssessment {
   const replica = state.replicas.get(addr);
-  if (replica && replica.level !== 'none') return 'diverging';
+  if (replica && activeLevel(replica) !== 'none') return 'diverging';
   if (!state.observed.has(addr)) {
     const notPrimary = state.windowStart === null;
     const absent = state.closedWindowCount - sinceWindow >= DIVERGENCE_RECOVERED_WINDOWS;
