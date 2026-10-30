@@ -127,10 +127,11 @@ function furthestReplicaGap(replication: Record<string, string>): number {
         return [pair.slice(0, eq), pair.slice(eq + 1)] as const;
       }),
     );
-    if (fields.get('state') !== 'online' || !fields.has('offset')) {
+    const offset = toNumber(fields.get('offset'));
+    if (fields.get('state') !== 'online' || offset <= 0) {
       continue;
     }
-    gap = Math.max(gap, masterOffset - toNumber(fields.get('offset')));
+    gap = Math.max(gap, masterOffset - offset);
   }
   return gap;
 }

@@ -116,6 +116,21 @@ describe('HealthGateService', () => {
     expect(result.allow).toBe(true);
   });
 
+  it('ignores an online replica that has not acked its first offset yet', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=0,lag=12',
+        },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+  });
+
   it('reports no lag on a primary without replicas', async () => {
     const { service } = makeService({
       info: makeInfo({ role: 'master', master_repl_offset: '999999999' }),
@@ -131,6 +146,9 @@ describe('HealthGateService', () => {
         role: 'replica',
         master_repl_offset: '100000000',
         slave_repl_offset: '50000000',
+        replicas: {
+          slave0: 'ip=10.0.0.4,port=6379,state=online,offset=50000000,lag=0',
+        },
       }),
     });
     const result = await service.evaluate(CONNECTION_ID);
