@@ -163,6 +163,20 @@ describe('SpikeDetector', () => {
       expect(result!.message).toContain('(94.3% below normal');
     });
 
+    it('resets the consecutive count on a below-mean sample under the threshold', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        { warningThreshold: 200, criticalThreshold: 2000, consecutiveRequired: 2, cooldownMs: 0 },
+        { thresholdOverridesBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      expect(detector.detect(buffer, 300, 50000)).toBeNull();
+      expect(detector.detect(buffer, 30, 51000)).toBeNull();
+      expect(detector.detect(buffer, 300, 52000)).toBeNull();
+      expect(detector.detect(buffer, 300, 53000)).not.toBeNull();
+    });
+
     it('fires a below-mean value over the critical threshold when warning is disabled', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(

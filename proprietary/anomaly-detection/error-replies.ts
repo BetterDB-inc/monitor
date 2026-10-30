@@ -6,6 +6,7 @@ export const ERROR_REPLIES_TOP_LIMIT = 3;
 export const ERROR_REPLIES_WARNING_PER_POLL = 200;
 export const ERROR_REPLIES_CRITICAL_PER_POLL = 2000;
 export const ERROR_REPLIES_MIN_PER_POLL = 20;
+export const ERROR_REPLIES_MAX_GAP_POLLS = 3;
 
 export interface ErrorstatDelta {
   prefix: string;

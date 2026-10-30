@@ -76,6 +76,9 @@ export class SpikeDetector {
 
     // Skip drops if not configured to detect them
     if (isDrop && !countsAsDrop && !exceedsAbsolute) {
+      if (this.options.thresholdOverridesBelowMean) {
+        this.consecutiveCounts.delete(this.metricType);
+      }
       return null;
     }
 

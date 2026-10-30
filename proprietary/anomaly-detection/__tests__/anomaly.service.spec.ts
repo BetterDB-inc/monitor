@@ -3255,6 +3255,43 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
     });
 
+    it('starts a new baseline when polling resumes after a gap', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      now += 10 * (service as any).getIntervalMs();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5100'));
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorBuffer().getLatest()).toBe(0);
+    });
+
+    it('keeps the errorstat baseline across a poll without errorstats', async () => {
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
+    });
+
     it('absorbs a counter reset on restart', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('900'));
       await poll();

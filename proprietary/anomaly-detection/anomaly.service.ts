@@ -117,6 +117,7 @@ import {
 } from '@app/common/types/metrics.types';
 import {
   ERROR_REPLIES_CRITICAL_PER_POLL,
+  ERROR_REPLIES_MAX_GAP_POLLS,
   ERROR_REPLIES_MIN_PER_POLL,
   ERROR_REPLIES_WARNING_PER_POLL,
   describeErrorstatDeltas,
@@ -242,7 +243,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // config value (fetched once) so the alert can say whether eviction is even
   // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
   private lastEvictedClients = new Map<string, number>();
-  private lastErrorReplies = new Map<string, number>();
+  private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
   private lastErrorstatCounts = new Map<string, Map<string, number>>();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
@@ -3008,12 +3009,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       return;
     }
     const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
-    const errorsDelta = Math.max(0, currentErrors - (lastErrors ?? currentErrors));
-    this.lastErrorReplies.set(ctx.connectionId, currentErrors);
+    const resumedAfterGap =
+      lastErrors !== undefined &&
+      timestamp - lastErrors.timestamp > ERROR_REPLIES_MAX_GAP_POLLS * this.getIntervalMs();
+    const errorsDelta =
+      lastErrors === undefined || resumedAfterGap
+        ? 0
+        : Math.max(0, currentErrors - lastErrors.value);
+    this.lastErrorReplies.set(ctx.connectionId, { value: currentErrors, timestamp });
 
     const currentCounts = readErrorstatCounts(errorstats);
-    const previousCounts = this.lastErrorstatCounts.get(ctx.connectionId);
-    this.lastErrorstatCounts.set(ctx.connectionId, currentCounts);
+    const previousCounts = resumedAfterGap
+      ? undefined
+      : this.lastErrorstatCounts.get(ctx.connectionId);
+    if (errorstats !== undefined || resumedAfterGap) {
+      this.lastErrorstatCounts.set(ctx.connectionId, currentCounts);
+    }
 
     if (buffers.has(MetricType.ERROR_REPLIES) === false) {
       buffers.set(MetricType.ERROR_REPLIES, new MetricBuffer(MetricType.ERROR_REPLIES));
