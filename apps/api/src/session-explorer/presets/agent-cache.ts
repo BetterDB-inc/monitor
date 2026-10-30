@@ -2,8 +2,10 @@ import {
   escapeGlob,
   globLiteralPrefix,
   type CapturedKey,
+  type JsonValue,
   type KeyView,
   type ParsedMessage,
+  type PendingInterrupt,
 } from '@betterdb/shared';
 import type { PresetDefinition } from './types';
 import {
@@ -22,6 +24,11 @@ const SESSION_MARKER = ':session:';
 const CHECKPOINT_MARKER = ':checkpoint:';
 const LATEST_SUFFIX = ':__checkpoint_latest';
 const WRITES_MARKER = ':writes:';
+const MESSAGES_CHANNEL = 'messages';
+const INTERRUPT_CHANNEL = '__interrupt__';
+const RESUME_CHANNEL = '__resume__';
+const ERROR_CHANNEL = '__error__';
+const NULL_TASK_ID = '00000000-0000-0000-0000-000000000000';
 
 const ROLE_BY_CONSTRUCTOR = new Map([
   ['HumanMessage', 'human'],
@@ -189,22 +196,26 @@ const newestCheckpointId = (entries: Entry[]): string | undefined =>
 const pendingOrder = (a: WriteKey, b: WriteKey) =>
   a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : a.idx - b.idx;
 
-function pendingMessages(
-  views: KeyView[],
-  entries: Entry[],
-  newestId: string | undefined,
-): ParsedMessage[] {
+interface PendingWrite {
+  view: KeyView;
+  write: WriteKey;
+}
+
+function newestWrites(views: KeyView[], entries: Entry[]): PendingWrite[] {
+  const newestId = newestCheckpointId(entries);
   if (newestId === undefined) return [];
   return views
     .map((view, i) => ({ view, parts: entries[i].parts }))
     .flatMap(({ view, parts }) =>
-      parts?.kind === 'write' && parts.write.checkpointId === newestId && parts.write.channel === 'messages'
+      parts?.kind === 'write' && parts.write.checkpointId === newestId
         ? [{ view, write: parts.write }]
         : [],
     )
-    .sort((a, b) => pendingOrder(a.write, b.write))
-    .flatMap(({ view }) => (view.parsed ? view.messages : []));
+    .sort((a, b) => pendingOrder(a.write, b.write));
 }
+
+const onChannel = (writes: PendingWrite[], channel: string) =>
+  writes.filter(({ write }) => write.channel === channel);
 
 const defaultPattern = (prefix: string) =>
   `${escapeGlob(prefix.replace(/:+$/, ''))}${SESSION_MARKER}*`;
@@ -212,6 +223,46 @@ const defaultPattern = (prefix: string) =>
 function parseWrite(value: string): ParsedMessage[] {
   const written = parseJson(value);
   return (Array.isArray(written) ? written : [written]).map(parseWritten);
+}
+
+interface RaisedInterrupt {
+  id?: string;
+  value?: JsonValue;
+}
+
+function interruptsOf(value: string): RaisedInterrupt[] {
+  const written = parseJson(value);
+  return (Array.isArray(written) ? written : [written]).map((entry) =>
+    isRecord(entry)
+      ? {
+          ...(typeof entry.id === 'string' ? { id: entry.id } : {}),
+          ...('value' in entry ? { value: entry.value as JsonValue } : {}),
+        }
+      : fail('Write is not an interrupt'),
+  );
+}
+
+const assertInterrupts = (value: string): void => {
+  interruptsOf(value);
+};
+
+function pendingInterrupts(writes: PendingWrite[]): PendingInterrupt[] {
+  const resumed = new Set(onChannel(writes, RESUME_CHANNEL).map(({ write }) => write.taskId));
+  const finished = new Set(
+    writes
+      .filter(({ write }) => ![INTERRUPT_CHANNEL, RESUME_CHANNEL, ERROR_CHANNEL].includes(write.channel))
+      .map(({ write }) => write.taskId),
+  );
+  const answered = ({ id }: RaisedInterrupt) =>
+    resumed.has(NULL_TASK_ID) || (id !== undefined && resumed.has(id));
+  return onChannel(writes, INTERRUPT_CHANNEL)
+    .filter(({ write }) => !finished.has(write.taskId))
+    .flatMap(({ view, write }) =>
+      view.parsed && typeof view.raw === 'string'
+        ? interruptsOf(view.raw).filter((raised) => resumed.has(write.taskId) || !answered(raised))
+        : [],
+    )
+    .map(({ value }) => (value === undefined ? {} : { value }));
 }
 
 const skipKey = (k: CapturedKey): KeyView =>
@@ -252,7 +303,9 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
       if (k.type !== 'string' || typeof k.value !== 'string') return fail('Expected a string value');
       const parts = partsOfKey(k.key);
       if (isCheckpoint(parts)) return parseCheckpoint(k.value);
-      if (parts?.kind === 'write' && parts.write.channel === 'messages') return parseWrite(k.value);
+      if (parts?.kind !== 'write') return [];
+      if (parts.write.channel === MESSAGES_CHANNEL) return parseWrite(k.value);
+      if (parts.write.channel === INTERRUPT_CHANNEL) assertInterrupts(k.value);
       return [];
     });
 
@@ -265,6 +318,7 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
     }),
     parseKey,
     selectKeys,
+    selection: 'latest checkpoint and its pending writes',
     parseKeys: (keys) => {
       const selected = new Set(selectKeys(keys.map((k) => k.key)));
       return keys.map((k) => (selected.has(k.key) ? parseKey(k) : skipKey(k)));
@@ -272,9 +326,15 @@ export function createAgentCachePreset(pattern?: string): PresetDefinition {
     mergeSession: (views) => {
       const entries = entriesOf(views.map((v) => v.key));
       const newest = newestCheckpointKey(entries);
-      const view = views.find((v) => v.key === newest);
-      if (!view || !view.parsed) return [];
-      return [...view.messages, ...pendingMessages(views, entries, newestCheckpointId(entries))];
+      const checkpoint = views.find((v) => v.key === newest);
+      if (!checkpoint || !checkpoint.parsed) return [];
+      const written = onChannel(newestWrites(views, entries), MESSAGES_CHANNEL);
+      return [
+        ...checkpoint.messages,
+        ...written.flatMap(({ view }) => (view.parsed ? view.messages : [])),
+      ];
     },
+    pendingInterrupts: (views) =>
+      pendingInterrupts(newestWrites(views, entriesOf(views.map((v) => v.key)))),
   };
 }

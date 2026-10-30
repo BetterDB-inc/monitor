@@ -21,15 +21,25 @@ const JSON_MEMORY_HEADROOM = 4;
 
 type PipelineResult = [Error | null, unknown] | undefined;
 
+export interface SessionTotals {
+  memoryBytes: number;
+  unmeasuredKeys: number;
+  goneKeys: number;
+  ttlMs: number | null;
+}
+
 export interface SessionKeysRead {
   keys: CapturedKey[];
   truncated: boolean;
   failed: Set<PrimaryRoute>;
   missingKeys: number;
+  erroredKeys: number;
   touchesKeys: boolean;
+  totals: SessionTotals;
 }
 
 export interface ReadOptions {
+  selected?: string[];
   byteCap?: number;
   totalByteCap?: number;
   listWindow?: number;
@@ -47,6 +57,7 @@ interface Located {
   key: string;
   type: string;
   pttl: number;
+  sampled: number | null;
   memory: number | null;
   length: number | null;
   exact: boolean;
@@ -88,6 +99,11 @@ const numberOf = (r: PipelineResult): number | null =>
 const lengthOf = (at: Located): number => {
   if (at.length === null) throw new KeyReadError();
   return at.length;
+};
+
+const minPositive = (values: number[]): number | null => {
+  const positive = values.filter((v) => v > 0);
+  return positive.length > 0 ? Math.min(...positive) : null;
 };
 
 const bulk = (length: number): number => length + String(length).length + 5;
@@ -178,23 +194,24 @@ async function readWindows(
   }
 }
 
+function append<K>(map: Map<K, string[]>, owner: K, key: string): void {
+  const list = map.get(owner);
+  if (list) list.push(key);
+  else map.set(owner, [key]);
+}
+
 function routeKeys(
   primaries: PrimaryClients,
   keys: string[],
-): { groups: Map<ReadableRoute, string[]>; failed: Set<PrimaryRoute> } {
+): { groups: Map<ReadableRoute, string[]>; unrouted: Map<PrimaryRoute, string[]> } {
   const groups = new Map<ReadableRoute, string[]>();
-  const failed = new Set<PrimaryRoute>();
+  const unrouted = new Map<PrimaryRoute, string[]>();
   for (const key of keys) {
     const route = ownerOf(primaries, key);
-    if (!isReadable(route)) {
-      failed.add(route);
-      continue;
-    }
-    const list = groups.get(route) ?? [];
-    list.push(key);
-    groups.set(route, list);
+    if (isReadable(route)) append(groups, route, key);
+    else append(unrouted, route, key);
   }
-  return { groups, failed };
+  return { groups, unrouted };
 }
 
 async function measure(client: Valkey, found: Located[]): Promise<void> {
@@ -204,7 +221,7 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
     for (const at of collections) {
       if (isCollection(at.type)) lengths[LENGTH_COMMANDS[at.type]](at.key);
     }
-    const counted = (await lengths.exec()) ?? [];
+    const counted = (await lengths.exec().catch(() => null)) ?? [];
     collections.forEach((at, i) => {
       at.length = numberOf(counted[i] as PipelineResult);
     });
@@ -219,7 +236,8 @@ async function measure(client: Valkey, found: Located[]): Promise<void> {
   if (exactly.length === 0) return;
   const exact = client.pipeline();
   for (const at of exactly) exact.memory('USAGE', at.key, 'SAMPLES', 0);
-  const measured = (await exact.exec()) ?? [];
+  const measured = await exact.exec().catch(() => null);
+  if (!measured) return;
   exactly.forEach((at, i) => {
     at.memory = numberOf(measured[i] as PipelineResult);
     at.exact = at.memory !== null;
@@ -230,10 +248,11 @@ async function locate(
   client: Valkey,
   keys: string[],
   batch: number,
-): Promise<{ located: Located[]; missing: number; moved: boolean }> {
+): Promise<{ located: Located[]; missing: string[]; errored: string[]; moved: string[] }> {
   const located: Located[] = [];
-  let missing = 0;
-  let moved = false;
+  const missing: string[] = [];
+  const errored: string[] = [];
+  const moved: string[] = [];
   for (let start = 0; start < keys.length; start += batch) {
     const slice = keys.slice(start, start + batch);
     const pipeline = client.pipeline();
@@ -247,17 +266,22 @@ async function locate(
     slice.forEach((key, i) => {
       const [type, pttl, memory] = results.slice(i * 3, i * 3 + 3) as PipelineResult[];
       if (type && isMoved(type[0])) {
-        moved = true;
+        moved.push(key);
         return;
       }
-      if (!type || type[0] || typeof type[1] !== 'string' || type[1] === 'none') {
-        missing++;
+      if (!type || type[0] || typeof type[1] !== 'string') {
+        errored.push(key);
+        return;
+      }
+      if (type[1] === 'none') {
+        missing.push(key);
         return;
       }
       found.push({
         key,
         type: type[1],
         pttl: numberOf(pttl) ?? -1,
+        sampled: numberOf(memory),
         memory: numberOf(memory),
         length: null,
         exact: false,
@@ -266,7 +290,7 @@ async function locate(
     await measure(client, found);
     located.push(...found);
   }
-  return { located, missing, moved };
+  return { located, missing, errored, moved };
 }
 
 function queueFirstRead(
@@ -578,6 +602,7 @@ interface ReadState {
   remaining: number;
   exhausted: boolean;
   missing: number;
+  errored: number;
   moved: Set<PrimaryRoute>;
   captured: Map<string, CapturedKey>;
 }
@@ -641,7 +666,7 @@ async function readNode(
         });
       } catch (err) {
         if (isMoved(err)) state.moved.add(route);
-        else state.missing++;
+        else state.errored++;
       }
     }
   }
@@ -658,27 +683,53 @@ export async function readSessionKeysOn(
     listWindow: options.listWindow ?? DEFAULT_LIST_WINDOW,
     batch: options.batch ?? DEFAULT_READ_BATCH,
   };
-  const { groups, failed } = routeKeys(primaries, keys);
+  const selected = options.selected ? new Set(options.selected) : null;
+  const isSelected = (key: string) => selected === null || selected.has(key);
+  const { groups, unrouted } = routeKeys(primaries, keys);
+  const failed = new Set<PrimaryRoute>();
   const state: ReadState = {
     remaining: opts.totalByteCap,
     exhausted: false,
     missing: 0,
+    errored: 0,
     moved: new Set(),
     captured: new Map(),
   };
+  const totals = { memoryBytes: 0, unmeasuredKeys: 0, goneKeys: 0, ttls: [] as number[] };
+  for (const [route, owned] of unrouted) {
+    totals.unmeasuredKeys += owned.length;
+    if (owned.some(isSelected)) failed.add(route);
+  }
   let lastError: unknown;
   let succeeded = 0;
 
   for (const [route, nodeKeys] of groups) {
-    if (state.exhausted) break;
+    let measured = false;
     try {
-      const { located, missing, moved } = await locate(route.client, nodeKeys, opts.batch);
-      state.missing += missing;
-      if (moved) state.moved.add(route);
-      await readNode(route, located, opts, state);
+      const { located, missing, errored, moved } = await locate(route.client, nodeKeys, opts.batch);
+      measured = true;
+      for (const at of located) {
+        totals.memoryBytes += at.sampled ?? 0;
+        totals.ttls.push(at.pttl);
+      }
+      const missingSelected = missing.filter(isSelected).length;
+      const erroredSelected = errored.filter(isSelected).length;
+      totals.goneKeys += missing.length - missingSelected;
+      totals.unmeasuredKeys +=
+        missingSelected +
+        errored.length +
+        moved.length +
+        located.filter((at) => at.sampled === null).length;
+      state.missing += missingSelected;
+      state.errored += erroredSelected;
+      if (moved.some(isSelected)) state.moved.add(route);
+      if (!state.exhausted) {
+        await readNode(route, located.filter((at) => isSelected(at.key)), opts, state);
+      }
       succeeded++;
     } catch (err) {
-      failed.add(route);
+      if (!measured) totals.unmeasuredKeys += nodeKeys.length;
+      if (nodeKeys.some(isSelected)) failed.add(route);
       lastError = err;
     }
   }
@@ -693,6 +744,13 @@ export async function readSessionKeysOn(
     truncated: state.exhausted,
     failed: union(failed, state.moved),
     missingKeys: state.missing,
+    erroredKeys: state.errored,
     touchesKeys: primaries.touchesKeys,
+    totals: {
+      memoryBytes: totals.memoryBytes,
+      unmeasuredKeys: totals.unmeasuredKeys,
+      goneKeys: totals.goneKeys,
+      ttlMs: minPositive(totals.ttls),
+    },
   };
 }

@@ -85,6 +85,9 @@ export class FakeValkey {
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
+  failTypeKeys = new Set<string>();
+  failPipelinesWith = new Set<string>();
+  failExactMemory = false;
   failHstrlen = false;
   lfu = false;
   noValues = true;
@@ -208,6 +211,7 @@ export class FakeValkey {
   private answer(name: string, args: unknown[]): unknown {
     const key = this.keyOf(name, args);
     if (this.movedKeys.has(key)) throw new Error('MOVED 1 10.0.0.9:7000');
+    if (name === 'type' && this.failTypeKeys.has(key)) throw new Error('ERR type failed');
     if (this.failKeys.has(key) && !['type', 'pttl', 'memory', 'object'].includes(name)) {
       throw new Error(this.failKeys.get(key));
     }
@@ -360,6 +364,15 @@ export class FakeValkey {
     }
     chain.exec = async () => {
       this.pipelineExecs++;
+      const failing = ops.find(({ name }) => this.failPipelinesWith.has(name));
+      if (failing) {
+        this.failPipelinesWith.delete(failing.name);
+        throw new Error(`ERR pipeline with ${failing.name} failed`);
+      }
+      if (this.failExactMemory && ops.some(({ name, args }) => name === 'memory' && args.includes('SAMPLES'))) {
+        this.failExactMemory = false;
+        throw new Error('ERR exact memory pipeline failed');
+      }
       return ops.map(({ name, args }) => {
         try {
           return [null, this.run(name, args)];

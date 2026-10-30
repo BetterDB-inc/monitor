@@ -35,21 +35,20 @@ import { readSessionKeysOn } from './session-reader';
 const PREVIEW_SCAN_COUNT = 1000;
 const PREVIEW_SCAN_PAGES = 10;
 
-const sessionMissing = (failedNodes: number) =>
-  failedNodes > 0
-    ? new ServiceUnavailableException('Session keys may live on primaries that could not be read')
+const sessionMissing = (failedNodes: number, erroredKeys = 0) => {
+  if (failedNodes > 0) {
+    return new ServiceUnavailableException('Session keys may live on primaries that could not be read');
+  }
+  return erroredKeys > 0
+    ? new ServiceUnavailableException('Session keys could not be read')
     : new NotFoundException('Session not found');
+};
 
 export interface SessionCapture {
   namespace: SessionNamespace;
   keys: CapturedKey[];
   detail: SessionDetail;
 }
-
-const minPositive = (values: number[]): number | null => {
-  const positive = values.filter((v) => v > 0);
-  return positive.length > 0 ? Math.min(...positive) : null;
-};
 
 async function sampleSessionKey(
   primaries: PrimaryClients,
@@ -206,17 +205,21 @@ export class SessionExplorerService {
   ): Promise<SessionCapture> {
     const namespace = await this.namespace(connectionId, id);
     const preset = this.presetOf(namespace);
-    const { scan, read } = await withPrimaries(
+    const { scan, read, selected } = await withPrimaries(
       this.registry.get(connectionId),
       async (primaries) => {
         const scan = await keysForSessionOn(primaries, namespace.pattern, preset, sessionId);
         if (scan.keys.length === 0) throw sessionMissing(scan.failed.size);
         const selected = preset.selectKeys ? preset.selectKeys(scan.keys) : scan.keys;
-        const read = await readSessionKeysOn(primaries, selected);
-        if (read.keys.length === 0) throw sessionMissing(union(scan.failed, read.failed).size);
-        return { scan, read };
+        const read = await readSessionKeysOn(primaries, scan.keys, { selected });
+        if (read.keys.length === 0) {
+          throw sessionMissing(union(scan.failed, read.failed).size, read.erroredKeys);
+        }
+        return { scan, read, selected };
       },
     );
+    const chosen = new Set(selected);
+    const skippedKeys = scan.keys.filter((key) => !chosen.has(key)).length - read.totals.goneKeys;
 
     const views = parseSessionKeys(preset, read.keys);
     const messages = preset.mergeSession(views);
@@ -228,6 +231,7 @@ export class SessionExplorerService {
       !truncated &&
       failedNodes === 0 &&
       read.missingKeys === 0 &&
+      read.erroredKeys === 0 &&
       read.keys.every((k) => !k.truncated);
 
     return {
@@ -238,14 +242,21 @@ export class SessionExplorerService {
         preset: namespace.preset,
         keys: views,
         messages,
+        interrupts: preset.pendingInterrupts?.(views) ?? [],
         estimatedTokens: estimateTokens(messages),
-        ttlMs: minPositive(read.keys.map((k) => k.pttl)),
+        ttlMs: read.totals.ttlMs,
         memoryBytes: read.keys.reduce((sum, k) => sum + (k.bytes ?? 0), 0),
+        totalKeys: scan.keys.length - read.totals.goneKeys,
+        skippedKeys,
+        totalMemoryBytes: read.totals.memoryBytes,
+        unmeasuredKeys: read.totals.unmeasuredKeys,
+        selection: skippedKeys > 0 ? (preset.selection ?? null) : null,
         complete,
         unparsedKeys,
         truncated,
         failedNodes,
         missingKeys: read.missingKeys,
+        erroredKeys: read.erroredKeys,
         touchesKeys: read.touchesKeys,
       },
     };

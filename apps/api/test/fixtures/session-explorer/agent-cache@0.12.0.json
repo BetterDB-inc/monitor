@@ -90,7 +90,7 @@
       "value": "{\"config\":{\"configurable\":{\"thread_id\":\"pending-write\",\"checkpoint_ns\":\"\",\"checkpoint_id\":\"1f1ceb43-98e5-63a1-800c-14a05e01014f\"}},\"checkpoint\":{\"v\":4,\"id\":\"1f1ceb43-98e5-63a1-800c-14a05e01014f\",\"ts\":\"2026-10-23T07:34:48.026Z\",\"channel_values\":{\"messages\":[{\"lc\":1,\"type\":\"constructor\",\"id\":[\"langchain_core\",\"messages\",\"SystemMessage\"],\"kwargs\":{\"content\":\"You book restaurant tables.\",\"additional_kwargs\":{},\"response_metadata\":{}}},{\"lc\":1,\"type\":\"constructor\",\"id\":[\"langchain_core\",\"messages\",\"HumanMessage\"],\"kwargs\":{\"content\":\"Book a table for two at 8pm.\",\"additional_kwargs\":{},\"response_metadata\":{}}}]},\"channel_versions\":{\"messages\":12},\"versions_seen\":{}},\"metadata\":{\"source\":\"loop\",\"step\":12,\"parents\":{}}}"
     },
     {
-      "key": "sxfix:ac:session:pending-write:writes:1f1ceb43-98e5-63a1-800c-14a05e01014f|agent|__interrupt__|1",
+      "key": "sxfix:ac:session:pending-write:writes:1f1ceb43-98e5-63a1-800c-14a05e01014f|approval|__interrupt__|0",
       "type": "string",
       "pttl": -1,
       "value": "[{\"value\":\"Confirm the booking?\",\"resumable\":true}]"

@@ -1,4 +1,4 @@
-import type { ParsedMessage } from '@betterdb/shared';
+import type { ParsedMessage, PendingInterrupt } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
 import { CollapsibleText } from '../../ui/collapsible-text';
 import { prettyArgs } from './format';
@@ -28,8 +28,31 @@ function ToolCalls({ calls }: { calls: NonNullable<ParsedMessage['toolCalls']> }
   );
 }
 
-export function MessageTimeline({ messages }: { messages: ParsedMessage[] }) {
-  if (messages.length === 0) {
+const interruptText = (value: PendingInterrupt['value']): string =>
+  value === undefined ? '' : typeof value === 'string' ? value : prettyArgs(value);
+
+function InterruptEntry({ index, interrupt }: { index: number; interrupt: PendingInterrupt }) {
+  const text = interruptText(interrupt.value);
+  return (
+    <li
+      data-testid={`interrupt-${index}`}
+      className="rounded-md border border-dashed border-amber-500/60 bg-amber-500/5 p-3"
+    >
+      <div className="text-xs font-medium text-amber-700 dark:text-amber-400">
+        Waiting for input
+      </div>
+      {text !== '' && <p className="mt-1 whitespace-pre-wrap break-words text-sm">{text}</p>}
+    </li>
+  );
+}
+
+interface Props {
+  messages: ParsedMessage[];
+  interrupts?: PendingInterrupt[];
+}
+
+export function MessageTimeline({ messages, interrupts = [] }: Props) {
+  if (messages.length === 0 && interrupts.length === 0) {
     return <p className="text-sm text-muted-foreground">No messages.</p>;
   }
   return (
@@ -48,6 +71,9 @@ export function MessageTimeline({ messages }: { messages: ParsedMessage[] }) {
           )}
           {m.toolCalls && m.toolCalls.length > 0 && <ToolCalls calls={m.toolCalls} />}
         </li>
+      ))}
+      {interrupts.map((interrupt, i) => (
+        <InterruptEntry key={`interrupt-${i}`} index={i} interrupt={interrupt} />
       ))}
     </ol>
   );

@@ -42,6 +42,127 @@ describe('SessionDetailPanel', () => {
     expect(screen.getByText(/~42 tokens/)).toBeInTheDocument();
   });
 
+  it('shows the session totals and how much of it the timeline reads', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({
+          totalKeys: 4,
+          skippedKeys: 3,
+          totalMemoryBytes: 4577,
+          memoryBytes: 1618,
+          selection: 'latest checkpoint and its pending writes',
+        })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/4\.47 KB · TTL 5s · 4 keys/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/showing latest checkpoint and its pending writes \(1 key · 1\.58 KB\)/),
+    ).toBeInTheDocument();
+  });
+
+  it('marks the session memory as a lower bound when keys could not be measured', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ totalKeys: 4, totalMemoryBytes: 4577, unmeasuredKeys: 2 })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByTitle('2 keys could not be measured').textContent).toBe('≥ 4.47 KB');
+  });
+
+  it('falls back to the keys it read when the server sends no session totals', () => {
+    const {
+      totalKeys: _totalKeys,
+      totalMemoryBytes: _totalMemoryBytes,
+      skippedKeys: _skippedKeys,
+      unmeasuredKeys: _unmeasuredKeys,
+      selection: _selection,
+      erroredKeys: _erroredKeys,
+      interrupts: _interrupts,
+      ...older
+    } = detail();
+    render(
+      <SessionDetailPanel
+        detail={older as ReturnType<typeof detail>}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/2\.00 KB · TTL 5s · 1 key$/)).toBeInTheDocument();
+  });
+
+  it('does not mention a checkpoint when every key was read', () => {
+    render(<SessionDetailPanel detail={detail()} onExport={vi.fn()} exporting={false} />);
+    expect(screen.queryByText(/latest checkpoint/)).toBeNull();
+  });
+
+  it('does not mention a checkpoint when keys are missing but none were skipped', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ totalKeys: 3, missingKeys: 2, complete: false })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.queryByText(/latest checkpoint/)).toBeNull();
+  });
+
+  it('says keys could not be read apart from keys that vanished', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ erroredKeys: 2, missingKeys: 1, complete: false })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText(/2 keys could not be read/)).toBeTruthy();
+    expect(screen.getByText(/1 key vanished before it could be read/)).toBeTruthy();
+  });
+
+  it('shows pending interrupts as requests for input after the messages', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({
+          interrupts: [{ value: 'Confirm the booking?' }, { value: { seats: 2 } }, {}],
+        })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    const first = screen.getByTestId('interrupt-0');
+    expect(first.textContent).toContain('Waiting for input');
+    expect(first.textContent).toContain('Confirm the booking?');
+    expect(screen.getByTestId('interrupt-1').textContent).toContain('{\n  "seats": 2\n}');
+    expect(screen.getByTestId('interrupt-2').textContent).toBe('Waiting for input');
+  });
+
+  it('shows a message with the role interrupt as an ordinary message', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ messages: [{ role: 'interrupt', content: 'a user role' }] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.getByText('a user role')).toBeInTheDocument();
+    expect(screen.queryByTestId('interrupt-0')).toBeNull();
+  });
+
+  it('shows interrupts even when the timeline holds no messages', () => {
+    render(
+      <SessionDetailPanel
+        detail={detail({ messages: [], interrupts: [{ value: 'Proceed?' }] })}
+        onExport={vi.fn()}
+        exporting={false}
+      />,
+    );
+    expect(screen.queryByText('No messages.')).toBeNull();
+    expect(screen.getByTestId('interrupt-0').textContent).toContain('Proceed?');
+  });
+
   it('warns when the timeline is incomplete', () => {
     render(
       <SessionDetailPanel

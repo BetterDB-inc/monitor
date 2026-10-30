@@ -617,7 +617,7 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(fakeDb(client), ['k1', 'k2']);
 
     expect(result.keys.map((k) => k.key)).toEqual(['k2']);
-    expect(result.missingKeys).toBe(1);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
   });
 
   it('records memory usage as bytes', async () => {
@@ -722,6 +722,171 @@ describe('readSessionKeys', () => {
     const result = await readSessionKeys(db, ['a', 'b']);
 
     expect(result.missingKeys).toBe(0);
+    expect(result.failed.size).toBe(1);
+  });
+
+  it('measures every key but reads only the selected ones', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: 'read', memory: 300, pttl: 9000 },
+        b: { type: 'string', value: 'skipped', memory: 200, pttl: 4000 },
+        c: { type: 'string', value: 'skipped', memory: 50, pttl: -1 },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'b', 'c'], { selected: ['a'] });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(client.reader.callsOf('pipeline.getrangeBuffer').map((c) => c.args[0])).toEqual(['a']);
+    expect(result.totals).toEqual({ memoryBytes: 550, unmeasuredKeys: 0, goneKeys: 0, ttlMs: 4000 });
+  });
+
+  it('counts keys it could not measure without failing the read', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: '1', memory: 300 },
+        b: { type: 'string', value: '2', memory: null },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'b', 'gone', 'skipped-gone'], {
+      selected: ['a', 'b', 'gone'],
+    });
+
+    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 2, goneKeys: 1 });
+    expect(result.missingKeys).toBe(1);
+  });
+
+  it('keeps a route readable when measuring its keys fails', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, pttl: 7000 },
+        s: { type: 'string', value: 'v', memory: 40, pttl: 9000 },
+      }),
+    );
+    client.failPipelinesWith = new Set(['llen']);
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 's']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['s']);
+    expect(result.failed.size).toBe(0);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
+    expect(result.totals).toMatchObject({ memoryBytes: 130, unmeasuredKeys: 0, ttlMs: 7000 });
+  });
+
+  it('totals the sampled memory the session list reports, not the exact memory used for reading', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, sampledMemory: 80 },
+        j: { type: 'ReJSON-RL', value: '{}', memory: 70, sampledMemory: 50 },
+        s: { type: 'string', value: 'v', memory: 40 },
+      }),
+    );
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 'j', 's']);
+
+    expect(result.totals).toMatchObject({ memoryBytes: 170, unmeasuredKeys: 0 });
+    expect(result.keys.find((k) => k.key === 'l')?.bytes).toBe(90);
+  });
+
+  it('keeps the sampled memory and lengths when the exact memory pipeline fails', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        l: { type: 'list', value: ['a', 'b'], memory: 90, sampledMemory: 80, pttl: 7000 },
+        s: { type: 'string', value: 'v', memory: 40, pttl: 9000 },
+      }),
+    );
+    client.failExactMemory = true;
+
+    const result = await readSessionKeys(fakeDb(client), ['l', 's']);
+
+    expect(result.keys.map((k) => k.key)).toEqual(['l', 's']);
+    expect(result.keys[0].value).toEqual(['a', 'b']);
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 0 });
+    expect(result.totals).toMatchObject({ memoryBytes: 120, unmeasuredKeys: 0 });
+  });
+
+  it('counts a key whose TYPE reply failed as unmeasured, not gone', async () => {
+    const client = new FakeValkey(
+      storeOf({
+        a: { type: 'string', value: '1', memory: 300 },
+        broken: { type: 'string', value: '2', memory: 40 },
+        'broken-selected': { type: 'string', value: '3', memory: 40 },
+      }),
+    );
+    client.failTypeKeys = new Set(['broken', 'broken-selected']);
+
+    const result = await readSessionKeys(fakeDb(client), ['a', 'broken', 'broken-selected', 'gone'], {
+      selected: ['a', 'broken-selected'],
+    });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.totals).toMatchObject({ memoryBytes: 300, unmeasuredKeys: 2, goneKeys: 1 });
+    expect(result).toMatchObject({ missingKeys: 0, erroredKeys: 1 });
+  });
+
+  it('still measures the keys left unread once the byte budget is spent', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: 'x'.repeat(100), memory: 100 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: 'y'.repeat(100), memory: 80 } }));
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { totalByteCap: 100 });
+
+    expect(result.truncated).toBe(true);
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.totals).toMatchObject({ memoryBytes: 180, unmeasuredKeys: 0 });
+  });
+
+  it('counts the keys of an unreachable primary as unmeasured', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.connectError = new Error('ECONNREFUSED');
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a'] });
+
+    expect(result.totals).toMatchObject({ memoryBytes: 10, unmeasuredKeys: 1 });
+    expect(result.missingKeys).toBe(0);
+  });
+
+  it('does not report a node as failed when it holds only skipped keys', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.pipeline = () => {
+      throw new Error('ETIMEDOUT');
+    };
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a'] });
+
+    expect(result.keys.map((k) => k.key)).toEqual(['a']);
+    expect(result.failed.size).toBe(0);
+    expect(result.missingKeys).toBe(0);
+    expect(result.totals).toMatchObject({ memoryBytes: 10, unmeasuredKeys: 1 });
+  });
+
+  it('reports a node as failed when it holds a selected key', async () => {
+    const nodeA = new FakeValkey(storeOf({ a: { type: 'string', value: '1', memory: 10 } }));
+    const nodeB = new FakeValkey(storeOf({ b: { type: 'string', value: '2' } }));
+    nodeB.pipeline = () => {
+      throw new Error('ETIMEDOUT');
+    };
+    const db = clusterOf(
+      { 7001: nodeA, 7002: nodeB },
+      { 7001: [[calculateSlot('a'), calculateSlot('a')]], 7002: [[calculateSlot('b'), calculateSlot('b')]] },
+    );
+
+    const result = await readSessionKeys(db, ['a', 'b'], { selected: ['a', 'b'] });
+
     expect(result.failed.size).toBe(1);
   });
 
