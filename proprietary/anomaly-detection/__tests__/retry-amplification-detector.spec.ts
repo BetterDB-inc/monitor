@@ -17,6 +17,7 @@ interface WindowSpec {
   errorsPerSec?: number;
   churn?: number | null;
   p99?: boolean;
+  lateP99?: boolean;
   saturation?: MetricType;
 }
 
@@ -47,11 +48,17 @@ class Driver {
   errors = 0;
   findings: RetryAmplificationFinding[] = [];
   ack = true;
+  carried: Array<{ metricType: MetricType; timestamp: number }> = [];
 
   window(spec: WindowSpec): void {
     const start = this.t;
-    const events = [];
-    if (spec.p99) events.push({ metricType: MetricType.COMMAND_P99, timestamp: start + 5_000 });
+    const events = this.carried;
+    this.carried = [];
+    if (spec.lateP99) {
+      this.carried.push({ metricType: MetricType.COMMAND_P99, timestamp: start + 59_500 });
+    } else if (spec.p99) {
+      events.push({ metricType: MetricType.COMMAND_P99, timestamp: start + 5_000 });
+    }
     if (spec.saturation) events.push({ metricType: spec.saturation, timestamp: start + 10_000 });
     for (let i = 0; i < RETRY_AMP_WINDOW_MS / 1000; i++) {
       this.commands += spec.cmdsPerClient * spec.clients;
@@ -133,8 +140,8 @@ describe('retry amplification detector', () => {
     const d = new Driver();
     d.baseline();
     d.window(hot(1.5));
-    d.window(hot(1.7, { saturation: MetricType.LOAD_SATURATION }));
-    d.window(hot(1.9));
+    d.window(hot(1.7));
+    d.window(hot(1.9, { saturation: MetricType.LOAD_SATURATION }));
     d.window(hot(2.0));
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].level).toBe('critical');
@@ -148,6 +155,29 @@ describe('retry amplification detector', () => {
     d.window(hot(1.8, { saturation: MetricType.CPU_UTILIZATION }));
     d.windows(hot(1.8), 3);
     expect(d.findings.map((f) => f.level)).toEqual(['warning', 'critical']);
+  });
+
+  it('drops back to warning once saturation clears and re-emits critical when it returns', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), 2);
+    d.window(hot(1.7, { saturation: MetricType.LOAD_SATURATION }));
+    d.windows(hot(1.8), 2);
+    d.window(hot(1.9, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.0));
+    expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
+  });
+
+  it('counts a P99 event that lands after the window has already rolled over', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { lateP99: true }));
+    d.window(hot(1.7, { lateP99: true }));
+    d.window(hot(1.9, { lateP99: true }));
+    d.window(hot(2.0, { lateP99: true }));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('latency');
+    expect(d.findings[0].relatedMetrics).toContain(MetricType.COMMAND_P99);
   });
 
   it('ignores traffic growth that comes from new clients', () => {

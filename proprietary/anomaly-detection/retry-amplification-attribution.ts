@@ -1,4 +1,5 @@
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
+export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
