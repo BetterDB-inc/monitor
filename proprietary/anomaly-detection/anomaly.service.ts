@@ -68,6 +68,7 @@ import {
   BacklogCoverageState,
   ResyncEscalation,
   ResyncEscalationState,
+  backlogCoverageRecovered,
   backlogCoverageSec,
   createBacklogCoverageState,
   createResyncEscalationState,
@@ -199,7 +200,7 @@ import {
   DIVERGENCE_CORRELATED_METRICS,
   DIVERGENCE_FLOOR_BYTES,
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
-  DIVERGENCE_ORPHAN_PAGE_SIZE,
+  OPEN_EVENT_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
   DivergenceRecovery,
@@ -463,13 +464,15 @@ export class AnomalyService
   private replicationStream = new ReplicationStreamTracker();
   private backlogCoverage = new Map<string, BacklogCoverageState>();
   private backlogCoverageEventIds = new Map<string, string>();
+  private staleBacklogEventIds = new Map<string, string[]>();
+  private openEventsAdopted = new Set<string>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
-  private removedDivergenceEvents = new Set<string>();
-  private removedDivergenceSweeps = new Set<string>();
+  private removedConnectionEvents = new Set<string>();
+  private removedConnectionSweeps = new Map<string, MetricType[]>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -806,7 +809,8 @@ export class AnomalyService
     this.lastClusterState.delete(connectionId);
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
-    this.closeSaturationAndBacklogEventsOnRemoval(connectionId);
+    this.closeConnectionEventsOnRemoval(connectionId);
+    this.openEventsAdopted.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
     this.clientSaturationEventIds.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
@@ -891,8 +895,8 @@ export class AnomalyService
     this.replicationStream.forget(connectionId);
     this.backlogCoverage.delete(connectionId);
     this.backlogCoverageEventIds.delete(connectionId);
+    this.staleBacklogEventIds.delete(connectionId);
     this.resyncEscalation.delete(connectionId);
-    this.closeDivergenceEventsOnRemoval(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
     this.divergenceOrphans.delete(connectionId);
@@ -1734,6 +1738,9 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
+    await this.adoptOpenEvents(ctx);
+    await this.resolveRemovedConnectionEvents();
+
     const connected = this.parseNumber(info.connected_clients);
     const maxClients = this.parseNumber(info.maxclients);
     if (connected === null || maxClients === null || maxClients <= 0) return;
@@ -1789,18 +1796,45 @@ export class AnomalyService
     // Advance the level last: on escalation only after addAnomaly resolved; on
     // steady/de-escalation immediately (the latter re-arms alerting on recovery).
     this.clientSaturationLevel.set(ctx.connectionId, level);
-    if (level === 'none') await this.settleClientSaturationEvents(ctx.connectionId);
+    if (level === 'none') await this.settleEvents(this.clientSaturationEventIds, ctx.connectionId);
   }
 
-  private async settleClientSaturationEvents(connectionId: string): Promise<void> {
-    const ids = this.clientSaturationEventIds.get(connectionId);
+  private async settleEvents(
+    eventIds: Map<string, string[]>,
+    connectionId: string,
+  ): Promise<void> {
+    const ids = eventIds.get(connectionId);
     if (!ids) return;
     const pending: string[] = [];
     for (const id of ids) {
       if ((await this.resolveAnomalyOutcome(id)) === 'retry') pending.push(id);
     }
-    if (pending.length > 0) this.clientSaturationEventIds.set(connectionId, pending);
-    else this.clientSaturationEventIds.delete(connectionId);
+    if (pending.length > 0) eventIds.set(connectionId, pending);
+    else eventIds.delete(connectionId);
+  }
+
+  private async adoptOpenEvents(ctx: ConnectionContext): Promise<void> {
+    if (this.openEventsAdopted.has(ctx.connectionId)) return;
+    this.removedConnectionSweeps.delete(ctx.connectionId);
+    try {
+      const saturation = await this.readOpenEvents(ctx.connectionId, MetricType.CLIENT_SATURATION);
+      const backlog = await this.readOpenEvents(ctx.connectionId, MetricType.BACKLOG_COVERAGE_RISK);
+      const tracked = this.clientSaturationEventIds.get(ctx.connectionId) ?? [];
+      const untracked = saturation.map((e) => e.id).filter((id) => !tracked.includes(id));
+      if (untracked.length > 0) {
+        this.clientSaturationEventIds.set(ctx.connectionId, [...tracked, ...untracked]);
+      }
+      const current = this.backlogCoverageEventIds.get(ctx.connectionId);
+      const stale = backlog.map((e) => e.id).filter((id) => id !== current);
+      if (stale.length > 0) this.staleBacklogEventIds.set(ctx.connectionId, stale);
+      this.openEventsAdopted.add(ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read open saturation and backlog events for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**
@@ -6592,6 +6626,9 @@ export class AnomalyService
       }
     }
     if (step.cleared) await this.settleBacklogCoverageEvent(ctx.connectionId);
+    if (backlogCoverageRecovered(coverageSec)) {
+      await this.settleEvents(this.staleBacklogEventIds, ctx.connectionId);
+    }
 
     if (sample.role !== 'primary') {
       this.resyncEscalation.delete(ctx.connectionId);
@@ -6641,7 +6678,12 @@ export class AnomalyService
     const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
     await this.addAnomaly(event, ctx);
     this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
-    if (previous) await this.resolveAnomalyOutcome(previous);
+    if (previous && (await this.resolveAnomalyOutcome(previous)) === 'retry') {
+      this.staleBacklogEventIds.set(ctx.connectionId, [
+        ...(this.staleBacklogEventIds.get(ctx.connectionId) ?? []),
+        previous,
+      ]);
+    }
   }
 
   private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
@@ -6692,9 +6734,9 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
   ): Promise<void> {
-    this.removedDivergenceSweeps.delete(ctx.connectionId);
+    this.removedConnectionSweeps.delete(ctx.connectionId);
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
-    await this.resolveRemovedDivergenceEvents();
+    await this.resolveRemovedConnectionEvents();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
     if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
@@ -6712,18 +6754,21 @@ export class AnomalyService
     await this.persistDivergenceWindows(state, ctx);
   }
 
-  private async readOpenDivergenceEvents(connectionId: string): Promise<StoredAnomalyEvent[]> {
+  private async readOpenEvents(
+    connectionId: string,
+    metricType: MetricType,
+  ): Promise<StoredAnomalyEvent[]> {
     const events: StoredAnomalyEvent[] = [];
-    for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
+    for (let offset = 0; ; offset += OPEN_EVENT_PAGE_SIZE) {
       const open = await this.storage.getAnomalyEvents({
         connectionId,
-        metricType: MetricType.REPLICATION_DIVERGENCE,
+        metricType,
         resolved: false,
-        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        limit: OPEN_EVENT_PAGE_SIZE,
         offset,
       });
       events.push(...open);
-      if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) return events;
+      if (open.length < OPEN_EVENT_PAGE_SIZE) return events;
     }
   }
 
@@ -6737,7 +6782,8 @@ export class AnomalyService
         ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
       ]);
       const orphans = new Map<string, OrphanedDivergence>();
-      for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
+      const open = await this.readOpenEvents(ctx.connectionId, MetricType.REPLICATION_DIVERGENCE);
+      for (const event of open) {
         if (seen.has(event.id)) continue;
         seen.add(event.id);
         const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
@@ -6855,14 +6901,17 @@ export class AnomalyService
   }
 
   private async sweepRemovedConnections(): Promise<void> {
-    for (const connectionId of this.removedDivergenceSweeps) {
+    for (const [connectionId, metricTypes] of this.removedConnectionSweeps) {
       try {
-        const open = await this.readOpenDivergenceEvents(connectionId);
-        if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
-        for (const event of open) this.removedDivergenceEvents.add(event.id);
+        const open: StoredAnomalyEvent[] = [];
+        for (const metricType of metricTypes) {
+          open.push(...(await this.readOpenEvents(connectionId, metricType)));
+        }
+        if (!this.removedConnectionSweeps.delete(connectionId)) continue;
+        for (const event of open) this.removedConnectionEvents.add(event.id);
       } catch (err) {
         this.logger.warn(
-          `Failed to read open divergence events of removed connection ${connectionId}: ${
+          `Failed to read open events of removed connection ${connectionId}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -6870,44 +6919,38 @@ export class AnomalyService
     }
   }
 
-  private async resolveRemovedDivergenceEvents(): Promise<void> {
+  private async resolveRemovedConnectionEvents(): Promise<void> {
     await this.sweepRemovedConnections();
-    for (const id of this.removedDivergenceEvents) {
-      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
+    for (const id of this.removedConnectionEvents) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedConnectionEvents.delete(id);
     }
   }
 
-  private closeSaturationAndBacklogEventsOnRemoval(connectionId: string): void {
+  private closeConnectionEventsOnRemoval(connectionId: string): void {
     const backlogEventId = this.backlogCoverageEventIds.get(connectionId);
+    const state = this.divergenceState.get(connectionId);
     const ids = [
       ...(this.clientSaturationEventIds.get(connectionId) ?? []),
       ...(backlogEventId ? [backlogEventId] : []),
+      ...(this.staleBacklogEventIds.get(connectionId) ?? []),
+      ...[...(state?.replicas.values() ?? [])].flatMap((r) => [r.eventId, ...r.unsavedEventIds]),
+      ...(this.divergenceSuperseded.get(connectionId) ?? []),
+      ...[...(this.divergenceOrphans.get(connectionId)?.values() ?? [])].flatMap((o) => [
+        ...o.eventIds,
+      ]),
     ];
-    if (ids.length === 0) return;
-    ids.forEach((id) => this.removedDivergenceEvents.add(id));
-    this.resolveRemovedDivergenceEvents().catch((err) => {
-      this.logger.error('Failed to resolve saturation events of a removed connection', err);
-    });
-  }
-
-  private closeDivergenceEventsOnRemoval(connectionId: string): void {
-    const state = this.divergenceState.get(connectionId);
-    for (const replica of state?.replicas.values() ?? []) {
-      for (const id of [replica.eventId, ...replica.unsavedEventIds]) {
-        if (id) this.removedDivergenceEvents.add(id);
-      }
+    for (const id of ids) {
+      if (id) this.removedConnectionEvents.add(id);
     }
-    for (const id of this.divergenceSuperseded.get(connectionId) ?? []) {
-      this.removedDivergenceEvents.add(id);
-    }
-    for (const orphan of this.divergenceOrphans.get(connectionId)?.values() ?? []) {
-      for (const id of orphan.eventIds) this.removedDivergenceEvents.add(id);
-    }
-    if (!this.divergenceOrphansSwept.has(connectionId)) {
-      this.removedDivergenceSweeps.add(connectionId);
-    }
-    this.resolveRemovedDivergenceEvents().catch((err) => {
-      this.logger.error('Failed to resolve divergence events of a removed connection', err);
+    const unswept = [
+      ...(this.divergenceOrphansSwept.has(connectionId) ? [] : [MetricType.REPLICATION_DIVERGENCE]),
+      ...(this.openEventsAdopted.has(connectionId)
+        ? []
+        : [MetricType.CLIENT_SATURATION, MetricType.BACKLOG_COVERAGE_RISK]),
+    ];
+    if (unswept.length > 0) this.removedConnectionSweeps.set(connectionId, unswept);
+    this.resolveRemovedConnectionEvents().catch((err) => {
+      this.logger.error('Failed to resolve events of a removed connection', err);
     });
   }
 

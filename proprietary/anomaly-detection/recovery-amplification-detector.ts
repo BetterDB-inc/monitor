@@ -37,6 +37,13 @@ export function backlogCoverageSec(sample: ReplicationStreamSample): number | nu
   return replBacklogHistlen / Math.max(bytesPerSec, bytesPerSecEwma);
 }
 
+export function backlogCoverageRecovered(coverageSec: number | null): boolean {
+  return (
+    coverageSec !== null &&
+    coverageSec > BACKLOG_COVERAGE_WARNING_SEC * BACKLOG_COVERAGE_REARM_FACTOR
+  );
+}
+
 export function stepBacklogCoverage(
   state: BacklogCoverageState,
   coverageSec: number | null,
@@ -46,7 +53,7 @@ export function stepBacklogCoverage(
   state.belowWarning = coverageSec < BACKLOG_COVERAGE_WARNING_SEC ? state.belowWarning + 1 : 0;
   state.belowCritical = coverageSec < BACKLOG_COVERAGE_CRITICAL_SEC ? state.belowCritical + 1 : 0;
 
-  if (coverageSec > BACKLOG_COVERAGE_WARNING_SEC * BACKLOG_COVERAGE_REARM_FACTOR) {
+  if (backlogCoverageRecovered(coverageSec)) {
     const cleared = state.level !== 'none';
     state.level = 'none';
     return { escalatedTo: null, cleared };

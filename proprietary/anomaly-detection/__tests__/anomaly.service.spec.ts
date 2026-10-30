@@ -17,7 +17,7 @@ import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
-  DIVERGENCE_ORPHAN_PAGE_SIZE,
+  OPEN_EVENT_PAGE_SIZE,
 } from '../replication-divergence-detector';
 import {
   MetricType,
@@ -3718,6 +3718,74 @@ describe('AnomalyService', () => {
 
     const satEvents = () =>
       service.getRecentEvents().filter((e) => e.metricType === MetricType.CLIENT_SATURATION);
+
+    describe('rows left open by an earlier run', () => {
+      const openRows = (rows: Record<string, string[]>) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
+        );
+      const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id);
+      const pollAt = async (connected: number) => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(connected));
+        await poll();
+      };
+
+      it('resolves the row on the first poll below the threshold', async () => {
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+      });
+
+      it('resolves the old row and the new event together when the node stays saturated', async () => {
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+
+        await pollAt(85);
+        expect(resolvedIds()).toEqual([]);
+        const [raised] = satEvents();
+
+        await pollAt(50);
+
+        expect(resolvedIds().sort()).toEqual(['old-1', raised.id].sort());
+      });
+
+      it('retries a failed read on the next poll, then reads no more', async () => {
+        storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+        await pollAt(50);
+        expect(resolvedIds()).toEqual([]);
+
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        await pollAt(50);
+        const reads = storage.getAnomalyEvents.mock.calls.length;
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads);
+      });
+
+      it('does not track an event raised before a failed read twice', async () => {
+        storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+        await pollAt(85);
+        const [raised] = satEvents();
+
+        openRows({ [MetricType.CLIENT_SATURATION]: [raised.id] });
+        await pollAt(85);
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual([raised.id]);
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await pollAt(50);
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1', 'old-1']);
+      });
+    });
 
     it('does not alert below the warning threshold', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(70));
@@ -8249,6 +8317,80 @@ describe('AnomalyService', () => {
       expect(events(MetricType.RESYNC_ESCALATION)).toEqual([]);
     });
 
+    describe('rows left open by an earlier run', () => {
+      const openBacklogRows = (...ids: string[]) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
+            ? ids.map((id) => ({ id }))
+            : [],
+        );
+      const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id);
+
+      it('resolves the row once coverage is measured above the re-arm level', async () => {
+        openBacklogRows('old-1', 'old-2');
+
+        await pollPrimary({ bytes: 2000 });
+        expect(resolvedIds()).toEqual([]);
+
+        for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds()).toEqual(['old-1', 'old-2']);
+      });
+
+      it('keeps the row through a new warning and resolves both on the drop', async () => {
+        openBacklogRows('old-1');
+
+        for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+        const [raised] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        expect(raised).toBeDefined();
+        expect(resolvedIds()).toEqual([]);
+
+        for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds().sort()).toEqual(['old-1', raised.id].sort());
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        openBacklogRows('old-1');
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        for (let i = 0; i < 21; i += 1) await pollPrimary({ bytes: 2000 });
+        storage.resolveAnomaly.mockClear();
+        storage.resolveAnomaly.mockResolvedValue(true);
+
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds()).toEqual(['old-1']);
+      });
+    });
+
+    it('does not hold the current event as stale after a failed read', async () => {
+      storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [raised] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+        metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0 ? [{ id: raised.id }] : [],
+      );
+
+      for (let i = 0; i < 40; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(storage.resolveAnomaly.mock.calls.map(([id]) => id)).toEqual([raised.id]);
+    });
+
+    it('keeps a superseded event whose resolve failed until coverage recovers', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [warning] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 200_000 });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+      storage.resolveAnomaly.mockClear();
+
+      for (let i = 0; i < 40; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(warning.id, expect.any(Number));
+    });
+
     it('clears its state when a connection is removed', async () => {
       await pollPrimary({ bytes: 2000 });
 
@@ -8516,7 +8658,7 @@ describe('AnomalyService', () => {
         connectionId: 'conn-1',
         metricType: MetricType.REPLICATION_DIVERGENCE,
         resolved: false,
-        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        limit: OPEN_EVENT_PAGE_SIZE,
         offset: 0,
       });
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
@@ -8553,6 +8695,18 @@ describe('AnomalyService', () => {
       expect(restartRecoveries()).toEqual([]);
     });
 
+    it('keeps the first resolution time when an orphaned event resolves again', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
+      const t = await feed([2], T0);
+      const cached = { id: 'old-1', resolved: true, resolvedAt: T0 - 1 };
+      (service as any).recentAnomalies.push(cached);
+
+      await feed([4, 6, 8], t);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect(cached.resolvedAt).toBe(T0 - 1);
+    });
+
     it('sends no recovered webhook for an orphaned event something else already resolved', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([
         { id: 'old-1', metricType: MetricType.REPLICATION_DIVERGENCE, resolved: false, message: '' },
@@ -8569,16 +8723,16 @@ describe('AnomalyService', () => {
       const page = (prefix: string, count: number) =>
         Array.from({ length: count }, (_, i) => orphan(`${prefix}-${i}`, '10.0.0.9:6379'));
       storage.getAnomalyEvents
-        .mockResolvedValueOnce(page('a', DIVERGENCE_ORPHAN_PAGE_SIZE))
+        .mockResolvedValueOnce(page('a', OPEN_EVENT_PAGE_SIZE))
         .mockResolvedValueOnce(page('b', 3));
 
       await feed([2, 4, 6, 8], T0);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
       expect(storage.getAnomalyEvents).toHaveBeenLastCalledWith(
-        expect.objectContaining({ offset: DIVERGENCE_ORPHAN_PAGE_SIZE }),
+        expect.objectContaining({ offset: OPEN_EVENT_PAGE_SIZE }),
       );
-      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(DIVERGENCE_ORPHAN_PAGE_SIZE + 3);
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(OPEN_EVENT_PAGE_SIZE + 3);
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
       expect(restartRecoveries()).toHaveLength(1);
     });
@@ -8915,9 +9069,13 @@ describe('AnomalyService', () => {
 
       describe('removed before the first sweep', () => {
         const flush = () => new Promise((resolve) => setImmediate(resolve));
-        const pending = () => (service as any).removedDivergenceSweeps as Set<string>;
+        const pending = () => (service as any).removedConnectionSweeps as Map<string, MetricType[]>;
         const readsFor = (connectionId: string) =>
-          storage.getAnomalyEvents.mock.calls.filter(([opts]) => opts.connectionId === connectionId);
+          storage.getAnomalyEvents.mock.calls.filter(
+            ([opts]) =>
+              opts.connectionId === connectionId &&
+              opts.metricType === MetricType.REPLICATION_DIVERGENCE,
+          );
         const pollOther = (timestamp: number) =>
           (service as any).detectReplicationDivergence(sample(timestamp, 0), {
             ...mockCtx,
@@ -8984,6 +9142,83 @@ describe('AnomalyService', () => {
           expect(readsFor('conn-1')).toHaveLength(reads);
         });
 
+        describe('saturation and backlog rows', () => {
+          const openRows = (rows: Record<string, string[]>) =>
+            storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+              offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
+            );
+          const rows: Record<string, string[]> = {
+            [MetricType.CLIENT_SATURATION]: ['sat-1'],
+            [MetricType.BACKLOG_COVERAGE_RISK]: ['backlog-1'],
+          };
+          const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+          const clients = (connected: number) => ({
+            connected_clients: String(connected),
+            maxclients: '100',
+          });
+          const pollClients = (connectionId: string, connected: number) =>
+            (service as any).detectClientSaturation(
+              clients(connected),
+              { ...mockCtx, connectionId },
+              T0,
+            );
+
+          it('closes them when the connection never adopted them', async () => {
+            openRows(rows);
+
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            expect(resolvedIds()).toEqual(['backlog-1', 'sat-1']);
+          });
+
+          it('retries a failed read from the saturation poll of another connection', async () => {
+            storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+            expect(resolvedIds()).toEqual([]);
+
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+              connectionId === 'conn-9' && offset === 0
+                ? (rows[metricType] ?? []).map((id) => ({ id }))
+                : [],
+            );
+            await pollClients('conn-2', 50);
+
+            expect(resolvedIds()).toEqual(['backlog-1', 'sat-1']);
+          });
+
+          it('closes adopted rows without reading them again', async () => {
+            openRows(rows);
+            await pollClients('conn-9', 85);
+            const adoptionReads = () =>
+              storage.getAnomalyEvents.mock.calls.filter(
+                ([opts]) =>
+                  opts.connectionId === 'conn-9' &&
+                  opts.metricType !== MetricType.REPLICATION_DIVERGENCE,
+              ).length;
+            const reads = adoptionReads();
+
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            expect(resolvedIds()).toEqual(expect.arrayContaining(['backlog-1', 'sat-1']));
+            expect(adoptionReads()).toBe(reads);
+          });
+
+          it('leaves them to the connection when it comes back', async () => {
+            storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            openRows(rows);
+            await pollClients('conn-9', 85);
+
+            expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('sat-1', expect.any(Number));
+            expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('backlog-1', expect.any(Number));
+          });
+        });
+
         it('leaves the rows to the connection when it comes back', async () => {
           storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
           (service as any).onConnectionRemoved('conn-1');
@@ -9003,14 +9238,14 @@ describe('AnomalyService', () => {
 
         (service as any).onConnectionRemoved('conn-1');
         await new Promise((resolve) => setImmediate(resolve));
-        expect((service as any).removedDivergenceEvents.has(eventId)).toBe(true);
+        expect((service as any).removedConnectionEvents.has(eventId)).toBe(true);
 
         await (service as any).detectReplicationDivergence(sample(T0 + 600_000, 0), {
           ...mockCtx,
           connectionId: 'conn-2',
         });
 
-        expect((service as any).removedDivergenceEvents.size).toBe(0);
+        expect((service as any).removedConnectionEvents.size).toBe(0);
       });
     });
 
@@ -9185,7 +9420,7 @@ describe('AnomalyService', () => {
         });
 
         expect(attempt.resolved).toBe(true);
-        expect((service as any).removedDivergenceEvents.size).toBe(0);
+        expect((service as any).removedConnectionEvents.size).toBe(0);
       });
 
       it('keeps a retried event in its correlated group', async () => {
