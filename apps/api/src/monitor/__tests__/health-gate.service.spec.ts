@@ -81,21 +81,24 @@ describe('HealthGateService', () => {
     expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
   });
 
-  it('computes replication lag on a primary from the furthest-behind online replica', async () => {
-    const { service } = makeService({
-      info: makeInfo({
-        role: 'master',
-        master_repl_offset: '100000000',
-        replicas: {
-          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=99000000,lag=0',
-          slave1: 'ip=10.0.0.3,port=6379,state=online,offset=50000000,lag=4',
-        },
-      }),
-    });
-    const result = await service.evaluate(CONNECTION_ID);
-    expect(result.signals.replicationLagBytes).toBe(50_000_000);
-    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
-  });
+  it.each(['master', 'primary'])(
+    'computes replication lag on a %s from the furthest-behind online replica',
+    async (role) => {
+      const { service } = makeService({
+        info: makeInfo({
+          role,
+          master_repl_offset: '100000000',
+          replicas: {
+            slave0: 'ip=10.0.0.2,port=6379,state=online,offset=99000000,lag=0',
+            slave1: 'ip=10.0.0.3,port=6379,state=online,offset=50000000,lag=4',
+          },
+        }),
+      });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(result.signals.replicationLagBytes).toBe(50_000_000);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+    },
+  );
 
   it('ignores replicas still in their initial sync', async () => {
     const { service } = makeService({
