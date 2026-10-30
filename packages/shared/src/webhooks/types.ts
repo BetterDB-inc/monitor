@@ -368,7 +368,8 @@ export interface ReplicationDivergenceData {
 
 export interface ReplicationRecoveredData {
   replica: string;
-  gapBytes: number;
+  reason: 'caught_up' | 'resolved_after_restart';
+  gapBytes: number | null;
   message: string;
   timestamp: number;
   instance: WebhookInstanceInfo;

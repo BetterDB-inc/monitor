@@ -19,6 +19,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
+  ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
@@ -164,6 +165,7 @@ import {
   acknowledgeRecovery,
   createDivergenceState,
   describeDivergence,
+  divergenceReplicaFromMessage,
   divergenceWindowMs,
   drainClosedWindows,
   requeueClosedWindows,
@@ -5776,7 +5778,9 @@ export class AnomalyService
         const orphans = open.filter((event) => !seen.has(event.id));
         for (const event of orphans) {
           seen.add(event.id);
-          if ((await this.resolveAnomalyOutcome(event.id)) === 'retry') return;
+          const outcome = await this.resolveAnomalyOutcome(event.id);
+          if (outcome === 'retry') return;
+          if (outcome === 'resolved') this.dispatchOrphanRecovered(event, ctx);
         }
         if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE || orphans.length === 0) break;
       }
@@ -5788,6 +5792,17 @@ export class AnomalyService
         }`,
       );
     }
+  }
+
+  private dispatchOrphanRecovered(event: StoredAnomalyEvent, ctx: ConnectionContext): void {
+    const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+    this.dispatchReplicationRecovered(ctx, {
+      replica,
+      reason: 'resolved_after_restart',
+      gapBytes: null,
+      message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
+      timestamp: Date.now(),
+    });
   }
 
   private async persistDivergenceWindows(
@@ -5894,14 +5909,23 @@ export class AnomalyService
     acknowledgeRecovery(state, recovery.addr);
     if (recovery.kind !== 'recovered') return;
 
-    const message = `Replica ${recovery.addr} caught up with the primary.`;
-    this.logger.log(`Replication recovered for ${ctx.connectionName}: ${message}`);
+    this.dispatchReplicationRecovered(ctx, {
+      replica: recovery.addr,
+      reason: 'caught_up',
+      gapBytes: recovery.gapBytes ?? 0,
+      message: `Replica ${recovery.addr} caught up with the primary.`,
+      timestamp,
+    });
+  }
+
+  private dispatchReplicationRecovered(
+    ctx: ConnectionContext,
+    data: Omit<ReplicationRecoveredData, 'instance' | 'connectionId'>,
+  ): void {
+    this.logger.log(`Replication recovered for ${ctx.connectionName}: ${data.message}`);
     this.webhookEventsProService
       ?.dispatchReplicationRecovered({
-        replica: recovery.addr,
-        gapBytes: recovery.gapBytes ?? 0,
-        message,
-        timestamp,
+        ...data,
         instance: { host: ctx.host, port: ctx.port },
         connectionId: ctx.connectionId,
       })

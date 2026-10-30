@@ -6553,7 +6553,7 @@ describe('AnomalyService', () => {
 
       await feed([0, 0, 0], t);
       expect(recoveredHook).toHaveBeenCalledTimes(1);
-      expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379' });
+      expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379', reason: 'caught_up' });
       expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('none');
     });
 
@@ -6638,7 +6638,12 @@ describe('AnomalyService', () => {
 
     it('resolves divergence events left open by a previous run, once per connection', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([
-        { id: 'old-1', metricType: MetricType.REPLICATION_DIVERGENCE, resolved: false },
+        {
+          id: 'old-1',
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          resolved: false,
+          message: 'WARNING: Replica 10.0.0.9:6379 is 8.0 MiB behind the primary; the gap grew.',
+        },
       ]);
 
       await feed([2, 4], T0);
@@ -6651,6 +6656,25 @@ describe('AnomalyService', () => {
         limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
       });
       expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect((webhookEventsProService as any).dispatchReplicationRecovered).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replica: '10.0.0.9:6379',
+          reason: 'resolved_after_restart',
+          gapBytes: null,
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('sends no recovered webhook for an orphaned event that no longer exists', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        { id: 'old-1', metricType: MetricType.REPLICATION_DIVERGENCE, resolved: false, message: '' },
+      ]);
+      storage.resolveAnomaly.mockResolvedValueOnce(false);
+
+      await feed([2], T0);
+
+      expect((webhookEventsProService as any).dispatchReplicationRecovered).not.toHaveBeenCalled();
     });
 
     it('pages through more orphaned events than one query returns', async () => {

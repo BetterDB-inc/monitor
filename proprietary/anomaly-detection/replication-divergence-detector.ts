@@ -453,6 +453,10 @@ function describeReason(finding: DivergenceFinding): string {
   }
 }
 
+export function divergenceReplicaFromMessage(message: string): string | null {
+  return /Replica (\S+) is /.exec(message)?.[1] ?? null;
+}
+
 export function describeDivergence(finding: DivergenceFinding): string {
   const behind =
     finding.secondsBehind === null
