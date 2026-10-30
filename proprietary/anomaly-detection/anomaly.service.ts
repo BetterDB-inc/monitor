@@ -311,6 +311,7 @@ export class AnomalyService
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
+  private reshardThinSince = new Map<string, number>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -763,6 +764,7 @@ export class AnomalyService
     this.reshardSkewEventIds.delete(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
+    this.reshardThinSince.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -4392,7 +4394,10 @@ export class AnomalyService
         if (finding) findings.push(finding);
       } else {
         this.reshardSnapshot.delete(ctx.connectionId);
+        this.reshardThinSince.delete(ctx.connectionId);
       }
+      const thinSince = this.reshardThinSince.get(ctx.connectionId);
+      const holdMs = RESHARD_STALE_POLLS * this.getIntervalMs();
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -4403,6 +4408,7 @@ export class AnomalyService
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * this.getIntervalMs(),
         eventIdsByConn: this.reshardSkewEventIds,
         metricType: MetricType.RESHARD_SHARD_SKEW,
+        preserveSignature: () => thinSince !== undefined && timestamp - thinSince < holdMs,
         buildEvent: (finding) => this.buildReshardSkewEvent(ctx, timestamp, finding),
       });
     } catch (err) {
@@ -4441,9 +4447,14 @@ export class AnomalyService
 
     const intervalMs = this.getIntervalMs();
     const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
+    const thin = shards.length < RESHARD_MIN_PRIMARIES;
+    if (!thin) this.reshardThinSince.delete(ctx.connectionId);
+    else if (!this.reshardThinSince.has(ctx.connectionId)) {
+      this.reshardThinSince.set(ctx.connectionId, timestamp);
+    }
     if (!isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs)) return null;
 
-    if (shards.length < RESHARD_MIN_PRIMARIES) {
+    if (thin) {
       if (!this.reshardThinViewLogged.has(ctx.connectionId)) {
         this.reshardThinViewLogged.add(ctx.connectionId);
         this.logger.warn(

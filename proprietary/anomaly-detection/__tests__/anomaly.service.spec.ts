@@ -1633,6 +1633,52 @@ describe('AnomalyService', () => {
       expect(skewEvents()[0].resolved).toBe(true);
     });
 
+    it('keeps the alert open while too few primaries are visible to judge it', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 7; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 18_000, true));
+      }
+
+      expect(skewEvents()[0].resolved).toBe(false);
+    });
+
+    it('stops holding the alert once the thin view outlasts the stale limit', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 12; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 18_000, true));
+      }
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('keeps one open alert when a node joins during the reshard', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      const joined = (id: string, ops: number, migrating: boolean) => {
+        const ctx = shardCtx(id, ops, migrating);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue([
+            ...shardNodes(id, migrating),
+            { ...shardNodes(id, false)[0], id: 'd0000000', flags: ['master'] },
+          ]);
+        return ctx;
+      };
+      for (let i = 0; i < 4; i += 1) {
+        clock += 1000;
+        await poll(joined('a', 18_000, true));
+        await poll(joined('b', 6000, false));
+        await poll(joined('c', 6000, false));
+      }
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(skewEvents()[0].resolved).toBe(false);
+    });
+
     it('rereads the stored write P99 on a slower cadence than the poll', async () => {
       storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([
         { command: 'set', p99Us: 900, capturedAt: BASE },
@@ -1679,6 +1725,7 @@ describe('AnomalyService', () => {
 
       expect((service as any).reshardSnapshot.has('conn-a')).toBe(false);
       expect((service as any).reshardWriteP99.has('conn-a')).toBe(false);
+      expect((service as any).reshardThinSince.has('conn-a')).toBe(false);
     });
   });
 

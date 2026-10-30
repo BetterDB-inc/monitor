@@ -102,5 +102,5 @@ export function evaluateReshardSkew(
 }
 
 export function reshardSkewSignature(finding: ReshardSkewFinding): string {
-  return `reshard_skew:${finding.clusterKey}:${finding.shardId}`;
+  return `reshard_skew:${finding.shardId}`;
 }
