@@ -41,6 +41,7 @@ import {
   BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
@@ -717,6 +718,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
    */
   private runMigrations(): void {
     if (!this.db) return;
+
+    const groupColumns = this.db.prepare('PRAGMA table_info(correlated_anomaly_groups)').all() as {
+      name: string;
+    }[];
+    if (!groupColumns.some((col) => col.name === 'anomaly_ids')) {
+      this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN anomaly_ids TEXT').run();
+    }
 
     // Get existing columns in webhooks table
     const tableInfo = this.db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[];
@@ -1838,6 +1846,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         source_host TEXT,
         source_port INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        anomaly_ids TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
 
@@ -2922,12 +2931,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, anomaly_ids
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(correlation_id) DO UPDATE SET
         diagnosis = excluded.diagnosis,
         recommendations = excluded.recommendations,
-        anomaly_count = excluded.anomaly_count
+        anomaly_count = excluded.anomaly_count,
+        anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids)
     `);
 
     stmt.run(
@@ -2942,12 +2952,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       group.sourceHost || null,
       group.sourcePort || null,
       connectionId,
+      group.anomalyIds ? JSON.stringify(group.anomalyIds) : null,
     );
 
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -2981,6 +2994,30 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
       params.push(...options.correlationIds);
     }
+    if (options.connectionIds) {
+      conditions.push(
+        options.connectionIds.length > 0
+          ? `connection_id IN (${options.connectionIds.map(() => '?').join(', ')})`
+          : '1 = 0',
+      );
+      params.push(...options.connectionIds);
+    }
+    if (options.patterns) {
+      conditions.push(
+        options.patterns.length > 0
+          ? `pattern IN (${options.patterns.map(() => '?').join(', ')})`
+          : '1 = 0',
+      );
+      params.push(...options.patterns);
+    }
+    if (options.involvingConnectionId) {
+      conditions.push(`(connection_id = ? OR EXISTS (
+        SELECT 1 FROM anomaly_events member
+        WHERE member.correlation_id = correlated_anomaly_groups.correlation_id
+          AND member.connection_id = ?
+      ))`);
+      params.push(options.involvingConnectionId, options.involvingConnectionId);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
@@ -2989,7 +3026,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM correlated_anomaly_groups
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, correlation_id DESC
       LIMIT ? OFFSET ?
     `;
 
@@ -2998,6 +3035,26 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db.prepare(query).all(...params) as any[];
 
     return rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
+  }
+
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+  ): Promise<StoredAnomalyEvent[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
+
+    const placeholders = (values: string[]) => values.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM anomaly_events
+        WHERE correlation_id IN (${placeholders(correlationIds)})
+          OR id IN (${placeholders(anomalyIds)})
+        ORDER BY timestamp ASC, id ASC`,
+      )
+      .all(...correlationIds, ...anomalyIds) as any[];
+
+    return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

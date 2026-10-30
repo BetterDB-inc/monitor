@@ -227,6 +227,7 @@ export class RowMappers {
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      anomalyIds: row.anomaly_ids ? this.dialect.fromArray(row.anomaly_ids) : undefined,
     };
   }
 

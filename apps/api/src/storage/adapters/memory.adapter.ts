@@ -23,6 +23,7 @@ import {
   StoredCorrelatedGroup,
   AnomalyEventCursor,
   AnomalyQueryOptions,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
@@ -789,7 +790,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     let filtered = [...this.correlatedGroups];
 
     if (options.connectionId)
@@ -802,10 +805,42 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       const ids = new Set(options.correlationIds);
       filtered = filtered.filter((g) => ids.has(g.correlationId));
     }
+    if (options.connectionIds) {
+      const ids = new Set(options.connectionIds);
+      filtered = filtered.filter((g) => g.connectionId !== undefined && ids.has(g.connectionId));
+    }
+    if (options.patterns) {
+      const patterns = new Set(options.patterns);
+      filtered = filtered.filter((g) => patterns.has(g.pattern));
+    }
+    if (options.involvingConnectionId) {
+      const caller = options.involvingConnectionId;
+      const involved = new Set(
+        this.anomalyEvents.filter((e) => e.connectionId === caller).map((e) => e.correlationId),
+      );
+      filtered = filtered.filter(
+        (g) => g.connectionId === caller || involved.has(g.correlationId),
+      );
+    }
 
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort(
+        (a, b) =>
+          b.timestamp - a.timestamp ||
+          (a.correlationId < b.correlationId ? 1 : a.correlationId > b.correlationId ? -1 : 0),
+      )
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 50));
+  }
+
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+  ): Promise<StoredAnomalyEvent[]> {
+    const groups = new Set(correlationIds);
+    const ids = new Set(anomalyIds);
+    return this.anomalyEvents
+      .filter((e) => (e.correlationId && groups.has(e.correlationId)) || ids.has(e.id))
+      .sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

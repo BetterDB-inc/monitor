@@ -26,6 +26,7 @@ import type {
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   AppSettings,
   AuditQueryOptions,
@@ -1679,6 +1680,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS anomaly_ids TEXT[];
+
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_severity ON correlated_anomaly_groups(severity, timestamp DESC);
@@ -3019,12 +3022,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        source_host, source_port, connection_id, anomaly_ids
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT (correlation_id) DO UPDATE SET
         diagnosis = EXCLUDED.diagnosis,
         recommendations = EXCLUDED.recommendations,
-        anomaly_count = EXCLUDED.anomaly_count`,
+        anomaly_count = EXCLUDED.anomaly_count,
+        anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids)`,
       [
         group.correlationId,
         group.timestamp,
@@ -3037,13 +3041,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         group.sourceHost || null,
         group.sourcePort || null,
         connectionId,
+        group.anomalyIds ?? null,
       ],
     );
 
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -3074,6 +3081,23 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`correlation_id = ANY($${paramIndex++})`);
       params.push(options.correlationIds);
     }
+    if (options.connectionIds) {
+      conditions.push(`connection_id = ANY($${paramIndex++})`);
+      params.push(options.connectionIds);
+    }
+    if (options.patterns) {
+      conditions.push(`pattern = ANY($${paramIndex++})`);
+      params.push(options.patterns);
+    }
+    if (options.involvingConnectionId) {
+      const caller = paramIndex++;
+      conditions.push(`(connection_id = $${caller} OR EXISTS (
+        SELECT 1 FROM anomaly_events member
+        WHERE member.correlation_id = correlated_anomaly_groups.correlation_id
+          AND member.connection_id = $${caller}
+      ))`);
+      params.push(options.involvingConnectionId);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
@@ -3083,15 +3107,39 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, anomaly_ids
       FROM correlated_anomaly_groups
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, correlation_id DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
+  }
+
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+  ): Promise<StoredAnomalyEvent[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
+
+    const isUuid = (id: string) => /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id);
+    const result = await this.pool.query(
+      `SELECT
+        id, timestamp, metric_type, anomaly_type, severity,
+        value, baseline, std_dev, z_score, threshold,
+        message, correlation_id, related_metrics,
+        resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id
+      FROM anomaly_events
+      WHERE correlation_id = ANY($1::uuid[]) OR id = ANY($2::uuid[])
+      ORDER BY timestamp ASC, id ASC`,
+      [correlationIds, anomalyIds.filter(isUuid)],
+    );
+
+    return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

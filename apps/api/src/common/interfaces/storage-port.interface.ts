@@ -208,6 +208,7 @@ export interface StoredCorrelatedGroup {
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  anomalyIds?: string[];
 }
 
 export interface AnomalyEventCursor {
@@ -225,9 +226,16 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
-  correlationIds?: string[];
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
+}
+
+export interface CorrelatedGroupQueryOptions
+  extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
+  correlationIds?: string[];
+  connectionIds?: string[];
+  patterns?: string[];
+  involvingConnectionId?: string;
 }
 
 export interface AnomalyStats {
@@ -625,7 +633,11 @@ export interface StoragePort {
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
-  getCorrelatedGroups(options?: AnomalyQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroups(options?: CorrelatedGroupQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+  ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
