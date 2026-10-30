@@ -856,6 +856,7 @@ export class AnomalyService
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    let replicationSample: ReplicationStreamSample | null = null;
     try {
       const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
@@ -877,8 +878,7 @@ export class AnomalyService
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
-      const replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
-      if (replicationSample) await this.detectReplicationDivergence(replicationSample, ctx);
+      replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -1523,6 +1523,12 @@ export class AnomalyService
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
+    } finally {
+      if (replicationSample) {
+        await this.detectReplicationDivergence(replicationSample, ctx).catch((err) => {
+          this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
+        });
+      }
     }
   }
 

@@ -70,6 +70,16 @@ class Harness {
     return outcomes;
   }
 
+  skip(ms: number): void {
+    this.t += ms;
+  }
+
+  poll(spec: WindowSpec, stepMs: number): DivergenceOutcome[] {
+    const emitted = observeDivergence(this.state, this.sample(spec), WINDOW_MS);
+    this.t += stepMs;
+    return emitted;
+  }
+
   windows(specs: WindowSpec[], ack = true): DivergenceOutcome[][] {
     return specs.map((spec) => this.window(spec, ack));
   }
@@ -87,6 +97,35 @@ describe('divergenceWindowMs', () => {
 });
 
 describe('observeDivergence', () => {
+  it('keeps a window open until it has enough samples when polls run slow', () => {
+    const harness = new Harness();
+
+    for (const gap of [2, 3, 4, 5, 6, 7, 8]) harness.poll({ gap: gap * MiB, rate: MiB }, 20_000);
+
+    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
+    expect(windows).toHaveLength(2);
+    expect(windows[0].end - windows[0].start).toBe(60_000);
+    expect(windows[0].end).toBe(windows[1].start);
+  });
+
+  it('starts a new chain when polling resumes after an outage', () => {
+    const harness = new Harness();
+    const before = harness.windows([
+      { gap: 2 * MiB, rate: MiB },
+      { gap: 8 * MiB, rate: MiB },
+      { gap: 16 * MiB, rate: MiB },
+    ]);
+    harness.skip(300_000);
+
+    const after = harness.windows([
+      { gap: 24 * MiB, rate: MiB },
+      { gap: 32 * MiB, rate: MiB },
+      { gap: 40 * MiB, rate: MiB },
+    ]);
+
+    expect(divergences([...before, ...after]).filter((f) => f.reason === 'growth')).toEqual([]);
+  });
+
   it('ignores samples from replicas', () => {
     const state = createDivergenceState();
     const sample: ReplicationStreamSample = {
