@@ -3913,6 +3913,21 @@ describe('AnomalyService', () => {
       expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
     });
 
+    it('applies threshold overrides from settings, including to a running detector', async () => {
+      const step = async (total: string) => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(total));
+        await poll();
+      };
+      await step('100');
+      await step('110');
+      const detector = (service as any).detectors.get('conn-1').get(MetricType.ERROR_REPLIES);
+      expect(detector.getConfig()).toMatchObject({ warningThreshold: 200, criticalThreshold: 2000 });
+
+      service.reloadDetectorConfig({ error_replies: { warningAbsolute: 50 } });
+
+      expect(detector.getConfig()).toMatchObject({ warningThreshold: 50, criticalThreshold: 2000 });
+    });
+
     it('keeps the same rate when the poll interval changes', async () => {
       let now = 1_700_000_000_000;
       jest.spyOn(Date, 'now').mockImplementation(() => now);

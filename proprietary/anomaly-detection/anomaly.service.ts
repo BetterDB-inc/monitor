@@ -122,10 +122,8 @@ import {
   ErrorStatsInfo,
 } from '@app/common/types/metrics.types';
 import {
-  ERROR_REPLIES_CRITICAL_PER_SEC,
   errorRepliesPerSecond,
   ERROR_REPLIES_MIN_PER_SEC,
-  ERROR_REPLIES_WARNING_PER_SEC,
   describeErrorstatDeltas,
   readErrorstatCounts,
   topErrorstatDeltas,
@@ -3170,14 +3168,7 @@ export class AnomalyService
         MetricType.ERROR_REPLIES,
         new SpikeDetector(
           MetricType.ERROR_REPLIES,
-          {
-            warningZScore: 3,
-            criticalZScore: 5,
-            warningThreshold: ERROR_REPLIES_WARNING_PER_SEC,
-            criticalThreshold: ERROR_REPLIES_CRITICAL_PER_SEC,
-            consecutiveRequired: 2,
-            cooldownMs: 60000,
-          },
+          this.resolveSpikeConfig(MetricType.ERROR_REPLIES),
           { minValue: ERROR_REPLIES_MIN_PER_SEC, thresholdOverridesBelowMean: true },
         ),
       );

@@ -443,6 +443,7 @@ Some metrics have custom thresholds beyond Z-score:
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
+| `error_replies` | 200/s | 2000/s | 2 | 60s |
 
 ## Monitored Metrics
 

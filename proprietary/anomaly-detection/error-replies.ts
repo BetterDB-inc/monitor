@@ -3,8 +3,6 @@ import { ErrorStatsInfo } from '@app/common/types/metrics.types';
 const ERRORSTAT_PREFIX = 'errorstat_';
 
 export const ERROR_REPLIES_TOP_LIMIT = 3;
-export const ERROR_REPLIES_WARNING_PER_SEC = 200;
-export const ERROR_REPLIES_CRITICAL_PER_SEC = 2000;
 export const ERROR_REPLIES_MIN_PER_SEC = 20;
 
 export interface ErrorstatDelta {
