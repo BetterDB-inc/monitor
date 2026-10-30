@@ -17,7 +17,8 @@ export const DIVERGENCE_RECOVERY_HORIZON_WINDOWS = 8;
 export const DIVERGENCE_RECOVERED_WINDOWS = 2;
 export const DIVERGENCE_HISTORY_WINDOWS = 120;
 export const DIVERGENCE_STALE_ACK_SEC = 10;
-export const DIVERGENCE_STALE_ESCALATE_WINDOWS = 2;
+export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
+export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
@@ -50,12 +51,13 @@ export interface ReplicaDivergenceState {
   subside: SubsideTracking | null;
   belowFloorStreak: number;
   staleWindows: number;
+  staleSince: number | null;
 }
 
 export interface DivergenceConnectionState {
   windowStart: number | null;
   accumulators: Map<string, ReplicaWindowAccumulator>;
-  staleAddrs: Set<string>;
+  staleGaps: Map<string, number>;
   rateHistory: number[];
   replicas: Map<string, ReplicaDivergenceState>;
 }
@@ -92,7 +94,7 @@ export function createDivergenceState(): DivergenceConnectionState {
   return {
     windowStart: null,
     accumulators: new Map(),
-    staleAddrs: new Set(),
+    staleGaps: new Map(),
     rateHistory: [],
     replicas: new Map(),
   };
@@ -133,6 +135,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     subside: null,
     belowFloorStreak: 0,
     staleWindows: 0,
+    staleSince: null,
   };
 }
 
@@ -158,6 +161,7 @@ function drainsWithinHorizon(recent: DivergenceWindow[]): boolean {
 function ceilingLevel(windows: DivergenceWindow[]): DivergenceLevel {
   const recent = windows.slice(-DIVERGENCE_CEILING_WINDOWS);
   if (recent.length < DIVERGENCE_CEILING_WINDOWS) return 'none';
+  if (recent.some((w, i) => i > 0 && !contiguous(recent[i - 1], w))) return 'none';
   if (drainsWithinHorizon(recent)) return 'none';
   const seconds = recent.map((w) => w.secondsBehind);
   if (seconds.some((s) => s === null)) return 'none';
@@ -190,7 +194,10 @@ function evaluateReplica(
 ): DivergenceOutcome | null {
   const windows = replica.windows;
   const last = windows[windows.length - 1];
-  if (windows.length > 1 && !contiguous(windows[windows.length - 2], last)) replica.subside = null;
+  if (windows.length > 1 && !contiguous(windows[windows.length - 2], last)) {
+    replica.subside = null;
+    replica.belowFloorStreak = 0;
+  }
 
   if (!isBehind(last)) {
     replica.subside = null;
@@ -256,23 +263,33 @@ function evaluateReplica(
   };
 }
 
-function staleAckFinding(replica: ReplicaDivergenceState): DivergenceFinding | null {
+function staleAckFinding(
+  replica: ReplicaDivergenceState,
+  gapBytes: number,
+  start: number,
+  rate: number | null,
+): DivergenceFinding | null {
+  if (rate === null || rate === 0) return null;
+  if (replica.staleWindows === 0) replica.staleSince = start;
   replica.staleWindows++;
-  if (replica.staleWindows < DIVERGENCE_STALE_ESCALATE_WINDOWS) return null;
-  if (LEVEL_RANK[replica.level] >= LEVEL_RANK.critical) return null;
-  const last = replica.windows[replica.windows.length - 1];
-  if (!last) return null;
+  const target: DivergenceLevel =
+    replica.staleWindows >= DIVERGENCE_STALE_CRIT_WINDOWS
+      ? 'critical'
+      : replica.staleWindows >= DIVERGENCE_STALE_WARN_WINDOWS
+        ? 'warning'
+        : 'none';
+  if (LEVEL_RANK[target] <= LEVEL_RANK[replica.level]) return null;
   return {
     kind: 'divergence',
     addr: replica.addr,
-    level: 'critical',
+    level: target as Exclude<DivergenceLevel, 'none'>,
     reason: 'not_acking',
-    gapBytes: last.gapBytes,
-    secondsBehind: last.secondsBehind,
-    bytesPerSec: last.bytesPerSec,
+    gapBytes,
+    secondsBehind: gapBytes / rate,
+    bytesPerSec: rate,
     slopeBytesPerWindow: 0,
     windowCount: replica.staleWindows,
-    spanStart: replica.spanStart ?? last.start,
+    spanStart: replica.spanStart ?? (replica.staleSince as number),
   };
 }
 
@@ -288,6 +305,7 @@ function dropReplica(
   replica.subside = null;
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
+  replica.staleSince = null;
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
@@ -304,13 +322,16 @@ function closeWindow(
   }
 
   for (const [addr, replica] of state.replicas) {
-    if (state.accumulators.has(addr)) continue;
-    if (replica.level !== 'none' && state.staleAddrs.has(addr)) {
-      const finding = staleAckFinding(replica);
-      if (finding) outcomes.push(finding);
-      continue;
-    }
+    if (state.accumulators.has(addr) || state.staleGaps.has(addr)) continue;
     outcomes.push(...dropReplica(state, replica));
+  }
+
+  for (const [addr, gapBytes] of state.staleGaps) {
+    if (state.accumulators.has(addr)) continue;
+    const replica = state.replicas.get(addr) ?? createReplicaState(addr);
+    state.replicas.set(addr, replica);
+    const finding = staleAckFinding(replica, gapBytes, start, rate);
+    if (finding) outcomes.push(finding);
   }
 
   for (const [addr, acc] of state.accumulators) {
@@ -318,6 +339,7 @@ function closeWindow(
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
     replica.staleWindows = 0;
+    replica.staleSince = null;
     const gapBytes = median(acc.gaps);
     const secondsBehind = acc.lastRate === null || acc.lastRate === 0 ? null : gapBytes / acc.lastRate;
     replica.windows.push({ start, end, gapBytes, bytesPerSec: acc.lastRate, secondsBehind });
@@ -327,7 +349,7 @@ function closeWindow(
   }
 
   state.accumulators = new Map();
-  state.staleAddrs = new Set();
+  state.staleGaps = new Map();
   return outcomes;
 }
 
@@ -339,7 +361,7 @@ export function observeDivergence(
   if (sample.role !== 'primary') {
     state.windowStart = null;
     state.accumulators = new Map();
-    state.staleAddrs = new Set();
+    state.staleGaps = new Map();
     return [...state.replicas.values()].flatMap((replica) => dropReplica(state, replica));
   }
   const outcomes: DivergenceOutcome[] = [];
@@ -352,7 +374,7 @@ export function observeDivergence(
   }
 
   for (const line of sample.replicas) {
-    if (line.state === 'online' && isStaleAck(line)) state.staleAddrs.add(line.addr);
+    if (line.state === 'online' && isStaleAck(line)) state.staleGaps.set(line.addr, line.gapBytes);
     if (!isTracked(line)) continue;
     const acc = state.accumulators.get(line.addr) ?? { gaps: [], lastRate: null };
     acc.gaps.push(line.gapBytes);
@@ -385,6 +407,7 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.subside = null;
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
+  replica.staleSince = null;
 }
 
 export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
