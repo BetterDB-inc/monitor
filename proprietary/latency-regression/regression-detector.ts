@@ -124,7 +124,7 @@ interface SustainedState {
   lastFiredAt: number;
   /** capturedAt of the last sample counted toward `consecutive`. */
   lastCountedAt: number;
-  degraded: boolean;
+  degraded: boolean | null;
 }
 
 export class RegressionDetector {
@@ -134,7 +134,7 @@ export class RegressionDetector {
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
-    for (const state of this.sustained.values()) state.degraded = false;
+    for (const state of this.sustained.values()) state.degraded = null;
     if (samples.length === 0) return [];
 
     const latestByCommand = this.latestByCommand(samples);
@@ -163,8 +163,10 @@ export class RegressionDetector {
     return findings;
   }
 
-  isDegraded(): boolean {
-    return [...this.sustained.values()].some((state) => state.degraded);
+  isDegraded(): boolean | null {
+    const verdicts = [...this.sustained.values()].map((state) => state.degraded);
+    if (verdicts.includes(true)) return true;
+    return verdicts.includes(false) ? false : null;
   }
 
   /**
@@ -395,7 +397,7 @@ export class RegressionDetector {
         consecutive: 0,
         lastFiredAt: 0,
         lastCountedAt: -1,
-        degraded: false,
+        degraded: null,
       };
       this.sustained.set(command, state);
 
@@ -408,12 +410,13 @@ export class RegressionDetector {
         baselineValues.length >= SUSTAINED_MIN_BASELINE_SAMPLES;
       const upgradeBaseline = this.upgrade?.baselines.get(command);
       if (upgradeBaseline !== undefined) {
-        state.degraded =
-          fresh && isDegraded(latest!.p99Us, upgradeBaseline, UPGRADE_DEGRADATION_FACTOR);
+        state.degraded = fresh
+          ? isDegraded(latest!.p99Us, upgradeBaseline, UPGRADE_DEGRADATION_FACTOR)
+          : null;
       } else {
-        state.degraded =
-          !usable ||
-          isDegraded(latest!.p99Us, median(baselineValues!), SUSTAINED_DEGRADATION_FACTOR);
+        state.degraded = usable
+          ? isDegraded(latest!.p99Us, median(baselineValues!), SUSTAINED_DEGRADATION_FACTOR)
+          : null;
       }
 
       // Owned by an open upgrade window (the upgrade rule fires once for it) — suppress

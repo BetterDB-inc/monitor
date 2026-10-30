@@ -18,6 +18,7 @@ export const RETRY_AMP_MIN_CORRELATION = 0.5;
 export const RETRY_AMP_MIN_LOAD_RISE = 1.1;
 export const RETRY_AMP_STEP_LOAD_RATIO = 2;
 export const RETRY_AMP_STEP_HOLD_FRACTION = 0.9;
+export const RETRY_AMP_STEP_WINDOWS = 3;
 export const RETRY_AMP_STRESS_HOLD_MS = 30 * 60_000;
 export const RETRY_AMP_SATURATION_HOLD_MS = 5 * 60_000;
 export const RETRY_AMP_POLL_GAP_MULTIPLIER = 3;
@@ -30,9 +31,15 @@ export const RETRY_AMP_SATURATION_METRICS: readonly MetricType[] = [
   MetricType.CLIENT_SATURATION,
   MetricType.CLIENT_LOCKOUT_RISK,
 ];
+export const RETRY_AMP_HELD_SATURATION_METRICS: readonly MetricType[] = [
+  MetricType.CPU_UTILIZATION,
+  MetricType.REJECTED_CONNECTIONS,
+  MetricType.CLIENT_LOCKOUT_RISK,
+];
 
 export type RetryAmplificationLevel = 'none' | 'warning' | 'critical';
 export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn' | 'saturation';
+export type RetryAmplificationPattern = 'rising' | 'step';
 export type RetryAmplificationEpisodeClass = 'transient' | 'unconfirmed' | 'amplifying';
 
 export interface RetryAmplificationEventRef {
@@ -108,7 +115,8 @@ export interface RetryAmplificationFinding {
   trigger: RetryAmplificationTrigger;
   windows: number;
   loadRatio: number;
-  correlation: number;
+  pattern: RetryAmplificationPattern;
+  correlation: number | null;
   connectedClients: number;
   relatedMetrics: MetricType[];
   message: string;
@@ -295,7 +303,7 @@ function slope(values: number[]): number {
 type LoadPattern = 'stress' | 'latency' | 'step';
 
 interface CoMovement {
-  r: number;
+  r: number | null;
   pattern: LoadPattern;
 }
 
@@ -309,14 +317,15 @@ function coMovement(run: RetryAmplificationWindow[]): CoMovement | null {
   for (const s of series) {
     if (s.some((v) => v === null)) continue;
     const r = pearson(load, s as number[]);
-    if (r !== null && (best === null || r > best.r)) best = { r, pattern: 'stress' };
+    if (r !== null && (best === null || r > (best.r ?? -Infinity))) best = { r, pattern: 'stress' };
   }
   if (run[run.length - 1].latencyEvent) {
     const r = pearson(
       load,
       load.map((_, i) => i),
     );
-    if (r !== null && (best === null || r > best.r)) best = { r, pattern: 'latency' };
+    if (r !== null && (best === null || r > (best.r ?? -Infinity)))
+      best = { r, pattern: 'latency' };
   }
   return best;
 }
@@ -327,19 +336,26 @@ function isRising(run: RetryAmplificationWindow[]): boolean {
 }
 
 function isHeldStep(run: RetryAmplificationWindow[], base: WindowBaseline): boolean {
-  const loads = run.map((w) => w.cmdsPerClient);
+  const trailing = run.slice(-RETRY_AMP_STEP_WINDOWS);
+  const loads = trailing.map((w) => w.cmdsPerClient);
   return (
     Math.min(...loads) >= base.cmdsPerClient * RETRY_AMP_STEP_LOAD_RATIO &&
-    loads[loads.length - 1] >= Math.max(...loads) * RETRY_AMP_STEP_HOLD_FRACTION
+    loads[loads.length - 1] >= Math.max(...loads) * RETRY_AMP_STEP_HOLD_FRACTION &&
+    trailing.some((w) => hasErrorStress(w, base) || hasChurnStress(w, base))
   );
 }
 
 function classifyLoad(run: RetryAmplificationWindow[], base: WindowBaseline): CoMovement | null {
   const movement = coMovement(run);
-  if (movement !== null && movement.r >= RETRY_AMP_MIN_CORRELATION && isRising(run)) {
+  if (
+    movement !== null &&
+    movement.r !== null &&
+    movement.r >= RETRY_AMP_MIN_CORRELATION &&
+    isRising(run)
+  ) {
     return movement;
   }
-  if (isHeldStep(run, base)) return { r: movement?.r ?? 0, pattern: 'step' };
+  if (isHeldStep(run, base)) return { r: null, pattern: 'step' };
   return null;
 }
 
@@ -377,7 +393,7 @@ function buildMessage(
   trigger: RetryAmplificationTrigger,
   windows: number,
   loadRatio: number,
-  correlation: number,
+  correlation: number | null,
   clients: number,
   pattern: LoadPattern,
 ): string {
@@ -391,7 +407,7 @@ function buildMessage(
     `client at ${loadRatio.toFixed(1)}× baseline for ${minutes} min while connected clients ` +
     `stay flat at ~${Math.round(clients)}; ` +
     LOAD_PATTERN_LABEL[pattern] +
-    (pattern === 'step' ? '' : ` (r=${correlation.toFixed(2)})`) +
+    (correlation === null ? '' : ` (r=${correlation.toFixed(2)})`) +
     `. Trigger: ${TRIGGER_LABEL[trigger]}. ${outcome}`
   );
 }
@@ -421,6 +437,7 @@ function classifyRun(
     trigger,
     windows: run.length,
     loadRatio,
+    pattern: movement.pattern === 'step' ? 'step' : 'rising',
     correlation,
     connectedClients: latest.connectedClients,
     relatedMetrics: collectRelatedMetrics(run, base, trigger),

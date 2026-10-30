@@ -141,6 +141,7 @@ describe('retry amplification detector', () => {
     expect(f.trigger).toBe('latency');
     expect(f.windows).toBe(3);
     expect(f.loadRatio).toBeCloseTo(1.9, 1);
+    expect(f.pattern).toBe('rising');
     expect(f.correlation).toBeGreaterThanOrEqual(0.5);
     expect(f.relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     expect(f.message).toContain('Retry amplification');
@@ -199,25 +200,44 @@ describe('retry amplification detector', () => {
     expect(d.findings).toHaveLength(0);
   });
 
-  it('flags load that steps up under stress and holds there', () => {
+  it('flags load that steps up under retry errors and holds there', () => {
     const d = new Driver();
     d.baseline();
-    d.window(hot(2.2));
-    d.window(hot(2.1));
-    d.window(hot(2.15));
-    d.window(hot(2.2));
+    d.window(hot(2.2, { errorsPerSec: 5 }));
+    d.window(hot(2.1, { errorsPerSec: 5 }));
+    d.window(hot(2.15, { errorsPerSec: 5 }));
+    d.window(hot(2.2, { errorsPerSec: 5 }));
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].level).toBe('warning');
+    expect(d.findings[0].pattern).toBe('step');
+    expect(d.findings[0].correlation).toBeNull();
     expect(d.findings[0].message).toContain('stepped up under stress');
+    expect(d.findings[0].message).not.toContain('r=');
+  });
+
+  it('flags a storm that overshoots and then settles on a plateau', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(3.0, { errorsPerSec: 5 }));
+    d.windows(hot(2.5, { errorsPerSec: 5 }), 4);
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].pattern).toBe('step');
+  });
+
+  it('does not treat a latency-only step as retries', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(2.2), 5);
+    expect(d.findings).toHaveLength(0);
   });
 
   it('does not flag a step that is already falling back', () => {
     const d = new Driver();
     d.baseline();
-    d.window(hot(3.0));
-    d.window(hot(2.6));
-    d.window(hot(2.2));
-    d.window(hot(1.8));
+    d.window(hot(3.0, { errorsPerSec: 5 }));
+    d.window(hot(2.6, { errorsPerSec: 5 }));
+    d.window(hot(2.2, { errorsPerSec: 5 }));
+    d.window(hot(1.8, { errorsPerSec: 5 }));
     expect(d.findings).toHaveLength(0);
   });
 
