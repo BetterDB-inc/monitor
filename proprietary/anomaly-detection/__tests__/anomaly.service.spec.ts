@@ -3355,6 +3355,55 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(1);
     });
 
+    it('names the clients whose command rate grew from CLIENT LIST tot-cmds', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        const grown = calls > 1;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'conn-1' }),
+      );
+      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'checkout', keyKind: 'name' }),
+      ]);
+    });
+
+    it('falls back to reconnects from stored snapshots without tot-cmds', async () => {
+      dbClient.getClients = jest.fn().mockResolvedValue([
+        { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 3 },
+      ]);
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: 1 },
+        { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt: 2 },
+      ]);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Top clients: name worker (2 reconnects).');
+    });
+
+    it('still emits when both attribution sources fail', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      storage.getClientSnapshots = jest.fn().mockRejectedValue(new Error('db down'));
+
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toContain('Client attribution unavailable.');
+      expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
+    });
+
     it('drops the per-connection state when the connection is removed', async () => {
       await runRetry();
       expect((service as any).retryAmplificationState.has('conn-1')).toBe(true);
@@ -3362,6 +3411,8 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
 
       expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
+      expect((service as any).retryAmplificationFirstClients.has('conn-1')).toBe(false);
+      expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
     });
   });
 

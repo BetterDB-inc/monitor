@@ -175,7 +175,15 @@ import {
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
   evaluateRetryAmplification,
+  retryAmplificationEpisodeStart,
 } from './retry-amplification-detector';
+import {
+  ClientCommandSnapshot,
+  RetryAmplificationContributor,
+  describeRetryAmplificationContributors,
+  rankRetryAmplificationContributors,
+  readClientCommandCounts,
+} from './retry-amplification-attribution';
 import {
   LargeReplyEntry,
   detectLargeReplyPressure,
@@ -387,6 +395,8 @@ export class AnomalyService
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
+  private retryAmplificationFirstClients = new Map<string, ClientCommandSnapshot | null>();
+  private retryAmplificationContributors = new Map<string, RetryAmplificationContributor[] | null>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -765,6 +775,8 @@ export class AnomalyService
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
     this.retryAmplificationState.delete(connectionId);
+    this.retryAmplificationFirstClients.delete(connectionId);
+    this.retryAmplificationContributors.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.activeLargeReplyOffenders.delete(connectionId);
@@ -3131,7 +3143,24 @@ export class AnomalyService
       connectsPerSec: this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null,
       recentEvents,
     });
+
+    const episodeStart = retryAmplificationEpisodeStart(state);
+    if (episodeStart === null) {
+      this.retryAmplificationFirstClients.delete(ctx.connectionId);
+    } else if (!this.retryAmplificationFirstClients.has(ctx.connectionId)) {
+      this.retryAmplificationFirstClients.set(
+        ctx.connectionId,
+        await this.readClientCommandCounts(ctx, timestamp),
+      );
+    }
     if (finding === null) return;
+
+    const contributors = await this.attributeRetryAmplification(
+      ctx,
+      timestamp,
+      episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS,
+    );
+    this.retryAmplificationContributors.set(ctx.connectionId, contributors);
 
     const event: AnomalyEvent = {
       id: randomUUID(),
@@ -3144,7 +3173,7 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
-      message: finding.message,
+      message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
       relatedMetrics: finding.relatedMetrics,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -3152,6 +3181,51 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
     acknowledgeRetryAmplificationFinding(state, finding);
+  }
+
+  private async readClientCommandCounts(
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<ClientCommandSnapshot | null> {
+    try {
+      return readClientCommandCounts(await ctx.client.getClients({ type: 'normal' }), timestamp);
+    } catch (error) {
+      this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
+      return null;
+    }
+  }
+
+  private async attributeRetryAmplification(
+    ctx: ConnectionContext,
+    timestamp: number,
+    episodeStart: number,
+  ): Promise<RetryAmplificationContributor[] | null> {
+    const latest = await this.readClientCommandCounts(ctx, timestamp);
+    let snapshots: Awaited<ReturnType<StoragePort['getClientSnapshots']>> = [];
+    let snapshotsLoaded = true;
+    try {
+      snapshots = await this.storage.getClientSnapshots({
+        connectionId: ctx.connectionId,
+        startTime: episodeStart,
+        endTime: timestamp,
+      });
+    } catch (error) {
+      snapshotsLoaded = false;
+      this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
+    }
+    const first = this.retryAmplificationFirstClients.get(ctx.connectionId) ?? null;
+    if (!snapshotsLoaded && (first === null || latest === null)) return null;
+    return rankRetryAmplificationContributors({
+      first,
+      latest,
+      snapshots,
+      snapshotIntervalMs:
+        this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs || 60_000,
+    });
+  }
+
+  getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
+    return this.retryAmplificationContributors.get(connectionId) ?? null;
   }
 
   /**

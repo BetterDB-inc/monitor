@@ -521,6 +521,10 @@ export function evaluateRetryAmplification(
   return state.pending;
 }
 
+export function retryAmplificationEpisodeStart(state: RetryAmplificationState): number | null {
+  return state.hotRun.length > 0 ? state.hotRun[0].start : null;
+}
+
 export function acknowledgeRetryAmplificationFinding(
   state: RetryAmplificationState,
   finding: RetryAmplificationFinding,
