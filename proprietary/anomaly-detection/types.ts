@@ -167,6 +167,7 @@ export interface AnomalyEvent {
    * can never resurface a row that was never written.
    */
   persisted?: boolean;
+  resolvedAt?: number;
 }
 
 export interface CorrelatedAnomalyGroup {
