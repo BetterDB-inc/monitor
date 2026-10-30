@@ -352,6 +352,34 @@ describe('Correlator', () => {
     });
   });
 
+  describe('related metrics', () => {
+    it('keeps detector-stamped related metrics after grouping', () => {
+      const baseTime = 1000000;
+      const stamped = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.CONNECTIONS,
+        relatedMetrics: [MetricType.MEMORY_USED],
+      });
+      correlator.correlate([
+        stamped,
+        makeAnomaly({ timestamp: baseTime + 1000, metricType: MetricType.OPS_PER_SEC }),
+      ]);
+
+      expect(stamped.relatedMetrics).toEqual([MetricType.MEMORY_USED, MetricType.OPS_PER_SEC]);
+    });
+
+    it('sets the other members for an unstamped event', () => {
+      const baseTime = 1000000;
+      const unstamped = makeAnomaly({ timestamp: baseTime, metricType: MetricType.CONNECTIONS });
+      correlator.correlate([
+        unstamped,
+        makeAnomaly({ timestamp: baseTime + 1000, metricType: MetricType.OPS_PER_SEC }),
+      ]);
+
+      expect(unstamped.relatedMetrics).toEqual([MetricType.OPS_PER_SEC]);
+    });
+  });
+
   describe('multi-metric pattern matching', () => {
     it('detects TRAFFIC_BURST when connections and ops spike without memory', () => {
       const baseTime = 1000000;

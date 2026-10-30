@@ -457,9 +457,10 @@ export class Correlator {
     // Update correlation ID on all anomalies
     anomalies.forEach((a) => {
       a.correlationId = correlationId;
-      a.relatedMetrics = anomalies
+      const members = anomalies
         .filter((other) => other.id !== a.id)
         .map((other) => other.metricType);
+      a.relatedMetrics = [...new Set([...(a.relatedMetrics ?? []), ...members])];
     });
 
     // Determine overall severity (highest severity wins)
