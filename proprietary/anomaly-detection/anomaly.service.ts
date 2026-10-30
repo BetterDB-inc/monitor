@@ -3290,7 +3290,12 @@ export class AnomalyService
     timestamp: number,
   ): Promise<ClientCommandSnapshot | null | undefined> {
     try {
-      return readClientCommandCounts(await ctx.client.getClients({ type: 'normal' }), timestamp);
+      const clients = await this.raceWithTimeout(
+        ctx.client.getClients({ type: 'normal' }),
+        this.infoTimeoutMs,
+        `CLIENT LIST timed out after ${this.infoTimeoutMs}ms`,
+      );
+      return readClientCommandCounts(clients, timestamp);
     } catch (error) {
       this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
       return undefined;
@@ -3324,6 +3329,7 @@ export class AnomalyService
       first: firstSnapshot,
       latest,
       snapshots,
+      episodeStart,
       snapshotIntervalMs:
         this.settingsService.getCachedSettings().clientAnalyticsPollIntervalMs || 60_000,
     });

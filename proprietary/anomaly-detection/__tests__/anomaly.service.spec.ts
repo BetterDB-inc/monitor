@@ -3420,6 +3420,17 @@ describe('AnomalyService', () => {
     });
 
     it('dispatches retry_amplification.detected with the finding and contributors', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        const grown = calls > 1;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
       const { recorded } = await runRetry();
 
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
@@ -3430,7 +3441,7 @@ describe('AnomalyService', () => {
           pattern: 'rising',
           loadRatio: recorded[0].value,
           message: recorded[0].message,
-          topContributors: service.getRetryAmplificationContributors('conn-1'),
+          topContributors: [expect.objectContaining({ key: 'checkout', keyKind: 'name' })],
           connectionId: 'conn-1',
         }),
       );
@@ -3448,6 +3459,17 @@ describe('AnomalyService', () => {
     });
 
     it('reports detector status and contributors per connection', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        const grown = calls > 1;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
       expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
         expect.objectContaining({ armed: false, classification: 'none', topContributors: null }),
       );
@@ -3460,6 +3482,7 @@ describe('AnomalyService', () => {
           classification: 'amplifying',
           level: 'warning',
           lastEpisode: null,
+          topContributors: [expect.objectContaining({ key: 'checkout', keyKind: 'name' })],
         }),
       );
     });
@@ -3595,6 +3618,17 @@ describe('AnomalyService', () => {
       ]);
     });
 
+    it('gives up on a CLIENT LIST that never answers', async () => {
+      (service as unknown as { infoTimeoutMs: number }).infoTimeoutMs = 1;
+      dbClient.getClients = jest.fn().mockReturnValue(new Promise(() => undefined));
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
+    });
+
     it('retakes the first snapshot after a failed CLIENT LIST', async () => {
       let calls = 0;
       dbClient.getClients = jest.fn().mockImplementation(async () => {
@@ -3627,9 +3661,9 @@ describe('AnomalyService', () => {
       dbClient.getClients = jest.fn().mockResolvedValue([
         { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 3 },
       ]);
-      storage.getClientSnapshots = jest.fn().mockResolvedValue([
-        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: 1 },
-        { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt: 2 },
+      storage.getClientSnapshots = jest.fn().mockImplementation(async ({ endTime }) => [
+        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: endTime },
+        { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt: endTime },
       ]);
 
       const { recorded } = await runRetry();
