@@ -1652,12 +1652,32 @@ describe('AnomalyService', () => {
       expect(skewEvents()[0].resolved).toBe(false);
     });
 
-    it('stops holding the alert once the thin view outlasts the stale limit', async () => {
+    it('does not resolve an alert because primaries stayed unmonitored', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 60; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 18_000, true));
+      }
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(6000, false);
+      await pollCluster(6000, false);
+      await pollCluster(6000, false);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('resolves the alert when the cluster itself shrank below a judgeable size', async () => {
       for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
 
       for (let i = 0; i < 12; i += 1) {
         clock += 1000;
-        await poll(shardCtx('a', 18_000, true));
+        const ctx = shardCtx('a', 18_000, true);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue(shardNodes('a', true).slice(0, 2));
+        await poll(ctx);
       }
 
       expect(skewEvents()[0].resolved).toBe(true);
@@ -1733,7 +1753,6 @@ describe('AnomalyService', () => {
 
       expect((service as any).reshardSnapshot.has('conn-a')).toBe(false);
       expect((service as any).reshardWriteP99.has('conn-a')).toBe(false);
-      expect((service as any).reshardThinSince.has('conn-a')).toBe(false);
     });
   });
 
