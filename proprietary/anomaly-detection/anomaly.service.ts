@@ -3359,11 +3359,17 @@ export class AnomalyService
     this.retryAmplificationLastEmit.set(ctx.connectionId, timestamp);
 
     const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
+    const closedAt = state.hotRun.length === 0 ? state.lastEpisode?.endedAt : undefined;
     const attributionKey = `${attributionStart}:${finding.level}`;
     let contributors = this.retryAmplificationContributors.get(ctx.connectionId)?.contributors ?? null;
     const firstAttempt = this.retryAmplificationAttributed.get(ctx.connectionId) !== attributionKey;
     if (firstAttempt) {
-      contributors = await this.attributeRetryAmplification(ctx, timestamp, attributionStart);
+      contributors = await this.attributeRetryAmplification(
+        ctx,
+        timestamp,
+        attributionStart,
+        closedAt,
+      );
       this.retryAmplificationContributors.set(ctx.connectionId, {
         episodeStart: attributionStart,
         contributors,
@@ -3381,7 +3387,7 @@ export class AnomalyService
     const event: AnomalyEvent = {
       id: retried?.id ?? randomUUID(),
       correlationId: retried?.correlationId,
-      timestamp,
+      timestamp: closedAt ?? timestamp,
       metricType: MetricType.RETRY_AMPLIFICATION,
       anomalyType: AnomalyType.SPIKE,
       severity,
@@ -3411,7 +3417,7 @@ export class AnomalyService
           correlation: finding.correlation,
           topContributors: contributors,
           message: event.message,
-          timestamp,
+          timestamp: event.timestamp,
           instance: { host: ctx.host, port: ctx.port },
           connectionId: ctx.connectionId,
         })
@@ -3454,8 +3460,11 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
     episodeStart: number,
+    closedAt?: number,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const latest = (await this.readClientCommandCounts(ctx, timestamp)) ?? null;
+    const latest =
+      closedAt === undefined ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null) : null;
+    const until = closedAt ?? timestamp;
     let snapshots: Awaited<ReturnType<StoragePort['getClientSnapshots']>> = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
@@ -3464,10 +3473,10 @@ export class AnomalyService
         this.storage.getClientSnapshots({
           connectionId: ctx.connectionId,
           startTime: episodeStart,
-          endTime: timestamp,
+          endTime: until,
           limit: RETRY_AMP_SNAPSHOT_LIMIT,
         }),
-        this.storage.getNewClientConnections(ctx.connectionId, episodeStart, timestamp),
+        this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
       ]);
     } catch (error) {
       snapshotsLoaded = false;

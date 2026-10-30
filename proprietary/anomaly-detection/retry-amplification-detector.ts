@@ -522,6 +522,7 @@ function evaluateWindow(
   }
 
   state.coldStreak = 0;
+  if (state.hotRun.length === 0) state.notifiedLevel = 'none';
   state.hotRun.push(w);
   state.pending = null;
   const finding = classifyRun(state, base, timestamp);
@@ -557,10 +558,13 @@ function finalizeClosing(state: RetryAmplificationState, timestamp: number): voi
 
 function endEpisodeAtPollGap(state: RetryAmplificationState, lastTimestamp: number): void {
   finalizeClosing(state, lastTimestamp);
+  const open = state.window === null ? null : summarize(state.window);
   state.window = null;
-  if (state.hotRun.length > 0) {
-    closeEpisode(state, lastTimestamp, computeBaseline(state.coldWindows));
-  }
+  if (open !== null) evaluateWindow(state, open, lastTimestamp);
+  if (state.hotRun.length === 0) return;
+  const { pending, notifiedLevel } = state;
+  closeEpisode(state, lastTimestamp, computeBaseline(state.coldWindows));
+  if (pending !== null) Object.assign(state, { pending, notifiedLevel });
 }
 
 export function evaluateRetryAmplification(
@@ -688,7 +692,8 @@ export function describeRetryAmplificationState(
 }
 
 export function retryAmplificationEpisodeStart(state: RetryAmplificationState): number | null {
-  return state.hotRun.length > 0 ? state.hotRun[0].start : null;
+  if (state.hotRun.length > 0) return state.hotRun[0].start;
+  return state.pending !== null ? (state.lastEpisode?.startedAt ?? null) : null;
 }
 
 export function retryAmplificationNeedsNotification(
@@ -709,6 +714,7 @@ export function acknowledgeRetryAmplificationFinding(
   state: RetryAmplificationState,
   finding: RetryAmplificationFinding,
 ): void {
-  state.ackedLevel = finding.level;
+  if (state.hotRun.length > 0) state.ackedLevel = finding.level;
+  else state.notifiedLevel = 'none';
   if (state.pending === finding) state.pending = null;
 }

@@ -2,7 +2,10 @@ import {
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
   describeRetryAmplificationState,
+  markRetryAmplificationNotified,
+  retryAmplificationEpisodeStart,
   retryAmplificationMaxPollGap,
+  retryAmplificationNeedsNotification,
   evaluateRetryAmplification,
   readRetryAmplificationTrigger,
   RetryAmplificationFinding,
@@ -324,6 +327,119 @@ describe('retry amplification detector', () => {
       d.ramp(5, { p99: true });
       expect(d.findings).toHaveLength(2);
       expect(d.findings[1].windows).toBe(3);
+    });
+
+    const skipGap = (d: Driver) => skip(d, 2 * RETRY_AMP_WINDOW_MS + d.pollMs + 1);
+    const hotSpec = hot(1.8, { p99: true });
+
+    it('emits the finding from a closing window at the gap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(hotSpec);
+      expect(d.findings).toHaveLength(0);
+      expect(d.state.closing).not.toBeNull();
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.lastEpisode).toMatchObject({ classification: 'amplifying', windows: 3 });
+    });
+
+    it('counts a covered open window at the gap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      expect(d.findings).toHaveLength(0);
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(1);
+    });
+
+    it('does not count an open window without enough coverage', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(2, { p99: true });
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(hotSpec);
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(0);
+      expect(d.state.lastEpisode).toMatchObject({ classification: 'transient', windows: 2 });
+    });
+
+    it('emits the gap finding once', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      skipGap(d);
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(BASE);
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.pending).toBeNull();
+    });
+
+    it('keeps a critical from before the gap until it is saved', () => {
+      const d = new Driver();
+      d.ack = false;
+      d.baseline();
+      d.ramp(3, { p99: true, activeSaturation: [MetricType.LOAD_SATURATION] });
+      skipGap(d);
+      d.poll(hotSpec);
+
+      const pending = d.state.pending;
+      expect(pending?.level).toBe('critical');
+      d.t += d.pollMs;
+      expect(d.poll(hotSpec)).toBe(pending);
+    });
+
+    it('does not notify again for an unsaved finding across the gap', () => {
+      const d = new Driver();
+      d.ack = false;
+      d.baseline();
+      d.ramp(4, { p99: true });
+      markRetryAmplificationNotified(d.state, d.state.pending!);
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(retryAmplificationNeedsNotification(d.state, d.state.pending!)).toBe(false);
+    });
+
+    it('raises the next episode after acknowledging a gap finding', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      skipGap(d);
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      expect(d.state.ackedLevel).toBe('none');
+      expect(d.state.notifiedLevel).toBe('none');
+
+      d.ramp(5, { p99: true });
+
+      expect(d.findings).toHaveLength(2);
+    });
+
+    it('reports the closed episode start while its finding is pending', () => {
+      const d = new Driver();
+      d.ack = false;
+      d.baseline();
+      d.ramp(3, { p99: true });
+      const startedAt = d.state.hotRun[0].start;
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(retryAmplificationEpisodeStart(d.state)).toBe(startedAt);
     });
 
     it('keeps the episode through a blip shorter than two windows', () => {

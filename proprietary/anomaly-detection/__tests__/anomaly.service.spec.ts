@@ -3813,6 +3813,76 @@ describe('AnomalyService', () => {
       expect(writes).toBeLessThanOrEqual(6);
     });
 
+    describe('finding closed by a poll gap', () => {
+      const emitAfterGap = async () => {
+        const { createRetryAmplificationState } = jest.requireActual(
+          '../retry-amplification-detector',
+        );
+        const state = createRetryAmplificationState();
+        state.pending = {
+          level: 'critical',
+          trigger: 'latency',
+          windows: 3,
+          loadRatio: 2,
+          correlation: 0.9,
+          pattern: 'rising',
+          message: 'storm',
+          timestamp: 500_000,
+        };
+        state.lastEpisode = {
+          classification: 'amplifying',
+          level: 'critical',
+          trigger: 'latency',
+          windows: 3,
+          startedAt: 320_000,
+          endedAt: 500_000,
+        };
+        (service as any).retryAmplificationState.set('conn-1', state);
+        dbClient.getClients = jest.fn().mockResolvedValue([]);
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+        storage.getNewClientConnections = jest.fn().mockResolvedValue([]);
+        const info = {
+          instantaneous_ops_per_sec: '1000',
+          connected_clients: '100',
+          total_commands_processed: '1000000',
+          total_error_replies: '0',
+        };
+        await (service as any).detectRetryAmplification(info, mockCtx, 900_000);
+        return { state, info };
+      };
+
+      it('attributes it to the episode, not the time after the gap', async () => {
+        await emitAfterGap();
+
+        expect(storage.getClientSnapshots).toHaveBeenCalledWith(
+          expect.objectContaining({ startTime: 320_000, endTime: 500_000 }),
+        );
+        expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 320_000, 500_000);
+        expect(dbClient.getClients).not.toHaveBeenCalled();
+      });
+
+      it('dates the event at the end of the episode', async () => {
+        await emitAfterGap();
+
+        const event = service
+          .getRecentEvents()
+          .find((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+        expect(event?.timestamp).toBe(500_000);
+        expect(event?.severity).toBe(AnomalySeverity.CRITICAL);
+      });
+
+      it('fires once', async () => {
+        const { info } = await emitAfterGap();
+
+        await (service as any).detectRetryAmplification(info, mockCtx, 901_000);
+        await (service as any).detectRetryAmplification(info, mockCtx, 1_000_000);
+
+        expect(
+          service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+      });
+    });
+
     describe('load saturation saves', () => {
       const info = (busy: number) => ({
         instantaneous_eventloop_duration_usec: String(busy * 10),

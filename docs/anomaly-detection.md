@@ -349,7 +349,7 @@ Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for r
 
 Runs that end before reaching 3 windows are recorded as transient.
 
-An episode ends after 2 cold windows, or when the monitor misses samples for longer than 2 windows or 3 poll intervals, whichever is longer. Anything shorter counts as the same episode, so a brief blip does not re-alert on the same storm. After a longer gap, a storm that is still running opens a new episode, and its finding fires again after 3 hot windows.
+An episode ends after 2 cold windows, or when the monitor misses samples for longer than 2 windows or 3 poll intervals, whichever is longer. Anything shorter counts as the same episode, so a brief blip does not re-alert on the same storm. After a longer gap, a storm that is still running opens a new episode, and its finding fires again after 3 hot windows. If the windows in hand at a gap qualify, the finding is still raised, dated at the end of the episode and attributed to the episode's own span from stored snapshots, without a new `CLIENT LIST`.
 
 - **WARNING** when the run qualifies
 - **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.
