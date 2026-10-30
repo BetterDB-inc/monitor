@@ -96,11 +96,16 @@ Compliance and audit events for regulated environments:
 
 ## Payload Format
 
-Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
+Set `payloadFormat` per webhook (`generic` default, `slack`, `discord`,
+`pagerduty`, `teams`, or `google_chat`).
 `generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
-blocks and `discord` sends an embed with the same fields (instance, metric,
-value/baseline, link back to `/anomalies` or `/dashboard`).
-HMAC headers are still sent for all formats; Slack/Discord ignore them.
+blocks, `discord` an embed, `teams` an Adaptive Card and `google_chat` a
+`cardsV2` card with the same fields
+(instance, metric, value/baseline, link back to `/anomalies` or `/dashboard`).
+`pagerduty` sends a PagerDuty Events API v2 event (see
+[PagerDuty](#pagerduty) below).
+HMAC headers are still sent for all formats; Slack, Discord, Teams, Google
+Chat and PagerDuty ignore them.
 
 Getting the webhook URL: Slack — create an app and enable an **Incoming
 Webhook** in its configuration; Discord — **Channel Settings → Integrations
@@ -793,7 +798,11 @@ A webhook delivery is considered successful when:
 - HTTP response status is 2xx (200-299)
 - Response received within timeout (default: 30 seconds)
 
-Any other response (4xx, 5xx, timeout, network error) triggers a retry.
+Server errors (5xx), `429 Too Many Requests`, timeouts and network errors are retried with the policy above. Other client errors (4xx) and redirects (3xx) fail immediately: the receiver rejected the request, so sending it again would fail the same way.
+
+A `429` waits at least as long as the receiver's `Retry-After` header (capped at 10 minutes) and does not count toward `maxRetries`. A delivery still rate-limited after 1 hour fails.
+
+A retried PagerDuty trigger is skipped if the recovery event for its condition (for example `instance.up` for `instance.down`) was already delivered to the same webhook. PagerDuty sends for one webhook and incident are sent one at a time, so a trigger retry and its recovery cannot race, and when both are pending the recovery is always the last event PagerDuty receives.
 
 ## Per-Webhook Configuration
 
@@ -1221,6 +1230,7 @@ curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks/{i
 3. **Secret mismatch**
    - Verify secret matches exactly (no trailing whitespace)
    - Check secret wasn't redacted when retrieving webhook details
+   - Updates that send back the redacted secret from a GET response (for example `whsec_abcd***`) keep the stored secret. Older versions saved the redacted value instead, so a webhook edited in the web UI before this fix may now sign with `whsec_abcd***`; set the secret again to recover
 
 4. **Character encoding issues**
    - Ensure UTF-8 encoding for all strings
@@ -1310,20 +1320,23 @@ BetterDB blocks private IP addresses to prevent SSRF attacks:
 
 ### Slack
 
+Create a Slack app, enable **Incoming Webhooks** and add one to a channel, then:
+
 ```bash
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Slack Notifications",
     "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+    "payloadFormat": "slack",
     "events": ["instance.down", "memory.critical"],
     "enabled": true
   }'
 ```
 
-Your endpoint should transform BetterDB payloads to Slack's format.
-
 ### PagerDuty
+
+In PagerDuty open the service, then **Integrations → Add an integration → Events API v2**, and copy the 32-character **Integration Key**. Pass it as `routingKey` (the URL is the same for every service; use `https://events.eu.pagerduty.com/v2/enqueue` for an EU account):
 
 ```bash
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
@@ -1331,15 +1344,30 @@ curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -d '{
     "name": "PagerDuty Incidents",
     "url": "https://events.pagerduty.com/v2/enqueue",
-    "headers": {
-      "Authorization": "Token token=YOUR_INTEGRATION_KEY"
-    },
-    "events": ["instance.down", "cluster.failover"],
+    "payloadFormat": "pagerduty",
+    "routingKey": "YOUR_32_CHARACTER_INTEGRATION_KEY",
+    "events": ["instance.down", "instance.up", "writes.rejected", "writes.recovered", "memory.critical"],
     "enabled": true
   }'
 ```
 
+How events map to incidents:
+
+- Every event carries a `dedup_key` of the form `betterdb:<connectionId>:<event>` (anomalies add the metric: `betterdb:<connectionId>:anomaly.detected:<metricType>`). PagerDuty folds repeats of the same condition into the open incident instead of paging again.
+- Recovery events **resolve** the incident their opener raised, through the same key: `instance.up` resolves `instance.down`, `writes.recovered` resolves `writes.rejected`, `failover.completed` resolves `failover.started`. Subscribe to both events of a pair to get auto-resolve.
+- Severity is `critical`, `error`, `warning` or `info` per event (for example `instance.down` and `data.loss.detected` are `critical`, `replication.lag` is `error`, `latency.spike` is `warning`). Events that grade themselves (`anomaly.detected`, `writes.rejected`, `cluster.demoted.writes`) use their own `severity`.
+- `summary` is the event message, `source` is `host:port`, `custom_details` holds the full event data, and the incident links back to BetterDB when `FRONTEND_URL` is set.
+- `config.changed` and `acl.modified` (Enterprise) are sent to PagerDuty's [Change Events API](https://developer.pagerduty.com/docs/events-api-v2/send-change-events/) instead (`/v2/change/enqueue` on the same host). They appear on the service's timeline next to the incidents they may explain, and never page anyone. When the webhook URL is not PagerDuty's own `/v2/enqueue` (for example a relay), they are sent as `info` alerts.
+
+`POST /webhooks/:id/test` on a PagerDuty webhook sends an `info` event on a separate test key (`betterdb:test:<webhookId>`) and then attempts to resolve it, so a test never touches a real incident. `testIncidentResolved` reports whether that resolve was accepted. The resolve is attempted after a 2xx, a 5xx or a timeout. It is skipped when the request never reached PagerDuty or was rejected with a 4xx (including 429). If `testIncidentResolved` is `false`, the test incident may still be open on the test key; the next successful test closes it.
+
+When editing a webhook, redacted values (`whsec_abcd***`, `R012***`), `''` and `null` for `secret` and `routingKey` all mean "keep the stored value". Switching a webhook to the PagerDuty format replaces a Slack, Discord, Teams or Google Chat URL with the PagerDuty endpoint; a custom relay URL is kept, with a warning that the integration key is sent to it. Use an `https://` relay URL: the PagerDuty body, including the integration key, is sent in the request.
+
+The routing key is redacted in API responses (`R012***`). Sending the redacted value back in an update keeps the stored key, as it does for `secret`.
+
 ### Discord
+
+**Channel Settings → Integrations → Webhooks → New Webhook**, then:
 
 ```bash
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
@@ -1347,6 +1375,7 @@ curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -d '{
     "name": "Discord Alerts",
     "url": "https://discord.com/api/webhooks/YOUR/DISCORD/WEBHOOK",
+    "payloadFormat": "discord",
     "events": ["instance.down", "instance.up"],
     "enabled": true
   }'
@@ -1354,16 +1383,39 @@ curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
 
 ### Microsoft Teams
 
+Microsoft is retiring Office 365 connectors in Teams, so create the webhook with **Workflows**: in the channel, **⋯ → Workflows → Post to a channel when a webhook request is received**, finish the wizard and copy the URL it shows (it looks like `https://….logic.azure.com/workflows/…` or `https://….api.powerplatform.com/…/workflows/…`). Then:
+
 ```bash
 curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Teams Notifications",
-    "url": "https://outlook.office.com/webhook/YOUR/TEAMS/WEBHOOK",
+    "url": "https://prod-00.westus.logic.azure.com:443/workflows/YOUR/WORKFLOW/URL",
+    "payloadFormat": "teams",
     "events": ["memory.critical", "connection.critical"],
     "enabled": true
   }'
 ```
+
+The body is a message with one Adaptive Card (version 1.4) attachment, the format the Workflows template posts to the channel. The card title is coloured by severity (green for recovery events) and lists event, instance, metric, value/baseline and time. Existing `*.webhook.office.com` incoming webhooks accept the same body.
+
+### Google Chat
+
+In the space, open **Apps & integrations → Webhooks → Add webhook** and copy the URL (`https://chat.googleapis.com/v1/spaces/…/messages?key=…&token=…`). Then:
+
+```bash
+curl -b cookies.txt -c cookies.txt -X POST http://localhost:3001/api/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Google Chat Alerts",
+    "url": "https://chat.googleapis.com/v1/spaces/YOUR_SPACE/messages?key=KEY&token=TOKEN",
+    "payloadFormat": "google_chat",
+    "events": ["instance.down", "instance.up"],
+    "enabled": true
+  }'
+```
+
+The message has notification `text` plus one `cardsV2` card with event, instance, metric, value/baseline, time and a "View in BetterDB" button. Angle brackets in event text are replaced with `‹ ›`, so a client name or ACL username cannot mention `<users/all>` or add a masked link.
 
 ### Custom HTTP Endpoint
 

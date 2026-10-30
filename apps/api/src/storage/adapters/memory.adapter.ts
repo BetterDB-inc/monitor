@@ -63,6 +63,7 @@ import {
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
+  WebhookUpdate,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   AgentToken,
@@ -931,7 +932,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async updateWebhook(
     id: string,
-    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+    updates: WebhookUpdate,
   ): Promise<Webhook | null> {
     return this.webhookRepo.updateWebhook(id, updates);
   }

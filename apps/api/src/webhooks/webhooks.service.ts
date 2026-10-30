@@ -2,11 +2,12 @@ import { Injectable, Inject, Logger, BadRequestException, NotFoundException, For
 import { randomBytes, createHmac } from 'crypto';
 import type { Webhook, WebhookDelivery, WebhookEventType, DEFAULT_RETRY_POLICY } from '@betterdb/shared';
 import { Tier, validateEventsForTier, getRequiredTierForEvent, getEventsForTier, getLockedEventsForTier } from '@betterdb/shared';
-import { WebhookPayloadFormat } from '@betterdb/shared';
+import { WebhookPayloadFormat, hasPagerDutyEventsHost, isValidPagerDutyRoutingKey } from '@betterdb/shared';
 import { assertSafeOutboundUrl } from '../common/utils/outbound-url-guard';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { CreateWebhookDto, UpdateWebhookDto } from '../common/dto/webhook.dto';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { redactRoutingKey } from './webhook-incident';
 import { LicenseService } from '@proprietary/licenses';
 
 @Injectable()
@@ -85,6 +86,10 @@ export class WebhooksService {
     // Validate event tier access
     this.validateEventTiers(dto.events);
 
+    const payloadFormat = dto.payloadFormat ?? WebhookPayloadFormat.GENERIC;
+    this.validateRoutingKey(payloadFormat, dto.routingKey);
+    this.validatePagerDutyUrl(payloadFormat, dto.url);
+
     // Generate secret if not provided
     const secret = dto.secret || this.generateSecret();
 
@@ -107,7 +112,8 @@ export class WebhooksService {
       deliveryConfig: dto.deliveryConfig,
       alertConfig: dto.alertConfig,
       thresholds: dto.thresholds,
-      payloadFormat: dto.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+      payloadFormat,
+      routingKey: payloadFormat === WebhookPayloadFormat.PAGERDUTY ? dto.routingKey || undefined : undefined,
       connectionId: this.resolveConnectionId(dto.connectionId),
     });
 
@@ -173,7 +179,34 @@ export class WebhooksService {
       this.validateEventTiers(dto.events);
     }
 
-    const updated = await this.storageClient.updateWebhook(id, dto);
+    const existing = await this.storageClient.getWebhook(id);
+    if (!existing) {
+      throw new NotFoundException(`Webhook with ID ${id} not found`);
+    }
+
+    // GET responses carry redacted credentials. A client that edits a webhook
+    // and sends the object back (the web UI does) must not overwrite the real
+    // secret / routing key with the redacted placeholder.
+    const updates: Omit<UpdateWebhookDto, 'routingKey'> & { routingKey?: string | null } = { ...dto };
+    // '', null or the redacted form of the stored value means "keep the stored value".
+    const redacted = this.redactSecret(existing);
+    if (updates.secret === undefined || updates.secret === null || updates.secret === '' ||
+        updates.secret === redacted.secret) delete updates.secret;
+    if (updates.routingKey === undefined || updates.routingKey === null || updates.routingKey === '' ||
+        (existing.routingKey !== undefined && updates.routingKey === redactRoutingKey(existing.routingKey))) {
+      delete updates.routingKey;
+    }
+
+    const effectiveFormat = updates.payloadFormat ?? existing.payloadFormat ?? WebhookPayloadFormat.GENERIC;
+    this.validateRoutingKey(effectiveFormat, updates.routingKey ?? existing.routingKey);
+    this.validatePagerDutyUrl(effectiveFormat, updates.url ?? existing.url);
+    if (effectiveFormat !== WebhookPayloadFormat.PAGERDUTY) {
+      // A key only means something to PagerDuty: drop a sent one, clear a stored one.
+      delete updates.routingKey;
+      if (existing.routingKey) updates.routingKey = null;
+    }
+
+    const updated = await this.storageClient.updateWebhook(id, updates);
     if (!updated) {
       throw new NotFoundException(`Webhook with ID ${id} not found`);
     }
@@ -231,30 +264,60 @@ export class WebhooksService {
     };
   }
 
+  /** PagerDuty's own Events hosts are https only; other hosts (relays, proxies) are left alone. */
+  private validatePagerDutyUrl(payloadFormat: WebhookPayloadFormat, url: string): void {
+    if (
+      payloadFormat === WebhookPayloadFormat.PAGERDUTY &&
+      hasPagerDutyEventsHost(url) &&
+      new URL(url).protocol !== 'https:'
+    ) {
+      throw new BadRequestException('PagerDuty webhooks must use https://');
+    }
+  }
+
   /**
-   * Redact webhook secret for API responses
+   * A PagerDuty webhook cannot deliver without a routing key, and any key that
+   * is supplied must have PagerDuty's shape, whatever the format.
+   */
+  private validateRoutingKey(payloadFormat: WebhookPayloadFormat, routingKey: string | undefined): void {
+    if (routingKey !== undefined && routingKey !== '' && !isValidPagerDutyRoutingKey(routingKey)) {
+      throw new BadRequestException(
+        'routingKey must be a PagerDuty integration key (32 letters and digits)',
+      );
+    }
+    if (payloadFormat === WebhookPayloadFormat.PAGERDUTY && !routingKey) {
+      throw new BadRequestException(
+        'routingKey is required for the pagerduty payload format (PagerDuty service > Integrations > Events API v2 > Integration Key)',
+      );
+    }
+  }
+
+  /**
+   * Redact webhook secret (and PagerDuty routing key) for API responses
    * Shows only a small prefix to help identify the secret without revealing it
    */
   redactSecret(webhook: Webhook): Webhook {
+    const redacted: Webhook = { ...webhook };
+    if (webhook.routingKey) {
+      redacted.routingKey = redactRoutingKey(webhook.routingKey);
+    }
     if (!webhook.secret) {
-      return webhook;
+      return redacted;
     }
 
     const secret = webhook.secret;
-    let redacted: string;
-
     if (secret.startsWith('whsec_')) {
       // For whsec_ prefixed secrets, show prefix + up to 4 chars
       const rest = secret.slice(6);
       const visibleChars = Math.min(4, rest.length);
-      redacted = `whsec_${rest.substring(0, visibleChars)}***`;
+      redacted.secret = `whsec_${rest.substring(0, visibleChars)}***`;
     } else {
       // For other secrets, show 2-4 chars based on length
       const visibleChars = secret.length < 8 ? 2 : 4;
-      redacted = `${secret.substring(0, Math.min(visibleChars, secret.length))}***`;
+      redacted.secret = `${secret.substring(0, Math.min(visibleChars, secret.length))}***`;
     }
 
-    return { ...webhook, secret: redacted };
+    return redacted;
   }
 
   /**
