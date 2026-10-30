@@ -162,6 +162,60 @@ describe('SpikeDetector', () => {
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       expect(detector.detect(buffer, 5, 50000)).toBeNull();
     });
+
+    it('still labels a below-threshold value with a negative z-score as a drop', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        detectDrops: true,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      const result = detector.detect(buffer, 5, 50000);
+      expect(result).not.toBeNull();
+      expect(result!.zScore).toBeLessThan(0);
+      expect(result!.anomalyType).toBe(AnomalyType.DROP);
+    });
+
+    it('holds a value pinned over the threshold at z = 0 to one alert per cooldown', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 30000,
+      });
+      fillBuffer(buffer, 30, 20);
+      const fired: number[] = [];
+      for (let t = 50000; t < 110000; t += 1000) {
+        const result = detector.detect(buffer, 20, t);
+        if (result) {
+          expect(result.zScore).toBe(0);
+          fired.push(t);
+        }
+      }
+      expect(fired).toEqual([50000, 80000]);
+    });
+
+    it('holds a value over the threshold but below the mean to one alert per cooldown', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 30000,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      const fired: number[] = [];
+      for (let t = 50000; t < 110000; t += 1000) {
+        if (detector.detect(buffer, 60, t)) {
+          fired.push(t);
+        }
+      }
+      expect(fired).toEqual([50000, 80000]);
+    });
   });
 
   describe('consecutive sample requirement', () => {
