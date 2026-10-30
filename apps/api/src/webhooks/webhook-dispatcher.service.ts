@@ -734,17 +734,35 @@ export class WebhookDispatcherService implements OnModuleDestroy {
    * POST `body` to `url` with a timeout. Resolves with the Response for any
    * HTTP status; rejects on timeout (`AbortError`), blocked address, DNS or
    * connection errors. The timer is always cleared.
+   *
+   * With `read`, the timer stays armed until `read` has consumed the response
+   * body, so a receiver that sends headers and then stalls also times out
+   * (`AbortError`). Aborting the signal does not reliably surface as an
+   * AbortError from a body read (callers swallow read errors), so the read is
+   * raced against the abort.
    */
-  private async postWithTimeout(
+  private async postWithTimeout<T = Response>(
     url: string,
     headers: Record<string, string>,
     body: string,
     timeoutMs: number,
-  ): Promise<Response> {
+    read?: (response: Response) => Promise<T>,
+  ): Promise<T> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await this.post(url, headers, body, controller.signal);
+      const response = await this.post(url, headers, body, controller.signal);
+      if (!read) return response as T;
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        return await Promise.race([read(response), aborted]);
+      } finally {
+        if (onAbort) controller.signal.removeEventListener('abort', onAbort);
+      }
     } finally {
       clearTimeout(timeoutId);
     }
@@ -828,10 +846,16 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
       // Send request with timeout
       try {
-        const response = await this.postWithTimeout(rendered.url, headers, payloadString, timeoutMs);
+        const { response, text } = await this.postWithTimeout(
+          rendered.url,
+          headers,
+          payloadString,
+          timeoutMs,
+          async (res) => ({ response: res, text: await res.text().catch(() => '') }),
+        );
 
         statusCode = response.status;
-        responseBody = await response.text().catch(() => '');
+        responseBody = text;
 
         // Consider 2xx as success
         if (response.ok) {
@@ -891,14 +915,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     const durationMs = Date.now() - startTime;
 
     // Update delivery record
-    await this.updateDelivery(deliveryId, webhook, status, {
+    return this.updateDelivery(deliveryId, webhook, status, {
       statusCode,
       responseBody: responseBody?.substring(0, maxResponseBodyBytes),
       durationMs,
       retryAfterMs,
     });
-
-    return status;
   }
 
   private recordPagerDutyResolve(webhook: Webhook, payload: WebhookPayload): void {
@@ -982,6 +1004,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
   /**
    * Update delivery record after attempt
+   * @returns The status to report for this attempt: `status`, except a 429
+   * past the rate-limit window, which is stored (and returned) as FAILED.
    */
   private async updateDelivery(
     deliveryId: string,
@@ -993,12 +1017,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       durationMs: number;
       retryAfterMs?: number;
     },
-  ): Promise<void> {
+  ): Promise<DeliveryStatus> {
     try {
       const delivery = await this.storageClient.getDelivery(deliveryId);
       if (!delivery) {
         this.logger.error(`Delivery not found: ${deliveryId}`);
-        return;
+        return status;
       }
 
       // A 429 is the receiver asking us to slow down, not a failed attempt: it
@@ -1020,7 +1044,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
 
       // If retrying, calculate next retry time
       if (rateLimited && Date.now() - delivery.createdAt > RATE_LIMIT_MAX_WINDOW_MS) {
-        updates.status = DeliveryStatus.FAILED;
+        status = DeliveryStatus.FAILED;
+        updates.status = status;
         updates.responseBody = 'Rate limited (HTTP 429) for over 1 h; giving up';
         updates.completedAt = Date.now();
         this.logger.warn(`Delivery ${deliveryId} failed: rate limited for over 1 h`);
@@ -1047,6 +1072,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Failed to update delivery ${deliveryId}:`, error);
     }
+    return status;
   }
 
   /**
@@ -1064,9 +1090,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     try {
       // Same headers as the trigger, signed for this body.
       const headers = this.buildRequestHeaders(webhook, body, testPayload.timestamp, this.testHeaders(webhook, testPayload));
-      const response = await this.postWithTimeout(webhook.url, headers, body, timeoutMs);
-      await response.text().catch(() => '');
-      return response.ok;
+      return await this.postWithTimeout(webhook.url, headers, body, timeoutMs, async (response) => {
+        await response.text().catch(() => '');
+        return response.ok;
+      });
     } catch (error) {
       this.logger.warn(
         `Failed to resolve PagerDuty test incident for webhook ${webhook.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1165,17 +1192,25 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       );
 
       let response: Response;
+      let responseBody: string;
       try {
-        response = await this.postWithTimeout(webhook.url, headers, payloadString, timeoutMs);
-        triggerSent = true;
-        triggerStatus = response.status;
+        ({ response, text: responseBody } = await this.postWithTimeout(
+          webhook.url,
+          headers,
+          payloadString,
+          timeoutMs,
+          async (res) => {
+            // `read` runs only once `post` has returned, so the request was sent.
+            triggerSent = true;
+            triggerStatus = res.status;
+            return { response: res, text: await res.text().catch(() => '') };
+          },
+        ));
       } catch (error) {
         // A timeout means the request went out and only the response was lost.
         if (error instanceof Error && error.name === 'AbortError') triggerSent = true;
         throw error;
       }
-
-      const responseBody = await response.text().catch(() => '');
 
       if (isPagerDuty && this.shouldResolvePagerDutyTest(triggerSent, triggerStatus)) {
         testIncidentResolved = await this.resolvePagerDutyTest(webhook, testPayload, timeoutMs);

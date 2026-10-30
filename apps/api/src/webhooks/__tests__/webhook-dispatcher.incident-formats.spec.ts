@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'http';
+import { createServer, type Server, type ServerResponse } from 'http';
 import type { AddressInfo } from 'net';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -25,6 +25,9 @@ describe('WebhookDispatcherService incident formats', () => {
   let delays: number[];
   /** Retry-After header for 429 responses, if any. */
   let retryAfter: string | undefined;
+  /** Number of upcoming requests to answer with headers only and never finish the body. */
+  let stallNext: number;
+  let stalled: ServerResponse[];
   let storage: { getDelivery: jest.Mock; updateDelivery: jest.Mock; getDeliveriesByWebhook?: jest.Mock };
   let service: WebhookDispatcherService;
 
@@ -58,6 +61,13 @@ describe('WebhookDispatcherService incident formats', () => {
       req.on('data', (chunk) => (body += chunk));
       req.on('end', () => {
         hits.push({ url: req.url ?? '', body: JSON.parse(body || '{}') });
+        if (stallNext > 0) {
+          stallNext--;
+          res.writeHead(202);
+          res.flushHeaders();
+          stalled.push(res);
+          return;
+        }
         const status = statuses.shift() ?? 202;
         setTimeout(() => {
           res
@@ -72,7 +82,13 @@ describe('WebhookDispatcherService incident formats', () => {
 
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
 
+  afterEach(() => {
+    for (const res of stalled) res.destroy();
+  });
+
   beforeEach(() => {
+    stallNext = 0;
+    stalled = [];
     hits = [];
     statuses = [];
     delays = [];
@@ -154,10 +170,21 @@ describe('WebhookDispatcherService incident formats', () => {
     it('429 past the 1 h window fails the delivery', async () => {
       storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 1, createdAt: Date.now() - 2 * 60 * 60_000 });
       statuses = [429];
-      await service.sendWebhook(hook(), 'd1', payload);
+      await expect(service.sendWebhook(hook(), 'd1', payload)).resolves.toBe(DeliveryStatus.FAILED);
       expect(storage.updateDelivery.mock.calls[0][1]).toMatchObject({
         status: DeliveryStatus.FAILED,
         responseBody: 'Rate limited (HTTP 429) for over 1 h; giving up',
+      });
+      expect(storage.updateDelivery.mock.calls[0][1]).not.toHaveProperty('nextRetryAt');
+    });
+
+    it('429 inside the 1 h window resolves RETRYING and schedules a retry', async () => {
+      storage.getDelivery.mockResolvedValue({ id: 'd1', attempts: 1, createdAt: Date.now() - 5 * 60_000 });
+      statuses = [429];
+      await expect(service.sendWebhook(hook(), 'd1', payload)).resolves.toBe(DeliveryStatus.RETRYING);
+      expect(storage.updateDelivery.mock.calls[0][1]).toMatchObject({
+        status: DeliveryStatus.RETRYING,
+        nextRetryAt: expect.any(Number),
       });
     });
   });
@@ -453,6 +480,39 @@ describe('WebhookDispatcherService incident formats', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('a receiver that stalls after sending headers does not block later sends for the same incident', async () => {
+      const stalling = hook({ deliveryConfig: { timeoutMs: 200 } });
+      const resolve: WebhookPayload = {
+        ...payload,
+        id: 'p2',
+        event: WebhookEventType.INSTANCE_UP,
+        timestamp: payload.timestamp + 1000,
+      };
+      stallNext = 1;
+      const started = Date.now();
+      const first = service.sendWebhook(stalling, 'd1', payload, 0);
+      const second = service.sendWebhook(stalling, 'd2', resolve, 0);
+      await expect(first).resolves.toBe(DeliveryStatus.RETRYING);
+      await expect(second).resolves.toBe(DeliveryStatus.SUCCESS);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(storage.updateDelivery.mock.calls[0][1]).toMatchObject({
+        status: DeliveryStatus.RETRYING,
+        responseBody: 'Request timeout',
+      });
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
+    });
+
+    it('a stalled body does not hang the PagerDuty test trigger', async () => {
+      stallNext = 1;
+      const started = Date.now();
+      const result = await service.testWebhook(hook({ deliveryConfig: { timeoutMs: 200 } }));
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(typeof result.success).toBe('boolean');
+      expect(result.success).toBe(false);
+      // The trigger went out, so the test incident is resolved afterwards.
+      expect(hits.map((hit) => hit.body['event_action'])).toEqual(['trigger', 'resolve']);
     });
 
     it('trigger, resolve and delivery send identical header sets', async () => {

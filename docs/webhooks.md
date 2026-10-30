@@ -1361,7 +1361,7 @@ How events map to incidents:
 
 `POST /webhooks/:id/test` on a PagerDuty webhook sends an `info` event on a separate test key (`betterdb:test:<webhookId>`) and then attempts to resolve it, so a test never touches a real incident. `testIncidentResolved` reports whether that resolve was accepted. The resolve is attempted after a 2xx, a 5xx or a timeout. It is skipped when the request never reached PagerDuty or was rejected with a 4xx (including 429). If `testIncidentResolved` is `false`, the test incident may still be open on the test key; the next successful test closes it.
 
-When editing a webhook, redacted values (`whsec_abcd***`, `R012***`), `''` and `null` for `secret` and `routingKey` all mean "keep the stored value". Switching a webhook to the PagerDuty format replaces a Slack, Discord, Teams or Google Chat URL with the PagerDuty endpoint; a custom relay URL is kept, with a warning that the integration key is sent to it.
+When editing a webhook, redacted values (`whsec_abcd***`, `R012***`), `''` and `null` for `secret` and `routingKey` all mean "keep the stored value". Switching a webhook to the PagerDuty format replaces a Slack, Discord, Teams or Google Chat URL with the PagerDuty endpoint; a custom relay URL is kept, with a warning that the integration key is sent to it. Use an `https://` relay URL: the PagerDuty body, including the integration key, is sent in the request.
 
 The routing key is redacted in API responses (`R012***`). Sending the redacted value back in an update keeps the stored key, as it does for `secret`.
 
