@@ -5858,13 +5858,11 @@ export class AnomalyService
     }
     const later = await Promise.all(
       [...signals.values()].map(async (signal) => {
-        const after = await this.getRecentAnomalies(
+        const after = await this.anomaliesInRange(
+          [signal.connectionId],
           windowEnd + 1,
           undefined,
-          undefined,
           signal.metricType,
-          1000,
-          signal.connectionId,
         );
         return after.reduce<AnomalyEvent | null>(
           (first, e) =>
@@ -5885,19 +5883,55 @@ export class AnomalyService
     endTime: number | undefined,
   ): Promise<AnomalyEvent[]> {
     const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
+    return this.anomaliesInRange(connectionIds, loadFrom, endTime);
+  }
+
+  private async anomaliesInRange(
+    connectionIds: Array<string | undefined>,
+    startTime: number,
+    endTime: number | undefined,
+    metricType?: MetricType,
+  ): Promise<AnomalyEvent[]> {
     const batches = await Promise.all(
-      connectionIds.map((id) =>
-        this.getRecentAnomalies(loadFrom, endTime, undefined, undefined, 1000, id),
+      connectionIds.map((connectionId) =>
+        this.storedAnomaliesInRange(connectionId, startTime, endTime, metricType),
       ),
     );
     const scope = new Set(connectionIds);
     const cached = this.recentAnomalies.filter(
       (e) =>
-        e.timestamp >= loadFrom &&
+        e.timestamp >= startTime &&
         (!endTime || e.timestamp <= endTime) &&
-        (!connectionId || scope.has(e.connectionId)),
+        (!metricType || e.metricType === metricType) &&
+        (scope.has(undefined) || scope.has(e.connectionId)),
     );
     return [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
+  }
+
+  private async storedAnomaliesInRange(
+    connectionId: string | undefined,
+    startTime: number,
+    endTime: number | undefined,
+    metricType: MetricType | undefined,
+  ): Promise<AnomalyEvent[]> {
+    const pageSize = 1000;
+    const events: AnomalyEvent[] = [];
+    for (let offset = 0; offset < MAX_SCANNED_CALLER_EVENTS; offset += pageSize) {
+      const page = await this.storage.getAnomalyEvents({
+        startTime,
+        endTime,
+        metricType: metricType as string,
+        connectionId,
+        limit: pageSize,
+        offset,
+      });
+      events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
+      if (page.length < pageSize) return events;
+    }
+    this.logger.warn(
+      `Incident history for ${connectionId ?? 'all connections'} stopped at ${events.length} events`,
+    );
+    return events;
   }
 
   private scopeConnectionIds(connectionId: string): string[] {

@@ -7541,6 +7541,92 @@ describe('AnomalyService', () => {
       );
     });
 
+    const pagedStorage = (rows: any[]) => {
+      const newestFirst = [...rows].sort((a, b) => b.timestamp - a.timestamp);
+      storage.getAnomalyEvents.mockImplementation(
+        async ({ startTime, endTime, limit = 100, offset = 0 }: any) =>
+          newestFirst
+            .filter(
+              (e) =>
+                (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+            )
+            .slice(offset, offset + limit),
+      );
+    };
+
+    it('keeps an incident whole when it straddles the thousand-row boundary', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      pagedStorage(
+        Array.from({ length: 1500 }, (_, i) => ({
+          ...anomaly({ id: `event-${i}`, timestamp: t + i * 1000 }),
+          anomalyType: 'spike',
+        })),
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1', t);
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].startedAt).toBe(t);
+      await expect(service.getIncidentTimeline(incidents[0].incidentId, 'conn-1')).resolves.toEqual(
+        incidents[0],
+      );
+    });
+
+    it('counts a row once when equal timestamps repeat it across pages', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const row = (id: number) => ({
+        ...anomaly({ id: `event-${id}`, timestamp: t }),
+        anomalyType: 'spike',
+      });
+      storage.getAnomalyEvents.mockImplementation(async ({ offset = 0 }: any) =>
+        offset === 0 ? Array.from({ length: 1000 }, (_, i) => row(i)) : [row(999), row(1000)],
+      );
+
+      const events = await (service as any).anomaliesInRange(['conn-1'], t, undefined);
+
+      expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(1001);
+      expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(1001);
+    });
+
+    it('warns and stops paging at the scan cap', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+      storage.getAnomalyEvents.mockImplementation(async ({ offset = 0 }: any) =>
+        Array.from({ length: 1000 }, (_, i) => ({
+          ...anomaly({ id: `event-${offset + i}`, timestamp: t }),
+          anomalyType: 'spike',
+        })),
+      );
+
+      const events = await (service as any).anomaliesInRange(['conn-1'], t, undefined);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(100);
+      expect(events).toHaveLength(100_000);
+      expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 100000 events');
+    });
+
+    it('binds the next firing to the earliest of many later events', async () => {
+      const t = Date.now() - 6 * 60 * MIN;
+      pagedStorage([
+        { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' },
+        ...Array.from({ length: 1500 }, (_, i) => ({
+          ...anomaly({ id: `later-${i}`, timestamp: t + 90 * MIN + i * 1000 }),
+          anomalyType: 'spike',
+        })),
+      ]);
+      const probe = jest.fn().mockReturnValue(null);
+      (service as any).incidentRecoveryProbe = probe;
+      const listed = await service.getIncidentTimelines('conn-1', t);
+      const first = listed.find((i) => i.startedAt === t)!;
+
+      probe.mockClear();
+      await service.getIncidentTimeline(first.incidentId, 'conn-1');
+
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: t, until: t + 90 * MIN }),
+      );
+    });
+
     it('only lists incidents that reach into the requested window', async () => {
       const from = Date.now() - 60 * MIN;
       (service as any).recentAnomalies.push(
