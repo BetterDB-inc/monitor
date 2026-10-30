@@ -53,7 +53,8 @@ export class SpikeDetector {
     // Determine if this is a spike or drop
     const isDrop = zScore < 0;
 
-    const exceedsAbsolute = currentValue >= this.config.warningThreshold;
+    const exceedsAbsolute =
+      currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
     const countsAsDrop = isDrop && this.config.detectDrops;
 
     // Skip drops if not configured to detect them
@@ -140,8 +141,8 @@ export class SpikeDetector {
     zScore: number,
   ): string {
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
-    const change = ((value - baseline) / baseline * 100).toFixed(1);
-    const direction = type === AnomalyType.SPIKE ? 'above' : 'below';
+    const change = Math.abs((value - baseline) / baseline * 100).toFixed(1);
+    const direction = value < baseline ? 'below' : 'above';
 
     return `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
            `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +

@@ -149,6 +149,22 @@ describe('SpikeDetector', () => {
       expect(result!.zScore).toBeLessThan(0);
       expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
       expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
+      expect(result!.message).toContain('(94.3% below normal');
+    });
+
+    it('fires a below-mean value over the critical threshold when warning is disabled', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: Infinity,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+      const result = detector.detect(buffer, 60, 50000);
+      expect(result).not.toBeNull();
+      expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
+      expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
     });
 
     it('still ignores a below-mean value under the absolute threshold', () => {
