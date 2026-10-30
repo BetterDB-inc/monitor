@@ -280,6 +280,59 @@ describe('Correlator', () => {
     });
   });
 
+  describe('RETRY_AMPLIFICATION pattern', () => {
+    const message =
+      'WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while ' +
+      'connected clients stay flat at ~100; load is rising with stress (r=0.97). ' +
+      'Trigger: a latency regression (COMMAND_P99). Without client backoff the loop keeps feeding itself.';
+
+    it('names the trigger from the detector event in the diagnosis', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message, connectionId: 'a' }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+      expect(groups[0].diagnosis).toContain('rising together with a latency regression (COMMAND_P99)');
+      expect(groups[0].recommendations.join(' ')).toContain('backoff');
+    });
+
+    it('takes precedence over a co-occurring P99 regression on the same node', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, metricType: MetricType.COMMAND_P99, connectionId: 'a' }),
+        makeAnomaly({
+          timestamp: t + 1000,
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          connectionId: 'a',
+        }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+    });
+
+    it('falls back to the generic diagnosis when the message has no trigger', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message: 'retry amplification' }),
+      ]);
+
+      expect(groups[0].diagnosis).toContain('rising together with a stress signal');
+    });
+
+    it('keeps the detector-stamped related metrics', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          relatedMetrics: [MetricType.COMMAND_P99],
+        }),
+      ]);
+
+      expect(groups[0].anomalies[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    });
+  });
+
   describe('scope partitioning', () => {
     it('keeps anomalies from different connections in separate groups', () => {
       const baseTime = 1000000;

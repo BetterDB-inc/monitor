@@ -169,6 +169,14 @@ import {
   evaluateLoadSaturation,
 } from './load-saturation-detector';
 import {
+  RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+  RETRY_AMP_WINDOW_MS,
+  RetryAmplificationState,
+  acknowledgeRetryAmplificationFinding,
+  createRetryAmplificationState,
+  evaluateRetryAmplification,
+} from './retry-amplification-detector';
+import {
   LargeReplyEntry,
   detectLargeReplyPressure,
   largeReplyPressureSignature,
@@ -378,6 +386,7 @@ export class AnomalyService
   // tracking the acknowledged level and the consecutive-poll counter that keeps
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
+  private retryAmplificationState = new Map<string, RetryAmplificationState>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -755,6 +764,7 @@ export class AnomalyService
     this.controlPlaneState.delete(connectionId);
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
+    this.retryAmplificationState.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.activeLargeReplyOffenders.delete(connectionId);
@@ -1484,6 +1494,8 @@ export class AnomalyService
       // same cpuUtilizationSample so the message can call out when CPU%
       // understates the load. State-based with hysteresis.
       await this.detectLoadSaturation(info, ctx, timestamp, cpuUtilizationSample);
+
+      await this.detectRetryAmplification(info, ctx, timestamp);
 
       // Large-reply commandlog throughput pressure (valkey-io/valkey#2926): hot
       // commands repeatedly crossing commandlog-reply-larger-than pay the
@@ -3087,6 +3099,59 @@ export class AnomalyService
     // retried on the next poll rather than being swallowed by the hysteresis.
     await this.addAnomaly(event, ctx);
     acknowledgeLoadSaturationFinding(state, finding);
+  }
+
+  private async detectRetryAmplification(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    let state = this.retryAmplificationState.get(ctx.connectionId);
+    if (state === undefined) {
+      state = createRetryAmplificationState();
+      this.retryAmplificationState.set(ctx.connectionId, state);
+    }
+
+    const recentEvents = this.recentAnomalies
+      .filter((a) => {
+        return (
+          a.connectionId === ctx.connectionId && timestamp - a.timestamp <= RETRY_AMP_WINDOW_MS
+        );
+      })
+      .map((a) => {
+        return { metricType: a.metricType, timestamp: a.timestamp };
+      });
+
+    const finding = evaluateRetryAmplification(state, {
+      timestamp,
+      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
+      connectedClients: this.parseNumber(info.connected_clients),
+      totalCommands: this.parseNumber(info.total_commands_processed),
+      totalErrorReplies: this.parseNumber(info.total_error_replies),
+      connectsPerSec: this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null,
+      recentEvents,
+    });
+    if (finding === null) return;
+
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.RETRY_AMPLIFICATION,
+      anomalyType: AnomalyType.SPIKE,
+      severity: finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.loadRatio,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+      message: finding.message,
+      relatedMetrics: finding.relatedMetrics,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addAnomaly(event, ctx);
+    acknowledgeRetryAmplificationFinding(state, finding);
   }
 
   /**

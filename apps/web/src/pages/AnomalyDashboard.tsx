@@ -156,6 +156,7 @@ const METRIC_LABELS: Record<string, string> = {
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
+  retry_amplification: 'Retry Amplification',
 };
 
 function formatTime(ts: number): string {
@@ -177,6 +178,7 @@ function formatValue(value: number, metric: string): string {
     return `${value.toFixed(1)}%`;
   }
   if (metric === 'fragmentation_ratio') return value.toFixed(2);
+  if (metric === 'retry_amplification') return `${value.toFixed(1)}×`;
   if (metric === 'command_p99') {
     // Stored in microseconds; show ms once past 1ms, else µs.
     return value >= 1000 ? `${(value / 1000).toFixed(1)} ms` : `${Math.round(value)} µs`;

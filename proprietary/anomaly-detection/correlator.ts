@@ -8,6 +8,11 @@ import {
   AnomalyType,
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
+import { readRetryAmplificationTrigger } from './retry-amplification-detector';
+
+const RETRY_AMPLIFICATION_DIAGNOSIS =
+  'Retry amplification: load per client is rising together with {trigger} while the client ' +
+  'count stays flat — the retry loop is self-sustaining';
 
 interface PatternRule {
   pattern: AnomalyPattern;
@@ -56,6 +61,18 @@ export class Correlator {
           'Check replica connection stability and cluster heartbeat health',
           'Keep a management path available: connect over a unix socket or reserved port for admin commands',
           'Upgrade to a QoS-capable version once the upstream trusted-sources feature (valkey#3927) lands',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
+        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
+        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
+        recommendations: [
+          'Add exponential backoff with jitter and a retry budget to the client retry policy',
+          'Put a circuit breaker in front of the instance so failing calls stop retrying',
+          'Set client timeouts above the observed P99 so slow replies are not retried',
+          'Throttle or inspect the clients whose command rate grew the most',
+          'Shed load until latency and error rates recover',
         ],
       },
       {
@@ -490,6 +507,12 @@ export class Correlator {
    * For NODE_FAILOVER, dynamically mention slowlog correlation if present.
    */
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
+    if (rule.pattern === AnomalyPattern.RETRY_AMPLIFICATION) {
+      const event = anomalies.find((a) => a.metricType === MetricType.RETRY_AMPLIFICATION);
+      const trigger = event ? readRetryAmplificationTrigger(event.message) : null;
+      return trigger ? RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', trigger) : rule.diagnosis;
+    }
+
     if (rule.pattern === AnomalyPattern.NODE_FAILOVER) {
       const hasSlowlogSpike = anomalies.some((a) => a.metricType === MetricType.SLOWLOG_LAST_ID);
       const hasClusterState = anomalies.some((a) => a.metricType === MetricType.CLUSTER_STATE);

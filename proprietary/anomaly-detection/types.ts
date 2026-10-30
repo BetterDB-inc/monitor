@@ -66,6 +66,7 @@ export enum MetricType {
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
   /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
+  RETRY_AMPLIFICATION = 'retry_amplification',
 }
 
 /**
@@ -107,6 +108,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
   MetricType.CONNECTION_CHURN,
+  MetricType.RETRY_AMPLIFICATION,
 ]);
 
 export enum AnomalySeverity {
@@ -132,6 +134,7 @@ export enum AnomalyPattern {
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
+  RETRY_AMPLIFICATION = 'retry_amplification',
   UNKNOWN = 'unknown',
 }
 

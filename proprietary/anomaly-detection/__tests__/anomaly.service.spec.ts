@@ -3285,6 +3285,86 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('retry amplification', () => {
+    async function runRetry(opts: { failFirstEmit?: boolean } = {}) {
+      const recorded: any[] = [];
+      let failures = opts.failFirstEmit ? 1 : 0;
+      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+        if (failures > 0) {
+          failures -= 1;
+          throw new Error('storage down');
+        }
+        recorded.push(a);
+      });
+      let ts = 1_000_000;
+      let commands = 1_000_000;
+      let errors = 0;
+      const errorsCaught: unknown[] = [];
+      for (let w = 0; w < 18; w++) {
+        const hot = w >= 12;
+        const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
+        if (hot) {
+          (service as any).recentAnomalies.push({
+            id: `p99-${w}`,
+            timestamp: ts + 5_000,
+            metricType: MetricType.COMMAND_P99,
+            connectionId: 'conn-1',
+            resolved: false,
+          });
+        }
+        for (let i = 0; i < 60; i++) {
+          commands += 1000 * factor;
+          errors += 0.1;
+          try {
+            await (service as any).detectRetryAmplification(
+              {
+                instantaneous_ops_per_sec: String(1000 * factor),
+                connected_clients: '100',
+                total_commands_processed: String(Math.round(commands)),
+                total_error_replies: String(Math.round(errors)),
+              },
+              mockCtx,
+              ts,
+            );
+          } catch (e) {
+            errorsCaught.push(e);
+          }
+          ts += 1_000;
+        }
+      }
+      return { recorded, errorsCaught };
+    }
+
+    it('emits one warning with the trigger and related metrics', async () => {
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].metricType).toBe(MetricType.RETRY_AMPLIFICATION);
+      expect(recorded[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(recorded[0].connectionId).toBe('conn-1');
+      expect(recorded[0].threshold).toBe(1.3);
+      expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+      expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
+    });
+
+    it('retries a failed emit on the next poll', async () => {
+      const { recorded, errorsCaught } = await runRetry({ failFirstEmit: true });
+
+      expect(errorsCaught).toHaveLength(1);
+      expect(recorded).toHaveLength(1);
+    });
+
+    it('drops the per-connection state when the connection is removed', async () => {
+      await runRetry();
+      expect((service as any).retryAmplificationState.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
+    });
+  });
+
   // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
   describe('client-eviction storm detection', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({
