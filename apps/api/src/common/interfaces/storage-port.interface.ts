@@ -220,6 +220,7 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  correlationIds?: string[];
 }
 
 export interface AnomalyStats {
