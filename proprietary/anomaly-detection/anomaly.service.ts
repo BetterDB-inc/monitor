@@ -6323,6 +6323,7 @@ export class AnomalyService
       await this.storage.getCorrelatedGroupMembers(
         stored.map((s) => s.correlationId),
         stored.flatMap((s) => s.anomalyIds ?? []),
+        this.maxRecentEvents,
       )
     ).map((a) => this.storedToAnomalyEvent(a));
 

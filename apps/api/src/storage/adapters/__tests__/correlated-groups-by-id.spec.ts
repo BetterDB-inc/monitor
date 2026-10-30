@@ -182,14 +182,28 @@ describe.each<[string, AdapterFactory]>(adapters)(
         await save(event(c, 'conn-c', undefined, 300));
         await save(event(noise, CONN, randomUUID(), 400));
 
-        const rows = await storage.getCorrelatedGroupMembers([shared], [c]);
+        const rows = await storage.getCorrelatedGroupMembers([shared], [c], 100);
 
         expect(rows.map((e) => e.id)).toEqual([b, a, c]);
       });
 
       it('returns no members for empty lists and ignores ids storage cannot hold', async () => {
-        expect(await storage.getCorrelatedGroupMembers([], [])).toEqual([]);
-        expect(await storage.getCorrelatedGroupMembers([], ['failover:conn-a:1'])).toEqual([]);
+        expect(await storage.getCorrelatedGroupMembers([], [], 100)).toEqual([]);
+        expect(await storage.getCorrelatedGroupMembers([], ['failover:conn-a:1'], 100)).toEqual([]);
+      });
+
+      it('keeps the newest members of each group up to the bound', async () => {
+        const [big, small] = [randomUUID(), randomUUID()];
+        const solo = randomUUID();
+        const bigIds = Array.from({ length: 5 }, () => randomUUID());
+        for (const [i, id] of bigIds.entries()) await save(event(id, CONN, big, 100 + i));
+        const smallId = randomUUID();
+        await save(event(smallId, CONN, small, 50));
+        await save(event(solo, CONN, undefined, 60));
+
+        const rows = await storage.getCorrelatedGroupMembers([big, small], [solo], 2);
+
+        expect(rows.map((e) => e.id)).toEqual([smallId, solo, bigIds[3], bigIds[4]]);
       });
     });
   },

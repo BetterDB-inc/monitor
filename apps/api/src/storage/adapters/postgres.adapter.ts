@@ -3121,6 +3121,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCorrelatedGroupMembers(
     correlationIds: string[],
     anomalyIds: string[],
+    maxPerGroup: number,
   ): Promise<StoredAnomalyEvent[]> {
     if (!this.pool) throw new Error('Database not initialized');
     if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
@@ -3133,10 +3134,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         message, correlation_id, related_metrics,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
-      FROM anomaly_events
-      WHERE correlation_id = ANY($1::uuid[]) OR id = ANY($2::uuid[])
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(correlation_id::text, id::text) ORDER BY timestamp DESC, id DESC
+        ) AS group_rank
+        FROM anomaly_events
+        WHERE correlation_id = ANY($1::uuid[]) OR id = ANY($2::uuid[])
+      ) ranked
+      WHERE group_rank <= $3
       ORDER BY timestamp ASC, id ASC`,
-      [correlationIds, anomalyIds.filter(isUuid)],
+      [correlationIds, anomalyIds.filter(isUuid), maxPerGroup],
     );
 
     return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row));

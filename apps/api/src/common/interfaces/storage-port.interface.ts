@@ -228,11 +228,11 @@ export interface AnomalyQueryOptions {
   connectionId?: string;
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
+  correlationIds?: string[];
 }
 
 export interface CorrelatedGroupQueryOptions
   extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
-  correlationIds?: string[];
   connectionIds?: string[];
   patterns?: string[];
   involvingConnectionId?: string;
@@ -637,6 +637,7 @@ export interface StoragePort {
   getCorrelatedGroupMembers(
     correlationIds: string[],
     anomalyIds: string[],
+    maxPerGroup: number,
   ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 

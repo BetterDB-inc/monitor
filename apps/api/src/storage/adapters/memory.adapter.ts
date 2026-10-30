@@ -835,12 +835,21 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCorrelatedGroupMembers(
     correlationIds: string[],
     anomalyIds: string[],
+    maxPerGroup: number,
   ): Promise<StoredAnomalyEvent[]> {
     const groups = new Set(correlationIds);
     const ids = new Set(anomalyIds);
+    const seenPerGroup = new Map<string, number>();
     return this.anomalyEvents
       .filter((e) => (e.correlationId && groups.has(e.correlationId)) || ids.has(e.id))
-      .sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      .sort((a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+      .filter((e) => {
+        const group = e.correlationId ?? e.id;
+        const seen = (seenPerGroup.get(group) ?? 0) + 1;
+        seenPerGroup.set(group, seen);
+        return seen <= maxPerGroup;
+      })
+      .reverse();
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

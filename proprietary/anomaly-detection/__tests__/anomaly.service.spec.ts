@@ -7762,7 +7762,11 @@ describe('AnomalyService', () => {
       );
 
       expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
-      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(['grp-seq'], ['c', 'm']);
+      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(
+        ['grp-seq'],
+        ['c', 'm'],
+        1000,
+      );
     });
 
     describe('during a fleet-wide event storm', () => {

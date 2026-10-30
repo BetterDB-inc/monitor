@@ -3040,6 +3040,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCorrelatedGroupMembers(
     correlationIds: string[],
     anomalyIds: string[],
+    maxPerGroup: number,
   ): Promise<StoredAnomalyEvent[]> {
     if (!this.db) throw new Error('Database not initialized');
     if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
@@ -3047,12 +3048,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const placeholders = (values: string[]) => values.map(() => '?').join(', ');
     const rows = this.db
       .prepare(
-        `SELECT * FROM anomaly_events
-        WHERE correlation_id IN (${placeholders(correlationIds)})
-          OR id IN (${placeholders(anomalyIds)})
+        `SELECT * FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(correlation_id, id) ORDER BY timestamp DESC, id DESC
+          ) AS group_rank
+          FROM anomaly_events
+          WHERE correlation_id IN (${placeholders(correlationIds)})
+            OR id IN (${placeholders(anomalyIds)})
+        )
+        WHERE group_rank <= ?
         ORDER BY timestamp ASC, id ASC`,
       )
-      .all(...correlationIds, ...anomalyIds) as any[];
+      .all(...correlationIds, ...anomalyIds, maxPerGroup) as any[];
 
     return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
   }
