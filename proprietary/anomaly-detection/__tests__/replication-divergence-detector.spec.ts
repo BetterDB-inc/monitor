@@ -622,6 +622,34 @@ describe('observeDivergence', () => {
       expect(h.state.replicas.size).toBe(0);
     });
 
+    it('keeps retrying the sent finding after the gap stops growing', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      const plateau = h.windows(
+        [10, 10, 10].map((m) => ({ gap: m * MiB, rate: MiB })),
+        false,
+      );
+
+      expect(plateau.flat()).toEqual([
+        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
+        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
+        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
+      ]);
+    });
+
+    it('stops retrying once the finding is saved', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      const [first, ...rest] = h.windows(
+        [10, 10, 10].map((m) => ({ gap: m * MiB, rate: MiB })),
+      );
+
+      expect(first).toHaveLength(1);
+      expect(rest.flat()).toEqual([]);
+    });
+
     it('hands over each unsaved attempt once', () => {
       const h = new Harness();
       sendWithoutSaving(h);

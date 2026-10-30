@@ -52,6 +52,7 @@ export interface ReplicaDivergenceState {
   windows: DivergenceWindow[];
   level: DivergenceLevel;
   dispatchedLevel: DivergenceLevel;
+  dispatchedReason: DivergenceReason;
   eventId: string | null;
   unsavedEventIds: string[];
   spanStart: number | null;
@@ -174,6 +175,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     windows: [],
     level: 'none',
     dispatchedLevel: 'none',
+    dispatchedReason: 'growth',
     eventId: null,
     unsavedEventIds: [],
     spanStart: null,
@@ -273,12 +275,12 @@ function evaluateReplica(
     reason = 'ceiling';
   }
 
-  if (replica.level === 'none' && target !== 'none') {
+  if (activeLevel(replica) === 'none' && target !== 'none') {
     replica.baselineRate = baselineRate(rateHistory, streak);
   }
 
   const stopped = writesStopped(last);
-  if ((replica.level !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
+  if ((activeLevel(replica) !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
     if (replica.subside === null) {
       replica.subside = { referenceGap: last.gapBytes, windows: 0 };
     } else if (last.gapBytes <= DIVERGENCE_RECOVERY_SHRINK_FRACTION * replica.subside.referenceGap) {
@@ -297,6 +299,10 @@ function evaluateReplica(
     replica.subside = null;
   }
 
+  if (LEVEL_RANK[replica.dispatchedLevel] > LEVEL_RANK[target]) {
+    target = replica.dispatchedLevel;
+    reason = replica.dispatchedReason;
+  }
   if (LEVEL_RANK[target] <= LEVEL_RANK[replica.level]) return null;
 
   const counted = Math.min(Math.max(streak, DIVERGENCE_CEILING_WINDOWS), windows.length);
@@ -531,6 +537,7 @@ export function claimDivergenceDispatch(state: DivergenceConnectionState, findin
   const replica = state.replicas.get(finding.addr);
   if (!replica || LEVEL_RANK[finding.level] <= LEVEL_RANK[replica.dispatchedLevel]) return false;
   replica.dispatchedLevel = finding.level;
+  replica.dispatchedReason = finding.reason;
   return true;
 }
 
