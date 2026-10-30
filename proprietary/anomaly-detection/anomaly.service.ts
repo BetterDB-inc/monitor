@@ -5460,7 +5460,7 @@ export class AnomalyService
     const samples = buffer?.isReady() ? buffer.getSamples() : [];
     if (!buffer || samples.length === 0 || samples[0].timestamp > settledAt) {
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) return settledAt;
-      return METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) ? null : undefined;
+      return !buffer && METRICS_HANDLED_OUTSIDE_EXTRACTOR.has(signal.metricType) ? null : undefined;
     }
     const warningZ =
       this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??

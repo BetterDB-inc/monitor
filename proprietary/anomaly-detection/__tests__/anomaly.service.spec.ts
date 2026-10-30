@@ -6967,6 +6967,14 @@ describe('AnomalyService', () => {
         expect(probe()(signal({ connectionId: 'gone' }))).toBeUndefined();
       });
 
+      it('does not know whether a lazily buffered signal recovered once its buffer moved past it', () => {
+        const buffer = new MetricBuffer(MetricType.CONNECTION_CHURN, 300, 2);
+        baseline(T + 60 * MIN).forEach(([ts, value]) => buffer.addSample(value, ts));
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTION_CHURN, buffer]]));
+
+        expect(probe()(signal({ metricType: MetricType.CONNECTION_CHURN }))).toBeUndefined();
+      });
+
       it('keeps a state signal with no buffer open', () => {
         expect(
           probe()(signal({ connectionId: 'gone', metricType: MetricType.CLUSTER_STATE })),
