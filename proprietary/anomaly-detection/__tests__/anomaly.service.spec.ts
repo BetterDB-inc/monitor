@@ -7381,6 +7381,23 @@ describe('AnomalyService', () => {
         expect(recoveredCalls()).toEqual([]);
       });
 
+      it('closes superseded and restart-orphaned events when the connection is removed', async () => {
+        (service as any).divergenceSuperseded.set('conn-1', new Set(['superseded-1']));
+        (service as any).divergenceOrphans.set(
+          'conn-1',
+          new Map([
+            ['10.0.0.2:6379', { eventIds: new Set(['orphan-1']), sinceWindow: 0, claimed: false }],
+          ]),
+        );
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('superseded-1', expect.any(Number));
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('orphan-1', expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
       it('keeps closing a saved event until storage accepts it after removal', async () => {
         await feed([2, 4, 6, 8, 10, 12], T0);
         const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
@@ -7571,6 +7588,48 @@ describe('AnomalyService', () => {
 
         expect(attempt.resolved).toBe(true);
         expect((service as any).removedDivergenceEvents.size).toBe(0);
+      });
+
+      it('keeps a retried event in its correlated group', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+
+        await feed([12, 14], t);
+
+        expect(group.anomalies).toEqual([divergenceCopies()[0]]);
+        expect(group.anomalies[0]).toBe(divergenceCopies()[0]);
+        await service.resolveGroup(group.correlationId);
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('closes a group member in storage once its retry is saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+        const [attempt] = divergenceCopies();
+        expect(attempt.persisted).toBeUndefined();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([12, 14], t);
+        await service.resolveGroup(group.correlationId);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('keeps a retry resolved when its attempt was resolved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        await service.resolveAnomaly(attempt.id);
+
+        await feed([12, 14], t);
+
+        expect(openCopies()).toEqual([]);
+        expect(divergenceCopies()[0].resolvedAt).toBe(attempt.resolvedAt);
       });
 
       it('shows the sent level while the event cannot be saved', async () => {

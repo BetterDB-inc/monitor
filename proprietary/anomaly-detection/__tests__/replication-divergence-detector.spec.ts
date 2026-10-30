@@ -17,6 +17,7 @@ import {
   requeueClosedWindows,
   takeUnsavedDivergence,
   trackUnsavedDivergence,
+  assessOrphanedReplica,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample } from '../replication-stream';
 
@@ -606,6 +607,13 @@ describe('observeDivergence', () => {
 
       expect(h.state.replicas.get(ADDR)?.level).toBe('none');
       expect(replicaObservedLevel(h.state, ADDR)).toBe('warning');
+    });
+
+    it('counts as diverging for an event left open by a restart', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      expect(assessOrphanedReplica(h.state, ADDR, 0)).toBe('diverging');
     });
 
     it('clears the replica when it drops out', () => {

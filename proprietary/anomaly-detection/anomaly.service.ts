@@ -5415,6 +5415,9 @@ export class AnomalyService
   ): Promise<void> {
     if (retryOf) {
       this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
+      for (const group of this.recentGroups) {
+        group.anomalies = group.anomalies.map((a) => (a.id === retryOf.id ? anomaly : a));
+      }
     }
     this.recentAnomalies.push(anomaly);
 
@@ -6055,10 +6058,16 @@ export class AnomalyService
 
   private closeDivergenceEventsOnRemoval(connectionId: string): void {
     const state = this.divergenceState.get(connectionId);
-    if (!state) return;
-    for (const [addr, replica] of state.replicas) {
-      if (replica.eventId) this.removedDivergenceEvents.add(replica.eventId);
-      for (const id of takeUnsavedDivergence(state, addr)) this.removedDivergenceEvents.add(id);
+    for (const replica of state?.replicas.values() ?? []) {
+      for (const id of [replica.eventId, ...replica.unsavedEventIds]) {
+        if (id) this.removedDivergenceEvents.add(id);
+      }
+    }
+    for (const id of this.divergenceSuperseded.get(connectionId) ?? []) {
+      this.removedDivergenceEvents.add(id);
+    }
+    for (const orphan of this.divergenceOrphans.get(connectionId)?.values() ?? []) {
+      for (const id of orphan.eventIds) this.removedDivergenceEvents.add(id);
     }
     this.resolveRemovedDivergenceEvents().catch((err) => {
       this.logger.error('Failed to resolve divergence events of a removed connection', err);
@@ -6099,7 +6108,8 @@ export class AnomalyService
       stdDev: 0,
       threshold: DIVERGENCE_FLOOR_BYTES,
       message,
-      resolved: false,
+      resolved: attempt?.resolved ?? false,
+      resolvedAt: attempt?.resolvedAt,
       connectionId: ctx.connectionId,
       relatedMetrics,
       correlationId: attempt?.correlationId,

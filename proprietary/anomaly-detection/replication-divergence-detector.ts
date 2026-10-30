@@ -495,7 +495,7 @@ export function assessOrphanedReplica(
   sinceWindow: number,
 ): OrphanAssessment {
   const replica = state.replicas.get(addr);
-  if (replica && replica.level !== 'none') return 'diverging';
+  if (replica && activeLevel(replica) !== 'none') return 'diverging';
   if (!state.observed.has(addr)) {
     const notPrimary = state.windowStart === null;
     const absent = state.closedWindowCount - sinceWindow >= DIVERGENCE_RECOVERED_WINDOWS;
