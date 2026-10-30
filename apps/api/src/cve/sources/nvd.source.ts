@@ -86,10 +86,11 @@ function toRange(match: NvdCpeMatch): BranchRange | null {
     ? { vulnerableAtOrBelow: upperBound.raw }
     : { vulnerableBelow: upperBound.raw };
 
-  // NVD's versionEndExcluding names the first fixed build on this branch. Record
-  // it as patchedAt so matchRanges() never lets a cross-branch wildcard re-flag
-  // a build NVD says is fixed. versionEndIncluding names the last vulnerable
-  // build, not the fix, so it is not a patchedAt.
+  // NVD's versionEndExcluding names the first fixed build on this branch, so it
+  // is recorded as patchedAt and reported as the finding's fixedIn. It does not
+  // affect matching: a fallback range is skipped whenever the version's branch
+  // has any on-branch range (matchRanges). versionEndIncluding names the last
+  // vulnerable build, not the fix, so it is not a patchedAt.
   const patchedAt =
     branch !== '*' && !upperBound.inclusive ? { patchedAt: upperBound.raw } : {};
 

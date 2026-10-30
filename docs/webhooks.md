@@ -406,9 +406,10 @@ Notes:
 - A single finding that is both critical and KEV-exploited emits both
   `cve.critical_detected` (Pro) and `cve.kev_detected` (Enterprise) plus one
   OTel event each, so subscribe accordingly.
-- Findings with confidence `broad` (matched only through NVD data for a branch
-  the vendor advisory doesn't list, typically an end-of-life branch) are shown
-  in the UI but don't fire these events unless `CVE_ALERT_ON_BROAD=true`.
+- Findings matched only through NVD data for a branch the vendor advisory
+  doesn't list (typically an end-of-life branch, shown with confidence `broad`)
+  are shown in the UI but don't fire these events unless
+  `CVE_ALERT_ON_BROAD=true`. Other findings fire regardless of confidence.
 
 ```json
 {

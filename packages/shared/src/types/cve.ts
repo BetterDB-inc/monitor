@@ -35,6 +35,18 @@ export function resolveFindingConfidence(
   return matchedViaFallback ? 'broad' : advisoryConfidence;
 }
 
+/**
+ * Whether a finding may fire cve.critical_detected / cve.kev_detected.
+ * Only fallback-only matches are held back, and only when the setting is off.
+ * Advisory-level confidence never affects alerting.
+ */
+export function isAlertableFinding(
+  finding: { fallback?: true },
+  alertOnFallback: boolean,
+): boolean {
+  return alertOnFallback || finding.fallback !== true;
+}
+
 export interface SourceProvenance {
   source: CveSourceId;
   fields: string[];
@@ -70,6 +82,12 @@ export interface CveFinding {
   fixedIn?: string;
   /** 'broad' when matched only through a fallback range; else the advisory's confidence. */
   confidence?: CveConfidence;
+  /**
+   * True when the finding matched only through an NVD fallback range (a branch
+   * the vendor advisory does not list). Used to gate alert events. Absent on
+   * findings stored before this field existed; those stay alertable.
+   */
+  fallback?: true;
 }
 
 export interface ScannedNode {

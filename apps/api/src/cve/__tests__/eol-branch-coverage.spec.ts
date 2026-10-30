@@ -116,6 +116,7 @@ describe('CVE-2025-49844 (GHSA "All" + NVD fallback wildcard)', () => {
 
     expect(finding).toBeDefined();
     expect(finding.confidence).toBe('broad');
+    expect(finding.fallback).toBe(true);
     expect(finding.fixedIn).toBe(fixedIn);
   });
 
@@ -131,6 +132,7 @@ describe('CVE-2025-49844 (GHSA "All" + NVD fallback wildcard)', () => {
 
     expect(finding).toBeDefined();
     expect(finding.confidence).toBe('exact');
+    expect(finding).not.toHaveProperty('fallback');
   });
 
   it('applies the same rule to pre-release builds, with no special casing', async () => {
@@ -198,6 +200,19 @@ describe('Valkey "<= 9.0.2" with patched TBD', () => {
 
     expect(isVulnerable(ds, '8.1.6', 'valkey')).toBe(false);
     expect(isVulnerable(ds, '8.0.20', 'valkey')).toBe(false);
+  });
+
+  it('flags 8.1.5 through the on-branch NVD range without marking it fallback', async () => {
+    const ds = await dataset(
+      [ghsaAdvisory('CVE-2099-0004', [{ range: '<= 9.0.2', patched: 'TBD' }], 'valkey')],
+      nvdPayload('CVE-2099-0004', [{ start: '8.1.0', end: '8.1.6' }], 'valkey'),
+      'valkey',
+    );
+
+    const finding = findingFor(ds, '8.1.5', 'valkey');
+
+    expect(finding).toBeDefined();
+    expect(finding).not.toHaveProperty('fallback');
   });
 });
 
