@@ -288,7 +288,7 @@ export class AnomalyService
   // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
   private lastEvictedClients = new Map<string, number>();
   private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
-  private lastErrorstatCounts = new Map<string, Map<string, number>>();
+  private lastErrorstatCounts = new Map<string, { counts: Map<string, number>; timestamp: number }>();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
   // connection — so the degraded-detection warning is emitted only on a change,
@@ -3161,7 +3161,7 @@ export class AnomalyService
     const currentCounts = readErrorstatCounts(errorstats);
     const previousCounts = this.lastErrorstatCounts.get(ctx.connectionId);
     if (errorstats !== undefined) {
-      this.lastErrorstatCounts.set(ctx.connectionId, currentCounts);
+      this.lastErrorstatCounts.set(ctx.connectionId, { counts: currentCounts, timestamp });
     }
 
     if (buffers.has(MetricType.ERROR_REPLIES) === false) {
@@ -3191,7 +3191,14 @@ export class AnomalyService
       return;
     }
     anomaly.connectionId = ctx.connectionId;
-    const breakdown = describeErrorstatDeltas(topErrorstatDeltas(previousCounts, currentCounts));
+    const polls =
+      previousCounts === undefined
+        ? 1
+        : Math.round((timestamp - previousCounts.timestamp) / this.getIntervalMs());
+    const breakdown = describeErrorstatDeltas(
+      topErrorstatDeltas(previousCounts?.counts, currentCounts),
+      polls,
+    );
     if (breakdown !== null) {
       anomaly.message = `${anomaly.message} — ${breakdown}`;
     }

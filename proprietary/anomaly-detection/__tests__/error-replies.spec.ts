@@ -102,6 +102,15 @@ describe('error replies helpers', () => {
     });
   });
 
+  describe('describeErrorstatDeltas span', () => {
+    const deltas = [{ prefix: 'ERR', delta: 5 }];
+
+    it('names the span only when it covers more than one poll', () => {
+      expect(describeErrorstatDeltas(deltas, 1)).toBe('top error types: ERR +5');
+      expect(describeErrorstatDeltas(deltas, 4)).toBe('top error types over 4 polls: ERR +5');
+    });
+  });
+
   describe('errorRepliesPerPoll', () => {
     it('keeps the delta when a poll arrives on time or early', () => {
       expect(errorRepliesPerPoll(900, 1000, 1000)).toBe(900);

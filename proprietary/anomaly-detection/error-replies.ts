@@ -51,12 +51,13 @@ export function topErrorstatDeltas(
   return deltas.slice(0, limit);
 }
 
-export function describeErrorstatDeltas(deltas: ErrorstatDelta[]): string | null {
+export function describeErrorstatDeltas(deltas: ErrorstatDelta[], polls: number = 1): string | null {
   if (deltas.length === 0) {
     return null;
   }
   const parts = deltas.map((d) => {
     return `${d.prefix} +${d.delta}`;
   });
-  return `top error types: ${parts.join(', ')}`;
+  const span = polls > 1 ? ` over ${polls} polls` : '';
+  return `top error types${span}: ${parts.join(', ')}`;
 }

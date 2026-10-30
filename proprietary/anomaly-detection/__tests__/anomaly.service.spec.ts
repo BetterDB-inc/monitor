@@ -3957,31 +3957,59 @@ describe('AnomalyService', () => {
 
       const events = errorEvents();
       expect(events).toHaveLength(1);
-      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
+      expect(events[0].message).toContain('top error types over 12 polls: TIMEOUT +6000');
     });
 
     it('keeps the errorstat baseline across a poll without errorstats', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
       let total = 1000;
       let timeouts = 1000;
       const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
       for (let i = 0; i < 31; i++) {
+        now += interval;
         total += 2;
         timeouts += 2;
         (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
         await poll();
       }
+      now += interval;
       total += 3000;
       timeouts += 3000;
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
       await poll();
+      now += interval;
       total += 3000;
       timeouts += 3000;
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
       await poll();
+      (Date.now as jest.Mock).mockRestore();
 
       const events = errorEvents();
       expect(events).toHaveLength(1);
-      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
+      expect(events[0].message).toContain('top error types over 2 polls: TIMEOUT +6000');
+    });
+
+    it('leaves the breakdown unlabelled when it covers one poll', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      const step = (add: number) => {
+        now += interval;
+        total += add;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+          infoWith(String(total), { errorstat_TIMEOUT: { count: total } }),
+        );
+        return poll();
+      };
+      for (let i = 0; i < 31; i++) await step(2);
+      await step(3000);
+      await step(3000);
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorEvents()[0].message).toContain('top error types: TIMEOUT +3000');
     });
 
     it('absorbs a counter reset on restart', async () => {
