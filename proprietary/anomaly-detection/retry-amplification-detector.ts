@@ -134,6 +134,7 @@ export interface RetryAmplificationState {
   episodeLevel: RetryAmplificationLevel;
   episodeMovement: CoMovement | null;
   ackedLevel: RetryAmplificationLevel;
+  notifiedLevel: RetryAmplificationLevel;
   pending: RetryAmplificationFinding | null;
   lastEpisode: RetryAmplificationEpisode | null;
 }
@@ -174,6 +175,7 @@ export function createRetryAmplificationState(
     episodeLevel: 'none',
     episodeMovement: null,
     ackedLevel: 'none',
+    notifiedLevel: 'none',
     pending: null,
     lastEpisode: null,
   };
@@ -483,6 +485,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
   state.episodeLevel = 'none';
   state.episodeMovement = null;
   state.ackedLevel = 'none';
+  state.notifiedLevel = 'none';
   state.pending = null;
 }
 
@@ -528,6 +531,7 @@ function evaluateWindow(
     LEVEL_RANK[finding.level] > LEVEL_RANK[state.episodeLevel] ? finding.level : state.episodeLevel;
   if (LEVEL_RANK[finding.level] < LEVEL_RANK[state.ackedLevel]) {
     state.ackedLevel = finding.level;
+    state.notifiedLevel = finding.level;
   }
   if (LEVEL_RANK[finding.level] > LEVEL_RANK[state.ackedLevel]) {
     state.pending = finding;
@@ -685,6 +689,20 @@ export function describeRetryAmplificationState(
 
 export function retryAmplificationEpisodeStart(state: RetryAmplificationState): number | null {
   return state.hotRun.length > 0 ? state.hotRun[0].start : null;
+}
+
+export function retryAmplificationNeedsNotification(
+  state: RetryAmplificationState,
+  finding: RetryAmplificationFinding,
+): boolean {
+  return LEVEL_RANK[finding.level] > LEVEL_RANK[state.notifiedLevel];
+}
+
+export function markRetryAmplificationNotified(
+  state: RetryAmplificationState,
+  finding: RetryAmplificationFinding,
+): void {
+  state.notifiedLevel = finding.level;
 }
 
 export function acknowledgeRetryAmplificationFinding(

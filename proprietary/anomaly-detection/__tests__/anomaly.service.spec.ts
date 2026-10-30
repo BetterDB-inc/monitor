@@ -3374,6 +3374,7 @@ describe('AnomalyService', () => {
         coolWindows?: number;
         realEmit?: boolean;
         cpuEvent?: Record<string, unknown>;
+        saturated?: (window: number) => boolean;
       } = {},
     ) {
       const recorded: any[] = [];
@@ -3412,6 +3413,11 @@ describe('AnomalyService', () => {
             connectionId: 'conn-1',
             resolved: false,
             ...opts.cpuEvent,
+          });
+        }
+        if (opts.saturated) {
+          (service as any).loadSaturationState.set('conn-1', {
+            ackedLevel: opts.saturated(w) ? 'critical' : 'none',
           });
         }
         for (let i = 0; i < 60; i++) {
@@ -3805,6 +3811,28 @@ describe('AnomalyService', () => {
       ).length;
       expect(writes).toBeGreaterThan(1);
       expect(writes).toBeLessThanOrEqual(6);
+    });
+
+    describe('saturation falling back and returning', () => {
+      const webhookLevels = () =>
+        webhookEventsProService.dispatchRetryAmplificationDetected.mock.calls.map(
+          ([payload]: [any]) => payload.level,
+        );
+      const flapping = (w: number) => w === 14 || w >= 16;
+
+      it('sends one webhook while the critical finding stays unsaved', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await runRetry({ realEmit: true, saturated: flapping });
+
+        expect(webhookLevels()).toEqual(['critical']);
+      });
+
+      it('sends a second webhook when a saved critical falls back and returns', async () => {
+        await runRetry({ realEmit: true, saturated: flapping });
+
+        expect(webhookLevels()).toEqual(['critical', 'critical']);
+      });
     });
 
     it('sends the webhook during a storage outage, once', async () => {

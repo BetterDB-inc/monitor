@@ -186,6 +186,8 @@ import {
   RetryAmplificationFinding,
   RetryAmplificationState,
   acknowledgeRetryAmplificationFinding,
+  markRetryAmplificationNotified,
+  retryAmplificationNeedsNotification,
   createRetryAmplificationState,
   evaluateRetryAmplification,
   RetryAmplificationStatus,
@@ -3363,7 +3365,9 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
 
-    if (firstAttempt && this.webhookEventsProService) {
+    const notify = retryAmplificationNeedsNotification(state, finding);
+    if (notify) markRetryAmplificationNotified(state, finding);
+    if (notify && this.webhookEventsProService) {
       this.webhookEventsProService
         .dispatchRetryAmplificationDetected({
           level: finding.level,
