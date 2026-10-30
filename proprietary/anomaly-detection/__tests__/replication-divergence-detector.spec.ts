@@ -1,5 +1,7 @@
 import {
+  ClosedDivergenceWindow,
   DIVERGENCE_MIN_WINDOW_MS,
+  DIVERGENCE_PERSIST_BACKLOG,
   DivergenceConnectionState,
   DivergenceFinding,
   DivergenceOutcome,
@@ -7,7 +9,9 @@ import {
   acknowledgeRecovery,
   createDivergenceState,
   divergenceWindowMs,
+  drainClosedWindows,
   observeDivergence,
+  requeueClosedWindows,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample } from '../replication-stream';
 
@@ -259,5 +263,29 @@ describe('observeDivergence', () => {
     expect(observeDivergence(h.state, demoted(), WINDOW_MS)).toEqual([]);
     expect(h.state.replicas.size).toBe(0);
     expect(h.state.windowStart).toBeNull();
+  });
+});
+
+describe('requeueClosedWindows', () => {
+  const closed = (end: number): ClosedDivergenceWindow => ({
+    addr: ADDR,
+    start: end - WINDOW_MS,
+    end,
+    gapBytes: 0,
+    bytesPerSec: null,
+    secondsBehind: null,
+  });
+
+  it('drops the oldest windows first when the backlog is full', () => {
+    const state = createDivergenceState();
+    const failed = Array.from({ length: DIVERGENCE_PERSIST_BACKLOG }, (_, i) => closed(i));
+    state.closedWindows = [closed(DIVERGENCE_PERSIST_BACKLOG), closed(DIVERGENCE_PERSIST_BACKLOG + 1)];
+
+    requeueClosedWindows(state, failed);
+
+    const ends = drainClosedWindows(state).map((w) => w.end);
+    expect(ends).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
+    expect(ends[0]).toBe(2);
+    expect(ends[ends.length - 1]).toBe(DIVERGENCE_PERSIST_BACKLOG + 1);
   });
 });
