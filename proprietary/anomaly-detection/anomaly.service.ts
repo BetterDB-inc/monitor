@@ -38,6 +38,9 @@ import {
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
   POINT_IN_TIME_METRICS,
   RecoveryProbe,
+  incidentStartOf,
+  matchSequence,
+  toTimelineEntry,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
@@ -5451,20 +5454,28 @@ export class AnomalyService
     return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
   }
 
-  private incidentRecoveryProbe: RecoveryProbe = (connectionId, metricType, since) => {
-    const settledAt = since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
-    const buffer = this.buffers.get(connectionId)?.get(metricType);
-    if (buffer && buffer.isReady()) {
-      const samples = buffer.getSamples();
-      if (samples[0].timestamp > settledAt) return settledAt;
-      const warningZ =
-        this.detectors.get(connectionId)?.get(metricType)?.getConfig().warningZScore ?? 2;
-      const backInBand = samples.find(
-        (s) => s.timestamp >= settledAt && Math.abs(buffer.getZScore(s.value)) < warningZ,
-      );
-      return backInBand?.timestamp ?? null;
+  private incidentRecoveryProbe: RecoveryProbe = (signal) => {
+    const settledAt = signal.since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
+    const buffer = this.buffers.get(signal.connectionId)?.get(signal.metricType);
+    if (!buffer || !buffer.isReady()) {
+      return POINT_IN_TIME_METRICS.has(signal.metricType) ? settledAt : null;
     }
-    return POINT_IN_TIME_METRICS.has(metricType) ? settledAt : null;
+    const warningZ =
+      this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??
+      2;
+    const inBand = (value: number) =>
+      signal.stdDev > 0
+        ? Math.abs(value - signal.baseline) / signal.stdDev < warningZ
+        : Math.abs(buffer.getZScore(value)) < warningZ;
+    const observed = buffer
+      .getSamples()
+      .filter(
+        (s) => s.timestamp >= settledAt && (signal.until === null || s.timestamp < signal.until),
+      );
+    const backInBand = observed.find((s) => inBand(s.value));
+    if (backInBand) return backInBand.timestamp;
+    if (observed.length > 0 || signal.until === null) return null;
+    return settledAt;
   };
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
@@ -5551,22 +5562,24 @@ export class AnomalyService
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
     const from = startTime ?? now - 24 * 60 * 60_000;
+    const loadFrom = from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
     const batches = await Promise.all(
       connectionIds.map((id) =>
-        this.getRecentAnomalies(from, endTime, undefined, undefined, 1000, id),
+        this.getRecentAnomalies(loadFrom, endTime, undefined, undefined, 1000, id),
       ),
     );
     const scope = new Set(connectionIds);
     const cached = this.recentAnomalies.filter(
       (e) =>
-        e.timestamp >= from &&
+        e.timestamp >= loadFrom &&
         (!endTime || e.timestamp <= endTime) &&
         (!connectionId || scope.has(e.connectionId)),
     );
     const events = [...new Map([...cached, ...batches.flat()].map((e) => [e.id, e])).values()];
     return this.incidentTimelineBuilder
       .build(events, now, this.incidentRecoveryProbe)
+      .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
   }
@@ -5578,7 +5591,7 @@ export class AnomalyService
   ): Promise<IncidentTimeline | null> {
     const timelines = await this.getIncidentTimelines(
       connectionId,
-      startTime,
+      incidentStartOf(incidentId) ?? startTime,
       undefined,
       Number.MAX_SAFE_INTEGER,
     );
@@ -5781,6 +5794,32 @@ export class AnomalyService
     return groups.slice(0, limit);
   }
 
+  private async sequenceGroupMembers(
+    group: StoredCorrelatedGroup,
+    connectionId: string | undefined,
+  ): Promise<AnomalyEvent[]> {
+    const rule = getSequenceRules().find((r) => r.pattern === group.pattern);
+    if (!rule) return [];
+    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
+    const batches = await Promise.all(
+      connectionIds.map((id) =>
+        this.storage.getAnomalyEvents({
+          startTime: group.timestamp,
+          endTime: group.timestamp + rule.maxSpanMs,
+          connectionId: id,
+        }),
+      ),
+    );
+    const stored = [...new Map(batches.flat().map((a) => [a.id, a])).values()];
+    const events = stored
+      .map((a) => this.storedToAnomalyEvent(a))
+      .sort((a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const matched = matchSequence(events.map(toTimelineEntry), rule);
+    if (!matched || matched[0].timestamp !== group.timestamp) return [];
+    const ids = new Set(matched.map((e) => e.anomalyId));
+    return events.filter((e) => ids.has(e.id));
+  }
+
   async getRecentCorrelatedGroups(
     startTime?: number,
     endTime?: number,
@@ -5814,9 +5853,13 @@ export class AnomalyService
         endTime: s.timestamp + this.correlationIntervalMs,
         connectionId,
       });
-      const anomalies = storedAnomalies
+      const correlated = storedAnomalies
         .filter((a) => a.correlationId === s.correlationId)
         .map((a) => this.storedToAnomalyEvent(a));
+      const anomalies =
+        correlated.length > 0
+          ? correlated
+          : await this.sequenceGroupMembers(s, s.connectionId ?? connectionId);
 
       groups.push({
         correlationId: s.correlationId,

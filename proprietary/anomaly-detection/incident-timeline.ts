@@ -55,11 +55,16 @@ export const DEFAULT_INCIDENT_TIMELINE_OPTIONS: IncidentTimelineOptions = {
   degradedAfterMs: 10 * 60_000,
 };
 
-export type RecoveryProbe = (
-  connectionId: string,
-  metricType: MetricType,
-  since: number,
-) => number | null;
+export interface RecoverySignal {
+  connectionId: string;
+  metricType: MetricType;
+  since: number;
+  until: number | null;
+  baseline: number;
+  stdDev: number;
+}
+
+export type RecoveryProbe = (signal: RecoverySignal) => number | null;
 
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
 
@@ -76,28 +81,54 @@ export function maxSeverity(severities: AnomalySeverity[]): AnomalySeverity {
   );
 }
 
-export function incidentIdFor(scope: string, firstAnomalyId: string): string {
-  return createHash('sha256').update(`${scope}\u0000${firstAnomalyId}`).digest('hex').slice(0, 24);
+export function incidentIdFor(scope: string, firstAnomalyId: string, startedAt: number): string {
+  const hash = createHash('sha256').update(`${scope}\u0000${firstAnomalyId}`).digest('hex');
+  return `${startedAt}-${hash.slice(0, 16)}`;
+}
+
+export function incidentStartOf(incidentId: string): number | null {
+  const match = /^(\d+)-[0-9a-f]{16}$/.exec(incidentId);
+  return match ? Number(match[1]) : null;
 }
 
 export function matchSequence(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
 ): IncidentTimelineEntry[] | null {
-  for (let start = 0; start < entries.length; start++) {
-    if (!rule.steps[0].includes(entries[start].metricType)) continue;
-    const matched = [entries[start]];
-    let step = 1;
-    for (let i = start + 1; i < entries.length && step < rule.steps.length; i++) {
-      if (entries[i].timestamp - entries[start].timestamp > rule.maxSpanMs) break;
-      if (rule.steps[step].includes(entries[i].metricType)) {
-        matched.push(entries[i]);
-        step++;
-      }
+  for (const first of entries) {
+    if (!rule.steps[0].includes(first.metricType)) continue;
+    const matched = [first];
+    for (const step of rule.steps.slice(1)) {
+      const previous = matched[matched.length - 1];
+      const next = entries.find(
+        (e) =>
+          !matched.includes(e) &&
+          step.includes(e.metricType) &&
+          e.timestamp >= previous.timestamp &&
+          e.timestamp - first.timestamp <= rule.maxSpanMs,
+      );
+      if (!next) break;
+      matched.push(next);
     }
-    if (step === rule.steps.length) return matched;
+    if (matched.length === rule.steps.length) return matched;
   }
   return null;
+}
+
+export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
+  return {
+    anomalyId: event.id,
+    connectionId: event.connectionId ?? '',
+    timestamp: event.timestamp,
+    metricType: event.metricType,
+    severity: event.severity,
+    message: event.message,
+    recoveredAt: null,
+  };
+}
+
+function signalKey(event: AnomalyEvent): string {
+  return `${event.connectionId ?? ''}\u0000${event.metricType}`;
 }
 
 export class IncidentTimelineBuilder {
@@ -121,13 +152,27 @@ export class IncidentTimelineBuilder {
       else byScope.set(scope, [event]);
     }
 
+    const signalTimes = new Map<string, number[]>();
+    for (const event of events) {
+      const key = signalKey(event);
+      const times = signalTimes.get(key);
+      if (times) times.push(event.timestamp);
+      else signalTimes.set(key, [event.timestamp]);
+    }
+    const nextOccurrence = (event: AnomalyEvent): number | null =>
+      signalTimes
+        .get(signalKey(event))!
+        .reduce<
+          number | null
+        >((next, t) => (t > event.timestamp && (next === null || t < next) ? t : next), null);
+
     const timelines: IncidentTimeline[] = [];
     for (const [scope, scoped] of byScope) {
       const sorted = [...scoped].sort(
         (a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
       );
       for (const cluster of this.cluster(sorted)) {
-        timelines.push(this.toTimeline(scope, cluster, now, probe));
+        timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
     return timelines.sort(
@@ -160,26 +205,28 @@ export class IncidentTimelineBuilder {
     events: AnomalyEvent[],
     now: number,
     probe: RecoveryProbe,
+    nextOccurrence: (event: AnomalyEvent) => number | null,
   ): IncidentTimeline {
+    const firstBySignal = new Map<string, AnomalyEvent>();
     const lastBySignal = new Map<string, AnomalyEvent>();
     for (const event of events) {
-      lastBySignal.set(`${event.connectionId ?? ''}\u0000${event.metricType}`, event);
+      const key = signalKey(event);
+      if (!firstBySignal.has(key)) firstBySignal.set(key, event);
+      lastBySignal.set(key, event);
     }
     const recoveredAtBySignal = new Map<string, number | null>();
     for (const [key, event] of lastBySignal) {
-      recoveredAtBySignal.set(key, this.recoveredAt(event, now, probe));
+      recoveredAtBySignal.set(
+        key,
+        this.recoveredAt(event, firstBySignal.get(key)!, nextOccurrence(event), now, probe),
+      );
     }
 
     const entries: IncidentTimelineEntry[] = events.map((event) => {
-      const key = `${event.connectionId ?? ''}\u0000${event.metricType}`;
+      const key = signalKey(event);
       const isLast = lastBySignal.get(key) === event;
       return {
-        anomalyId: event.id,
-        connectionId: event.connectionId ?? '',
-        timestamp: event.timestamp,
-        metricType: event.metricType,
-        severity: event.severity,
-        message: event.message,
+        ...toTimelineEntry(event),
         recoveredAt: isLast
           ? (recoveredAtBySignal.get(key) ?? null)
           : this.recoveredAtIfResolved(event),
@@ -218,7 +265,7 @@ export class IncidentTimelineBuilder {
     const lastEventAt = events[events.length - 1].timestamp;
 
     return {
-      incidentId: incidentIdFor(scope, events[0].id),
+      incidentId: incidentIdFor(scope, events[0].id, events[0].timestamp),
       scope,
       connectionIds: [...new Set(entries.map((e) => e.connectionId))],
       startedAt: events[0].timestamp,
@@ -239,10 +286,23 @@ export class IncidentTimelineBuilder {
     return event.resolved ? (event.resolvedAt ?? event.timestamp) : null;
   }
 
-  private recoveredAt(event: AnomalyEvent, now: number, probe: RecoveryProbe): number | null {
+  private recoveredAt(
+    event: AnomalyEvent,
+    first: AnomalyEvent,
+    until: number | null,
+    now: number,
+    probe: RecoveryProbe,
+  ): number | null {
     if (event.resolved) return event.resolvedAt ?? event.timestamp;
     if (now - event.timestamp < this.opts.settleMs) return null;
-    return probe(event.connectionId ?? '', event.metricType, event.timestamp);
+    return probe({
+      connectionId: event.connectionId ?? '',
+      metricType: event.metricType,
+      since: event.timestamp,
+      until,
+      baseline: first.baseline,
+      stdDev: first.stdDev,
+    });
   }
 
   private status(now: number, lastEventAt: number, openCount: number): IncidentRecoveryStatus {

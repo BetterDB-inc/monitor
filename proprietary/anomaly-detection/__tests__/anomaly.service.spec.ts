@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder } from '../incident-timeline';
 import { MetricBuffer } from '../metric-buffer';
+import * as sequenceRules from '../sequence-rules';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -6565,6 +6566,16 @@ describe('AnomalyService', () => {
         (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
       };
 
+      const signal = (overrides = {}) => ({
+        connectionId: 'conn-1',
+        metricType: MetricType.CONNECTIONS,
+        since: T,
+        until: null,
+        baseline: 10,
+        stdDev: 1,
+        ...overrides,
+      });
+
       it('recovers at the first sample back in band after the settle time', () => {
         withBuffer([
           ...baseline(T - 30_000),
@@ -6573,26 +6584,115 @@ describe('AnomalyService', () => {
           [T + 3 * MIN, 600],
         ]);
 
-        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBe(T + 2 * MIN);
+        expect(probe()(signal())).toBe(T + 2 * MIN);
       });
 
       it('stays open while no sample after the settle time is back in band', () => {
-        withBuffer([
-          ...baseline(T - 30_000),
-          [T + MIN, 900],
-        ]);
+        withBuffer([...baseline(T - 30_000), [T + MIN, 900]]);
 
-        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBeNull();
+        expect(probe()(signal())).toBeNull();
       });
 
-      it('does not judge an incident older than the buffer by the current samples', () => {
-        withBuffer([
-          ...baseline(T + 60 * MIN),
-          [T + 61 * MIN, 900],
-        ]);
+      it('judges against the pre-incident baseline, not a rolling one that drifted up', () => {
+        withBuffer(Array.from({ length: 40 }, (_, i) => [T + i * 5000, 500 + (i % 2)]));
 
-        expect(probe()('conn-1', MetricType.CONNECTIONS, T)).toBe(T + MIN);
+        expect(probe()(signal())).toBeNull();
       });
+
+      it('ignores samples after the signal fired again', () => {
+        withBuffer([...baseline(T - 30_000), [T + MIN, 900], [T + 3 * MIN, 10]]);
+
+        expect(probe()(signal({ until: T + 2 * MIN }))).toBeNull();
+      });
+
+      it('infers recovery for an old signal that fired again after the buffer window', () => {
+        withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
+
+        expect(probe()(signal({ until: T + 30 * MIN }))).toBe(T + MIN);
+      });
+
+      it('recovers an old signal at the first observed in-band sample, not a made-up time', () => {
+        withBuffer([[T + 60 * MIN, 900], ...baseline(T + 61 * MIN)]);
+
+        expect(probe()(signal())).toBe(T + 61 * MIN);
+      });
+    });
+
+    it('only lists incidents that reach into the requested window', async () => {
+      const from = Date.now() - 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'before', timestamp: from - 20 * MIN }),
+        anomaly({ id: 'straddle', timestamp: from - 90_000 }),
+        anomaly({ id: 'tail', timestamp: from + 1000 }),
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1', from);
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        ['straddle', 'tail'],
+      ]);
+    });
+
+    it('rebuilds stored sequence group members across the topology from the rule', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      const t = Date.now() - 3 * 60 * MIN;
+      storage.getCorrelatedGroups.mockResolvedValue([
+        {
+          correlationId: 'grp-seq',
+          timestamp: t,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+        },
+      ]);
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'node-2' }]);
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, connectionId }: any) =>
+        startTime !== t
+          ? []
+          : connectionId === 'node-2'
+            ? [
+                {
+                  ...anomaly({
+                    id: 'm',
+                    timestamp: t + 2 * MIN,
+                    metricType: MetricType.MEMORY_USED,
+                    connectionId: 'node-2',
+                  }),
+                  anomalyType: 'spike',
+                },
+              ]
+            : connectionId !== 'conn-1'
+              ? []
+              : [
+                  { ...anomaly({ id: 'c', timestamp: t }), anomalyType: 'spike' },
+                  {
+                    ...anomaly({
+                      id: 'noise',
+                      timestamp: t + MIN,
+                      metricType: MetricType.CPU_UTILIZATION,
+                    }),
+                    anomalyType: 'spike',
+                  },
+                ],
+      );
+
+      const [group] = await service.getRecentCorrelatedGroups(
+        t - MIN,
+        undefined,
+        undefined,
+        50,
+        'conn-1',
+      );
+
+      expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
     });
 
     it('includes memory-only events older than the cache TTL in history', async () => {

@@ -1,4 +1,9 @@
-import { IncidentTimelineBuilder, RecoveryProbe, incidentIdFor } from '../incident-timeline';
+import {
+  IncidentTimelineBuilder,
+  RecoveryProbe,
+  incidentIdFor,
+  incidentStartOf,
+} from '../incident-timeline';
 import { SequenceRule } from '../sequence-rules';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
 
@@ -27,7 +32,7 @@ function event(overrides: Partial<AnomalyEvent> = {}): AnomalyEvent {
 }
 
 const neverRecovers: RecoveryProbe = () => null;
-const recoversAfterQuiet: RecoveryProbe = (_c, _m, since) => since + MIN;
+const recoversAfterQuiet: RecoveryProbe = ({ since }) => since + MIN;
 
 const escalation: SequenceRule = {
   pattern: AnomalyPattern.MEMORY_PRESSURE,
@@ -113,8 +118,19 @@ describe('IncidentTimelineBuilder', () => {
           neverRecovers,
         );
 
-      expect(build()[0].incidentId).toBe(incidentIdFor('conn-a', first.id));
+      expect(build()[0].incidentId).toBe(incidentIdFor('conn-a', first.id, T0));
       expect(build()[0].incidentId).toBe(build()[0].incidentId);
+    });
+
+    it('carries the start time in the incident id', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [event({ timestamp: T0 + 5000 })],
+        T0 + MIN,
+        neverRecovers,
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5000);
+      expect(incidentStartOf('not-an-id')).toBeNull();
     });
   });
 
@@ -174,7 +190,7 @@ describe('IncidentTimelineBuilder', () => {
           event({ metricType: MetricType.CPU_UTILIZATION }),
         ],
         T0 + 5 * MIN,
-        (_c, metric, since) => (metric === MetricType.CONNECTIONS ? since + MIN : null),
+        ({ metricType, since }) => (metricType === MetricType.CONNECTIONS ? since + MIN : null),
       );
 
       expect(incident.recovery.status).toBe('recovering');
@@ -193,7 +209,7 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     it('judges a signal by its latest event only', () => {
-      const probe = jest.fn((_c: string, _m: MetricType, since: number) => since + MIN);
+      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(({ since }) => since + MIN);
 
       new IncidentTimelineBuilder().build(
         [event(), event({ timestamp: T0 + MIN })],
@@ -202,7 +218,46 @@ describe('IncidentTimelineBuilder', () => {
       );
 
       expect(probe).toHaveBeenCalledTimes(1);
-      expect(probe).toHaveBeenCalledWith('conn-a', MetricType.MEMORY_USED, T0 + MIN);
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({
+          connectionId: 'conn-a',
+          metricType: MetricType.MEMORY_USED,
+          since: T0 + MIN,
+          until: null,
+        }),
+      );
+    });
+
+    it('judges recovery against the baseline from before the incident', () => {
+      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(() => null);
+
+      new IncidentTimelineBuilder().build(
+        [
+          event({ baseline: 100, stdDev: 5 }),
+          event({ timestamp: T0 + MIN, baseline: 400, stdDev: 50 }),
+        ],
+        T0 + 5 * MIN,
+        probe,
+      );
+
+      expect(probe).toHaveBeenCalledWith(expect.objectContaining({ baseline: 100, stdDev: 5 }));
+    });
+
+    it('bounds the probe by the next occurrence of the signal', () => {
+      const probe = jest.fn<number | null, Parameters<RecoveryProbe>>(() => null);
+
+      new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
+        [event(), event({ timestamp: T0 + 10 * MIN })],
+        T0 + 20 * MIN,
+        probe,
+      );
+
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: T0, until: T0 + 10 * MIN }),
+      );
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: T0 + 10 * MIN, until: null }),
+      );
     });
   });
 
@@ -273,6 +328,15 @@ describe('IncidentTimelineBuilder', () => {
       );
 
       expect(incident.sequenceMatches[0].anomalyIds[0]).toBe(late.id);
+    });
+
+    it('matches steps that land in the same poll in either order', () => {
+      const mem = event({ metricType: MetricType.MEMORY_USED, id: 'evt-a' });
+      const conn = event({ metricType: MetricType.CONNECTIONS, id: 'evt-b' });
+
+      const [incident] = builder().build([mem, conn], T0 + MIN, neverRecovers);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id]);
     });
   });
 });
