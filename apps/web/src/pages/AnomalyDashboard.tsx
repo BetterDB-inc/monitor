@@ -111,6 +111,11 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
   node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
+  replication_divergence: {
+    icon: Database,
+    label: 'Replication Divergence',
+    color: 'var(--destructive)',
+  },
   unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
 };
 
@@ -156,6 +161,7 @@ const METRIC_LABELS: Record<string, string> = {
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
+  replication_divergence: 'Replication Divergence',
 };
 
 function formatTime(ts: number): string {
@@ -167,7 +173,11 @@ function formatTime(ts: number): string {
 }
 
 function formatValue(value: number, metric: string): string {
-  if (metric === 'memory_used' || metric === 'memory_overhead') {
+  if (
+    metric === 'memory_used' ||
+    metric === 'memory_overhead' ||
+    metric === 'replication_divergence'
+  ) {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
     return `${(value / 1e3).toFixed(0)} KB`;

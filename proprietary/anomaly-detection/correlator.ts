@@ -20,6 +20,38 @@ interface PatternRule {
 
 export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
 
+const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new Map([
+  [MetricType.MEMORY_USED, 'memory growth'],
+  [MetricType.MEMORY_OVERHEAD, 'memory overhead'],
+  [MetricType.REPL_BUFFER_PRESSURE, 'replica output-buffer pressure'],
+  [MetricType.FORK_MEMORY_RISK, 'fork copy-on-write pressure'],
+  [MetricType.INPUT_KBPS, 'write-rate spike'],
+  [MetricType.OPS_PER_SEC, 'write-rate spike'],
+  [MetricType.CLUSTER_TOPOLOGY, 'slot migration'],
+]);
+
+function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent[]): string {
+  const divergence = anomalies.filter((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE);
+  const metrics = new Set<MetricType>([
+    ...anomalies.map((a) => a.metricType),
+    ...divergence.flatMap((a) => a.relatedMetrics ?? []),
+  ]);
+  const signals = [
+    ...new Set(
+      [...metrics]
+        .map((m) => DIVERGENCE_COMPOUND_SIGNALS.get(m))
+        .filter((label): label is string => label !== undefined),
+    ),
+  ];
+  const critical = divergence.some((a) => a.severity === AnomalySeverity.CRITICAL);
+  if (!critical && signals.length === 0) return fallback;
+  const context = signals.length > 0 ? ` alongside ${signals.join(', ')}` : '';
+  return (
+    `Sustained replication divergence${context} — the replica is not keeping up, ` +
+    'and the pressures can compound while client throughput and latency still look healthy'
+  );
+}
+
 const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
 
 export class Correlator {
@@ -56,6 +88,20 @@ export class Correlator {
           'Check replica connection stability and cluster heartbeat health',
           'Keep a management path available: connect over a unix socket or reserved port for admin commands',
           'Upgrade to a QoS-capable version once the upstream trusted-sources feature (valkey#3927) lands',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
+        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
+        check: (anomalies) =>
+          anomalies.some((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE),
+        diagnosis:
+          'Replica falling behind the primary during a write burst — watching whether it catches up',
+        recommendations: [
+          'Compare the replica offset gap with the primary write rate over the next few minutes',
+          'Check replica host CPU, disk and network for a slow apply path',
+          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
+          'Throttle bulk writes or resharding until the replica catches up',
         ],
       },
       {
@@ -490,6 +536,10 @@ export class Correlator {
    * For NODE_FAILOVER, dynamically mention slowlog correlation if present.
    */
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
+    if (rule.pattern === AnomalyPattern.REPLICATION_DIVERGENCE) {
+      return describeReplicationDivergence(rule.diagnosis, anomalies);
+    }
+
     if (rule.pattern === AnomalyPattern.NODE_FAILOVER) {
       const hasSlowlogSpike = anomalies.some((a) => a.metricType === MetricType.SLOWLOG_LAST_ID);
       const hasClusterState = anomalies.some((a) => a.metricType === MetricType.CLUSTER_STATE);

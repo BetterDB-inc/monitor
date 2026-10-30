@@ -152,6 +152,20 @@ import {
 } from './fork-memory-risk-detector';
 import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import {
+  DIVERGENCE_CORRELATED_METRICS,
+  DIVERGENCE_FLOOR_BYTES,
+  DivergenceConnectionState,
+  DivergenceFinding,
+  DivergenceRecovery,
+  DivergenceWindow,
+  acknowledgeDivergence,
+  acknowledgeRecovery,
+  createDivergenceState,
+  describeDivergence,
+  divergenceWindowMs,
+  observeDivergence,
+} from './replication-divergence-detector';
+import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
   SATURATION_CORROBORATION_WINDOW_MS,
@@ -365,6 +379,7 @@ export class AnomalyService
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
   private replicationStream = new ReplicationStreamTracker();
+  private divergenceState = new Map<string, DivergenceConnectionState>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -769,6 +784,7 @@ export class AnomalyService
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
     this.replicationStream.forget(connectionId);
+    this.divergenceState.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -856,7 +872,8 @@ export class AnomalyService
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
-      this.replicationStream.observe(ctx.connectionId, info, timestamp);
+      const replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
+      if (replicationSample) await this.detectReplicationDivergence(replicationSample, ctx);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -5650,6 +5667,126 @@ export class AnomalyService
 
   getReplicationStreamSample(connectionId: string): ReplicationStreamSample | null {
     return this.replicationStream.latest(connectionId);
+  }
+
+  getReplicationDivergenceState(
+    connectionId: string,
+  ): Array<{ replica: string; level: string; windows: DivergenceWindow[] }> {
+    const state = this.divergenceState.get(connectionId);
+    if (!state) return [];
+    return [...state.replicas.values()].map((r) => ({
+      replica: r.addr,
+      level: r.level,
+      windows: [...r.windows],
+    }));
+  }
+
+  private async detectReplicationDivergence(
+    sample: ReplicationStreamSample,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
+    this.divergenceState.set(ctx.connectionId, state);
+
+    for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+      if (outcome.kind === 'divergence') {
+        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      } else {
+        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      }
+    }
+  }
+
+  private async emitReplicationDivergence(
+    state: DivergenceConnectionState,
+    finding: DivergenceFinding,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const relatedMetrics = [
+      ...new Set(
+        this.recentAnomalies
+          .filter(
+            (a) =>
+              a.connectionId === ctx.connectionId &&
+              a.timestamp >= finding.spanStart &&
+              DIVERGENCE_CORRELATED_METRICS.has(a.metricType),
+          )
+          .map((a) => a.metricType),
+      ),
+    ];
+    const isCritical = finding.level === 'critical';
+    const message = describeDivergence(finding);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.gapBytes,
+      baseline: DIVERGENCE_FLOOR_BYTES,
+      zScore: 0,
+      stdDev: 0,
+      threshold: DIVERGENCE_FLOOR_BYTES,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+      relatedMetrics,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
+    const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
+    await this.addAnomaly(event, ctx);
+    acknowledgeDivergence(state, finding, event.id);
+    if (previousEventId) await this.resolveAnomalyOutcome(previousEventId);
+
+    this.webhookEventsProService
+      ?.dispatchReplicationDivergence({
+        replica: finding.addr,
+        level: finding.level,
+        reason: finding.reason,
+        gapBytes: finding.gapBytes,
+        secondsBehind: finding.secondsBehind,
+        bytesPerSec: finding.bytesPerSec,
+        slopeBytesPerWindow: finding.slopeBytesPerWindow,
+        windowCount: finding.windowCount,
+        correlatedSignals: relatedMetrics,
+        message,
+        timestamp,
+        instance: { host: ctx.host, port: ctx.port },
+        connectionId: ctx.connectionId,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch replication.divergence webhook', err);
+      });
+  }
+
+  private async resolveReplicationDivergence(
+    state: DivergenceConnectionState,
+    recovery: DivergenceRecovery,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    if (recovery.eventId) {
+      const outcome = await this.resolveAnomalyOutcome(recovery.eventId);
+      if (outcome === 'retry') return;
+    }
+    acknowledgeRecovery(state, recovery.addr);
+    if (recovery.kind !== 'recovered') return;
+
+    const message = `Replica ${recovery.addr} caught up with the primary.`;
+    this.logger.log(`Replication recovered for ${ctx.connectionName}: ${message}`);
+    this.webhookEventsProService
+      ?.dispatchReplicationRecovered({
+        replica: recovery.addr,
+        gapBytes: recovery.gapBytes ?? 0,
+        message,
+        timestamp,
+        instance: { host: ctx.host, port: ctx.port },
+        connectionId: ctx.connectionId,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch replication.recovered webhook', err);
+      });
   }
 
   getBufferStats(connectionId?: string): BufferStats[] {

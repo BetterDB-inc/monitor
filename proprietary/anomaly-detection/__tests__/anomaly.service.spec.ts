@@ -6424,4 +6424,80 @@ describe('AnomalyService', () => {
       expect(next!.replicas[0].gapBytes).toBe(500);
     });
   });
+
+  describe('replication divergence', () => {
+    const MiB = 1024 * 1024;
+    const T0 = 1_700_000_000_000;
+
+    function sample(timestamp: number, gapBytes: number) {
+      return {
+        timestamp,
+        role: 'primary' as const,
+        replid: 'a'.repeat(40),
+        masterReplOffset: 0,
+        bytesPerSec: MiB,
+        bytesPerSecEwma: MiB,
+        replBacklogHistlen: null,
+        replicas: [
+          { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 0, lagSec: 0, gapBytes },
+        ],
+      };
+    }
+
+    async function feed(gapsMiB: number[], start: number): Promise<number> {
+      let t = start;
+      for (const gap of gapsMiB) {
+        for (let i = 0; i < 3; i++) {
+          await (service as any).detectReplicationDivergence(sample(t, gap * MiB), mockCtx);
+          t += 10_000;
+        }
+      }
+      return t;
+    }
+
+    it('alerts once, stamps related metrics, then reports recovery', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      const recoveredHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      (webhookEventsProService as any).dispatchReplicationRecovered = recoveredHook;
+      (service as any).recentAnomalies.push({
+        id: 'mem-1',
+        timestamp: T0 + 5_000,
+        metricType: MetricType.MEMORY_USED,
+        anomalyType: 'spike',
+        severity: 'warning',
+        value: 1,
+        baseline: 1,
+        zScore: 3,
+        stdDev: 1,
+        threshold: 2,
+        message: 'memory spike',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+      expect(divergenceHook).toHaveBeenCalledTimes(1);
+      expect(divergenceHook.mock.calls[0][0]).toMatchObject({
+        replica: '10.0.0.2:6379',
+        level: 'warning',
+        reason: 'growth',
+        windowCount: 4,
+        correlatedSignals: [MetricType.MEMORY_USED],
+        connectionId: 'conn-1',
+      });
+      const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+      expect(event.relatedMetrics).toEqual([MetricType.MEMORY_USED]);
+      expect(service.getReplicationDivergenceState('conn-1')[0]).toMatchObject({
+        replica: '10.0.0.2:6379',
+        level: 'warning',
+      });
+
+      await feed([0, 0, 0], t);
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+      expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379' });
+      expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('none');
+    });
+  });
 });
