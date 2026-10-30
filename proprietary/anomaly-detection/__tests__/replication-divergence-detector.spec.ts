@@ -339,6 +339,25 @@ describe('observeDivergence', () => {
     expect(h.state.replicas.size).toBe(0);
   });
 
+  it('keeps emitting cleared when an unacknowledged replica returns with a stale ack', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const returned = h.windows(
+      [
+        { gap: 0, rate: MiB, present: false },
+        ...Array.from({ length: 6 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 })),
+      ],
+      false,
+    );
+    expect(returned.flat().every((o) => o.kind === 'cleared')).toBe(true);
+    expect(returned.flat()).toHaveLength(6);
+
+    acknowledgeRecovery(h.state, ADDR);
+    const stale = divergences(h.windows(Array.from({ length: 3 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
+    expect(stale.map((f) => [f.level, f.reason])).toEqual([['warning', 'not_acking']]);
+  });
+
   it('starts a fresh series when a cleared replica comes back', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
