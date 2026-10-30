@@ -67,6 +67,8 @@ export interface RecoverySignal {
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
 
+export const FLAT_BASELINE_RECOVERY_TOLERANCE = 0.05;
+
 export const POINT_IN_TIME_METRICS: ReadonlySet<MetricType> = new Set([MetricType.COMMAND_P99]);
 
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {

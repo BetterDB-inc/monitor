@@ -6807,6 +6807,21 @@ describe('AnomalyService', () => {
         expect(probe()(signal())).toBeNull();
       });
 
+      it('judges a flat pre-incident baseline by the baseline, not a rolling z-score', () => {
+        withBuffer(Array.from({ length: 40 }, (_, i) => [T + i * 5000, 500]));
+
+        expect(probe()(signal({ stdDev: 0 }))).toBeNull();
+      });
+
+      it('recovers a flat pre-incident baseline once the value is back on it', () => {
+        withBuffer([
+          ...Array.from({ length: 30 }, (_, i): [number, number] => [T + i * 1000, 500]),
+          [T + 2 * MIN, 10],
+        ]);
+
+        expect(probe()(signal({ stdDev: 0 }))).toBe(T + 2 * MIN);
+      });
+
       it('ignores samples after the signal fired again', () => {
         withBuffer([...baseline(T - 30_000), [T + MIN, 900], [T + 3 * MIN, 10]]);
 
@@ -6846,6 +6861,25 @@ describe('AnomalyService', () => {
           T + MIN,
         );
       });
+    });
+
+    it('finds an incident that a long chain split off at the max span', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = Array.from({ length: 36 }, (_, i) => ({
+        ...anomaly({ id: `chain-${String(i).padStart(2, '0')}`, timestamp: t + i * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      const listed = await service.getIncidentTimelines('conn-1', t);
+      const tail = listed.find((i) => i.startedAt > t)!;
+
+      const detail = await service.getIncidentTimeline(tail.incidentId, 'conn-1');
+
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(tail.entries.map((e) => e.anomalyId));
     });
 
     it('bounds an incident detail lookup by the next firing past its window', async () => {

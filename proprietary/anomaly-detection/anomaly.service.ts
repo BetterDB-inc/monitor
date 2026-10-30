@@ -35,6 +35,7 @@ import {
   IncidentTimeline,
   IncidentTimelineBuilder,
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
+  FLAT_BASELINE_RECOVERY_TOLERANCE,
   POINT_IN_TIME_METRICS,
   RecoveryProbe,
   incidentStartOf,
@@ -5464,7 +5465,8 @@ export class AnomalyService
     const inBand = (value: number) =>
       signal.stdDev > 0
         ? Math.abs(value - signal.baseline) / signal.stdDev < warningZ
-        : Math.abs(buffer.getZScore(value)) < warningZ;
+        : Math.abs(value - signal.baseline) <=
+          Math.abs(signal.baseline) * FLAT_BASELINE_RECOVERY_TOLERANCE;
     const backInBand = samples.find(
       (s) =>
         s.timestamp >= settledAt &&
@@ -5587,7 +5589,7 @@ export class AnomalyService
     }
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const windowEnd = startedAt + 2 * maxSpanMs;
-    const events = await this.loadIncidentEvents(connectionId, startedAt - maxSpanMs, windowEnd);
+    const events = await this.loadIncidentEvents(connectionId, startedAt, windowEnd);
     const find = (all: AnomalyEvent[]) =>
       this.incidentTimelineBuilder
         .build(all, Date.now(), this.incidentRecoveryProbe)
