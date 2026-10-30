@@ -183,6 +183,21 @@ function unavailableResult(
   };
 }
 
+function instanceNotFoundResult(instanceId: string): {
+  content: Array<{ type: 'text'; text: string }>;
+  isError: true;
+} {
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: `Instance '${instanceId}' not found. Use list_instances to see available instances.`,
+      },
+    ],
+    isError: true,
+  };
+}
+
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function resolveInstanceId(overrideId?: string): string {
@@ -265,15 +280,7 @@ server.tool(
       };
       const found = data.instances.find((inst) => inst.id === instanceId);
       if (!found) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Instance '${instanceId}' not found. Use list_instances to see available instances.`,
-            },
-          ],
-          isError: true,
-        };
+        return instanceNotFoundResult(instanceId);
       }
       activeInstanceId = instanceId;
       return {
@@ -675,7 +682,12 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/anomalies/retry-amplification`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Anomaly detection');
+          const { instances } = (await apiFetch('/mcp/instances')) as {
+            instances: Array<{ id: string }>;
+          };
+          return instances.some((inst) => inst.id === id)
+            ? unavailableResult('Anomaly detection')
+            : instanceNotFoundResult(id);
         }
         throw err;
       }
