@@ -805,7 +805,7 @@ export class AnomalyService
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
     this.replicationStream.forget(connectionId);
-    this.dismissUnsavedDivergenceCopies(connectionId);
+    this.closeDivergenceEventsOnRemoval(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
     this.divergenceOrphans.delete(connectionId);
@@ -6053,10 +6053,11 @@ export class AnomalyService
     }
   }
 
-  private dismissUnsavedDivergenceCopies(connectionId: string): void {
+  private closeDivergenceEventsOnRemoval(connectionId: string): void {
     const state = this.divergenceState.get(connectionId);
     if (!state) return;
-    for (const addr of state.replicas.keys()) {
+    for (const [addr, replica] of state.replicas) {
+      if (replica.eventId) this.removedDivergenceEvents.add(replica.eventId);
       for (const id of takeUnsavedDivergence(state, addr)) this.removedDivergenceEvents.add(id);
     }
     this.resolveRemovedDivergenceEvents().catch((err) => {
@@ -6155,7 +6156,17 @@ export class AnomalyService
       if (outcome === 'retry') return;
     }
     acknowledgeRecovery(state, recovery.addr);
-    if (recovery.kind !== 'recovered') return;
+
+    if (recovery.kind === 'cleared') {
+      this.dispatchReplicationRecovered(ctx, {
+        replica: recovery.addr,
+        reason: 'replica_gone',
+        gapBytes: null,
+        message: `Replica ${recovery.addr} is no longer online, so its divergence was closed.`,
+        timestamp,
+      });
+      return;
+    }
 
     this.dispatchReplicationRecovered(ctx, {
       replica: recovery.addr,

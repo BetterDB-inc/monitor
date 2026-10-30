@@ -7285,6 +7285,110 @@ describe('AnomalyService', () => {
       expect(recoveredHook).toHaveBeenCalledWith(expect.objectContaining({ reason: 'caught_up' }));
     });
 
+    describe('replica gone', () => {
+      const absent = (timestamp: number) => ({ ...sample(timestamp, 0), replicas: [] });
+      const offline = (timestamp: number) => {
+        const base = sample(timestamp, 0);
+        return { ...base, replicas: base.replicas.map((r) => ({ ...r, state: 'wait_bgsave' })) };
+      };
+      const recoveredCalls = () =>
+        ((webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock).mock.calls;
+
+      async function poll(build: (timestamp: number) => unknown, start: number): Promise<number> {
+        let t = start;
+        for (let i = 0; i < 9; i++) {
+          await (service as any).detectReplicationDivergence(build(t), mockCtx);
+          t += 10_000;
+        }
+        return t;
+      }
+
+      it('sends replication.recovered with a null gap when an alerted replica drops out', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await poll(absent, t);
+
+        expect(recoveredCalls()).toHaveLength(1);
+        expect(recoveredCalls()[0][0]).toMatchObject({
+          replica: '10.0.0.2:6379',
+          reason: 'replica_gone',
+          gapBytes: null,
+        });
+      });
+
+      it('sends it when an alerted replica goes offline', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await poll(offline, t);
+
+        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+      });
+
+      it('sends it for each alerted replica when the node stops being a primary', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
+
+        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+      });
+
+      it('sends it once, after the event closes, when the resolve has to retry', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await poll(absent, t);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+        expect(recoveredCalls()).toHaveLength(1);
+      });
+
+      it('sends it for an alert that was sent but never saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await poll(absent, t);
+
+        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+      });
+
+      it('sends nothing for a replica that never alerted', async () => {
+        const t = await feed([2, 2], T0);
+
+        await poll(absent, t);
+
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends nothing and closes the saved event when the connection is removed', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        expect(eventId).toEqual(expect.any(String));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('keeps closing a saved event until storage accepts it after removal', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        expect((service as any).removedDivergenceEvents.has(eventId)).toBe(true);
+
+        await (service as any).detectReplicationDivergence(sample(T0 + 600_000, 0), {
+          ...mockCtx,
+          connectionId: 'conn-2',
+        });
+
+        expect((service as any).removedDivergenceEvents.size).toBe(0);
+      });
+    });
+
     describe('unsaved attempts', () => {
       const divergenceCopies = () =>
         (service as any).recentAnomalies.filter(
