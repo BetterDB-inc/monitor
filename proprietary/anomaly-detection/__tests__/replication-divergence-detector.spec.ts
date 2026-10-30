@@ -191,6 +191,16 @@ describe('observeDivergence', () => {
     expect(divergences(draining)).toEqual([]);
   });
 
+  it('escalates a drain too slow to clear within the horizon', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+    h.windows([22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })));
+
+    const crawling = divergences(h.windows([28, 27, 26, 25, 24, 23].map((m) => ({ gap: m * MiB, rate: MiB }))));
+    expect(crawling).toHaveLength(1);
+    expect(crawling[0]).toMatchObject({ level: 'critical', reason: 'not_catching_up' });
+  });
+
   it('keeps an active finding open while the replica ack goes stale', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
