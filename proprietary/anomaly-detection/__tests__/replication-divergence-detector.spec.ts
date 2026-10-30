@@ -7,11 +7,16 @@ import {
   DivergenceOutcome,
   acknowledgeDivergence,
   acknowledgeRecovery,
+  claimDivergenceDispatch,
   createDivergenceState,
+  describeDivergence,
   divergenceWindowMs,
   drainClosedWindows,
   observeDivergence,
+  replicaObservedLevel,
   requeueClosedWindows,
+  takeUnsavedDivergence,
+  trackUnsavedDivergence,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample } from '../replication-stream';
 
@@ -582,6 +587,65 @@ describe('observeDivergence', () => {
 
     const gone = h.windows([{ gap: 0, rate: MiB, present: false }, { gap: 0, rate: MiB, present: false }]);
     expect(gone.flat()).toEqual([{ kind: 'cleared', addr: ADDR, eventId: 'evt-warning', gapBytes: null }]);
+  });
+
+  describe('an alert that was sent but never saved', () => {
+    function sendWithoutSaving(h: Harness): void {
+      for (const gap of [2, 4, 6, 8, 10]) {
+        for (const outcome of h.window({ gap: gap * MiB, rate: MiB }, false)) {
+          if (outcome.kind !== 'divergence') continue;
+          claimDivergenceDispatch(h.state, outcome);
+          trackUnsavedDivergence(h.state, outcome.addr, 'attempt-1');
+        }
+      }
+    }
+
+    it('reports the sent level while no event holds it', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      expect(h.state.replicas.get(ADDR)?.level).toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR)).toBe('warning');
+    });
+
+    it('clears the replica when it drops out', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      const absent = { gap: 0, rate: MiB, present: false };
+      const gone = h.windows([absent, absent, absent], false).flat();
+      const cleared = gone.filter((o) => o.kind === 'cleared');
+
+      expect(cleared[0]).toEqual({ kind: 'cleared', addr: ADDR, eventId: null, gapBytes: null });
+      acknowledgeRecovery(h.state, ADDR);
+      h.windows([absent, absent]);
+      expect(h.state.replicas.size).toBe(0);
+    });
+
+    it('hands over each unsaved attempt once', () => {
+      const h = new Harness();
+      sendWithoutSaving(h);
+
+      expect(takeUnsavedDivergence(h.state, ADDR)).toEqual(['attempt-1']);
+      expect(takeUnsavedDivergence(h.state, ADDR)).toEqual([]);
+    });
+  });
+
+  it('writes a gap below 1 KiB in bytes', () => {
+    const message = describeDivergence({
+      kind: 'divergence',
+      addr: ADDR,
+      level: 'warning',
+      reason: 'not_acking',
+      gapBytes: 400,
+      secondsBehind: null,
+      bytesPerSec: null,
+      slopeBytesPerWindow: 0,
+      windowCount: 2,
+      spanStart: 0,
+    });
+
+    expect(message).toContain('is 400 B behind');
   });
 
   it('keeps emitting cleared for a dropped replica until it is acknowledged', () => {
