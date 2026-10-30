@@ -111,6 +111,7 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
   node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
+  retry_amplification: { icon: AlertTriangle, label: 'Retry Amplification', color: 'var(--chart-warning)' },
   unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
 };
 

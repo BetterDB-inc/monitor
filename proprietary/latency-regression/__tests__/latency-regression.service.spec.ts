@@ -188,7 +188,7 @@ describe('LatencyRegressionService', () => {
     await driveUpgradeRegression(service);
 
     expect(sink.reportLatencyDegraded).toHaveBeenCalled();
-    expect(sink.reportLatencyDegraded.mock.calls.at(-1)).toEqual([expect.any(String), true]);
+    expect(sink.reportLatencyDegraded.mock.calls.at(-1)).toEqual(['conn-1', true]);
   });
 
   it('does not hand an unpersisted event to the anomaly event sink', async () => {

@@ -149,7 +149,7 @@ const TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
 
 const LOAD_PATTERN_LABEL: Record<LoadPattern, string> = {
   stress: 'load is rising with stress',
-  latency: 'load keeps climbing under a sustained latency regression',
+  latency: 'load is trending up under a sustained latency regression',
   step: 'load stepped up under stress and is holding',
 };
 
