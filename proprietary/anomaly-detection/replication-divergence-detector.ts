@@ -18,9 +18,10 @@ export const DIVERGENCE_RECOVERED_WINDOWS = 2;
 export const DIVERGENCE_HISTORY_WINDOWS = 120;
 export const DIVERGENCE_STALE_ACK_SEC = 10;
 export const DIVERGENCE_PERSIST_BACKLOG = 1000;
+export const DIVERGENCE_STALE_ESCALATE_WINDOWS = 2;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
-export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying';
+export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
 
 export interface DivergenceWindow {
   start: number;
@@ -49,6 +50,7 @@ export interface ReplicaDivergenceState {
   baselineRate: number | null;
   subside: SubsideTracking | null;
   belowFloorStreak: number;
+  staleWindows: number;
 }
 
 export interface ClosedDivergenceWindow extends DivergenceWindow {
@@ -144,22 +146,33 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     baselineRate: null,
     subside: null,
     belowFloorStreak: 0,
+    staleWindows: 0,
   };
+}
+
+function contiguous(previous: DivergenceWindow, next: DivergenceWindow): boolean {
+  return previous.end === next.start;
 }
 
 function growthStreak(windows: DivergenceWindow[]): number {
   let streak = 1;
   for (let i = windows.length - 1; i > 0; i--) {
-    if (windows[i].gapBytes > windows[i - 1].gapBytes) streak++;
+    if (contiguous(windows[i - 1], windows[i]) && windows[i].gapBytes > windows[i - 1].gapBytes) streak++;
     else break;
   }
   return streak;
 }
 
+function drainsWithinHorizon(recent: DivergenceWindow[]): boolean {
+  const last = recent[recent.length - 1].gapBytes;
+  const drainedPerWindow = (recent[0].gapBytes - last) / (recent.length - 1);
+  return drainedPerWindow > 0 && last / drainedPerWindow <= DIVERGENCE_RECOVERY_HORIZON_WINDOWS;
+}
+
 function ceilingLevel(windows: DivergenceWindow[]): DivergenceLevel {
   const recent = windows.slice(-DIVERGENCE_CEILING_WINDOWS);
   if (recent.length < DIVERGENCE_CEILING_WINDOWS) return 'none';
-  if (recent[recent.length - 1].gapBytes < recent[0].gapBytes) return 'none';
+  if (drainsWithinHorizon(recent)) return 'none';
   const seconds = recent.map((w) => w.secondsBehind);
   if (seconds.some((s) => s === null)) return 'none';
   const lowest = Math.min(...(seconds as number[]));
@@ -191,6 +204,7 @@ function evaluateReplica(
 ): DivergenceOutcome | null {
   const windows = replica.windows;
   const last = windows[windows.length - 1];
+  if (windows.length > 1 && !contiguous(windows[windows.length - 2], last)) replica.subside = null;
 
   if (!isBehind(last)) {
     replica.subside = null;
@@ -256,6 +270,26 @@ function evaluateReplica(
   };
 }
 
+function staleAckFinding(replica: ReplicaDivergenceState): DivergenceFinding | null {
+  replica.staleWindows++;
+  if (replica.staleWindows < DIVERGENCE_STALE_ESCALATE_WINDOWS) return null;
+  if (LEVEL_RANK[replica.level] >= LEVEL_RANK.critical) return null;
+  const last = replica.windows[replica.windows.length - 1];
+  if (!last) return null;
+  return {
+    kind: 'divergence',
+    addr: replica.addr,
+    level: 'critical',
+    reason: 'not_acking',
+    gapBytes: last.gapBytes,
+    secondsBehind: last.secondsBehind,
+    bytesPerSec: last.bytesPerSec,
+    slopeBytesPerWindow: 0,
+    windowCount: replica.staleWindows,
+    spanStart: replica.spanStart ?? last.start,
+  };
+}
+
 function dropReplica(
   state: DivergenceConnectionState,
   replica: ReplicaDivergenceState,
@@ -267,6 +301,7 @@ function dropReplica(
   replica.windows = [];
   replica.subside = null;
   replica.belowFloorStreak = 0;
+  replica.staleWindows = 0;
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
@@ -284,7 +319,11 @@ function closeWindow(
 
   for (const [addr, replica] of state.replicas) {
     if (state.accumulators.has(addr)) continue;
-    if (replica.level !== 'none' && state.staleAddrs.has(addr)) continue;
+    if (replica.level !== 'none' && state.staleAddrs.has(addr)) {
+      const finding = staleAckFinding(replica);
+      if (finding) outcomes.push(finding);
+      continue;
+    }
     outcomes.push(...dropReplica(state, replica));
   }
 
@@ -292,6 +331,7 @@ function closeWindow(
     if (acc.gaps.length < DIVERGENCE_MIN_SAMPLES) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
+    replica.staleWindows = 0;
     const gapBytes = median(acc.gaps);
     const secondsBehind = acc.lastRate === null || acc.lastRate === 0 ? null : gapBytes / acc.lastRate;
     const window: DivergenceWindow = { start, end, gapBytes, bytesPerSec: acc.lastRate, secondsBehind };
@@ -373,6 +413,7 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.baselineRate = null;
   replica.subside = null;
   replica.belowFloorStreak = 0;
+  replica.staleWindows = 0;
 }
 
 export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
@@ -406,6 +447,8 @@ function describeReason(finding: DivergenceFinding): string {
       return 'the write rate is back to baseline but the gap has not closed';
     case 'not_applying':
       return 'writes have stopped but the replica is not applying the backlog';
+    case 'not_acking':
+      return `the replica has not acknowledged the stream for over ${DIVERGENCE_STALE_ACK_SEC}s`;
   }
 }
 

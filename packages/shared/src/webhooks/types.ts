@@ -353,7 +353,7 @@ export interface LatencyRegressionCommand {
 export interface ReplicationDivergenceData {
   replica: string;
   level: 'warning' | 'critical';
-  reason: 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying';
+  reason: 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
   gapBytes: number;
   secondsBehind: number | null;
   bytesPerSec: number | null;
