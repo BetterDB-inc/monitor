@@ -3738,6 +3738,25 @@ describe('AnomalyService', () => {
       expect(writes).toBeLessThanOrEqual(6);
     });
 
+    it('sends the webhook during a storage outage, once', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+      await runRetry({ realEmit: true });
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not repeat the webhook when a failed write later succeeds', async () => {
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('storage down'))
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
     it('ignores a relative CPU move, even a critical one', async () => {
       const { recorded } = await runRetry({
         cpuEvent: { severity: AnomalySeverity.CRITICAL, anomalyType: AnomalyType.DROP },

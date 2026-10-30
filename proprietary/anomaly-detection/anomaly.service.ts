@@ -3329,7 +3329,8 @@ export class AnomalyService
     const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
     const attributionKey = `${attributionStart}:${finding.level}`;
     let contributors = this.retryAmplificationContributors.get(ctx.connectionId)?.contributors ?? null;
-    if (this.retryAmplificationAttributed.get(ctx.connectionId) !== attributionKey) {
+    const firstAttempt = this.retryAmplificationAttributed.get(ctx.connectionId) !== attributionKey;
+    if (firstAttempt) {
       contributors = await this.attributeRetryAmplification(ctx, timestamp, attributionStart);
       this.retryAmplificationContributors.set(ctx.connectionId, {
         episodeStart: attributionStart,
@@ -3356,12 +3357,8 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
-    if (event.persisted !== true) return;
-    this.retryAmplificationLastEmit.delete(ctx.connectionId);
-    acknowledgeRetryAmplificationFinding(state, finding);
-    this.retryAmplificationAttributed.delete(ctx.connectionId);
 
-    if (this.webhookEventsProService) {
+    if (firstAttempt && this.webhookEventsProService) {
       this.webhookEventsProService
         .dispatchRetryAmplificationDetected({
           level: finding.level,
@@ -3380,6 +3377,11 @@ export class AnomalyService
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
         });
     }
+
+    if (event.persisted !== true) return;
+    this.retryAmplificationLastEmit.delete(ctx.connectionId);
+    acknowledgeRetryAmplificationFinding(state, finding);
+    this.retryAmplificationAttributed.delete(ctx.connectionId);
   }
 
   private async readClientCommandCounts(

@@ -518,6 +518,7 @@ function evaluateWindow(
 
   state.coldStreak = 0;
   state.hotRun.push(w);
+  state.pending = null;
   const finding = classifyRun(state, base, timestamp);
   if (finding === null) return;
 

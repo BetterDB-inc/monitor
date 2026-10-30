@@ -418,6 +418,19 @@ describe('retry amplification detector', () => {
     expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
   });
 
+  it('drops an unacknowledged critical once the level falls back', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    expect(d.state.ackedLevel).toBe('warning');
+    d.ack = false;
+    d.window(hot(2.1, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.2));
+    expect(d.state.pending?.level).toBe('critical');
+    d.window(hot(2.3));
+    expect(d.state.pending).toBeNull();
+  });
+
   it('freezes the baseline while an episode is open', () => {
     const d = new Driver();
     d.baseline();
