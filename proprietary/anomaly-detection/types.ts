@@ -67,6 +67,7 @@ export enum MetricType {
   /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
   RETRY_AMPLIFICATION = 'retry_amplification',
+  ERROR_REPLIES = 'error_replies',
 }
 
 /**
@@ -109,6 +110,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LARGE_REPLY_PRESSURE,
   MetricType.CONNECTION_CHURN,
   MetricType.RETRY_AMPLIFICATION,
+  MetricType.ERROR_REPLIES,
 ]);
 
 export enum AnomalySeverity {

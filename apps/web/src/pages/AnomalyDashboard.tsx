@@ -158,6 +158,7 @@ const METRIC_LABELS: Record<string, string> = {
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
   retry_amplification: 'Retry Amplification',
+  error_replies: 'Error Replies',
 };
 
 function formatTime(ts: number): string {

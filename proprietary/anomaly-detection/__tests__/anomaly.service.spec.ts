@@ -3769,6 +3769,236 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('error replies delta detection', () => {
+    const infoWith = (totalErrors: string, errorstats?: Record<string, { count: number }>) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        total_error_replies: totalErrors,
+      },
+      ...(errorstats ? { errorstats } : {}),
+    });
+    const errorEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.ERROR_REPLIES);
+    const errorBuffer = () => {
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      return buffers.get(MetricType.ERROR_REPLIES);
+    };
+
+    it('feeds the per-poll delta, not the lifetime counter', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('512'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(12);
+    });
+
+    it('does not create the buffer when total_error_replies is absent', async () => {
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
+    });
+
+    it('scales the delta to one poll when polling resumes after a gap', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      now += 10 * (service as any).getIntervalMs();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5100'));
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorBuffer().getLatest()).toBe(500);
+    });
+
+    it('keeps the errorstat baseline when a poll after a gap has no errorstats', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        now += interval;
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      now += 10 * interval;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
+    });
+
+    it('keeps the errorstat baseline across a poll without errorstats', async () => {
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types: TIMEOUT +6000');
+    });
+
+    it('absorbs a counter reset on restart', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('900'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('3'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(0);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('stays quiet when a zero-error instance sees a couple of errors', async () => {
+      let total = 1000;
+      for (let i = 0; i < 31; i++) {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      for (let i = 0; i < 3; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      expect(errorBuffer().getLatest()).toBe(1);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('fires on an error burst and names the top error types', async () => {
+      let total = 1000;
+      const stats = { ERR: 900, TIMEOUT: 100, BUSY: 0 };
+      const snapshot = () =>
+        infoWith(String(total), {
+          errorstat_ERR: { count: stats.ERR },
+          errorstat_TIMEOUT: { count: stats.TIMEOUT },
+          errorstat_BUSY: { count: stats.BUSY },
+        });
+      for (let i = 0; i < 31; i++) {
+        total += 2;
+        stats.ERR += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+      expect(errorEvents()).toHaveLength(0);
+
+      for (let i = 0; i < 2; i++) {
+        total += 3000;
+        stats.TIMEOUT += 2000;
+        stats.BUSY += 900;
+        stats.ERR += 100;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].connectionId).toBe('conn-1');
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].message).toContain('above normal');
+      expect(events[0].message).toContain('top error types: TIMEOUT +2000, BUSY +900, ERR +100');
+    });
+
+    it('labels a steady rate over the absolute threshold as a spike without a z-score trigger', async () => {
+      let total = 0;
+      for (let i = 0; i < 32; i++) {
+        total += 300;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].zScore).toBeLessThan(3);
+      expect(events[0].threshold).toBe(200);
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('starts a new baseline after a poll without total_error_replies', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...infoWith('0'),
+        stats: { ...infoWith('0').stats, total_error_replies: undefined },
+      });
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5000'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(0);
+    });
+
+    it('needs two consecutive hot polls before firing', async () => {
+      let total = 0;
+      for (let i = 0; i < 31; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      total += 5000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      total += 1;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('clears its counters when the connection is removed', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+        infoWith('10', { errorstat_ERR: { count: 10 } }),
+      );
+      await poll();
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).lastErrorReplies.has('conn-1')).toBe(false);
+      expect((service as any).lastErrorstatCounts.has('conn-1')).toBe(false);
+    });
+  });
+
   // ─── Client-eviction storm (valkey-io/valkey#4151) ─────────────────────────
   describe('client-eviction storm detection', () => {
     const infoWith = (evicted: string, memClients = '1048576') => ({

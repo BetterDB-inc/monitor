@@ -119,7 +119,17 @@ import {
   ClusterShard,
   SlotStats,
   SentinelNodeInfo,
+  ErrorStatsInfo,
 } from '@app/common/types/metrics.types';
+import {
+  ERROR_REPLIES_CRITICAL_PER_POLL,
+  errorRepliesPerPoll,
+  ERROR_REPLIES_MIN_PER_POLL,
+  ERROR_REPLIES_WARNING_PER_POLL,
+  describeErrorstatDeltas,
+  readErrorstatCounts,
+  topErrorstatDeltas,
+} from './error-replies';
 import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
@@ -277,6 +287,8 @@ export class AnomalyService
   // config value (fetched once) so the alert can say whether eviction is even
   // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
   private lastEvictedClients = new Map<string, number>();
+  private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
+  private lastErrorstatCounts = new Map<string, Map<string, number>>();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
   // connection — so the degraded-detection warning is emitted only on a change,
@@ -729,6 +741,8 @@ export class AnomalyService
     this.lastChurnReading.delete(connectionId);
     this.connectionChurnSamples.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
+    this.lastErrorReplies.delete(connectionId);
+    this.lastErrorstatCounts.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
@@ -1036,6 +1050,14 @@ export class AnomalyService
       }
 
       await this.detectConnectionChurn(ctx, info, buffers, detectors, timestamp);
+      await this.detectErrorReplies(
+        info,
+        infoResponse.errorstats,
+        ctx,
+        buffers,
+        detectors,
+        timestamp,
+      );
 
       // Client-eviction storm (maxmemory-clients). evicted_clients is a lifetime
       // counter, so we feed the per-poll delta — the count of clients disconnected
@@ -3107,6 +3129,72 @@ export class AnomalyService
    * busyness escalates and re-arms on a drop; the passed cpuUtilization lets the
    * message point out when CPU% understates the load.
    */
+  private async detectErrorReplies(
+    info: Record<string, string>,
+    errorstats: ErrorStatsInfo | undefined,
+    ctx: ConnectionContext,
+    buffers: Map<MetricType, MetricBuffer>,
+    detectors: Map<MetricType, SpikeDetector>,
+    timestamp: number,
+  ): Promise<void> {
+    const currentErrors = this.parseNumber(info.total_error_replies);
+    if (currentErrors === null) {
+      this.lastErrorReplies.delete(ctx.connectionId);
+      this.lastErrorstatCounts.delete(ctx.connectionId);
+      return;
+    }
+    const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
+    const errorsDelta =
+      lastErrors === undefined
+        ? 0
+        : errorRepliesPerPoll(
+            Math.max(0, currentErrors - lastErrors.value),
+            timestamp - lastErrors.timestamp,
+            this.getIntervalMs(),
+          );
+    this.lastErrorReplies.set(ctx.connectionId, { value: currentErrors, timestamp });
+
+    const currentCounts = readErrorstatCounts(errorstats);
+    const previousCounts = this.lastErrorstatCounts.get(ctx.connectionId);
+    if (errorstats !== undefined) {
+      this.lastErrorstatCounts.set(ctx.connectionId, currentCounts);
+    }
+
+    if (buffers.has(MetricType.ERROR_REPLIES) === false) {
+      buffers.set(MetricType.ERROR_REPLIES, new MetricBuffer(MetricType.ERROR_REPLIES));
+      detectors.set(
+        MetricType.ERROR_REPLIES,
+        new SpikeDetector(
+          MetricType.ERROR_REPLIES,
+          {
+            warningZScore: 3,
+            criticalZScore: 5,
+            warningThreshold: ERROR_REPLIES_WARNING_PER_POLL,
+            criticalThreshold: ERROR_REPLIES_CRITICAL_PER_POLL,
+            consecutiveRequired: 2,
+            cooldownMs: 60000,
+          },
+          { minValue: ERROR_REPLIES_MIN_PER_POLL, thresholdOverridesBelowMean: true },
+        ),
+      );
+    }
+
+    const errorsBuffer = buffers.get(MetricType.ERROR_REPLIES)!;
+    const errorsDetector = detectors.get(MetricType.ERROR_REPLIES)!;
+    errorsBuffer.addSample(errorsDelta, timestamp);
+    const anomaly = errorsDetector.detect(errorsBuffer, errorsDelta, timestamp);
+    if (anomaly === null) {
+      return;
+    }
+    anomaly.connectionId = ctx.connectionId;
+    const breakdown = describeErrorstatDeltas(topErrorstatDeltas(previousCounts, currentCounts));
+    if (breakdown !== null) {
+      anomaly.message = `${anomaly.message} — ${breakdown}`;
+    }
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+    await this.addAnomaly(anomaly, ctx);
+  }
+
   private async detectLoadSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
