@@ -19,6 +19,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
+  ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
@@ -176,6 +177,31 @@ import {
   createForkMemoryState,
   evaluateForkMemoryRisk,
 } from './fork-memory-risk-detector';
+import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
+import {
+  DIVERGENCE_CORRELATED_METRICS,
+  DIVERGENCE_FLOOR_BYTES,
+  DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_ORPHAN_PAGE_SIZE,
+  DivergenceConnectionState,
+  DivergenceFinding,
+  DivergenceRecovery,
+  DivergenceWindow,
+  OrphanedDivergence,
+  ReplicaDivergenceHistory,
+  acknowledgeDivergence,
+  claimDivergenceDispatch,
+  assessOrphanedReplica,
+  acknowledgeRecovery,
+  createDivergenceState,
+  describeDivergence,
+  divergenceReplicaFromMessage,
+  divergenceWindowMs,
+  drainClosedWindows,
+  replicaObservedLevel,
+  requeueClosedWindows,
+  observeDivergence,
+} from './replication-divergence-detector';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -411,6 +437,11 @@ export class AnomalyService
   // cumulative counter (which never resets on AOF-only deployments).
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
+  private replicationStream = new ReplicationStreamTracker();
+  private divergenceState = new Map<string, DivergenceConnectionState>();
+  private divergenceOrphansSwept = new Set<string>();
+  private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
+  private divergenceSuperseded = new Map<string, Set<string>>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -826,6 +857,11 @@ export class AnomalyService
     // detectConfigDrift call, which rebuilds its node list from what remains.
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
+    this.replicationStream.forget(connectionId);
+    this.divergenceState.delete(connectionId);
+    this.divergenceOrphansSwept.delete(connectionId);
+    this.divergenceOrphans.delete(connectionId);
+    this.divergenceSuperseded.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -892,6 +928,7 @@ export class AnomalyService
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    let replicationSample: ReplicationStreamSample | null = null;
     try {
       const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
@@ -913,6 +950,7 @@ export class AnomalyService
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
+      replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -1558,6 +1596,12 @@ export class AnomalyService
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
+    } finally {
+      if (replicationSample) {
+        await this.detectReplicationDivergence(replicationSample, ctx).catch((err) => {
+          this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
+        });
+      }
     }
   }
 
@@ -6370,6 +6414,323 @@ export class AnomalyService
     }
 
     return groups;
+  }
+
+  getReplicationStreamSample(connectionId: string): ReplicationStreamSample | null {
+    return this.replicationStream.latest(connectionId);
+  }
+
+  getReplicationDivergenceState(
+    connectionId: string,
+  ): Array<{ replica: string; level: string; windows: DivergenceWindow[] }> {
+    const state = this.divergenceState.get(connectionId);
+    if (!state) return [];
+    return [...state.replicas.values()].map((r) => ({
+      replica: r.addr,
+      level: r.level,
+      windows: [...r.windows],
+    }));
+  }
+
+  async getReplicationDivergenceHistory(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<ReplicaDivergenceHistory[]> {
+    const state = this.divergenceState.get(connectionId);
+    const series = new Map<string, DivergenceWindow[]>();
+    try {
+      const stored = await this.storage.getReplicationDivergenceWindows({
+        connectionId,
+        startTime,
+        endTime,
+        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
+      });
+      for (const row of stored) {
+        const windows = series.get(row.replicaAddr) ?? [];
+        windows.push({
+          start: row.windowStart,
+          end: row.windowEnd,
+          gapBytes: row.gapBytes,
+          bytesPerSec: row.bytesPerSec,
+          secondsBehind: row.secondsBehind,
+        });
+        series.set(row.replicaAddr, windows);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read replication divergence windows, using in-memory history: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    for (const replica of state?.replicas.values() ?? []) {
+      const windows = series.get(replica.addr) ?? [];
+      const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
+      windows.push(
+        ...replica.windows.filter((w) => w.end > storedEnd && w.end >= startTime && w.end <= endTime),
+      );
+      series.set(replica.addr, windows);
+    }
+    return [...series.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([replica, windows]) => ({
+        replica,
+        level: replicaObservedLevel(state, replica),
+        latest: windows[windows.length - 1] ?? null,
+        windows,
+      }));
+  }
+
+  private async detectReplicationDivergence(
+    sample: ReplicationStreamSample,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    await this.resolveSupersededDivergenceEvents(ctx.connectionId);
+    const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
+    this.divergenceState.set(ctx.connectionId, state);
+    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
+      await this.collectOrphanedDivergenceEvents(state, ctx);
+    }
+
+    for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+      if (outcome.kind === 'divergence') {
+        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      } else {
+        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      }
+    }
+    await this.settleOrphanedDivergenceEvents(state, ctx);
+    await this.persistDivergenceWindows(state, ctx);
+  }
+
+  private async collectOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    try {
+      const seen = new Set([
+        ...[...state.replicas.values()].map((r) => r.eventId),
+        ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
+      ]);
+      const orphans = new Map<string, OrphanedDivergence>();
+      for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
+        const open = await this.storage.getAnomalyEvents({
+          connectionId: ctx.connectionId,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          resolved: false,
+          limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+          offset,
+        });
+        for (const event of open) {
+          if (seen.has(event.id)) continue;
+          seen.add(event.id);
+          const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+          const orphan = orphans.get(replica) ?? {
+            eventIds: new Set<string>(),
+            sinceWindow: state.closedWindowCount,
+            claimed: false,
+          };
+          orphan.eventIds.add(event.id);
+          orphans.set(replica, orphan);
+        }
+        if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) break;
+      }
+      if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
+      this.divergenceOrphansSwept.add(ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async settleOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const orphans = this.divergenceOrphans.get(ctx.connectionId);
+    if (!orphans) return;
+    for (const [replica, orphan] of orphans) {
+      const assessment = assessOrphanedReplica(state, replica, orphan.sinceWindow);
+      if (assessment === 'pending') continue;
+      try {
+        for (const id of orphan.eventIds) {
+          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, Date.now())) || orphan.claimed;
+          orphan.eventIds.delete(id);
+          const cached = this.recentAnomalies.find((a) => a.id === id);
+          if (cached) cached.resolved = true;
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        continue;
+      }
+      orphans.delete(replica);
+      if (orphan.claimed && assessment !== 'diverging') this.dispatchOrphanRecovered(replica, ctx);
+    }
+    if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
+  }
+
+  private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
+    this.dispatchReplicationRecovered(ctx, {
+      replica,
+      reason: 'resolved_after_restart',
+      gapBytes: null,
+      message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
+      timestamp: Date.now(),
+    });
+  }
+
+  private async persistDivergenceWindows(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const closed = drainClosedWindows(state);
+    if (closed.length === 0) return;
+    try {
+      await this.storage.saveReplicationDivergenceWindows(
+        closed.map((w) => ({
+          replicaAddr: w.addr,
+          windowStart: w.start,
+          windowEnd: w.end,
+          gapBytes: w.gapBytes,
+          bytesPerSec: w.bytesPerSec,
+          secondsBehind: w.secondsBehind,
+        })),
+        ctx.connectionId,
+      );
+    } catch (err) {
+      requeueClosedWindows(state, closed);
+      this.logger.warn(
+        `Failed to persist replication divergence windows for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async resolveSupersededDivergenceEvents(connectionId: string): Promise<void> {
+    const pending = this.divergenceSuperseded.get(connectionId);
+    if (!pending) return;
+    for (const id of pending) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') pending.delete(id);
+    }
+    if (pending.size === 0) this.divergenceSuperseded.delete(connectionId);
+  }
+
+  private async emitReplicationDivergence(
+    state: DivergenceConnectionState,
+    finding: DivergenceFinding,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const relatedMetrics = [
+      ...new Set(
+        this.recentAnomalies
+          .filter(
+            (a) =>
+              a.connectionId === ctx.connectionId &&
+              a.timestamp >= finding.spanStart &&
+              DIVERGENCE_CORRELATED_METRICS.has(a.metricType),
+          )
+          .map((a) => a.metricType),
+      ),
+    ];
+    const isCritical = finding.level === 'critical';
+    const message = describeDivergence(finding);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.gapBytes,
+      baseline: DIVERGENCE_FLOOR_BYTES,
+      zScore: 0,
+      stdDev: 0,
+      threshold: DIVERGENCE_FLOOR_BYTES,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+      relatedMetrics,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
+    const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
+    await this.addAnomaly(event, ctx);
+
+    if (claimDivergenceDispatch(state, finding)) {
+      this.webhookEventsProService
+        ?.dispatchReplicationDivergence({
+          replica: finding.addr,
+          level: finding.level,
+          reason: finding.reason,
+          gapBytes: finding.gapBytes,
+          secondsBehind: finding.secondsBehind,
+          bytesPerSec: finding.bytesPerSec,
+          slopeBytesPerWindow: finding.slopeBytesPerWindow,
+          windowCount: finding.windowCount,
+          correlatedSignals: relatedMetrics,
+          message,
+          timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch replication.divergence webhook', err);
+        });
+    }
+
+    if (event.persisted !== true) return;
+    acknowledgeDivergence(state, finding, event.id);
+    if (previousEventId && (await this.resolveAnomalyOutcome(previousEventId)) === 'retry') {
+      const pending = this.divergenceSuperseded.get(ctx.connectionId) ?? new Set<string>();
+      pending.add(previousEventId);
+      this.divergenceSuperseded.set(ctx.connectionId, pending);
+    }
+  }
+
+  private async resolveReplicationDivergence(
+    state: DivergenceConnectionState,
+    recovery: DivergenceRecovery,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    if (recovery.eventId) {
+      const outcome = await this.resolveAnomalyOutcome(recovery.eventId);
+      if (outcome === 'retry') return;
+    }
+    acknowledgeRecovery(state, recovery.addr);
+    if (recovery.kind !== 'recovered') return;
+
+    this.dispatchReplicationRecovered(ctx, {
+      replica: recovery.addr,
+      reason: 'caught_up',
+      gapBytes: recovery.gapBytes ?? 0,
+      message: `Replica ${recovery.addr} caught up with the primary.`,
+      timestamp,
+    });
+  }
+
+  private dispatchReplicationRecovered(
+    ctx: ConnectionContext,
+    data: Omit<ReplicationRecoveredData, 'instance' | 'connectionId'>,
+  ): void {
+    this.logger.log(`Replication recovered for ${ctx.connectionName}: ${data.message}`);
+    this.webhookEventsProService
+      ?.dispatchReplicationRecovered({
+        ...data,
+        instance: { host: ctx.host, port: ctx.port },
+        connectionId: ctx.connectionId,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch replication.recovered webhook', err);
+      });
   }
 
   getBufferStats(connectionId?: string): BufferStats[] {

@@ -129,6 +129,17 @@ describe('Correlator', () => {
       expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
     });
 
+    it('keeps the failover diagnosis when divergence shares the window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.REPLICATION_DIVERGENCE, timestamp: now }),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+
     it('matches on CLUSTER_STATE metric', () => {
       const anomaly = makeAnomaly({
         metricType: MetricType.CLUSTER_STATE,
@@ -523,6 +534,62 @@ describe('Correlator', () => {
       const recs = correlator.getPatternRecommendations(AnomalyPattern.SLOW_QUERIES);
       expect(recs.length).toBeGreaterThan(0);
       expect(recs).toContain('Review slow log entries to identify problematic commands');
+    });
+  });
+
+  describe('REPLICATION_DIVERGENCE pattern', () => {
+    const divergence = (overrides: Partial<AnomalyEvent> = {}) =>
+      makeAnomaly({
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        zScore: 0,
+        message: 'WARNING: Replica 10.0.0.2:6379 is 8.0 MiB behind the primary',
+        connectionId: 'c1',
+        ...overrides,
+      });
+
+    it('reads a lone warning as a transient burst', () => {
+      const groups = correlator.correlate([divergence()]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(groups[0].diagnosis).toContain('watching whether it catches up');
+    });
+
+    it('reads a critical divergence as sustained', () => {
+      const [group] = correlator.correlate([divergence({ severity: AnomalySeverity.CRITICAL })]);
+      expect(group.diagnosis).toContain('Sustained replication divergence');
+    });
+
+    it('groups divergence with memory pressure into one compound diagnosis', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(groups[0].diagnosis).toContain('alongside memory growth');
+    });
+
+    it('names signals the detector stamped from outside the correlation window', () => {
+      const [group] = correlator.correlate([
+        divergence({
+          relatedMetrics: [MetricType.REPL_BUFFER_PRESSURE, MetricType.CLUSTER_TOPOLOGY],
+        }),
+      ]);
+      expect(group.diagnosis).toContain('replica output-buffer pressure');
+      expect(group.diagnosis).toContain('slot migration');
+    });
+
+    it('keeps stamped related metrics after grouping', () => {
+      const now = Date.now();
+      const stamped = divergence({ timestamp: now, relatedMetrics: [MetricType.FORK_MEMORY_RISK] });
+      correlator.correlate([
+        stamped,
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(stamped.relatedMetrics).toEqual(
+        expect.arrayContaining([MetricType.FORK_MEMORY_RISK, MetricType.MEMORY_USED]),
+      );
     });
   });
 });

@@ -72,6 +72,8 @@ Advanced monitoring events for anomaly detection and performance tracking:
 |-------|-------------|-------------------|
 | `slowlog.threshold` | Slow query detected | Slowlog count exceeds configured threshold |
 | `replication.lag` | Replication lag detected | Replica lag exceeds acceptable threshold |
+| `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
+| `replication.recovered` | Replica caught up | A diverged replica is back below the floor, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
@@ -352,6 +354,46 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
   "masterLinkStatus": "up",
   "message": "Replication lag (45s) exceeds threshold (30s)",
   "timestamp": 1706457600000
+}
+```
+
+#### replication.divergence (Pro)
+
+Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`.
+
+Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "level": "critical",
+  "reason": "ceiling",
+  "gapBytes": 629145600,
+  "secondsBehind": 600,
+  "bytesPerSec": 1048576,
+  "slopeBytesPerWindow": -1048576,
+  "windowCount": 2,
+  "correlatedSignals": ["memory_used"],
+  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600.0 MiB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows.",
+  "timestamp": 1706457600000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
+}
+```
+
+#### replication.recovered (Pro)
+
+`reason` is `caught_up` when the replica's gap stays below the floor for two windows. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open; `gapBytes` is then `null`. After a restart the event stays open until the replica has been assessed: it closes with this reason once the replica has stayed below the floor for two windows, or is no longer connected. A replica that is still behind but below the alert thresholds keeps its event open. If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "reason": "caught_up",
+  "gapBytes": 0,
+  "message": "Replica 10.0.0.2:6379 caught up with the primary.",
+  "timestamp": 1706457660000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
 }
 ```
 
