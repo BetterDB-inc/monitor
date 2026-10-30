@@ -3813,6 +3813,105 @@ describe('AnomalyService', () => {
       expect(writes).toBeLessThanOrEqual(6);
     });
 
+    describe('load saturation saves', () => {
+      const info = (busy: number) => ({
+        instantaneous_eventloop_duration_usec: String(busy * 10),
+        instantaneous_eventloop_cycles_per_sec: '1000',
+        instantaneous_ops_per_sec: '1000',
+      });
+      const ctx = { connectionId: 'conn-1', connectionName: 'c', host: 'h', port: 6379 };
+      const poll = async (busy: number, timestamp: number) =>
+        (service as any).detectLoadSaturation(info(busy), ctx, timestamp, null);
+      const polls = async (busy: number, from: number, count: number) => {
+        for (let i = 0; i < count; i++) await poll(busy, from + i * 1_000);
+      };
+      const loadEvents = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.LOAD_SATURATION);
+      const loadCounts = () =>
+        prometheusService.incrementAnomalyEvent.mock.calls.filter(
+          ([, metric]: unknown[]) => metric === MetricType.LOAD_SATURATION,
+        );
+      const saves = () => storage.saveAnomalyEvent.mock.calls.map(([e]: [any]) => e);
+
+      it('stops after a save goes through', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+
+        await polls(90, 0, 10);
+
+        expect(saves()).toHaveLength(1);
+      });
+
+      it('retries a failed save once a minute under one event', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 125);
+
+        expect(saves()).toHaveLength(3);
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(1);
+        expect(loadEvents()).toHaveLength(1);
+        expect(loadCounts()).toHaveLength(1);
+      });
+
+      it('saves on the retry and then stays quiet', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+        const attempts = saves().length;
+        await polls(90, 70_000, 70);
+
+        expect(attempts).toBe(2);
+        expect(saves()).toHaveLength(2);
+        expect((loadEvents()[0] as any).persisted).toBe(true);
+      });
+
+      it('sends an escalation straight away and counts it', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 3);
+        await polls(99, 3_000, 3);
+
+        expect(saves()).toHaveLength(2);
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(2);
+        expect(saves()[1].severity).toBe(AnomalySeverity.CRITICAL);
+        expect(loadEvents()).toHaveLength(2);
+        expect(loadCounts().map(([severity]: unknown[]) => severity)).toEqual([
+          AnomalySeverity.WARNING,
+          AnomalySeverity.CRITICAL,
+        ]);
+      });
+
+      it('forgets an unsaved event when the load drops', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 3);
+        await poll(10, 3_000);
+        await polls(90, 4_000, 3);
+
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(2);
+      });
+
+      it('clears an unsaved event when the connection goes', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        await polls(90, 0, 3);
+
+        (service as any).onConnectionRemoved('conn-1');
+
+        expect((service as any).loadSaturationUnsaved.has('conn-1')).toBe(false);
+      });
+
+      it('counts as active saturation while its save is failing', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        await polls(90, 0, 3);
+
+        const { recorded } = await runRetry();
+
+        expect(recorded[0].severity).toBe(AnomalySeverity.CRITICAL);
+      });
+    });
+
     describe('saturation falling back and returning', () => {
       const webhookLevels = () =>
         webhookEventsProService.dispatchRetryAmplificationDetected.mock.calls.map(
@@ -3893,6 +3992,32 @@ describe('AnomalyService', () => {
 
         expect(retryEvents()).toHaveLength(1);
         expect(retryEvents()[0].correlationId).toBe('group-1');
+      });
+
+      it('counts the event once however many saves it takes', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        const counted = (mock: jest.Mock, metric: unknown) =>
+          mock.mock.calls.filter((args) => JSON.stringify(args).includes(String(metric)));
+
+        await runRetry({ realEmit: true });
+
+        expect(storage.saveAnomalyEvent.mock.calls.length).toBeGreaterThan(1);
+        expect(
+          counted(prometheusService.incrementAnomalyEvent, MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+        expect(counted(otelEvents.dispatch, MetricType.RETRY_AMPLIFICATION)).toHaveLength(1);
+      });
+
+      it('treats a rise to critical as its own event', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await runRetry({ realEmit: true, saturated: (w) => w >= 16 });
+
+        const severities = prometheusService.incrementAnomalyEvent.mock.calls
+          .filter(([, metric]: unknown[]) => metric === MetricType.RETRY_AMPLIFICATION)
+          .map(([severity]: unknown[]) => severity);
+        expect(severities).toEqual([AnomalySeverity.WARNING, AnomalySeverity.CRITICAL]);
+        expect(retryEvents()).toHaveLength(2);
       });
 
       it('does not replace an unsaved event from an earlier episode', async () => {

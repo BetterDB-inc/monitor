@@ -255,6 +255,7 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const LOAD_SAVE_RETRY_MS = 60_000;
 
 @Injectable()
 export class AnomalyService
@@ -431,6 +432,7 @@ export class AnomalyService
   >();
   private retryAmplificationAttributed = new Map<string, string>();
   private retryAmplificationLastEmit = new Map<string, number>();
+  private loadSaturationUnsaved = new Map<string, AnomalyEvent>();
   private retryAmplificationUnsaved = new Map<
     string,
     { episodeStart: number; event: AnomalyEvent }
@@ -815,6 +817,7 @@ export class AnomalyService
     this.controlPlaneState.delete(connectionId);
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
+    this.loadSaturationUnsaved.delete(connectionId);
     this.retryAmplificationState.delete(connectionId);
     this.retryAmplificationFirstClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
@@ -3223,13 +3226,22 @@ export class AnomalyService
       opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
       timestamp,
     });
-    if (finding === null) return;
+    if (finding === null) {
+      this.loadSaturationUnsaved.delete(ctx.connectionId);
+      return;
+    }
 
     const severity =
       finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+    const unsaved = this.loadSaturationUnsaved.get(ctx.connectionId);
+    const retried = unsaved?.severity === severity ? unsaved : undefined;
+    if (retried !== undefined && timestamp - retried.timestamp < LOAD_SAVE_RETRY_MS) {
+      return;
+    }
     const busyPct = finding.busyFraction * 100;
     const event: AnomalyEvent = {
-      id: randomUUID(),
+      id: retried?.id ?? randomUUID(),
+      correlationId: retried?.correlationId,
       timestamp,
       metricType: MetricType.LOAD_SATURATION,
       anomalyType: AnomalyType.SPIKE,
@@ -3245,9 +3257,14 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     // Await the emit so a failure propagates to the poll error handler, and
-    // acknowledge only AFTER a successful emit — a failed escalation is then
-    // retried on the next poll rather than being swallowed by the hysteresis.
-    await this.addAnomaly(event, ctx);
+    // acknowledge only AFTER a successful save — a failed escalation is then
+    // retried rather than being swallowed by the hysteresis.
+    await this.addAnomaly(event, ctx, retried);
+    if (event.persisted !== true) {
+      this.loadSaturationUnsaved.set(ctx.connectionId, event);
+      return;
+    }
+    this.loadSaturationUnsaved.delete(ctx.connectionId);
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
@@ -3295,7 +3312,10 @@ export class AnomalyService
       }
     }
     const loadLevel = this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
-    if (loadLevel !== undefined && loadLevel !== 'none') {
+    if (
+      this.loadSaturationUnsaved.has(ctx.connectionId) ||
+      (loadLevel !== undefined && loadLevel !== 'none')
+    ) {
       activeSaturation.add(MetricType.LOAD_SATURATION);
     }
     const clientLevel = this.clientSaturationLevel.get(ctx.connectionId);
@@ -3351,15 +3371,20 @@ export class AnomalyService
       this.retryAmplificationAttributed.set(ctx.connectionId, attributionKey);
     }
 
+    const severity =
+      finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
     const unsaved = this.retryAmplificationUnsaved.get(ctx.connectionId);
-    const retried = unsaved?.episodeStart === attributionStart ? unsaved.event : undefined;
+    const retried =
+      unsaved?.episodeStart === attributionStart && unsaved.event.severity === severity
+        ? unsaved.event
+        : undefined;
     const event: AnomalyEvent = {
       id: retried?.id ?? randomUUID(),
       correlationId: retried?.correlationId,
       timestamp,
       metricType: MetricType.RETRY_AMPLIFICATION,
       anomalyType: AnomalyType.SPIKE,
-      severity: finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      severity,
       value: finding.loadRatio,
       baseline: 1,
       zScore: 0,
@@ -3371,10 +3396,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    if (retried !== undefined) {
-      this.recentAnomalies = this.recentAnomalies.filter((a) => a !== retried);
-    }
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, retried);
 
     const notify = retryAmplificationNeedsNotification(state, finding);
     if (notify) markRetryAmplificationNotified(state, finding);
@@ -5733,13 +5755,34 @@ export class AnomalyService
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    retryOf?: Pick<AnomalyEvent, 'id'>,
+  ): Promise<void> {
+    if (retryOf) this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
+    if (!retryOf) this.countAnomaly(anomaly, ctx);
+
+    try {
+      const connectionId = ctx?.connectionId || anomaly.connectionId;
+      if (connectionId) {
+        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+        // Mark durable so resolution goes storage-first; a save failure (e.g. a
+        // string id rejected by the Postgres UUID PK) leaves it memory-only.
+        anomaly.persisted = true;
+      }
+    } catch (err) {
+      this.logger.error('Failed to persist anomaly event:', err);
+    }
+  }
+
+  private countAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): void {
     // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
     // or the OTLP dispatch must never abort recording/persisting the anomaly, and
     // must never propagate out of addAnomaly (that would let one detector's emit
@@ -5774,18 +5817,6 @@ export class AnomalyService
       );
     } catch (err) {
       this.logger.error('Failed to dispatch anomaly OTLP event:', err);
-    }
-
-    try {
-      const connectionId = ctx?.connectionId || anomaly.connectionId;
-      if (connectionId) {
-        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
-        // Mark durable so resolution goes storage-first; a save failure (e.g. a
-        // string id rejected by the Postgres UUID PK) leaves it memory-only.
-        anomaly.persisted = true;
-      }
-    } catch (err) {
-      this.logger.error('Failed to persist anomaly event:', err);
     }
   }
 
