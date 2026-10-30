@@ -3321,7 +3321,10 @@ export class AnomalyService
         });
       }
     }
-    if (finding === null) return;
+    if (finding === null) {
+      this.retryAmplificationAttributed.delete(ctx.connectionId);
+      return;
+    }
     const lastEmit = this.retryAmplificationLastEmit.get(ctx.connectionId);
     if (lastEmit !== undefined && timestamp - lastEmit < RETRY_AMP_WINDOW_MS) return;
     this.retryAmplificationLastEmit.set(ctx.connectionId, timestamp);

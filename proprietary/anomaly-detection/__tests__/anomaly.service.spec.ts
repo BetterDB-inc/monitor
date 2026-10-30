@@ -3757,6 +3757,23 @@ describe('AnomalyService', () => {
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
     });
 
+    it('forgets a failed finding once nothing is pending', async () => {
+      (service as any).retryAmplificationAttributed.set('conn-1', '1000:critical');
+
+      await (service as any).detectRetryAmplification(
+        {
+          instantaneous_ops_per_sec: '1000',
+          connected_clients: '100',
+          total_commands_processed: '1000000',
+          total_error_replies: '0',
+        },
+        mockCtx,
+        1_000_000,
+      );
+
+      expect((service as any).retryAmplificationAttributed.has('conn-1')).toBe(false);
+    });
+
     it('ignores a relative CPU move, even a critical one', async () => {
       const { recorded } = await runRetry({
         cpuEvent: { severity: AnomalySeverity.CRITICAL, anomalyType: AnomalyType.DROP },
