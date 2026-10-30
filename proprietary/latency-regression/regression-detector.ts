@@ -179,10 +179,12 @@ export class RegressionDetector {
   }
 
   isDegraded(): boolean | null {
-    const verdicts = [...this.sustained.values()].map((state) => state.degraded);
+    const verdicts = [...this.flaggedRecovered.keys()].map(
+      (command) => this.sustained.get(command)?.degraded,
+    );
     if (verdicts.includes(true)) return true;
-    const flagged = [...this.flaggedRecovered.values()];
-    return flagged.length > 0 && flagged.every((recovered) => recovered) ? false : null;
+    const recovered = [...this.flaggedRecovered.values()];
+    return recovered.length > 0 && recovered.every(Boolean) ? false : null;
   }
 
   /**

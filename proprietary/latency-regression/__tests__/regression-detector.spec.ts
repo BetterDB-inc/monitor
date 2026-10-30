@@ -388,6 +388,21 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(sim.detector.isDegraded()).toBeNull();
   });
 
+  it('ignores a degraded command that was never flagged', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    sim.addSample(2500, '8.1.0', sim.now + MINUTE, 'get');
+    sim.tick(1000, '8.1.0');
+
+    expect(sim.detector.isDegraded()).toBe(false);
+  });
+
   it('drops a flagged command from the verdict once it loses eligibility', () => {
     const sim = new Sim();
     sim.callsPerMin.set('get', 120);
