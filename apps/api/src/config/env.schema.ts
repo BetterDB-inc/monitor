@@ -61,6 +61,17 @@ export const otelMetricsStaleAfterMsSchema = z.coerce
   })
   .default(300000);
 
+/**
+ * DB_AUTH_MODE: `password` (AUTH with DB_USERNAME/DB_PASSWORD) or `certificate`
+ * (no AUTH; the server maps the client certificate to an ACL user). Trimmed and
+ * lowercased before validation so `Certificate` or a trailing newline from a
+ * secret store is accepted. Single source of truth, also used by configuration.ts.
+ */
+export const dbAuthModeSchema = z.preprocess(
+  (value) => (typeof value === 'string' ? value.trim().toLowerCase() || undefined : value),
+  z.enum(['password', 'certificate']).optional(),
+);
+
 export const envSchema = z
   .object({
     // Application
@@ -84,12 +95,7 @@ export const envSchema = z
     DB_TLS_KEY_PASSPHRASE: z.string().optional(),
     // `certificate` sends no AUTH; the server maps the client certificate to an
     // ACL user (Valkey tls-auth-clients-user). Requires DB_TLS and a cert + key.
-    // Normalised (trim + lowercase) so `Certificate` or a trailing newline from a
-    // secret store validates the same way configuration.ts reads it.
-    DB_AUTH_MODE: z.preprocess(
-      (value) => (typeof value === 'string' ? value.trim().toLowerCase() || undefined : value),
-      z.enum(['password', 'certificate']).optional(),
-    ),
+    DB_AUTH_MODE: dbAuthModeSchema,
     // Directory that server-side TLS files referenced by UI-added connections
     // must live in (mirrors BETTERDB_SSH_KEY_DIR). Unset disables file paths.
     BETTERDB_TLS_CERT_DIR: z.string().optional(),

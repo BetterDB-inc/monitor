@@ -28,7 +28,7 @@ describe('database TLS configuration from env', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('reads the PEM files into inline material when DB_TLS is on', () => {
+  it('keeps the PEM files as trusted file paths (re-read on reconnect) when DB_TLS is on', () => {
     process.env.DB_TLS = 'true';
     process.env.DB_TLS_CA_FILE = path.join(dir, 'ca.pem');
     process.env.DB_TLS_CERT_FILE = path.join(dir, 'client.crt');
@@ -37,7 +37,14 @@ describe('database TLS configuration from env', () => {
     process.env.DB_AUTH_MODE = 'Certificate';
 
     const { database } = configuration();
-    expect(database.tlsConfig).toEqual({ source: 'inline', ca: 'CA', cert: 'CERT', key: 'KEY', passphrase: 'pw' });
+    expect(database.tlsConfig).toEqual({
+      source: 'file',
+      trustedPaths: true,
+      caPath: path.join(dir, 'ca.pem'),
+      certPath: path.join(dir, 'client.crt'),
+      keyPath: path.join(dir, 'client.key'),
+      passphrase: 'pw',
+    });
     expect(database.authMode).toBe('certificate');
   });
 
@@ -51,6 +58,11 @@ describe('database TLS configuration from env', () => {
     process.env.DB_TLS = 'true';
     process.env.DB_TLS_CERT_FILE = path.join(dir, 'missing.crt');
     expect(() => configuration()).toThrow(/DB_TLS_CERT_FILE: cannot read/);
+  });
+
+  it('rejects an unknown DB_AUTH_MODE with the same validator as the env schema', () => {
+    process.env.DB_AUTH_MODE = 'token';
+    expect(() => configuration()).toThrow();
   });
 
   it('has no material when DB_TLS is on but no files are named', () => {

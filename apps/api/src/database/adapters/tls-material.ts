@@ -57,26 +57,49 @@ function readAllowlistedFile(filePath: string, label: string): Buffer {
         'variable to a directory containing allowed certificate files to enable this option.',
     );
   }
-  const baseDir = fs.realpathSync(path.resolve(certDir));
+  // Error messages name only the user-supplied path and the env var: the
+  // resolved server path is returned verbatim by the test endpoint and must not
+  // disclose the filesystem layout.
+  let baseDir: string;
+  try {
+    baseDir = fs.realpathSync(path.resolve(certDir));
+  } catch {
+    throw new Error(`The ${TLS_CERT_DIR_ENV} directory does not exist on the server`);
+  }
   const resolved = path.resolve(baseDir, filePath);
   const contains = (candidate: string): boolean => {
     const rel = path.relative(baseDir, candidate);
     return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
   };
   if (!contains(resolved)) {
-    throw new Error(`${label} path must resolve inside ${TLS_CERT_DIR_ENV} (${baseDir})`);
+    throw new Error(`${label} path '${filePath}' must resolve inside ${TLS_CERT_DIR_ENV}`);
   }
   if (!fs.existsSync(resolved)) {
-    throw new Error(`${label} file not found: ${resolved}`);
+    throw new Error(`${label} file '${filePath}' not found in ${TLS_CERT_DIR_ENV}`);
   }
   const realResolved = fs.realpathSync(resolved);
   if (!contains(realResolved)) {
-    throw new Error(`${label} path escapes ${TLS_CERT_DIR_ENV} via a symlink (${baseDir})`);
+    throw new Error(`${label} path '${filePath}' escapes ${TLS_CERT_DIR_ENV} via a symlink`);
   }
   try {
     return fs.readFileSync(realResolved);
   } catch {
-    throw new Error(`Could not read ${label} file: ${resolved}`);
+    throw new Error(`Could not read ${label} file '${filePath}' in ${TLS_CERT_DIR_ENV}`);
+  }
+}
+
+/**
+ * Operator-owned absolute paths (DB_TLS_*_FILE). The operator controls the
+ * environment, so there is no allowlist to enforce; the message may name the
+ * path because it came from that same operator's configuration.
+ */
+function readTrustedFile(filePath: string, label: string): Buffer {
+  try {
+    return fs.readFileSync(filePath);
+  } catch (error) {
+    throw new Error(`Could not read ${label} file ${filePath}: ${error instanceof Error ? error.message : error}`, {
+      cause: error,
+    });
   }
 }
 
@@ -93,9 +116,10 @@ export function resolveTlsMaterial(tlsConfig: TlsConfig | undefined): TlsMateria
   const source = tlsConfig.source ?? 'inline';
   const out: TlsMaterialOptions = {};
   if (source === 'file') {
-    if (tlsConfig.caPath) out.ca = readAllowlistedFile(tlsConfig.caPath, 'CA bundle');
-    if (tlsConfig.certPath) out.cert = readAllowlistedFile(tlsConfig.certPath, 'Client certificate');
-    if (tlsConfig.keyPath) out.key = readAllowlistedFile(tlsConfig.keyPath, 'Client private key');
+    const read = tlsConfig.trustedPaths ? readTrustedFile : readAllowlistedFile;
+    if (tlsConfig.caPath) out.ca = read(tlsConfig.caPath, 'CA bundle');
+    if (tlsConfig.certPath) out.cert = read(tlsConfig.certPath, 'Client certificate');
+    if (tlsConfig.keyPath) out.key = read(tlsConfig.keyPath, 'Client private key');
   } else {
     if (tlsConfig.ca) out.ca = tlsConfig.ca;
     if (tlsConfig.cert) out.cert = tlsConfig.cert;

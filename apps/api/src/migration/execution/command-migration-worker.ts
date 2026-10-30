@@ -42,7 +42,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
           const client = new Valkey({
             host,
             port,
-            ...nodeClientAuthOptions(sourceConfig),
+            ...nodeClientAuthOptions(sourceConfig, host),
             lazyConnect: true,
             connectionName: 'BetterDB-Migration-Source',
           });

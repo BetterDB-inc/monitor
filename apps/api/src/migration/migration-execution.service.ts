@@ -209,7 +209,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       throw new BadRequestException('Source and target must be different connections');
     }
 
-    assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
+    assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId, mode);
 
     this.enforceSafetyGate(req);
 
@@ -382,7 +382,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         try {
           client = new Valkey({
             host, port,
-            ...nodeClientAuthOptions(targetConfig),
+            ...nodeClientAuthOptions(targetConfig, host),
             lazyConnect: true,
             retryStrategy: () => null,
             maxRetriesPerRequest: 1,

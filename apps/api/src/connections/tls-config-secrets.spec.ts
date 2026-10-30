@@ -16,9 +16,10 @@ describe('sanitizeTlsConfigInput', () => {
     expect(sanitizeTlsConfigInput({ ca: '   ', cert: '', passphrase: 'pw' })).toBeUndefined();
   });
 
-  it('never trusts secretsEncrypted from input', () => {
-    const out = sanitizeTlsConfigInput({ cert: 'C', key: 'K', secretsEncrypted: true } as never);
+  it('never trusts secretsEncrypted or trustedPaths from input', () => {
+    const out = sanitizeTlsConfigInput({ source: 'file', certPath: '/etc/ssl/x', keyPath: '/etc/ssl/y', secretsEncrypted: true, trustedPaths: true } as never);
     expect(out?.secretsEncrypted).toBe(false);
+    expect(out).not.toHaveProperty('trustedPaths');
   });
 
   it('keeps only the fields that match the chosen source', () => {
@@ -44,6 +45,16 @@ describe('encryptTlsConfig / decryptTlsConfig', () => {
   it('encrypts only the private key and passphrase', () => {
     const enc = encryptTlsConfig(plain, cipher);
     expect(enc).toEqual({ ...plain, key: 'enc(KEY)', passphrase: 'enc(pw)', secretsEncrypted: true });
+  });
+
+  it('does not flag a config that holds no secrets (CA-only must not require ENCRYPTION_KEY later)', () => {
+    const caOnly = { source: 'inline' as const, ca: 'CA', secretsEncrypted: false };
+    const enc = encryptTlsConfig(caOnly, cipher);
+    expect(enc).toBe(caOnly);
+    expect(enc?.secretsEncrypted).toBe(false);
+    const errors: string[] = [];
+    expect(decryptTlsConfig(enc, null, (m) => errors.push(m))).toBe(caOnly);
+    expect(errors).toEqual([]);
   });
 
   it('is a no-op without a cipher or when already encrypted', () => {

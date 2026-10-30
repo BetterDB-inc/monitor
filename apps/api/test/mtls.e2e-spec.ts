@@ -193,6 +193,28 @@ function adapter(overrides: Partial<ConstructorParameters<typeof UnifiedDatabase
     }
   });
 
+  it('reads operator-trusted absolute paths (the env-configured connection) without an allowlist', async () => {
+    const previous = process.env[TLS_CERT_DIR_ENV];
+    delete process.env[TLS_CERT_DIR_ENV];
+    const db = adapter({
+      authMode: 'certificate',
+      tlsConfig: {
+        source: 'file',
+        trustedPaths: true,
+        caPath: join(CERT_DIR, 'ca.crt'),
+        certPath: join(CERT_DIR, 'client.crt'),
+        keyPath: join(CERT_DIR, 'client.key'),
+      },
+    });
+    try {
+      await db.connect();
+      expect(db.getAuthenticatedUser()).toBe(MAPPED_USER);
+    } finally {
+      await db.disconnect();
+      if (previous !== undefined) process.env[TLS_CERT_DIR_ENV] = previous;
+    }
+  });
+
   it('falls back to the default user when the CN maps to no ACL user, and WHOAMI makes that visible', async () => {
     const db = adapter({
       authMode: 'certificate',

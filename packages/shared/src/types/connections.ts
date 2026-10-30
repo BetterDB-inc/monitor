@@ -118,10 +118,16 @@ export interface TlsConfig {
    * Server-managed only — never accepted from API input (see `TlsConfigInput`).
    */
   secretsEncrypted?: boolean;
+  /**
+   * Server-managed only: the `*Path` fields are operator-supplied absolute paths
+   * (DB_TLS_*_FILE on the env-configured connection) and are read as-is instead
+   * of inside BETTERDB_TLS_CERT_DIR. Never accepted from API input.
+   */
+  trustedPaths?: boolean;
 }
 
 /** TLS material shape accepted from API requests (see `SshTunnelInput`). */
-export type TlsConfigInput = Omit<TlsConfig, 'secretsEncrypted'>;
+export type TlsConfigInput = Omit<TlsConfig, 'secretsEncrypted' | 'trustedPaths'>;
 
 /** Redacted TLS material summary safe to return over the API (no PEM content). */
 export interface TlsConfigStatus {
@@ -216,6 +222,15 @@ export interface DatabaseConnectionConfig {
  * SQL storage adapters so serialization stays consistent.
  */
 export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
+  return parseJsonColumn<SshTunnelConfig>(value);
+}
+
+/**
+ * Parse a persisted JSON column value (a JSON string or an already-parsed
+ * object) into `T`, or `undefined` when absent, blank or invalid. Shared by the
+ * SQL storage adapters so every JSON column deserialises the same way.
+ */
+export function parseJsonColumn<T extends object>(value: unknown): T | undefined {
   if (value === null || value === undefined) return undefined;
   let obj: unknown = value;
   if (typeof value === 'string') {
@@ -227,7 +242,7 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
     }
   }
   if (typeof obj !== 'object' || obj === null) return undefined;
-  return obj as SshTunnelConfig;
+  return obj as T;
 }
 
 /**
@@ -235,18 +250,7 @@ export function parseSshTunnel(value: unknown): SshTunnelConfig | undefined {
  * a `TlsConfig`, or `undefined` when absent/invalid.
  */
 export function parseTlsConfig(value: unknown): TlsConfig | undefined {
-  if (value === null || value === undefined) return undefined;
-  let obj: unknown = value;
-  if (typeof value === 'string') {
-    if (value.trim() === '') return undefined;
-    try {
-      obj = JSON.parse(value);
-    } catch {
-      return undefined;
-    }
-  }
-  if (typeof obj !== 'object' || obj === null) return undefined;
-  return obj as TlsConfig;
+  return parseJsonColumn<TlsConfig>(value);
 }
 
 export function hasOwnKeyAnalytics(membership: TopologyMembership | undefined): boolean {

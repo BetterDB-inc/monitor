@@ -1,6 +1,7 @@
-import { readFileSync } from 'fs';
+import { accessSync, constants as fsConstants } from 'fs';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import { isTrueFlag } from './env-normalize';
+import { dbAuthModeSchema } from './env.schema';
 
 export interface DatabaseConfig {
   host: string;
@@ -16,38 +17,38 @@ export interface DatabaseConfig {
 }
 
 /**
- * Read a PEM file named by an env var into inline material. The operator owns
- * the environment, so these paths are trusted as-is (no allowlist directory);
- * an unreadable file fails startup loudly rather than silently connecting
- * without the certificate.
+ * A PEM file path named by an env var. The operator owns the environment, so
+ * the path is trusted as-is (no allowlist directory). It is checked for
+ * readability now so startup fails loudly rather than silently connecting
+ * without the certificate, but the content is read by the adapter each time a
+ * socket opens, so a rotated file (cert-manager, mounted secrets) is picked up
+ * on reconnect without a restart.
  */
-function readPemFromEnv(name: string): string | undefined {
+function pemPathFromEnv(name: string): string | undefined {
   const filePath = process.env[name]?.trim();
   if (!filePath) return undefined;
   try {
-    return readFileSync(filePath, 'utf8');
+    accessSync(filePath, fsConstants.R_OK);
   } catch (error) {
     throw new Error(`${name}: cannot read ${filePath}: ${error instanceof Error ? error.message : error}`, { cause: error });
   }
+  return filePath;
 }
 
 function envTlsConfig(): TlsConfig | undefined {
   // The files are TLS material; a non-TLS deployment must not fail to start
   // because a stale DB_TLS_*_FILE path is still set in its environment.
   if (!isTrueFlag(process.env.DB_TLS)) return undefined;
-  const ca = readPemFromEnv('DB_TLS_CA_FILE');
-  const cert = readPemFromEnv('DB_TLS_CERT_FILE');
-  const key = readPemFromEnv('DB_TLS_KEY_FILE');
+  const caPath = pemPathFromEnv('DB_TLS_CA_FILE');
+  const certPath = pemPathFromEnv('DB_TLS_CERT_FILE');
+  const keyPath = pemPathFromEnv('DB_TLS_KEY_FILE');
   const passphrase = process.env.DB_TLS_KEY_PASSPHRASE || undefined;
-  if (!ca && !cert && !key) return undefined;
-  return { source: 'inline', ca, cert, key, passphrase };
+  if (!caPath && !certPath && !keyPath) return undefined;
+  return { source: 'file', caPath, certPath, keyPath, passphrase, trustedPaths: true };
 }
 
 function envAuthMode(): DatabaseAuthMode | undefined {
-  const raw = process.env.DB_AUTH_MODE?.trim().toLowerCase();
-  if (!raw) return undefined;
-  if (raw === 'password' || raw === 'certificate') return raw;
-  throw new Error(`DB_AUTH_MODE must be 'password' or 'certificate' (got '${raw}')`);
+  return dbAuthModeSchema.parse(process.env.DB_AUTH_MODE);
 }
 
 export interface StorageConfig {

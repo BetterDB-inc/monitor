@@ -15,7 +15,9 @@ export interface TlsSecretCipher {
  */
 export function sanitizeTlsConfigInput(input: TlsConfigInput | undefined): TlsConfig | undefined {
   if (!input) return undefined;
-  const { secretsEncrypted: _ignored, ...rest } = input as TlsConfig;
+  // `trustedPaths` would let a caller read arbitrary server files by absolute
+  // path; like `secretsEncrypted` it is server-managed and never taken from input.
+  const { secretsEncrypted: _ignored, trustedPaths: _alsoIgnored, ...rest } = input as TlsConfig;
   const trim = (value: string | undefined): string | undefined => {
     const trimmed = value?.trim();
     return trimmed ? trimmed : undefined;
@@ -50,6 +52,11 @@ export function encryptTlsConfig(
   cipher: TlsSecretCipher | null | undefined,
 ): TlsConfig | undefined {
   if (!config || !cipher || config.secretsEncrypted) {
+    return config;
+  }
+  // Only flag the record as encrypted when something actually was: a CA-only
+  // config must not demand ENCRYPTION_KEY on a later boot.
+  if (!config.key && !config.passphrase) {
     return config;
   }
   return {

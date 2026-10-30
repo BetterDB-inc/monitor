@@ -138,6 +138,20 @@ describe('ConnectionRegistry TLS material', () => {
     expect(persisted.authMode).toBe('certificate');
   });
 
+  it('drops TLS material when TLS is off instead of storing an unused private key', async () => {
+    const id = await registry.addConnection({
+      name: 'plain',
+      host: 'cache.internal',
+      port: 6379,
+      tls: false,
+      tlsConfig: { cert: CERT, key: PRIVATE_KEY },
+    });
+    expect(storage.saveConnection.mock.calls[0][0].tlsConfig).toBeUndefined();
+    expect(registry.list().find((c) => c.id === id)?.tlsConfig).toBeUndefined();
+    const test = await registry.testConnection({ name: 'plain', host: 'cache.internal', port: 6379, tls: false, tlsConfig: { cert: CERT, key: PRIVATE_KEY } });
+    expect(test.success).toBe(true);
+  });
+
   it('rejects TLS settings on an external (OTLP push) test the same way save does', async () => {
     const result = await registry.testConnection({
       name: 'otlp',
@@ -171,34 +185,67 @@ describe('ConnectionRegistry TLS material', () => {
     expect(JSON.stringify(status)).not.toContain('BEGIN');
   });
 
-  describe('env-owned default connection', () => {
+  describe('env-owned default connection follows the environment', () => {
     const ROTATED_CERT = '-----BEGIN CERTIFICATE-----\nrotated\n-----END CERTIFICATE-----\n';
+    const envDefault = (overrides: Partial<DatabaseConnectionConfig> = {}) =>
+      saved({ id: ENV_DEFAULT_ID, name: 'Default', host: 'localhost', port: 6379, username: 'default', password: '', ...overrides });
 
-    it('replaces the persisted TLS material with the environment\'s on startup', async () => {
-      storage.getConnections.mockResolvedValue([
-        saved({ id: ENV_DEFAULT_ID, name: 'Default', tlsConfig: encryptedTls() }),
-      ]);
-      database.tls = true;
-      database.tlsConfig = { source: 'inline', cert: ROTATED_CERT, key: PRIVATE_KEY };
-      database.authMode = 'certificate';
+    it('rebuilds host, credentials, TLS flag, material and auth mode from DB_* on startup and persists them', async () => {
+      storage.getConnections.mockResolvedValue([envDefault({ tls: false, tlsConfig: undefined })]);
+      Object.assign(database, {
+        host: 'cache.internal',
+        port: 6380,
+        username: 'monitor',
+        password: 'rotated-password',
+        tls: true,
+        tlsConfig: { source: 'file', trustedPaths: true, certPath: '/etc/tls/client.crt', keyPath: '/etc/tls/client.key', passphrase: 'pw' },
+        authMode: 'certificate',
+      });
 
       await registry.onModuleInit();
 
       const config = registry.getConfig(ENV_DEFAULT_ID);
-      expect(config?.tlsConfig?.cert).toBe(ROTATED_CERT);
-      expect(config?.tlsConfig?.key).toBe(PRIVATE_KEY);
-      expect(config?.authMode).toBe('certificate');
+      expect(config).toMatchObject({
+        host: 'cache.internal',
+        port: 6380,
+        username: 'monitor',
+        password: 'rotated-password',
+        tls: true,
+        authMode: 'certificate',
+        tlsConfig: { source: 'file', trustedPaths: true, certPath: '/etc/tls/client.crt', keyPath: '/etc/tls/client.key', passphrase: 'pw' },
+      });
       const persisted = storage.saveConnection.mock.calls.at(-1)![0];
       expect(persisted.id).toBe(ENV_DEFAULT_ID);
-      expect(persisted.tlsConfig?.cert).toBe(ROTATED_CERT);
+      expect(persisted.tls).toBe(true);
+      expect(persisted.tlsConfig?.trustedPaths).toBe(true);
       expect(persisted.tlsConfig?.secretsEncrypted).toBe(true);
-      expect(enc.decrypt(persisted.tlsConfig!.key!)).toBe(PRIVATE_KEY);
+      expect(enc.decrypt(persisted.tlsConfig!.passphrase!)).toBe('pw');
+      expect(enc.decrypt(persisted.password!)).toBe('rotated-password');
+    });
+
+    it('never writes a null password after a failed decrypt: the environment supplies it', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ password: 'not-ciphertext', passwordEncrypted: true, tlsConfig: encryptedTls() }),
+      ]);
+      Object.assign(database, {
+        password: 'env-password',
+        tls: true,
+        tlsConfig: { source: 'inline', cert: ROTATED_CERT, key: PRIVATE_KEY },
+      });
+
+      await registry.onModuleInit();
+
+      const config = registry.getConfig(ENV_DEFAULT_ID);
+      expect(config?.password).toBe('env-password');
+      expect(config?.credentialStatus).toBe('valid');
+      const persisted = storage.saveConnection.mock.calls.at(-1)![0];
+      expect(persisted.password).toBeTruthy();
+      expect(enc.decrypt(persisted.password!)).toBe('env-password');
     });
 
     it('clears persisted material when the environment no longer provides any', async () => {
-      storage.getConnections.mockResolvedValue([
-        saved({ id: ENV_DEFAULT_ID, name: 'Default', tlsConfig: encryptedTls(), authMode: 'certificate' }),
-      ]);
+      storage.getConnections.mockResolvedValue([envDefault({ tlsConfig: encryptedTls(), authMode: 'certificate' })]);
+      database.tls = true;
 
       await registry.onModuleInit();
 
@@ -208,9 +255,9 @@ describe('ConnectionRegistry TLS material', () => {
       expect(storage.saveConnection).toHaveBeenCalled();
     });
 
-    it('does not rewrite the record when the material is unchanged', async () => {
+    it('does not rewrite the record when nothing changed, whatever the stored key order', async () => {
       storage.getConnections.mockResolvedValue([
-        saved({ id: ENV_DEFAULT_ID, name: 'Default', tlsConfig: encryptedTls() }),
+        envDefault({ tlsConfig: { secretsEncrypted: true, passphrase: enc.encrypt('pw'), key: enc.encrypt(PRIVATE_KEY), cert: CERT, source: 'inline' } }),
       ]);
       database.tls = true;
       database.tlsConfig = { source: 'inline', cert: CERT, key: PRIVATE_KEY, passphrase: 'pw' };
@@ -219,6 +266,31 @@ describe('ConnectionRegistry TLS material', () => {
 
       expect(registry.getConfig(ENV_DEFAULT_ID)?.tlsConfig?.cert).toBe(CERT);
       expect(storage.saveConnection).not.toHaveBeenCalled();
+    });
+
+    it('propagates the TLS settings to nodes auto-registered from the default', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ tlsConfig: encryptedTls() }),
+        saved({
+          id: 'child',
+          name: 'Default · 10.0.0.2:6379',
+          host: '10.0.0.2',
+          isDefault: false,
+          tlsConfig: encryptedTls(),
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n2', origin: 'auto', source: 'cluster' },
+        }),
+      ]);
+      database.tls = true;
+      database.tlsConfig = { source: 'inline', cert: ROTATED_CERT, key: PRIVATE_KEY };
+      database.authMode = 'certificate';
+
+      await registry.onModuleInit();
+
+      const child = registry.getConfig('child');
+      expect(child?.tlsConfig?.cert).toBe(ROTATED_CERT);
+      expect(child?.authMode).toBe('certificate');
+      expect(child?.host).toBe('10.0.0.2');
+      expect(storage.saveConnection.mock.calls.some(([c]) => c.id === 'child' && c.tlsConfig?.cert === ROTATED_CERT)).toBe(true);
     });
 
     it('leaves UI-added connections alone', async () => {

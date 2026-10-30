@@ -199,30 +199,45 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
   }
 
-  /** The full `tls` option for a new socket: SNI/identity plus the current material. */
+  /** The full `tls` option for a socket: SNI/identity plus the currently loaded material. */
   private tlsOptions(): ConnectionOptions | undefined {
     if (!this.config.tls) return undefined;
-    return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.currentTlsMaterial() };
+    return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial };
   }
 
   /**
-   * File-sourced material is re-read every time a socket is about to open, so a
-   * rotated certificate on disk is picked up by reconnects, the CLI client and
-   * tunnel re-establishment without rebuilding the adapter. A read failure keeps
-   * the previously loaded material rather than breaking a working connection.
-   * Inline material never changes after construction.
+   * Re-read file-sourced material from disk. Called only when iovalkey is about
+   * to reconnect (where a rotated certificate matters), not on every client
+   * creation: key-analytics opens a scratch client per database and must not pay
+   * for synchronous file reads each time. A read failure keeps the previously
+   * loaded material rather than breaking a working connection. Inline material
+   * never changes after construction.
    */
-  private currentTlsMaterial(): TlsMaterialOptions {
-    if (this.config.tls && this.config.tlsConfig?.source === 'file' && !this.tlsSetupError) {
-      try {
-        this.tlsMaterial = resolveTlsMaterial(this.config.tlsConfig);
-      } catch (error) {
-        this.logger.warn(
-          `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
-        );
-      }
+  private refreshTlsMaterial(): void {
+    if (!this.config.tls || this.config.tlsConfig?.source !== 'file') return;
+    try {
+      this.tlsMaterial = resolveTlsMaterial(this.config.tlsConfig);
+    } catch (error) {
+      this.logger.warn(
+        `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
+      );
     }
-    return this.tlsMaterial;
+  }
+
+  /**
+   * Retry a TLS setup that failed at construction (for example a secret volume
+   * mounted a moment after the API started). A configuration error (certificate
+   * mode without a certificate) is permanent and keeps throwing; a file read
+   * failure is retried on every connect and, once it succeeds, the existing
+   * client's socket options are updated so the next dial presents the material.
+   */
+  private ensureTlsMaterial(): void {
+    if (!this.tlsSetupError) return;
+    assertAuthConfig(this.config);
+    this.tlsMaterial = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
+    this.tlsSetupError = null;
+    if (this._client) this._client.options.tls = this.tlsOptions();
+    this.logger.log('TLS material loaded on retry');
   }
 
   private initClient(): void {
@@ -253,15 +268,24 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     // here lets an automatic reconnect present a rotated certificate from disk.
     client.on('reconnecting', () => {
       if (this._client !== client) return;
+      this.refreshTlsMaterial();
       const tls = this.tlsOptions();
       if (tls) client.options.tls = tls;
     });
 
     // After an automatic reconnect the server may map the session to a
     // different ACL user (rotated certificate, changed ACL); refresh the cached
-    // identity so list() does not keep reporting the previous one.
+    // identity so list() does not keep reporting the previous one. The first
+    // `ready` is the initial connect, which doConnect() probes itself after the
+    // handshake SELECT and capability detection; probing here as well would
+    // queue a second WHOAMI ahead of those and could overwrite the fresher value.
+    let initialReady = true;
     client.on('ready', () => {
       if (this._client !== client) return;
+      if (initialReady) {
+        initialReady = false;
+        return;
+      }
       void this.probeAuthenticatedUser(client).then((user) => {
         if (this._client === client) this.authenticatedUser = user;
       });
@@ -410,9 +434,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   private async doConnect(): Promise<void> {
     try {
-      if (this.tlsSetupError) {
-        throw this.tlsSetupError;
-      }
+      this.ensureTlsMaterial();
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
       }

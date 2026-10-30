@@ -20,6 +20,23 @@ import type { DesiredNode } from '../topology/membership-diff';
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
 
+/** Field-by-field comparison of TLS material (ignores the server-managed flags). */
+function sameTlsMaterial(a: DatabaseConnectionConfig['tlsConfig'], b: DatabaseConnectionConfig['tlsConfig']): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    (a.source ?? 'inline') === (b.source ?? 'inline') &&
+    (a.ca ?? '') === (b.ca ?? '') &&
+    (a.caPath ?? '') === (b.caPath ?? '') &&
+    (a.cert ?? '') === (b.cert ?? '') &&
+    (a.certPath ?? '') === (b.certPath ?? '') &&
+    (a.key ?? '') === (b.key ?? '') &&
+    (a.keyPath ?? '') === (b.keyPath ?? '') &&
+    (a.passphrase ?? '') === (b.passphrase ?? '') &&
+    (a.trustedPaths ?? false) === (b.trustedPaths ?? false)
+  );
+}
+
 export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
 
 export type ConnectionRemovalListener = (id: string) => void | Promise<void>;
@@ -180,9 +197,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       for (const config of savedConnections) {
-        // Decrypt password if encrypted; the env-owned default also re-reads its
-        // TLS material from the environment so certificate rotation takes effect.
-        const decryptedConfig = await this.refreshEnvDefaultTlsFromEnv(this.decryptConfig(config));
+        // Decrypt password if encrypted; the env-owned default (and the nodes
+        // discovered from it) follow the current environment, see syncWithEnvironment.
+        const decryptedConfig = await this.syncWithEnvironment(this.decryptConfig(config));
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {
@@ -191,7 +208,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           const adapter = this.createAdapter(decryptedConfig);
           this.connections.set(config.id, adapter);
           this.logger.warn(
-            `Skipping connection to ${config.name}: password decryption failed. ` +
+            `Skipping connection to ${config.name}: credential decryption failed (${decryptedConfig.credentialError ?? 'unknown reason'}). ` +
             'Fix ENCRYPTION_KEY and restart, or use POST /connections/{id}/reconnect after fixing.'
           );
           if (config.isDefault) {
@@ -305,51 +322,87 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * The env-configured default connection is persisted once (so it survives a
-   * restart without DB_HOST), but its TLS material and auth mode keep following
-   * the environment while DB_HOST is set: a rotated DB_TLS_*_FILE or a changed
-   * DB_AUTH_MODE must win over the copy stored at first connect, or the
-   * connection would keep presenting an expired certificate. Only the TLS
-   * material and auth mode are refreshed here; host, port and password keep the
-   * existing persisted-once behaviour. The refreshed record is persisted so the
-   * stored copy never lags the environment.
+   * The env-configured default connection is persisted once so it survives a
+   * restart without DB_HOST, but while DB_HOST is set the environment is its
+   * source of truth: host, port, credentials, TLS flag, TLS material and auth
+   * mode are all rebuilt from the current `database` config on every load, and
+   * the stored copy is rewritten only when something differs. That is what makes
+   * a rotated DB_PASSWORD or DB_TLS_*_FILE, or a newly enabled DB_TLS, take
+   * effect on restart, and it never persists a record derived from a failed
+   * decrypt (the password comes from the environment, not from storage).
+   *
+   * Nodes auto-registered from the env default inherit its TLS flag, material
+   * and auth mode the same way, so they present the rotated certificate too.
    */
-  private async refreshEnvDefaultTlsFromEnv(config: DatabaseConnectionConfig): Promise<DatabaseConnectionConfig> {
-    if (config.id !== ENV_DEFAULT_ID || !process.env.DB_HOST) {
+  private async syncWithEnvironment(config: DatabaseConnectionConfig): Promise<DatabaseConnectionConfig> {
+    if (!process.env.DB_HOST) {
       return config;
     }
     const dbConfig = this.configService.get('database');
     if (!dbConfig) {
       return config;
     }
-    const stripFlag = (tls: DatabaseConnectionConfig['tlsConfig']) => {
-      if (!tls) return undefined;
-      const { secretsEncrypted: _ignored, ...rest } = tls;
-      return rest;
-    };
-    const unchanged =
-      JSON.stringify(stripFlag(config.tlsConfig) ?? null) === JSON.stringify(stripFlag(dbConfig.tlsConfig) ?? null) &&
-      (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
-    if (unchanged) {
+    const envTlsConfig: DatabaseConnectionConfig['tlsConfig'] = dbConfig.tlsConfig
+      ? { ...dbConfig.tlsConfig, secretsEncrypted: false }
+      : undefined;
+
+    let synced: DatabaseConnectionConfig;
+    if (config.id === ENV_DEFAULT_ID) {
+      const same =
+        config.host === dbConfig.host &&
+        config.port === dbConfig.port &&
+        (config.username ?? '') === (dbConfig.username ?? '') &&
+        (config.password ?? '') === (dbConfig.password ?? '') &&
+        (config.tls ?? false) === (dbConfig.tls ?? false) &&
+        sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
+        (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+      if (same) {
+        return config;
+      }
+      synced = {
+        ...config,
+        host: dbConfig.host,
+        port: dbConfig.port,
+        username: dbConfig.username,
+        password: dbConfig.password,
+        passwordEncrypted: false,
+        tls: dbConfig.tls ?? false,
+        tlsConfig: envTlsConfig,
+        authMode: dbConfig.authMode,
+        // Everything that could have failed to decrypt was just replaced from env.
+        credentialStatus: 'unknown',
+        credentialError: undefined,
+        updatedAt: Date.now(),
+      };
+      this.logger.log('Default connection updated from the environment (DB_* settings changed since it was stored)');
+    } else if (config.membership?.seedId === ENV_DEFAULT_ID) {
+      const same =
+        (config.tls ?? false) === (dbConfig.tls ?? false) &&
+        sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
+        (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+      if (same) {
+        return config;
+      }
+      synced = {
+        ...config,
+        tls: dbConfig.tls ?? false,
+        tlsConfig: envTlsConfig,
+        authMode: dbConfig.authMode,
+        updatedAt: Date.now(),
+      };
+      if (config.credentialStatus === 'decryption_failed' && !config.passwordEncrypted) {
+        synced.credentialStatus = 'unknown';
+        synced.credentialError = undefined;
+      }
+      this.logger.log(`${config.name}: TLS settings updated from the environment (follows the default connection)`);
+    } else {
       return config;
     }
-    const refreshed: DatabaseConnectionConfig = {
-      ...config,
-      tlsConfig: dbConfig.tlsConfig ? { ...dbConfig.tlsConfig, secretsEncrypted: false } : undefined,
-      authMode: dbConfig.authMode,
-      updatedAt: Date.now(),
-    };
-    // The stale stored key may have failed to decrypt; the env now supplies
-    // fresh material, so a TLS-only decryption failure no longer applies.
-    if (refreshed.credentialStatus === 'decryption_failed' && !config.passwordEncrypted) {
-      refreshed.credentialStatus = 'unknown';
-      refreshed.credentialError = undefined;
-    }
-    this.logger.log('Refreshed the default connection\'s TLS material and auth mode from the environment');
-    await this.storage.saveConnection(this.encryptConfig(refreshed)).catch((err) => {
-      this.logger.warn(`Failed to persist refreshed TLS material for the default connection: ${err instanceof Error ? err.message : err}`);
+
+    await this.storage.saveConnection(this.encryptConfig(synced)).catch((err) => {
+      this.logger.warn(`Failed to persist environment-synced settings for ${config.name}: ${err instanceof Error ? err.message : err}`);
     });
-    return refreshed;
+    return synced;
   }
 
   private async createEnvDefaultConnection(): Promise<void> {
@@ -706,7 +759,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
-      tlsConfig: sanitizeTlsConfigInput(request.tlsConfig),
+      // Material is meaningless (and would still be stored encrypted) without TLS.
+      tlsConfig: request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined,
       authMode: request.authMode,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       connectionType: request.connectionType,
@@ -940,7 +994,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
-      tlsConfig: sanitizeTlsConfigInput(request.tlsConfig),
+      tlsConfig: request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined,
       authMode: request.authMode,
       dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
@@ -1092,11 +1146,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const storedConfig = storedConfigs.find(c => c.id === id);
 
       if (storedConfig) {
-        config = this.withLiveTopology(id, this.decryptConfig(storedConfig));
+        config = this.withLiveTopology(id, await this.syncWithEnvironment(this.decryptConfig(storedConfig)));
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
           this.configs.set(id, this.withLiveTopology(id, config));
-          throw new Error(`Password decryption still failing: ${config.credentialError}`);
+          throw new Error(`Credential decryption still failing: ${config.credentialError}`);
         }
         // Decryption succeeded this time - continue with connection attempt
         this.logger.log(`Decryption succeeded for ${config.name}`);

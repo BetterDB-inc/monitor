@@ -90,7 +90,7 @@ export async function probeSourceFunctionsClusterAware(
         client = new Valkey({
           host,
           port,
-          ...nodeClientAuthOptions(config),
+          ...nodeClientAuthOptions(config, host),
           ...NODE_CONNECT_OPTIONS,
           maxRetriesPerRequest: 1,
         });

@@ -1,16 +1,27 @@
 import Valkey, { Cluster } from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { buildTlsOptions, clientCredentials } from '../../database/adapters/tls-material';
+import { tlsIdentityOptions } from '../../database/adapters/tls-servername';
 
 /**
  * Credentials and TLS options for a per-node client built from a connection
  * config: honours certificate-only auth (no AUTH sent) and carries the custom
  * CA / client certificate so discovered nodes are reached the same way the seed is.
+ * With `host`, the same SNI/hostname identity the monitor paths use is applied,
+ * so a private-PKI certificate issued for a hostname verifies when the node is
+ * dialled by IP. Omit it for a Cluster client, whose redisOptions apply to
+ * every node and cannot carry a single servername.
  */
 export function nodeClientAuthOptions(
   config: Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>,
+  host?: string,
+  announcedHostname?: string,
 ): { username: string | undefined; password: string | undefined; tls: ReturnType<typeof buildTlsOptions> } {
-  return { ...clientCredentials(config), tls: buildTlsOptions(config) };
+  const tls = buildTlsOptions(config);
+  return {
+    ...clientCredentials(config),
+    tls: tls && host ? { ...tlsIdentityOptions(host, announcedHostname), ...tls } : tls,
+  };
 }
 
 /**
@@ -20,7 +31,7 @@ export function createClient(config: DatabaseConnectionConfig, name: string): Va
   return new Valkey({
     host: config.host,
     port: config.port,
-    ...nodeClientAuthOptions(config),
+    ...nodeClientAuthOptions(config, config.host),
     lazyConnect: true,
     connectTimeout: 10_000,
     commandTimeout: 15_000,

@@ -850,3 +850,70 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     await expect(pending).resolves.toBeUndefined();
   });
 });
+
+describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per connect', () => {
+  const CERT = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-late-mount-'));
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+  });
+
+  it('recovers when the certificate files appear after construction (late-mounted secret)', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: '127.0.0.1',
+      port: 1,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    // Files missing: the deferred error surfaces on connect, every time.
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+
+    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT);
+    fs.writeFileSync(path.join(certDir, 'client.key'), KEY);
+
+    // Now the material loads and the dial proceeds (and fails on the dead port instead).
+    let message = '';
+    try {
+      await adapter.connect();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toMatch(/not found/);
+    // The failed dial discards the client, so inspect the loaded material directly.
+    const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string } }).tlsMaterial;
+    expect(material.cert?.toString()).toBe(CERT);
+    await adapter.disconnect().catch(() => undefined);
+  });
+
+  it('keeps a permanent configuration error permanent', async () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, tls: true, authMode: 'certificate' });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('does not probe WHOAMI on the initial ready (doConnect owns that), only on later reconnects', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
+    const probe = jest
+      .spyOn(adapter as unknown as { probeAuthenticatedUser: () => Promise<string | undefined> }, 'probeAuthenticatedUser')
+      .mockResolvedValue('app');
+    const client = adapter.getClient();
+
+    client.emit('ready');
+    expect(probe).not.toHaveBeenCalled();
+
+    client.emit('ready');
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+});

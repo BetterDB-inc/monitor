@@ -71,13 +71,42 @@ describe('resolveTlsMaterial', () => {
     expect(() => resolveTlsMaterial({ source: 'file', caPath: 'ca.pem' })).toThrow(TLS_CERT_DIR_ENV);
   });
 
-  it('rejects paths that escape the allowlisted directory', () => {
-    expect(() => resolveTlsMaterial({ source: 'file', caPath: '../etc/passwd' })).toThrow(
-      /must resolve inside/,
+  it('rejects paths that escape the allowlisted directory without revealing the server path', () => {
+    for (const caPath of ['../etc/passwd', '/etc/passwd']) {
+      let message = '';
+      try {
+        resolveTlsMaterial({ source: 'file', caPath });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toMatch(/must resolve inside BETTERDB_TLS_CERT_DIR/);
+      expect(message).toContain(caPath);
+      expect(message).not.toContain(certDir);
+    }
+  });
+
+  it('explains a missing allowlist directory instead of throwing a raw ENOENT', () => {
+    process.env[TLS_CERT_DIR_ENV] = path.join(certDir, 'does-not-exist');
+    expect(() => resolveTlsMaterial({ source: 'file', caPath: 'ca.pem' })).toThrow(
+      /BETTERDB_TLS_CERT_DIR directory does not exist/,
     );
-    expect(() => resolveTlsMaterial({ source: 'file', caPath: '/etc/passwd' })).toThrow(
-      /must resolve inside/,
-    );
+  });
+
+  it('reads operator-trusted absolute paths directly, bypassing the allowlist', () => {
+    delete process.env[TLS_CERT_DIR_ENV];
+    const out = resolveTlsMaterial({
+      source: 'file',
+      trustedPaths: true,
+      caPath: path.join(certDir, 'ca.pem'),
+      certPath: path.join(certDir, 'client.crt'),
+      keyPath: path.join(certDir, 'client.key'),
+    });
+    expect(out.ca?.toString()).toBe(CA);
+    expect(out.cert?.toString()).toBe(CERT);
+    expect(out.key?.toString()).toBe(KEY);
+    expect(() =>
+      resolveTlsMaterial({ source: 'file', trustedPaths: true, caPath: path.join(certDir, 'nope.pem') }),
+    ).toThrow(/Could not read CA bundle file/);
   });
 
   it('rejects a symlink that points outside the allowlisted directory', () => {
@@ -91,10 +120,15 @@ describe('resolveTlsMaterial', () => {
     }
   });
 
-  it('reports a missing file by name', () => {
-    expect(() => resolveTlsMaterial({ source: 'file', certPath: 'missing.crt' })).toThrow(
-      /Client certificate file not found/,
-    );
+  it('reports a missing file by its relative name only', () => {
+    let message = '';
+    try {
+      resolveTlsMaterial({ source: 'file', certPath: 'missing.crt' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/Client certificate file 'missing.crt' not found/);
+    expect(message).not.toContain(certDir);
   });
 });
 
