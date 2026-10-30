@@ -162,6 +162,10 @@ export class RegressionDetector {
     findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
     for (const command of this.flaggedRecovered.keys()) {
+      if (!eligible.has(command)) {
+        this.flaggedRecovered.delete(command);
+        continue;
+      }
       const degraded = this.sustained.get(command)?.degraded;
       if (degraded !== null && degraded !== undefined) {
         this.flaggedRecovered.set(command, !degraded);

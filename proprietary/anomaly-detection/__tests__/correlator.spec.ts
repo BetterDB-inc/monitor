@@ -292,7 +292,7 @@ describe('Correlator', () => {
       ]);
 
       expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
-      expect(groups[0].diagnosis).toContain('rising together with a latency regression (COMMAND_P99)');
+      expect(groups[0].diagnosis).toContain('stepped up together with a latency regression (COMMAND_P99)');
       expect(groups[0].recommendations.join(' ')).toContain('backoff');
     });
 
@@ -317,7 +317,7 @@ describe('Correlator', () => {
         makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message: 'retry amplification' }),
       ]);
 
-      expect(groups[0].diagnosis).toContain('rising together with a stress signal');
+      expect(groups[0].diagnosis).toContain('stepped up together with a stress signal');
     });
 
     it('keeps the detector-stamped related metrics', () => {
