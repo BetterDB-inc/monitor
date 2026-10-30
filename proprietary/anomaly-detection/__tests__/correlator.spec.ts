@@ -260,6 +260,26 @@ describe('Correlator', () => {
     });
   });
 
+  describe('COMMAND_P99 input', () => {
+    it('maps a standalone P99 regression to SLOW_QUERIES', () => {
+      const groups = correlator.correlate([makeAnomaly({ metricType: MetricType.COMMAND_P99 })]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.SLOW_QUERIES);
+      expect(groups[0].diagnosis).toContain('P99');
+    });
+
+    it('lets a co-occurring failover take precedence', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, metricType: MetricType.REPLICATION_ROLE }),
+        makeAnomaly({ timestamp: t + 1000, metricType: MetricType.COMMAND_P99 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+  });
+
   describe('scope partitioning', () => {
     it('keeps anomalies from different connections in separate groups', () => {
       const baseTime = 1000000;

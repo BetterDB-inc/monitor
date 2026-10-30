@@ -308,6 +308,17 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.SLOW_QUERIES,
+        requiredMetrics: [MetricType.COMMAND_P99],
+        diagnosis: 'Per-command P99 latency regression detected',
+        recommendations: [
+          'Compare per-command P99 before and after the regression in latencystats history',
+          'Check for a recent server upgrade or config change on this instance',
+          'Look for concurrent resharding, resync or persistence activity',
+          'Review the commands named in the regression for larger payloads',
+        ],
+      },
+      {
         pattern: AnomalyPattern.CACHE_THRASHING,
         requiredMetrics: [MetricType.KEYSPACE_MISSES],
         diagnosis: 'High cache miss rate detected',
