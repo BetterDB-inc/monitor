@@ -179,6 +179,7 @@ import {
 } from './retry-amplification-detector';
 import {
   ClientCommandSnapshot,
+  RETRY_AMP_SNAPSHOT_LIMIT,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
   rankRetryAmplificationContributors,
@@ -3208,6 +3209,7 @@ export class AnomalyService
         connectionId: ctx.connectionId,
         startTime: episodeStart,
         endTime: timestamp,
+        limit: RETRY_AMP_SNAPSHOT_LIMIT,
       });
     } catch (error) {
       snapshotsLoaded = false;

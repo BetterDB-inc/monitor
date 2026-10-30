@@ -11,6 +11,7 @@ import { ConnectionContext } from '@app/common/services/multi-connection-poller'
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
+import { RETRY_AMP_SNAPSHOT_LIMIT } from '../retry-amplification-attribution';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
@@ -3371,7 +3372,7 @@ describe('AnomalyService', () => {
 
       expect(dbClient.getClients).toHaveBeenCalledTimes(2);
       expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionId: 'conn-1' }),
+        expect.objectContaining({ connectionId: 'conn-1', limit: RETRY_AMP_SNAPSHOT_LIMIT }),
       );
       expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
       expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
