@@ -339,18 +339,20 @@ Each condition fires once per episode and the tracking state clears when the chi
 **Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. A window is hot when:
 - Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
 - Connected clients stay within ±15% of baseline
-- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped as soon as the latency guard sees the command recover), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped as soon as the latency guard sees the command recover; while the guard has no verdict yet, the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
 
 A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
 - **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, load that keeps climbing window over window. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
-- **Step**: every window is at least 2× baseline, and the latest is within 10% of the run's peak. This catches a storm that jumps up and then holds.
+- **Step**: the last 3 windows are all at least 2× baseline, the latest is within 10% of their peak, and at least one of them shows retry evidence (an error-reply or reconnect burst). This catches a storm that jumps up, or overshoots and settles, then holds. Latency alone is not enough for a step, because a legitimate batch job through pooled clients looks the same.
+
+Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
 
 Runs that end within 3 windows are recorded as transient.
 
 - **WARNING** when the run qualifies
-- **CRITICAL** when saturation (load, CPU, rejected connections, client saturation or lockout risk) is active in the latest window
+- **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. CPU, rejected-connection and lockout-risk events count for 5 minutes.
 
-**Limitations**: The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
+**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling.
 
 **Recommended actions**:
 - Add exponential backoff with jitter and a retry budget

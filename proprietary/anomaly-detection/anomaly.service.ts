@@ -171,7 +171,7 @@ import {
 import {
   RETRY_AMP_CMDS_PER_CLIENT_RATIO,
   RETRY_AMP_SATURATION_HOLD_MS,
-  RETRY_AMP_SATURATION_METRICS,
+  RETRY_AMP_HELD_SATURATION_METRICS,
   RETRY_AMP_STRESS_HOLD_MS,
   RETRY_AMP_STRESS_METRICS,
   RETRY_AMP_WINDOW_MS,
@@ -3129,9 +3129,10 @@ export class AnomalyService
   ): Promise<void> {
     let state = this.retryAmplificationState.get(ctx.connectionId);
     if (state === undefined) {
-      state = createRetryAmplificationState(retryAmplificationMaxPollGap(this.getIntervalMs()));
+      state = createRetryAmplificationState();
       this.retryAmplificationState.set(ctx.connectionId, state);
     }
+    state.maxPollGapMs = retryAmplificationMaxPollGap(this.getIntervalMs());
 
     const connectionEvents = this.recentAnomalies.filter((a) => {
       return a.connectionId === ctx.connectionId && a.timestamp <= timestamp;
@@ -3156,7 +3157,7 @@ export class AnomalyService
     for (const a of connectionEvents) {
       if (
         !a.resolved &&
-        RETRY_AMP_SATURATION_METRICS.includes(a.metricType) &&
+        RETRY_AMP_HELD_SATURATION_METRICS.includes(a.metricType) &&
         timestamp - a.timestamp <= RETRY_AMP_SATURATION_HOLD_MS
       ) {
         activeSaturation.add(a.metricType);
@@ -5513,8 +5514,12 @@ export class AnomalyService
     }
   }
 
-  reportLatencyDegraded(connectionId: string, degraded: boolean): void {
-    this.latencyDegraded.set(connectionId, degraded);
+  reportLatencyDegraded(connectionId: string, degraded: boolean | null): void {
+    if (degraded === null) {
+      this.latencyDegraded.delete(connectionId);
+    } else {
+      this.latencyDegraded.set(connectionId, degraded);
+    }
   }
 
   ingestExternalAnomaly(event: AnomalyEvent): void {

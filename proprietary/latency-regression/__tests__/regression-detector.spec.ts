@@ -371,11 +371,11 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(sim.detector.isDegraded()).toBe(false);
   });
 
-  it('treats a command without enough baseline as still degraded', () => {
+  it('reports no verdict for a command without enough baseline', () => {
     const sim = new Sim();
     seedBaseline(sim, 20);
     sim.tick(1000, '8.1.0');
-    expect(sim.detector.isDegraded()).toBe(true);
+    expect(sim.detector.isDegraded()).toBeNull();
   });
 
   it('does not fire below 2x baseline', () => {

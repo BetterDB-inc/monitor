@@ -3428,6 +3428,36 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
+    it('ignores a load saturation event once the saturation detector has re-armed', async () => {
+      (service as any).recentAnomalies.push({
+        id: 'load-sat',
+        timestamp: 1_700_000,
+        metricType: MetricType.LOAD_SATURATION,
+        connectionId: 'conn-1',
+        resolved: false,
+      });
+      jest.spyOn(service as any, 'detectLoadSaturation').mockResolvedValue(undefined);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('follows a change to the anomaly poll interval', async () => {
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      };
+      await (service as any).detectRetryAmplification(info, mockCtx, 1_000_000);
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(20_000);
+      await (service as any).detectRetryAmplification(info, mockCtx, 1_020_000);
+
+      expect((service as any).retryAmplificationState.get('conn-1').maxPollGapMs).toBe(60_000);
+    });
+
     it('reports critical while load saturation is still active', async () => {
       (service as any).loadSaturationState.set('conn-1', {
         ackedLevel: 'warning',
