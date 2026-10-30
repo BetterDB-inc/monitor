@@ -126,21 +126,29 @@ describe('observeDivergence', () => {
     expect(divergences([...before, ...after]).filter((f) => f.reason === 'growth')).toEqual([]);
   });
 
-  it('seals a window with enough samples when an outage interrupts it', () => {
+  it('seals a full window with enough samples when an outage interrupts it', () => {
     const harness = new Harness();
-    harness.window({ gap: 8 * MiB, rate: MiB }, true);
-    const pending = [8, 9, 10].map((gap) => harness.poll({ gap: gap * MiB, rate: MiB }, POLL_MS));
-    const lastSampleAt = harness.t - POLL_MS;
+    for (const gap of [8, 9, 10]) harness.poll({ gap: gap * MiB, rate: MiB }, 20_000);
+    const lastSampleAt = harness.t - 20_000;
     harness.skip(300_000);
 
     harness.poll({ gap: 11 * MiB, rate: MiB }, POLL_MS);
 
-    expect(pending.flat()).toEqual([]);
     const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
-    expect(windows).toHaveLength(2);
-    expect(windows[1].end).toBe(lastSampleAt);
-    expect(windows[1].gapBytes).toBe(9 * MiB);
-    expect(harness.state.windowStart).toBeGreaterThan(windows[1].end);
+    expect(windows).toHaveLength(1);
+    expect(windows[0].end).toBe(lastSampleAt);
+    expect(windows[0].gapBytes).toBe(9 * MiB);
+  });
+
+  it('discards a window an outage cut short', () => {
+    const harness = new Harness();
+    harness.window({ gap: 8 * MiB, rate: MiB }, true);
+    for (const gap of [8, 9, 10]) harness.poll({ gap: gap * MiB, rate: MiB }, POLL_MS);
+    harness.skip(300_000);
+
+    harness.poll({ gap: 11 * MiB, rate: MiB }, POLL_MS);
+
+    expect(harness.state.replicas.get(ADDR)?.windows).toHaveLength(1);
   });
 
   it('keeps detecting when polls stay slower than a window', () => {
@@ -152,6 +160,18 @@ describe('observeDivergence', () => {
     const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
     expect(windows[0].end).toBe(windows[1].start);
     expect(divergences(outcomes).map((f) => f.reason)).toContain('growth');
+  });
+
+  it('restarts the chain when an outage interrupts slow polling', () => {
+    const harness = new Harness();
+    for (let i = 0; i < 9; i++) harness.poll({ gap: 8 * MiB, rate: MiB }, 40_000);
+    harness.skip(600_000);
+
+    for (let i = 0; i < 3; i++) harness.poll({ gap: 8 * MiB, rate: MiB }, 40_000);
+
+    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
+    expect(windows.length).toBeGreaterThan(0);
+    expect(windows.every((w) => w.end - w.start < 600_000)).toBe(true);
   });
 
   it('ignores samples from replicas', () => {
