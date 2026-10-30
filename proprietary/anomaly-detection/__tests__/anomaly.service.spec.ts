@@ -6660,6 +6660,66 @@ describe('AnomalyService', () => {
       expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
     });
 
+    const siblingGroup = (correlationId: string, timestamp: number) => ({
+      correlationId,
+      timestamp,
+      pattern: 'memory_pressure',
+      severity: 'warning',
+      diagnosis: '',
+      recommendations: [],
+      anomalyCount: 2,
+      metricTypes: [],
+      connectionId: 'node-1',
+    });
+
+    it('keeps looking past caller groups no sibling shares', async () => {
+      const caller = [
+        { ...member('x1', 'node-2'), correlationId: 'solo-1', timestamp: 1_000_300 },
+        { ...member('x2', 'node-2'), correlationId: 'solo-2', timestamp: 1_000_200 },
+        member('b', 'node-2'),
+      ];
+      storage.getCorrelatedGroups.mockImplementation(
+        async ({ connectionId, correlationIds }: any) =>
+          connectionId === 'node-1' && correlationIds?.includes('grp-1')
+            ? [siblingGroup('grp-1', 1_000_000)]
+            : [],
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2'
+          ? caller
+          : connectionId === 'node-1'
+            ? [member('a', 'node-1')]
+            : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 2, 'node-2');
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
+    it('drops sibling groups that start outside the requested window', async () => {
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-1' ? [siblingGroup('grp-1', 1_000_000)] : [],
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2'
+          ? [{ ...member('b', 'node-2'), timestamp: 1_002_000 }]
+          : connectionId === 'node-1'
+            ? [member('a', 'node-1')]
+            : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(
+        1_001_000,
+        undefined,
+        undefined,
+        50,
+        'node-2',
+      );
+
+      expect(groups).toEqual([]);
+    });
+
     it('finds a stored group from any member of the topology', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-1'
