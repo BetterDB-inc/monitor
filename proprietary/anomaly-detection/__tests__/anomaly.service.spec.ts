@@ -3835,6 +3835,82 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('failed saves', () => {
+      const retryEvents = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+      it('keeps one event in the active feed while the save keeps failing', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await runRetry({ realEmit: true });
+
+        const saves = storage.saveAnomalyEvent.mock.calls
+          .map(([e]: [any]) => e)
+          .filter((e: any) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+        expect(saves.length).toBeGreaterThan(1);
+        expect(new Set(saves.map((e: any) => e.id)).size).toBe(1);
+        expect(retryEvents()).toHaveLength(1);
+      });
+
+      it('leaves one saved event when a retry goes through', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+
+        expect(retryEvents()).toHaveLength(1);
+        expect((retryEvents()[0] as any).persisted).toBe(true);
+      });
+
+      it('hands correlation one event for the finding', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+        await runRetry({ realEmit: true });
+        const correlate = jest.spyOn((service as any).correlator, 'correlate').mockReturnValue([]);
+
+        await (service as any).correlateAnomalies();
+
+        const passed = correlate.mock.calls[0][0] as any[];
+        expect(
+          passed.filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+      });
+
+      it('keeps the correlation of the attempt it replaces', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        const correlated = jest.spyOn(service as any, 'addAnomaly');
+        correlated.mockImplementationOnce(async (a: any) => {
+          a.correlationId = 'group-1';
+          (service as any).recentAnomalies.push(a);
+        });
+
+        await runRetry({ realEmit: true });
+        correlated.mockRestore();
+
+        expect(retryEvents()).toHaveLength(1);
+        expect(retryEvents()[0].correlationId).toBe('group-1');
+      });
+
+      it('does not replace an unsaved event from an earlier episode', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        await runRetry({ realEmit: true });
+        const earlier = retryEvents()[0];
+        (service as any).retryAmplificationState.delete('conn-1');
+        (service as any).retryAmplificationLastEmit.delete('conn-1');
+        (service as any).retryAmplificationUnsaved.get('conn-1').episodeStart = -1;
+        (service as any).recentAnomalies = [earlier];
+
+        await runRetry({ realEmit: true });
+
+        expect(retryEvents().map((e) => e.id)).toContain(earlier.id);
+        expect(retryEvents().length).toBeGreaterThan(1);
+      });
+    });
+
     it('sends the webhook during a storage outage, once', async () => {
       storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
 

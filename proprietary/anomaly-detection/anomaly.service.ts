@@ -431,6 +431,10 @@ export class AnomalyService
   >();
   private retryAmplificationAttributed = new Map<string, string>();
   private retryAmplificationLastEmit = new Map<string, number>();
+  private retryAmplificationUnsaved = new Map<
+    string,
+    { episodeStart: number; event: AnomalyEvent }
+  >();
   private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -816,6 +820,7 @@ export class AnomalyService
     this.retryAmplificationContributors.delete(connectionId);
     this.retryAmplificationAttributed.delete(connectionId);
     this.retryAmplificationLastEmit.delete(connectionId);
+    this.retryAmplificationUnsaved.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
@@ -3346,8 +3351,11 @@ export class AnomalyService
       this.retryAmplificationAttributed.set(ctx.connectionId, attributionKey);
     }
 
+    const unsaved = this.retryAmplificationUnsaved.get(ctx.connectionId);
+    const retried = unsaved?.episodeStart === attributionStart ? unsaved.event : undefined;
     const event: AnomalyEvent = {
-      id: randomUUID(),
+      id: retried?.id ?? randomUUID(),
+      correlationId: retried?.correlationId,
       timestamp,
       metricType: MetricType.RETRY_AMPLIFICATION,
       anomalyType: AnomalyType.SPIKE,
@@ -3363,6 +3371,9 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    if (retried !== undefined) {
+      this.recentAnomalies = this.recentAnomalies.filter((a) => a !== retried);
+    }
     await this.addAnomaly(event, ctx);
 
     const notify = retryAmplificationNeedsNotification(state, finding);
@@ -3387,7 +3398,14 @@ export class AnomalyService
         });
     }
 
-    if (event.persisted !== true) return;
+    if (event.persisted !== true) {
+      this.retryAmplificationUnsaved.set(ctx.connectionId, {
+        episodeStart: attributionStart,
+        event,
+      });
+      return;
+    }
+    this.retryAmplificationUnsaved.delete(ctx.connectionId);
     this.retryAmplificationLastEmit.delete(ctx.connectionId);
     acknowledgeRetryAmplificationFinding(state, finding);
     this.retryAmplificationAttributed.delete(ctx.connectionId);
