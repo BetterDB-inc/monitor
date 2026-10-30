@@ -3883,6 +3883,36 @@ describe('AnomalyService', () => {
         ]);
       });
 
+      it('resolves the saved retry through its correlated group', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            (service as any).recentGroups = [{ correlationId: 'grp', anomalies: loadEvents() }];
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+
+        expect(await service.resolveGroup('grp')).toBe(true);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(loadEvents()[0].id, expect.any(Number));
+      });
+
+      it('does not reopen an attempt resolved in memory', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            loadEvents()[0].resolved = true;
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+
+        expect(loadEvents()[0]).toMatchObject({ resolved: true, persisted: true });
+      });
+
       it('forgets an unsaved event when the load drops', async () => {
         storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
 
@@ -4006,6 +4036,36 @@ describe('AnomalyService', () => {
           counted(prometheusService.incrementAnomalyEvent, MetricType.RETRY_AMPLIFICATION),
         ).toHaveLength(1);
         expect(counted(otelEvents.dispatch, MetricType.RETRY_AMPLIFICATION)).toHaveLength(1);
+      });
+
+      it('resolves the saved retry through its correlated group', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            (service as any).recentGroups = [{ correlationId: 'grp', anomalies: retryEvents() }];
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+
+        expect(await service.resolveGroup('grp')).toBe(true);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(retryEvents()[0].id, expect.any(Number));
+      });
+
+      it('does not reopen an attempt resolved in memory', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            retryEvents()[0].resolved = true;
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+
+        expect(retryEvents()[0]).toMatchObject({ resolved: true, persisted: true });
       });
 
       it('treats a rise to critical as its own event', async () => {

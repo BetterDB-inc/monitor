@@ -3252,7 +3252,7 @@ export class AnomalyService
       stdDev: 0,
       threshold: (finding.level === 'critical' ? LOAD_CRIT_FRACTION : LOAD_WARN_FRACTION) * 100,
       message: finding.message,
-      resolved: false,
+      resolved: retried?.resolved ?? false,
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -3392,7 +3392,7 @@ export class AnomalyService
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
       message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
       relatedMetrics: finding.relatedMetrics,
-      resolved: false,
+      resolved: retried?.resolved ?? false,
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -5760,7 +5760,12 @@ export class AnomalyService
     ctx?: ConnectionContext,
     retryOf?: Pick<AnomalyEvent, 'id'>,
   ): Promise<void> {
-    if (retryOf) this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
+    if (retryOf) {
+      this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
+      for (const group of this.recentGroups) {
+        group.anomalies = group.anomalies.map((a) => (a.id === retryOf.id ? anomaly : a));
+      }
+    }
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
