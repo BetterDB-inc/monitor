@@ -30,7 +30,7 @@ interface WindowSpec {
 
 class Harness {
   readonly state: DivergenceConnectionState = createDivergenceState();
-  private t = 1_700_000_000_000;
+  t = 1_700_000_000_000;
 
   private sample(spec: WindowSpec): ReplicationStreamSample {
     const replicas: ReplicaOffset[] =
@@ -128,6 +128,34 @@ describe('observeDivergence', () => {
     ]);
 
     expect(divergences([...before, ...after]).filter((f) => f.reason === 'growth')).toEqual([]);
+  });
+
+  it('seals a window with enough samples when an outage interrupts it', () => {
+    const harness = new Harness();
+    harness.window({ gap: 8 * MiB, rate: MiB }, true);
+    const pending = [8, 9, 10].map((gap) => harness.poll({ gap: gap * MiB, rate: MiB }, POLL_MS));
+    const lastSampleAt = harness.t - POLL_MS;
+    harness.skip(300_000);
+
+    harness.poll({ gap: 11 * MiB, rate: MiB }, POLL_MS);
+
+    expect(pending.flat()).toEqual([]);
+    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
+    expect(windows).toHaveLength(2);
+    expect(windows[1].end).toBe(lastSampleAt);
+    expect(windows[1].gapBytes).toBe(9 * MiB);
+    expect(harness.state.windowStart).toBeGreaterThan(windows[1].end);
+  });
+
+  it('keeps detecting when polls stay slower than a window', () => {
+    const harness = new Harness();
+    const outcomes: DivergenceOutcome[][] = [];
+
+    for (let gap = 8; gap < 40; gap += 2) outcomes.push(harness.poll({ gap: gap * MiB, rate: MiB }, 40_000));
+
+    const windows = harness.state.replicas.get(ADDR)?.windows ?? [];
+    expect(windows[0].end).toBe(windows[1].start);
+    expect(divergences(outcomes).map((f) => f.reason)).toContain('growth');
   });
 
   it('ignores samples from replicas', () => {
