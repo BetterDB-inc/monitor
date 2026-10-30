@@ -255,6 +255,8 @@ export class AnomalyService
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
   private sequenceDedupeSeedFailedAt: number | null = null;
+  private readonly observedRecoveries = new Map<string, number>();
+  private readonly observedOpenThrough = new Map<string, number>();
   private lastHourGroups: Array<
     Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
   > = [];
@@ -5457,9 +5459,16 @@ export class AnomalyService
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => {
     const settledAt = signal.since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
+    const key = `${signal.connectionId}\u0000${signal.metricType}\u0000${signal.since}`;
+    const recovered = this.observedRecoveries.get(key);
+    if (recovered !== undefined && (signal.until === null || recovered < signal.until)) {
+      return recovered;
+    }
+    const observedFrom =
+      signal.until === null ? (this.observedOpenThrough.get(key) ?? settledAt) : settledAt;
     const buffer = this.buffers.get(signal.connectionId)?.get(signal.metricType);
     const samples = buffer?.isReady() ? buffer.getSamples() : [];
-    if (!buffer || samples.length === 0 || samples[0].timestamp > settledAt) {
+    if (!buffer || samples.length === 0 || samples[0].timestamp > observedFrom) {
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
         return signal.until !== null && signal.until <= settledAt ? null : settledAt;
       }
@@ -5483,8 +5492,29 @@ export class AnomalyService
         (signal.until === null || s.timestamp < signal.until) &&
         inBand(s.value),
     );
-    return backInBand ? backInBand.timestamp : null;
+    if (backInBand) {
+      this.observedOpenThrough.delete(key);
+      this.rememberIncidentObservation(this.observedRecoveries, key, backInBand.timestamp);
+      return backInBand.timestamp;
+    }
+    if (signal.until === null) {
+      const through = samples[samples.length - 1].timestamp;
+      this.rememberIncidentObservation(this.observedOpenThrough, key, through);
+    }
+    return null;
   };
+
+  private rememberIncidentObservation(
+    observations: Map<string, number>,
+    key: string,
+    at: number,
+  ): void {
+    observations.delete(key);
+    observations.set(key, at);
+    if (observations.size > this.maxRecentEvents) {
+      observations.delete(observations.keys().next().value!);
+    }
+  }
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;

@@ -6965,6 +6965,39 @@ describe('AnomalyService', () => {
       expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
     });
 
+    it('reaches degraded for a buffered signal that never came back in band', async () => {
+      const now = Date.now();
+      const start = now - 11 * MIN;
+      const fill = (from: number) => {
+        const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
+        for (let ts = from; ts <= from + 4 * MIN; ts += 10_000) buffer.addSample(900, ts);
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
+      };
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: start,
+          metricType: MetricType.CONNECTIONS,
+          baseline: 10,
+          stdDev: 1,
+        }),
+      );
+
+      fill(start - MIN);
+      await (service as any).tickIncidentTimelines(start + 3 * MIN);
+      fill(start + 3 * MIN);
+      await (service as any).tickIncidentTimelines(start + 7 * MIN);
+      fill(start + 7 * MIN);
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(service.getLiveIncidentTimelines()[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          openSignals: [MetricType.CONNECTIONS],
+          unknownSignals: [],
+        }),
+      );
+    });
+
     it('reports a one-shot state event as unknown rather than degraded', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(
@@ -7085,6 +7118,71 @@ describe('AnomalyService', () => {
         ]);
 
         expect(probe()(signal())).toBe(T + 2 * MIN);
+      });
+
+      describe('after the buffer slides past the settle time', () => {
+        const outOfBand = (start: number): Array<[number, number]> =>
+          Array.from({ length: 30 }, (_, i) => [start + i * 1000, 900]);
+
+        it('keeps a recovery it already observed', () => {
+          withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+          expect(probe()(signal())).toBe(T + 2 * MIN);
+
+          withBuffer(baseline(T + 60 * MIN));
+
+          expect(probe()(signal())).toBe(T + 2 * MIN);
+        });
+
+        it('ignores an observed recovery that a later firing bounds out', () => {
+          withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+          probe()(signal());
+
+          withBuffer(baseline(T + 60 * MIN));
+
+          expect(probe()(signal({ until: T + 2 * MIN }))).toBeUndefined();
+        });
+
+        it('stays open while observation of the out-of-band signal is unbroken', () => {
+          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          expect(probe()(signal())).toBeNull();
+
+          withBuffer([[T + 2 * MIN, 900], ...outOfBand(T + 3 * MIN)]);
+          expect(probe()(signal())).toBeNull();
+
+          withBuffer([[T + 3 * MIN + 29_000, 900], ...outOfBand(T + 8 * MIN)]);
+
+          expect(probe()(signal())).toBeNull();
+        });
+
+        it('recovers when unbroken observation finds the signal back in band', () => {
+          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          probe()(signal());
+
+          withBuffer([
+            [T + 2 * MIN, 900],
+            [T + 5 * MIN, 10],
+          ]);
+
+          expect(probe()(signal())).toBe(T + 5 * MIN);
+        });
+
+        it('does not know once observation has a gap', () => {
+          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          probe()(signal());
+
+          withBuffer(outOfBand(T + 8 * MIN));
+
+          expect(probe()(signal())).toBeUndefined();
+        });
+
+        it('does not keep a re-fired signal open from its own watermark', () => {
+          withBuffer([...outOfBand(T - 30_000), [T + 2 * MIN, 900]]);
+          probe()(signal());
+
+          withBuffer([[T + 2 * MIN, 900], ...outOfBand(T + 3 * MIN)]);
+
+          expect(probe()(signal({ until: T + 30 * MIN }))).toBeUndefined();
+        });
       });
 
       it('stays open while no sample after the settle time is back in band', () => {
