@@ -354,13 +354,13 @@ export class IncidentTimelineBuilder {
     }
 
     const lastEventAt = events[events.length - 1].timestamp;
-    const startedAt = start?.startedAt ?? events[0].timestamp;
+    const anchoredAt = start?.startedAt ?? events[0].timestamp;
 
     return {
-      incidentId: incidentIdFor(scope, start?.anomalyId ?? events[0].id, startedAt),
+      incidentId: incidentIdFor(scope, start?.anomalyId ?? events[0].id, anchoredAt),
       scope,
       connectionIds: [...new Set(entries.map((e) => e.connectionId))],
-      startedAt,
+      startedAt: Math.min(anchoredAt, events[0].timestamp),
       lastEventAt,
       entries,
       sequence,

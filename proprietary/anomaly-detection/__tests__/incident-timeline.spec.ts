@@ -132,7 +132,7 @@ describe('IncidentTimelineBuilder', () => {
       );
 
       expect(incidents).toHaveLength(1);
-      expect(incidents[0].startedAt).toBe(T0);
+      expect(incidents[0].startedAt).toBe(T0 - 10_000);
       expect(incidents[0].incidentId).toBe(incidentIdFor('conn-a', start.id, T0));
       expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual([late.id, start.id]);
     });

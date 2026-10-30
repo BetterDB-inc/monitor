@@ -543,6 +543,8 @@ export class AnomalyService
   // also gates the recovery-time storage query so healthy polls stay cheap.
   private raftPrevTerm = new Map<string, number>();
   private raftTermChanges = new Map<string, number[]>();
+  private raftFlappingEventIds = new Map<string, string[]>();
+  private raftLastElectionAt = new Map<string, number>();
   private raftLeaderlessSince = new Map<string, number>();
   private raftWatchCommit = new Map<string, number>();
   private raftLastSeeking = new Map<string, number>();
@@ -840,6 +842,8 @@ export class AnomalyService
     this.clientSaturationEventIds.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
+    this.raftFlappingEventIds.delete(connectionId);
+    this.raftLastElectionAt.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
     this.raftWatchCommit.delete(connectionId);
     this.raftLastSeeking.delete(connectionId);
@@ -1763,7 +1767,7 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
-    await this.adoptOpenEvents(ctx);
+    await this.adoptOpenEvents(ctx, timestamp);
     await this.resolveEventsToClose();
 
     const connected = this.parseNumber(info.connected_clients);
@@ -1844,7 +1848,7 @@ export class AnomalyService
     return true;
   }
 
-  private async adoptOpenEvents(ctx: ConnectionContext): Promise<void> {
+  private async adoptOpenEvents(ctx: ConnectionContext, timestamp: number): Promise<void> {
     const { connectionId } = ctx;
     if (this.openEventsAdopted.has(connectionId)) return;
     if (!this.reclaimRemovedConnection(connectionId)) return;
@@ -1876,6 +1880,7 @@ export class AnomalyService
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
         this.raftLeaderlessActive.set(connectionId, true);
       }
+      this.adoptRaftFlappingEvents(connectionId, rows(MetricType.RAFT_HEALTH), timestamp);
       this.openEventsAdopted.add(connectionId);
     } catch (err) {
       this.logger.warn(
@@ -1893,6 +1898,22 @@ export class AnomalyService
       .map((e) => ({ id: e.id, addr: resyncEventReplica(e.message), since: e.timestamp }));
     if (untracked.length > 0) {
       this.resyncEscalationEvents.set(connectionId, [...tracked, ...untracked]);
+    }
+  }
+
+  private adoptRaftFlappingEvents(
+    connectionId: string,
+    open: StoredAnomalyEvent[],
+    timestamp: number,
+  ): void {
+    const tracked = this.raftFlappingEventIds.get(connectionId) ?? [];
+    const untracked = open
+      .filter((e) => e.severity === AnomalySeverity.WARNING)
+      .map((e) => e.id)
+      .filter((id) => !tracked.includes(id));
+    if (untracked.length > 0) {
+      this.raftFlappingEventIds.set(connectionId, [...tracked, ...untracked]);
+      this.raftLastElectionAt.set(connectionId, timestamp);
     }
   }
 
@@ -4115,6 +4136,11 @@ export class AnomalyService
     return allResolved;
   }
 
+  private async settleRaftFlappingEvents(connectionId: string): Promise<void> {
+    await this.settleEvents(this.raftFlappingEventIds, connectionId);
+    if (!this.raftFlappingEventIds.has(connectionId)) this.raftLastElectionAt.delete(connectionId);
+  }
+
   private async detectRaftHealth(
     clusterInfo: Record<string, string>,
     ctx: ConnectionContext,
@@ -4128,6 +4154,7 @@ export class AnomalyService
       this.raftLeaderlessSince.delete(ctx.connectionId);
       this.raftWatchCommit.delete(ctx.connectionId);
       this.raftLastSeeking.delete(ctx.connectionId);
+      await this.settleRaftFlappingEvents(ctx.connectionId);
       // If an outage was open, resolve its incident(s) before the protocol switch
       // so nothing stays stuck active; keep the flag to retry on a resolve failure.
       if (this.raftLeaderlessActive.get(ctx.connectionId)) {
@@ -4147,6 +4174,9 @@ export class AnomalyService
     this.raftPrevTerm.set(ctx.connectionId, state.currentTerm);
     const churnCutoff = timestamp - AnomalyService.RAFT_CHURN_WINDOW_MS;
     const isNewElection = prevTerm !== undefined && state.currentTerm > prevTerm;
+    if (isNewElection && this.raftFlappingEventIds.has(ctx.connectionId)) {
+      this.raftLastElectionAt.set(ctx.connectionId, timestamp);
+    }
     const recent = [
       ...(this.raftTermChanges.get(ctx.connectionId) ?? []),
       ...(isNewElection ? [timestamp] : []),
@@ -4174,6 +4204,16 @@ export class AnomalyService
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
       await this.addAnomaly(event, ctx);
       this.raftTermChanges.set(ctx.connectionId, []); // dedupe: clear only after a successful emit
+      this.raftFlappingEventIds.set(ctx.connectionId, [
+        ...(this.raftFlappingEventIds.get(ctx.connectionId) ?? []),
+        event.id,
+      ]);
+      this.raftLastElectionAt.set(ctx.connectionId, timestamp);
+    } else if (
+      timestamp - (this.raftLastElectionAt.get(ctx.connectionId) ?? timestamp) >=
+      AnomalyService.RAFT_CHURN_WINDOW_MS
+    ) {
+      await this.settleRaftFlappingEvents(ctx.connectionId);
     }
 
     // --- Leaderless / quorum loss ---
@@ -6027,11 +6067,13 @@ export class AnomalyService
   private async storeIncidentBoundaries(windowStart: number): Promise<void> {
     const key = (scope: string, startedAt: number) => `${scope}\u0000${startedAt}`;
     const known = new Set(this.liveBoundaries.map((b) => key(b.scopeId, b.startedAt)));
+    const anchor = (incident: IncidentTimeline) =>
+      incidentStartOf(incident.incidentId) ?? incident.startedAt;
     const kept = this.liveBoundaries.filter(
       (b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
     );
     const fresh = this.liveIncidents
-      .filter((incident) => !known.has(key(incident.scope, incident.startedAt)))
+      .filter((incident) => !known.has(key(incident.scope, anchor(incident))))
       .map((incident) => ({
         scopeId: incident.scope,
         startedAt: incident.startedAt,
@@ -6195,9 +6237,10 @@ export class AnomalyService
     }
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const windowEnd = startedAt + 2 * maxSpanMs;
+    const anchors = await this.readIncidentBoundaries(connectionId, startedAt, startedAt);
     const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
-      startedAt,
+      anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
       windowEnd,
     );
     const find = (all: AnomalyEvent[]) =>
@@ -7062,6 +7105,7 @@ export class AnomalyService
     const state = this.divergenceState.get(connectionId);
     const ids = [
       ...(this.clientSaturationEventIds.get(connectionId) ?? []),
+      ...(this.raftFlappingEventIds.get(connectionId) ?? []),
       ...(backlogEventId ? [backlogEventId] : []),
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),

@@ -535,6 +535,13 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `INFO stats.total_connections_received` and `INFO clients.connected_clients`
 **Detection method**: Z-score spike detector (warning 3.0, critical 5.0, 2 consecutive samples, 60s cooldown). Only fires at 10 or more new connections per second while `connected_clients` stays flat, with under 10% of the new connections retained.
 
+### raft_health
+**What it measures**: Raft elections and quorum on Valkey Cluster V2
+**Why anomalies matter**: Repeated elections point to an unstable primary or a split network, and a lost quorum freezes writes
+**Typical baseline**: No elections
+**Source**: `CLUSTER INFO` (`cluster_raft_*` fields)
+**Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
+
 ## Configuration
 
 ### Environment Variables

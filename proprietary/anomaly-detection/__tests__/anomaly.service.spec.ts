@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { AnomalyService } from '../anomaly.service';
-import { IncidentTimelineBuilder } from '../incident-timeline';
+import { IncidentTimelineBuilder, incidentIdFor } from '../incident-timeline';
 import { MetricBuffer } from '../metric-buffer';
 import * as sequenceRules from '../sequence-rules';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
@@ -4704,6 +4704,142 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('flapping');
     });
 
+    describe('flapping events', () => {
+      let term: number;
+      const elect = async () => {
+        now += 1000;
+        term += 1;
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: String(term) }),
+        );
+        await poll();
+      };
+      const flap = async () => {
+        await elect();
+        await elect();
+        await elect();
+      };
+      const quiet = async (ms: number) => {
+        now += ms;
+        await poll();
+      };
+      const resolvedTimes = (id: string) =>
+        storage.resolveAnomaly.mock.calls.filter(([resolved]: [string]) => resolved === id).length;
+
+      beforeEach(async () => {
+        term = 1;
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: '1' }),
+        );
+        await poll();
+      });
+
+      it('closes once a full window passes with no new election', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        await quiet(59_000);
+        expect(resolvedTimes(id)).toBe(0);
+
+        await quiet(1_000);
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('stays open when an election lands inside the window', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        await quiet(30_000);
+        await elect();
+        await quiet(40_000);
+        expect(resolvedTimes(id)).toBe(0);
+
+        await quiet(20_000);
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('keeps both events and restarts the clock on a second flap', async () => {
+        await flap();
+        await quiet(30_000);
+        await flap();
+        const [first, second] = raftEvents();
+
+        await quiet(40_000);
+        expect(resolvedTimes(first.id)).toBe(0);
+
+        await quiet(20_000);
+        expect(resolvedTimes(first.id)).toBe(1);
+        expect(resolvedTimes(second.id)).toBe(1);
+      });
+
+      it('retries a resolve that storage rejected', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await quiet(60_000);
+        expect(resolvedTimes(id)).toBe(1);
+
+        await quiet(1_000);
+        expect(resolvedTimes(id)).toBe(2);
+      });
+
+      it('closes an adopted row a window after adoption', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        const row = (id: string, severity: AnomalySeverity) => ({
+          id,
+          severity,
+          timestamp: now - 60 * 60_000,
+        });
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }: any) =>
+          metricType === MetricType.RAFT_HEALTH && !offset
+            ? [row('old-flap', AnomalySeverity.WARNING)]
+            : [],
+        );
+
+        await quiet(1_000);
+        await quiet(59_000);
+        expect(resolvedTimes('old-flap')).toBe(0);
+
+        await quiet(1_000);
+        expect(resolvedTimes('old-flap')).toBe(1);
+      });
+
+      it('leaves an adopted outage to the quorum path', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }: any) =>
+          metricType === MetricType.RAFT_HEALTH && !offset
+            ? [{ id: 'old-outage', severity: AnomalySeverity.CRITICAL, timestamp: now }]
+            : [],
+        );
+
+        await quiet(1_000);
+
+        expect((service as any).raftFlappingEventIds.has('conn-1')).toBe(false);
+      });
+
+      it('closes a tracked event on removal when storage reads fail', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('closes when the connection leaves Raft', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue({ cluster_state: 'ok' });
+        await quiet(1_000);
+
+        expect(resolvedTimes(id)).toBe(1);
+      });
+    });
+
     it('does not treat a single healthy failover (one term bump) as churn', async () => {
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
         raftInfo({ cluster_raft_current_term: '1' }),
@@ -8018,6 +8154,46 @@ describe('AnomalyService', () => {
       expect(detail?.entries.map((e) => e.anomalyId)).toEqual(tail.entries.map((e) => e.anomalyId));
     });
 
+    it('finds a late entry on an incident whose stored start follows it', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = [
+        { ...anomaly({ id: 'late', timestamp: t - 10_000 }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'start', timestamp: t }), anomalyType: 'spike' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t, anomalyId: 'start' },
+      ]);
+      const [listed] = await service.getIncidentTimelines('conn-1', t - MIN);
+
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(detail?.startedAt).toBe(t - 10_000);
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(['late', 'start']);
+    });
+
+    it('does not store a boundary for a late entry', async () => {
+      const t = Date.now();
+      const scoped = { scopeId: 'conn-1', startedAt: t, anomalyId: 'start' };
+      (service as any).liveBoundaries = [scoped];
+      (service as any).liveIncidents = [
+        {
+          incidentId: incidentIdFor('conn-1', 'start', t),
+          scope: 'conn-1',
+          startedAt: t - 10_000,
+          entries: [{ anomalyId: 'late' }],
+        },
+      ];
+
+      await (service as any).storeIncidentBoundaries(t);
+
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
     it('bounds an incident detail lookup by the next firing past its window', async () => {
       const t = Date.now() - 3 * 60 * MIN;
       const stored = [
@@ -9389,7 +9565,7 @@ describe('AnomalyService', () => {
             const slotId = (signature: string, at: number) =>
               `conn-9-replica-slot-state-${signature}-${at}`;
             const ctx = { ...mockCtx, connectionId: 'conn-9' };
-            const adopt = () => (service as any).adoptOpenEvents(ctx);
+            const adopt = () => (service as any).adoptOpenEvents(ctx, T0);
             const rowsBy = (byMetric: Record<string, unknown[]>) =>
               storage.getAnomalyEvents.mockImplementation(
                 async ({ metricType, offset }) => (offset ? [] : (byMetric[metricType] ?? [])),
