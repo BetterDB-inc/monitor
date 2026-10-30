@@ -170,11 +170,16 @@ import {
 } from './load-saturation-detector';
 import {
   RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+  RETRY_AMP_SATURATION_HOLD_MS,
+  RETRY_AMP_SATURATION_METRICS,
+  RETRY_AMP_STRESS_HOLD_MS,
+  RETRY_AMP_STRESS_METRICS,
   RETRY_AMP_WINDOW_MS,
   RetryAmplificationState,
   acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
   evaluateRetryAmplification,
+  retryAmplificationMaxPollGap,
 } from './retry-amplification-detector';
 import {
   LargeReplyEntry,
@@ -3108,19 +3113,45 @@ export class AnomalyService
   ): Promise<void> {
     let state = this.retryAmplificationState.get(ctx.connectionId);
     if (state === undefined) {
-      state = createRetryAmplificationState();
+      state = createRetryAmplificationState(retryAmplificationMaxPollGap(this.getIntervalMs()));
       this.retryAmplificationState.set(ctx.connectionId, state);
     }
 
-    const recentEvents = this.recentAnomalies
+    const connectionEvents = this.recentAnomalies.filter((a) => {
+      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp;
+    });
+    const recentEvents = connectionEvents
       .filter((a) => {
-        return (
-          a.connectionId === ctx.connectionId && timestamp - a.timestamp <= RETRY_AMP_WINDOW_MS
-        );
+        return timestamp - a.timestamp <= RETRY_AMP_WINDOW_MS;
       })
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
+    const stressActive = connectionEvents.some((a) => {
+      return (
+        !a.resolved &&
+        RETRY_AMP_STRESS_METRICS.includes(a.metricType) &&
+        timestamp - a.timestamp <= RETRY_AMP_STRESS_HOLD_MS
+      );
+    });
+    const activeSaturation = new Set<MetricType>();
+    for (const a of connectionEvents) {
+      if (
+        !a.resolved &&
+        RETRY_AMP_SATURATION_METRICS.includes(a.metricType) &&
+        timestamp - a.timestamp <= RETRY_AMP_SATURATION_HOLD_MS
+      ) {
+        activeSaturation.add(a.metricType);
+      }
+    }
+    const loadLevel = this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
+    if (loadLevel !== undefined && loadLevel !== 'none') {
+      activeSaturation.add(MetricType.LOAD_SATURATION);
+    }
+    const clientLevel = this.clientSaturationLevel.get(ctx.connectionId);
+    if (clientLevel !== undefined && clientLevel !== 'none') {
+      activeSaturation.add(MetricType.CLIENT_SATURATION);
+    }
 
     const finding = evaluateRetryAmplification(state, {
       timestamp,
@@ -3130,6 +3161,8 @@ export class AnomalyService
       totalErrorReplies: this.parseNumber(info.total_error_replies),
       connectsPerSec: this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null,
       recentEvents,
+      stressActive,
+      activeSaturation: [...activeSaturation],
     });
     if (finding === null) return;
 

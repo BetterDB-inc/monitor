@@ -3286,7 +3286,7 @@ describe('AnomalyService', () => {
   });
 
   describe('retry amplification', () => {
-    async function runRetry(opts: { failFirstEmit?: boolean } = {}) {
+    async function runRetry(opts: { failFirstEmit?: boolean; p99Once?: boolean } = {}) {
       const recorded: any[] = [];
       let failures = opts.failFirstEmit ? 1 : 0;
       jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
@@ -3303,7 +3303,7 @@ describe('AnomalyService', () => {
       for (let w = 0; w < 18; w++) {
         const hot = w >= 12;
         const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
-        if (hot) {
+        if (hot && (!opts.p99Once || w === 12)) {
           (service as any).recentAnomalies.push({
             id: `p99-${w}`,
             timestamp: ts + 5_000,
@@ -3346,6 +3346,28 @@ describe('AnomalyService', () => {
       expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
       expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
+    });
+
+    it('keeps an earlier P99 regression as stress for the following windows', async () => {
+      const { recorded } = await runRetry({ p99Once: true });
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toContain('sustained latency regression');
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    });
+
+    it('reports critical while load saturation is still active', async () => {
+      (service as any).loadSaturationState.set('conn-1', {
+        ackedLevel: 'warning',
+        lastLevel: 'warning',
+        consecutive: 0,
+      });
+      jest.spyOn(service as any, 'detectLoadSaturation').mockResolvedValue(undefined);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(recorded[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
     });
 
     it('retries a failed emit on the next poll', async () => {
