@@ -182,6 +182,13 @@ describe('observeDivergence', () => {
     expect(divergences(out)).toEqual([]);
   });
 
+  it('raises the ceiling on a gap that shrinks too slowly to matter', () => {
+    const h = new Harness();
+    const findings = divergences(h.windows([600, 599, 598, 597].map((m) => ({ gap: m * MiB, rate: MiB }))));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ level: 'critical', reason: 'ceiling' });
+  });
+
   it('does not escalate a steady drain that will clear soon', () => {
     const h = new Harness();
     h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
@@ -205,12 +212,32 @@ describe('observeDivergence', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
 
-    const stale = h.windows(Array.from({ length: 3 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 })));
+    const stale = h.windows([{ gap: 10 * MiB, rate: MiB, lagSec: 30 }]);
     expect(stale.flat()).toEqual([]);
     expect(h.state.replicas.get(ADDR)?.level).toBe('warning');
 
     const gone = h.windows([{ gap: 0, rate: MiB, present: false }, { gap: 0, rate: MiB, present: false }]);
     expect(gone.flat().map((o) => o.kind)).toEqual(['cleared']);
+  });
+
+  it('escalates an active finding whose ack stays stale', () => {
+    const h = new Harness();
+    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
+
+    const stale = divergences(h.windows(Array.from({ length: 4 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
+    expect(stale).toHaveLength(1);
+    expect(stale[0]).toMatchObject({ level: 'critical', reason: 'not_acking', gapBytes: 8 * MiB });
+  });
+
+  it('restarts the recovery grace when tracking resumes after a stale ack', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+    h.windows([22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })));
+    h.windows([28, 28, 28].map((m) => ({ gap: m * MiB, rate: MiB })));
+    h.windows([{ gap: 28 * MiB, rate: MiB, lagSec: 30 }]);
+
+    const resumed = h.windows(Array.from({ length: 6 }, () => ({ gap: 28 * MiB, rate: MiB })));
+    expect(resumed.map((w) => divergences([w]).map((f) => f.reason))).toEqual([[], [], [], [], [], ['not_catching_up']]);
   });
 
   it('escalates on gap alone when writes stop and the replica applies nothing', () => {
