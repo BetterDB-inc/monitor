@@ -3217,10 +3217,10 @@ export class AnomalyService
       state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS &&
       this.retryAmplificationFirstClients.get(ctx.connectionId)?.episodeStart !== episodeStart
     ) {
-      this.retryAmplificationFirstClients.set(ctx.connectionId, {
-        episodeStart,
-        snapshot: await this.readClientCommandCounts(ctx, timestamp),
-      });
+      const snapshot = await this.readClientCommandCounts(ctx, timestamp);
+      if (snapshot !== undefined) {
+        this.retryAmplificationFirstClients.set(ctx.connectionId, { episodeStart, snapshot });
+      }
     }
     if (finding === null) return;
 
@@ -3281,12 +3281,12 @@ export class AnomalyService
   private async readClientCommandCounts(
     ctx: ConnectionContext,
     timestamp: number,
-  ): Promise<ClientCommandSnapshot | null> {
+  ): Promise<ClientCommandSnapshot | null | undefined> {
     try {
       return readClientCommandCounts(await ctx.client.getClients({ type: 'normal' }), timestamp);
     } catch (error) {
       this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
-      return null;
+      return undefined;
     }
   }
 
@@ -3295,7 +3295,7 @@ export class AnomalyService
     timestamp: number,
     episodeStart: number,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const latest = await this.readClientCommandCounts(ctx, timestamp);
+    const latest = (await this.readClientCommandCounts(ctx, timestamp)) ?? null;
     let snapshots: Awaited<ReturnType<StoragePort['getClientSnapshots']>> = [];
     let snapshotsLoaded = true;
     try {

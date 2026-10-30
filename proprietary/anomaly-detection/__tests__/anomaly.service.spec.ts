@@ -3591,6 +3591,25 @@ describe('AnomalyService', () => {
       ]);
     });
 
+    it('retakes the first snapshot after a failed CLIENT LIST', async () => {
+      let calls = 0;
+      dbClient.getClients = jest.fn().mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('timeout');
+        const grown = calls > 2;
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
+        ];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      expect(dbClient.getClients).toHaveBeenCalledTimes(3);
+      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+    });
+
     it('falls back to reconnects from stored snapshots without tot-cmds', async () => {
       dbClient.getClients = jest.fn().mockResolvedValue([
         { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 3 },
