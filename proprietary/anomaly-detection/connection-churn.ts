@@ -31,7 +31,7 @@ export function computeConnectionChurn(
 
   sample.connectsPerSec = (curr.totalReceived - prev.totalReceived) / dtSec;
   sample.retainedRatio =
-    Math.abs(curr.connectedClients - prev.connectedClients) /
+    Math.max(0, curr.connectedClients - prev.connectedClients) /
     Math.max(1, curr.totalReceived - prev.totalReceived);
   return sample;
 }
