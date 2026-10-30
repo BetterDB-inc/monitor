@@ -3403,6 +3403,14 @@ describe('AnomalyService', () => {
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     });
 
+    it('stops counting a held P99 regression once the latency guard reports recovery', async () => {
+      service.reportLatencyDegraded('conn-1', false);
+
+      const { recorded } = await runRetry({ p99Once: true });
+
+      expect(recorded).toHaveLength(0);
+    });
+
     it('reports critical while load saturation is still active', async () => {
       (service as any).loadSaturationState.set('conn-1', {
         ackedLevel: 'warning',

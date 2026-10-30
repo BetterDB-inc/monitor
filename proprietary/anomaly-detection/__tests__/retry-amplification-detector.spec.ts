@@ -170,11 +170,12 @@ describe('retry amplification detector', () => {
   it('drops back to warning once saturation clears and re-emits critical when it returns', () => {
     const d = new Driver();
     d.baseline();
-    d.windows(hot(1.6), 2);
-    d.window(hot(1.7, { saturation: MetricType.LOAD_SATURATION }));
-    d.windows(hot(1.8), 2);
-    d.window(hot(1.9, { saturation: MetricType.LOAD_SATURATION }));
-    d.window(hot(2.0));
+    d.window(hot(1.5));
+    d.window(hot(1.65));
+    d.window(hot(1.8, { saturation: MetricType.LOAD_SATURATION }));
+    d.ramp(2, {}, 1.95);
+    d.window(hot(2.25, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.4));
     expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
   });
 
@@ -194,6 +195,38 @@ describe('retry amplification detector', () => {
     const d = new Driver();
     d.baseline();
     d.windows(hot(1.6), 6);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('flags load that steps up under stress and holds there', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(2.2));
+    d.window(hot(2.1));
+    d.window(hot(2.15));
+    d.window(hot(2.2));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].level).toBe('warning');
+    expect(d.findings[0].message).toContain('stepped up under stress');
+  });
+
+  it('does not flag a step that is already falling back', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(3.0));
+    d.window(hot(2.6));
+    d.window(hot(2.2));
+    d.window(hot(1.8));
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('needs a real load rise before trusting a three-window correlation', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, stressActive: true }));
+    d.window(hot(1.6, { p99: false, stressActive: true }));
+    d.window(hot(1.55, { p99: false, stressActive: true }));
+    d.window(BASE);
     expect(d.findings).toHaveLength(0);
   });
 
