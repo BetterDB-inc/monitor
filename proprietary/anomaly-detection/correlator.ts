@@ -96,13 +96,12 @@ export class Correlator {
         check: (anomalies) =>
           anomalies.some((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE) &&
           !anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE),
-        diagnosis:
-          'Replica falling behind the primary during a write burst — watching whether it catches up',
+        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
         recommendations: [
           'Compare the replica offset gap with the primary write rate over the next few minutes',
           'Check replica host CPU, disk and network for a slow apply path',
           'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
-          'Throttle bulk writes or resharding until the replica catches up',
+          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
         ],
       },
       {

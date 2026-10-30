@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ReplicationDivergencePanel, formatGap } from './ReplicationDivergencePanel';
+import { PaymentRequiredError } from '@/api/client';
 import type { ReplicaDivergenceHistory } from '@/types/anomaly';
 
 const MiB = 1024 * 1024;
@@ -47,6 +48,42 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getByText('In sync')).toBeInTheDocument();
     expect(screen.getByText('Not observed')).toBeInTheDocument();
     expect(screen.getAllByText('collecting')).toHaveLength(3);
+  });
+
+  it('says so when the history could not be loaded', () => {
+    render(<ReplicationDivergencePanel replicas={undefined} error={new Error('boom')} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Replication history could not be loaded');
+  });
+
+  it('stays hidden when the feature is not licensed', () => {
+    const { container } = render(
+      <ReplicationDivergencePanel
+        replicas={undefined}
+        error={
+          new PaymentRequiredError({
+            message: 'upgrade',
+            feature: 'anomalyDetection',
+            currentTier: 'community',
+            requiredTier: 'pro',
+            upgradeUrl: '/upgrade',
+          })
+        }
+      />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('keeps the last loaded replicas and flags them when a refresh fails', () => {
+    const replicas: ReplicaDivergenceHistory[] = [
+      { replica: '10.0.0.2:6379', level: 'none', latest: null, windows: [] },
+    ];
+
+    render(<ReplicationDivergencePanel replicas={replicas} error={new Error('boom')} />);
+
+    expect(screen.getByText('10.0.0.2:6379')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
   });
 
   it('formats gap sizes across units', () => {

@@ -547,11 +547,25 @@ describe('Correlator', () => {
         ...overrides,
       });
 
-    it('reads a lone warning as a transient burst', () => {
+    it('reads a lone warning as still being watched', () => {
       const groups = correlator.correlate([divergence()]);
       expect(groups).toHaveLength(1);
       expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
       expect(groups[0].diagnosis).toContain('watching whether it catches up');
+    });
+
+    it('does not claim a write burst it has no evidence for', () => {
+      const [group] = correlator.correlate([
+        divergence({
+          message:
+            'WARNING: Replica 10.0.0.2:6379 is 8.0 MiB behind the primary; ' +
+            'the replica has not acknowledged the stream for over 10s.',
+        }),
+      ]);
+      expect(group.diagnosis).not.toContain('write burst');
+      expect(group.recommendations).toContain(
+        'If bulk writes or resharding are driving it, throttle them until the replica catches up',
+      );
     });
 
     it('reads a critical divergence as sustained', () => {

@@ -654,9 +654,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       ...existing,
       correlationId: event.correlationId ?? existing.correlationId,
       relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
-      resolved: event.resolved,
-      resolvedAt: event.resolvedAt,
-      durationMs: event.durationMs,
+      resolved: existing.resolved || event.resolved,
+      resolvedAt: existing.resolvedAt ?? event.resolvedAt,
+      durationMs: existing.durationMs ?? event.durationMs,
       scopeId: existing.scopeId ?? event.scopeId,
     };
   }
@@ -711,6 +711,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
+    if (options.correlationIds) {
+      const ids = new Set(options.correlationIds);
+      filtered = filtered.filter((e) => e.correlationId !== undefined && ids.has(e.correlationId));
+    }
     if (options.scope) filtered = filtered.filter(this.inScope(options.scope));
 
     const direction = options.order === 'asc' ? 1 : -1;

@@ -73,7 +73,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `slowlog.threshold` | Slow query detected | Slowlog count exceeds configured threshold |
 | `replication.lag` | Replication lag detected | Replica lag exceeds acceptable threshold |
 | `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
-| `replication.recovered` | Replica caught up | A diverged replica is back below the floor, or a divergence left open by a restart was resolved |
+| `replication.recovered` | Replica divergence closed | A diverged replica is back below the floor or went away, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
@@ -383,7 +383,7 @@ Detection works on windows of at least 30 seconds, or three poll intervals if th
 
 #### replication.recovered (Pro)
 
-`reason` is `caught_up` when the replica's gap stays below the floor for two windows. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open; `gapBytes` is then `null`. After a restart the event stays open until the replica has been assessed: it closes with this reason once the replica has stayed below the floor for two windows, or is no longer connected. A replica that is still behind but below the alert thresholds keeps its event open. If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere.
+`reason` is `caught_up` when the replica's gap stays below the floor for two windows. It is `replica_gone` when an alerted replica goes offline or drops out of the primary's replica list, or the node stops being a primary; `gapBytes` is then `null` because the gap can no longer be read. It says the alert closed, not that the replica caught up. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open; `gapBytes` is then `null`. After a restart the event stays open until the replica has been assessed: it closes with this reason once the replica has stayed below the floor for two windows, or is no longer connected. A replica that is still behind but below the alert thresholds keeps its event open. If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere. Removing a connection closes its divergence events without sending `replication.recovered`.
 
 ```json
 {

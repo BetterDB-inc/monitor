@@ -16,7 +16,10 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
-import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
+import {
+  ReplicationDivergencePanel,
+  formatGap,
+} from '../components/anomalies/ReplicationDivergencePanel';
 import type { ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
@@ -183,12 +186,9 @@ function formatTime(ts: number): string {
   });
 }
 
-function formatValue(value: number, metric: string): string {
-  if (
-    metric === 'memory_used' ||
-    metric === 'memory_overhead' ||
-    metric === 'replication_divergence'
-  ) {
+export function formatValue(value: number, metric: string): string {
+  if (metric === 'replication_divergence') return formatGap(value);
+  if (metric === 'memory_used' || metric === 'memory_overhead') {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
     return `${(value / 1e3).toFixed(0)} KB`;
@@ -301,7 +301,9 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
-  const { data: replicationDivergence } = usePolling<ReplicaDivergenceHistory[]>({
+  const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
+    ReplicaDivergenceHistory[]
+  >({
     fetcher: () =>
       currentConnection?.id ? metricsApi.getReplicationDivergence() : Promise.resolve([]),
     interval: 10000,
@@ -437,7 +439,10 @@ export function AnomalyDashboard() {
         </Card>
       </div>
 
-      <ReplicationDivergencePanel replicas={replicationDivergence ?? undefined} />
+      <ReplicationDivergencePanel
+        replicas={replicationDivergence ?? undefined}
+        error={replicationDivergenceError}
+      />
 
       {/* Charts Row */}
       <div className="grid md:grid-cols-2 gap-4">

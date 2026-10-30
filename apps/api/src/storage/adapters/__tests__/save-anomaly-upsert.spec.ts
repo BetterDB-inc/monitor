@@ -92,5 +92,70 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows).toHaveLength(1);
       expect(rows[0]).toEqual(preserved);
     });
+
+    it('keeps an event resolved when a stale copy is saved again', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.resolveOpenAnomaly(ID, 1_700_000_060_000);
+
+      await storage.saveAnomalyEvent(correlated, CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+      expect(row).toEqual(
+        expect.objectContaining({
+          resolved: true,
+          resolvedAt: 1_700_000_060_000,
+          durationMs: 60_000,
+          correlationId: CORRELATION_ID,
+        }),
+      );
+    });
+
+    it('keeps an event resolved when a stale copy is batch saved again', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.resolveOpenAnomaly(ID, 1_700_000_060_000);
+
+      await storage.saveAnomalyEvents([correlated], CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+      expect(row).toEqual(
+        expect.objectContaining({ resolved: true, resolvedAt: 1_700_000_060_000 }),
+      );
+    });
+
+    it('still records a resolution arriving through a save', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+
+      await storage.saveAnomalyEvent(
+        event({ resolved: true, resolvedAt: 1_700_000_060_000, durationMs: 60_000 }),
+        CONN,
+      );
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+      expect(row).toEqual(
+        expect.objectContaining({ resolved: true, resolvedAt: 1_700_000_060_000 }),
+      );
+    });
+
+    it('filters by correlation id before the page limit', async () => {
+      const other = randomUUID();
+      await storage.saveAnomalyEvents(
+        Array.from({ length: 120 }, (_, i) =>
+          event({
+            id: randomUUID(),
+            timestamp: 1_700_000_000_000 + i,
+            correlationId: i < 2 ? CORRELATION_ID : other,
+          }),
+        ),
+        CONN,
+      );
+
+      const rows = await storage.getAnomalyEvents({
+        connectionId: CONN,
+        correlationIds: [CORRELATION_ID],
+      });
+
+      expect(rows).toHaveLength(2);
+      expect(await storage.getAnomalyEvents({ connectionId: CONN, correlationIds: [] })).toEqual([]);
+    });
   },
 );

@@ -161,6 +161,7 @@ export interface AnomalyEvent {
   correlationId?: string;
   relatedMetrics?: MetricType[];
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
   scopeId?: string;
   /**
@@ -179,7 +180,6 @@ export interface AnomalyEvent {
    * can never resurface a row that was never written.
    */
   persisted?: boolean;
-  resolvedAt?: number;
 }
 
 export interface CorrelatedAnomalyGroup {

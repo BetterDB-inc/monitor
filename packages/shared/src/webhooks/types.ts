@@ -368,7 +368,7 @@ export interface ReplicationDivergenceData {
 
 export interface ReplicationRecoveredData {
   replica: string;
-  reason: 'caught_up' | 'resolved_after_restart';
+  reason: 'caught_up' | 'replica_gone' | 'resolved_after_restart';
   gapBytes: number | null;
   message: string;
   timestamp: number;

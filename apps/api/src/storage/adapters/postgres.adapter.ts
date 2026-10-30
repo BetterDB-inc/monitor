@@ -2764,9 +2764,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       [
         event.id,
         event.timestamp,
@@ -2844,9 +2844,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       values,
     );
 
@@ -2887,6 +2887,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.scope) {
       conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
       params.push(options.scope.id, options.scope.connectionIds);
+    }
+    if (options.correlationIds) {
+      conditions.push(`correlation_id = ANY($${paramIndex++})`);
+      params.push(options.correlationIds);
     }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
@@ -5174,7 +5178,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
     connectionId: string,
   ): Promise<number> {
-    if (!this.pool || windows.length === 0) return 0;
+    if (!this.pool) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
 
     const values: unknown[] = [];
     const placeholders: string[] = [];

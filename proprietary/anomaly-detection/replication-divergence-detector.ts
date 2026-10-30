@@ -52,7 +52,9 @@ export interface ReplicaDivergenceState {
   windows: DivergenceWindow[];
   level: DivergenceLevel;
   dispatchedLevel: DivergenceLevel;
+  dispatchedReason: DivergenceReason;
   eventId: string | null;
+  unsavedEventIds: string[];
   spanStart: number | null;
   baselineRate: number | null;
   subside: SubsideTracking | null;
@@ -173,7 +175,9 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     windows: [],
     level: 'none',
     dispatchedLevel: 'none',
+    dispatchedReason: 'growth',
     eventId: null,
+    unsavedEventIds: [],
     spanStart: null,
     baselineRate: null,
     subside: null,
@@ -182,6 +186,12 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     staleSince: null,
     clearing: false,
   };
+}
+
+function activeLevel(replica: ReplicaDivergenceState): DivergenceLevel {
+  return LEVEL_RANK[replica.dispatchedLevel] > LEVEL_RANK[replica.level]
+    ? replica.dispatchedLevel
+    : replica.level;
 }
 
 function contiguous(previous: DivergenceWindow, next: DivergenceWindow): boolean {
@@ -246,7 +256,7 @@ function evaluateReplica(
 
   if (!isBehind(last)) {
     replica.subside = null;
-    if (replica.level === 'none' && replica.dispatchedLevel === 'none') return null;
+    if (activeLevel(replica) === 'none') return null;
     replica.belowFloorStreak++;
     if (replica.belowFloorStreak < DIVERGENCE_RECOVERED_WINDOWS) return null;
     return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes: last.gapBytes };
@@ -265,12 +275,12 @@ function evaluateReplica(
     reason = 'ceiling';
   }
 
-  if (replica.level === 'none' && target !== 'none') {
+  if (activeLevel(replica) === 'none' && target !== 'none') {
     replica.baselineRate = baselineRate(rateHistory, streak);
   }
 
   const stopped = writesStopped(last);
-  if ((replica.level !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
+  if ((activeLevel(replica) !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
     if (replica.subside === null) {
       replica.subside = { referenceGap: last.gapBytes, windows: 0 };
     } else if (last.gapBytes <= DIVERGENCE_RECOVERY_SHRINK_FRACTION * replica.subside.referenceGap) {
@@ -289,6 +299,10 @@ function evaluateReplica(
     replica.subside = null;
   }
 
+  if (LEVEL_RANK[replica.dispatchedLevel] > LEVEL_RANK[target]) {
+    target = replica.dispatchedLevel;
+    reason = replica.dispatchedReason;
+  }
   if (LEVEL_RANK[target] <= LEVEL_RANK[replica.level]) return null;
 
   const counted = Math.min(Math.max(streak, DIVERGENCE_CEILING_WINDOWS), windows.length);
@@ -342,7 +356,7 @@ function dropReplica(
   state: DivergenceConnectionState,
   replica: ReplicaDivergenceState,
 ): DivergenceRecovery[] {
-  if (replica.level === 'none') {
+  if (activeLevel(replica) === 'none') {
     state.replicas.delete(replica.addr);
     return [];
   }
@@ -469,7 +483,8 @@ export function replicaObservedLevel(
   state: DivergenceConnectionState | undefined,
   addr: string,
 ): ReplicaObservedLevel {
-  const level = state?.replicas.get(addr)?.level ?? 'none';
+  const replica = state?.replicas.get(addr);
+  const level = replica ? activeLevel(replica) : 'none';
   if (level !== 'none') return level;
   return state?.observed.has(addr) ? 'none' : 'unobserved';
 }
@@ -516,13 +531,42 @@ export function acknowledgeDivergence(
   replica.level = finding.level;
   replica.eventId = eventId;
   replica.spanStart = finding.spanStart;
+  replica.unsavedEventIds = replica.unsavedEventIds.filter((id) => id !== eventId);
 }
 
 export function claimDivergenceDispatch(state: DivergenceConnectionState, finding: DivergenceFinding): boolean {
   const replica = state.replicas.get(finding.addr);
   if (!replica || LEVEL_RANK[finding.level] <= LEVEL_RANK[replica.dispatchedLevel]) return false;
   replica.dispatchedLevel = finding.level;
+  replica.dispatchedReason = finding.reason;
   return true;
+}
+
+export function divergenceRetryId(
+  state: DivergenceConnectionState,
+  finding: DivergenceFinding,
+): string | null {
+  const replica = state.replicas.get(finding.addr);
+  if (!replica || LEVEL_RANK[finding.level] > LEVEL_RANK[replica.dispatchedLevel]) return null;
+  return replica.unsavedEventIds.at(-1) ?? null;
+}
+
+export function trackUnsavedDivergence(
+  state: DivergenceConnectionState,
+  addr: string,
+  eventId: string,
+): void {
+  const replica = state.replicas.get(addr);
+  if (!replica || replica.unsavedEventIds.includes(eventId)) return;
+  replica.unsavedEventIds = [...replica.unsavedEventIds, eventId].slice(-DIVERGENCE_PERSIST_BACKLOG);
+}
+
+export function takeUnsavedDivergence(state: DivergenceConnectionState, addr: string): string[] {
+  const replica = state.replicas.get(addr);
+  if (!replica) return [];
+  const taken = replica.unsavedEventIds;
+  replica.unsavedEventIds = [];
+  return taken;
 }
 
 export function acknowledgeRecovery(state: DivergenceConnectionState, addr: string): void {
@@ -553,7 +597,8 @@ export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
 function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  return `${Math.round(bytes / 1024)} KiB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
+  return `${Math.round(bytes)} B`;
 }
 
 function describeReason(finding: DivergenceFinding): string {

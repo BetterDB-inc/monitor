@@ -135,6 +135,22 @@ describe('ReplicationStreamTracker', () => {
     expect(promoted.bytesPerSec).toBe(1000);
   });
 
+  it('keeps the rate when the old history ends exactly at second_repl_offset', () => {
+    const tracker = new ReplicationStreamTracker();
+    tracker.observe('c1', primaryInfo({ master_repl_offset: '5000' }), T0);
+    const promoted = tracker.observe(
+      'c1',
+      primaryInfo({
+        master_replid: REPLID_B,
+        master_replid2: REPLID_A,
+        second_repl_offset: '5000',
+        master_repl_offset: '6000',
+      }),
+      T0 + 1000,
+    )!;
+    expect(promoted.bytesPerSec).toBe(1000);
+  });
+
   it('re-baselines when the old history ran past second_repl_offset', () => {
     const tracker = new ReplicationStreamTracker();
     tracker.observe('c1', primaryInfo({ master_repl_offset: '5000' }), T0);

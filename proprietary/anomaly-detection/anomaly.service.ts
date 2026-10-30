@@ -208,6 +208,7 @@ import {
   ReplicaDivergenceHistory,
   acknowledgeDivergence,
   claimDivergenceDispatch,
+  divergenceRetryId,
   assessOrphanedReplica,
   acknowledgeRecovery,
   createDivergenceState,
@@ -218,6 +219,8 @@ import {
   replicaObservedLevel,
   requeueClosedWindows,
   observeDivergence,
+  takeUnsavedDivergence,
+  trackUnsavedDivergence,
 } from './replication-divergence-detector';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
@@ -465,6 +468,7 @@ export class AnomalyService
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
   private divergenceSuperseded = new Map<string, Set<string>>();
+  private removedDivergenceEvents = new Set<string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -884,6 +888,7 @@ export class AnomalyService
     this.backlogCoverage.delete(connectionId);
     this.backlogCoverageEventIds.delete(connectionId);
     this.resyncEscalation.delete(connectionId);
+    this.closeDivergenceEventsOnRemoval(connectionId);
     this.divergenceState.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
     this.divergenceOrphans.delete(connectionId);
@@ -5659,8 +5664,8 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       resolved: anomaly.resolved || false,
-      resolvedAt: undefined,
-      durationMs: undefined,
+      resolvedAt: anomaly.resolvedAt,
+      durationMs: anomaly.resolvedAt === undefined ? undefined : anomaly.resolvedAt - anomaly.timestamp,
       sourceHost: ctx?.host || this.configService.get('database.host'),
       sourcePort: ctx?.port || this.configService.get('database.port'),
       connectionId: ctx?.connectionId || anomaly.connectionId,
@@ -5676,6 +5681,15 @@ export class AnomalyService
     this.incidentEvents.set(connectionId, events);
   }
 
+  private forgetIncidentEvent(anomalyId: string): void {
+    for (const [connectionId, events] of this.incidentEvents) {
+      this.incidentEvents.set(
+        connectionId,
+        events.filter((a) => a.id !== anomalyId),
+      );
+    }
+  }
+
   private findIncidentEvent(anomalyId: string): AnomalyEvent | undefined {
     for (const events of this.incidentEvents.values()) {
       const found = events.find((a) => a.id === anomalyId);
@@ -5688,8 +5702,16 @@ export class AnomalyService
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    retryOf?: Pick<AnomalyEvent, 'id'>,
+  ): Promise<void> {
     this.stampScope(anomaly, ctx?.connectionId || anomaly.connectionId);
+    if (retryOf) {
+      this.recentAnomalies = this.recentAnomalies.filter((a) => a.id !== retryOf.id);
+      this.forgetIncidentEvent(retryOf.id);
+    }
     this.recentAnomalies.push(anomaly);
     this.rememberIncidentEvent(anomaly);
 
@@ -5697,6 +5719,22 @@ export class AnomalyService
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
+    if (!retryOf) this.countAnomaly(anomaly, ctx);
+
+    try {
+      const connectionId = ctx?.connectionId || anomaly.connectionId;
+      if (connectionId) {
+        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+        // Mark durable so resolution goes storage-first; a save failure (e.g. a
+        // string id rejected by the Postgres UUID PK) leaves it memory-only.
+        anomaly.persisted = true;
+      }
+    } catch (err) {
+      this.logger.error('Failed to persist anomaly event:', err);
+    }
+  }
+
+  private countAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): void {
     // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
     // or the OTLP dispatch must never abort recording/persisting the anomaly, and
     // must never propagate out of addAnomaly (that would let one detector's emit
@@ -5731,18 +5769,6 @@ export class AnomalyService
       );
     } catch (err) {
       this.logger.error('Failed to dispatch anomaly OTLP event:', err);
-    }
-
-    try {
-      const connectionId = ctx?.connectionId || anomaly.connectionId;
-      if (connectionId) {
-        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
-        // Mark durable so resolution goes storage-first; a save failure (e.g. a
-        // string id rejected by the Postgres UUID PK) leaves it memory-only.
-        anomaly.persisted = true;
-      }
-    } catch (err) {
-      this.logger.error('Failed to persist anomaly event:', err);
     }
   }
 
@@ -6208,6 +6234,7 @@ export class AnomalyService
                 this.toStoredAnomalyEvent(anomaly),
                 anomaly.connectionId ?? connectionId,
               );
+              anomaly.persisted = true;
             }
           }
         } catch (err) {
@@ -6419,7 +6446,9 @@ export class AnomalyService
         stored.flatMap((s) => s.anomalyIds ?? []),
         this.maxRecentEvents,
       )
-    ).map((a) => this.storedToAnomalyEvent(a));
+    )
+      .map((a) => this.storedToAnomalyEvent(a))
+      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 
     const groups: CorrelatedAnomalyGroup[] = [];
     for (const s of stored) {
@@ -6459,7 +6488,7 @@ export class AnomalyService
     if (!state) return [];
     return [...state.replicas.values()].map((r) => ({
       replica: r.addr,
-      level: r.level,
+      level: replicaObservedLevel(state, r.addr),
       windows: [...r.windows],
     }));
   }
@@ -6506,12 +6535,15 @@ export class AnomalyService
     }
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
-      .map(([replica, windows]) => ({
-        replica,
-        level: replicaObservedLevel(state, replica),
-        latest: windows[windows.length - 1] ?? null,
-        windows,
-      }));
+      .map(([replica, windows]) => {
+        const level = replicaObservedLevel(state, replica);
+        return {
+          replica,
+          level,
+          latest: level === 'unobserved' ? null : (windows[windows.length - 1] ?? null),
+          windows,
+        };
+      });
   }
 
   private async detectRecoveryAmplification(
@@ -6634,6 +6666,7 @@ export class AnomalyService
     ctx: ConnectionContext,
   ): Promise<void> {
     await this.resolveSupersededDivergenceEvents(ctx.connectionId);
+    await this.resolveRemovedDivergenceEvents();
     const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
     this.divergenceState.set(ctx.connectionId, state);
     if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
@@ -6657,7 +6690,7 @@ export class AnomalyService
   ): Promise<void> {
     try {
       const seen = new Set([
-        ...[...state.replicas.values()].map((r) => r.eventId),
+        ...[...state.replicas.values()].flatMap((r) => [r.eventId, ...r.unsavedEventIds]),
         ...(this.divergenceSuperseded.get(ctx.connectionId) ?? []),
       ]);
       const orphans = new Map<string, OrphanedDivergence>();
@@ -6771,6 +6804,37 @@ export class AnomalyService
     if (pending.size === 0) this.divergenceSuperseded.delete(connectionId);
   }
 
+  private async retireUnsavedDivergenceEvents(
+    state: DivergenceConnectionState,
+    addr: string,
+    connectionId: string,
+  ): Promise<void> {
+    const unsaved = takeUnsavedDivergence(state, addr);
+    if (unsaved.length === 0) return;
+    const pending = this.divergenceSuperseded.get(connectionId) ?? new Set<string>();
+    for (const id of unsaved) pending.add(id);
+    this.divergenceSuperseded.set(connectionId, pending);
+    await this.resolveSupersededDivergenceEvents(connectionId);
+  }
+
+  private async resolveRemovedDivergenceEvents(): Promise<void> {
+    for (const id of this.removedDivergenceEvents) {
+      if ((await this.resolveAnomalyOutcome(id)) !== 'retry') this.removedDivergenceEvents.delete(id);
+    }
+  }
+
+  private closeDivergenceEventsOnRemoval(connectionId: string): void {
+    const state = this.divergenceState.get(connectionId);
+    if (!state) return;
+    for (const [addr, replica] of state.replicas) {
+      if (replica.eventId) this.removedDivergenceEvents.add(replica.eventId);
+      for (const id of takeUnsavedDivergence(state, addr)) this.removedDivergenceEvents.add(id);
+    }
+    this.resolveRemovedDivergenceEvents().catch((err) => {
+      this.logger.error('Failed to resolve divergence events of a removed connection', err);
+    });
+  }
+
   private async emitReplicationDivergence(
     state: DivergenceConnectionState,
     finding: DivergenceFinding,
@@ -6791,8 +6855,10 @@ export class AnomalyService
     ];
     const isCritical = finding.level === 'critical';
     const message = describeDivergence(finding);
+    const retryId = divergenceRetryId(state, finding);
+    const attempt = retryId ? this.recentAnomalies.find((a) => a.id === retryId) : undefined;
     const event: AnomalyEvent = {
-      id: randomUUID(),
+      id: retryId ?? randomUUID(),
       timestamp,
       metricType: MetricType.REPLICATION_DIVERGENCE,
       anomalyType: AnomalyType.SPIKE,
@@ -6806,10 +6872,12 @@ export class AnomalyService
       resolved: false,
       connectionId: ctx.connectionId,
       relatedMetrics,
+      correlationId: attempt?.correlationId,
+      persisted: attempt?.persisted,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, retryId ? { id: retryId } : undefined);
 
     if (claimDivergenceDispatch(state, finding)) {
       this.webhookEventsProService
@@ -6833,8 +6901,12 @@ export class AnomalyService
         });
     }
 
-    if (event.persisted !== true) return;
+    if (event.persisted !== true) {
+      trackUnsavedDivergence(state, finding.addr, event.id);
+      return;
+    }
     acknowledgeDivergence(state, finding, event.id);
+    await this.retireUnsavedDivergenceEvents(state, finding.addr, ctx.connectionId);
     if (previousEventId && (await this.resolveAnomalyOutcome(previousEventId)) === 'retry') {
       const pending = this.divergenceSuperseded.get(ctx.connectionId) ?? new Set<string>();
       pending.add(previousEventId);
@@ -6848,12 +6920,23 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
+    await this.retireUnsavedDivergenceEvents(state, recovery.addr, ctx.connectionId);
     if (recovery.eventId) {
       const outcome = await this.resolveAnomalyOutcome(recovery.eventId);
       if (outcome === 'retry') return;
     }
     acknowledgeRecovery(state, recovery.addr);
-    if (recovery.kind !== 'recovered') return;
+
+    if (recovery.kind === 'cleared') {
+      this.dispatchReplicationRecovered(ctx, {
+        replica: recovery.addr,
+        reason: 'replica_gone',
+        gapBytes: null,
+        message: `Replica ${recovery.addr} is no longer tracked by this node, so its divergence was closed.`,
+        timestamp,
+      });
+      return;
+    }
 
     this.dispatchReplicationRecovered(ctx, {
       replica: recovery.addr,
