@@ -171,6 +171,11 @@ export class RegressionDetector {
         this.flaggedRecovered.set(command, !degraded);
       }
     }
+    if (findings.length > 0) {
+      for (const [command, recovered] of this.flaggedRecovered) {
+        if (recovered) this.flaggedRecovered.delete(command);
+      }
+    }
     for (const finding of findings) {
       for (const { command } of finding.commands) this.flaggedRecovered.set(command, false);
     }
