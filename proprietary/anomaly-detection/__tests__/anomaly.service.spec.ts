@@ -15,7 +15,6 @@ import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import {
   RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
-  RETRY_AMP_SNAPSHOT_LIMIT,
 } from '../retry-amplification-attribution';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
@@ -73,6 +72,7 @@ describe('AnomalyService', () => {
       getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getNewClientConnections: jest.fn().mockResolvedValue([]),
+      getClientSnapshotGroups: jest.fn().mockResolvedValue([]),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       resolveAnomaly: jest.fn().mockResolvedValue(true),
@@ -3735,24 +3735,33 @@ describe('AnomalyService', () => {
       expect(dbClient.getClients).toHaveBeenCalledTimes(RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS);
     });
 
-    it('reads only the latest client capture of an episode', async () => {
+    it('reads the latest client capture as counts, not rows', async () => {
       dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
       const capturedAt = 1_700_000_000_000;
-      storage.getClientSnapshots = jest.fn().mockImplementation(async ({ limit }) =>
-        limit === 1
-          ? [{ clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt }]
-          : [
-              { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt },
-              { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt },
-            ],
-      );
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt },
+      ]);
+      storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+        { capturedAt, name: 'worker', user: 'default', ip: '10.0.0.1', count: 2, ageSum: 7 },
+      ]);
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockResolvedValue([{ name: 'worker', user: 'default', ip: '10.0.0.1', count: 2 }]);
 
       await runRetry();
 
-      const [latest, capture] = (storage.getClientSnapshots as jest.Mock).mock.calls.map((c) => c[0]);
-      expect(latest).toMatchObject({ limit: 1 });
-      expect(capture).toMatchObject({ startTime: capturedAt, endTime: capturedAt });
-      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(2);
+      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
+      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 1 }),
+      );
+      expect(storage.getClientSnapshotGroups).toHaveBeenCalledWith(
+        'conn-1',
+        capturedAt - 1,
+        capturedAt,
+      );
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'worker', connections: 2 }),
+      ]);
     });
 
     it('falls back to reconnects from stored snapshots without tot-cmds', async () => {
@@ -3761,7 +3770,9 @@ describe('AnomalyService', () => {
       ]);
       storage.getClientSnapshots = jest.fn().mockImplementation(async ({ endTime }) => [
         { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt: endTime },
-        { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt: endTime },
+      ]);
+      storage.getClientSnapshotGroups = jest.fn().mockImplementation(async (_id, _start, end) => [
+        { capturedAt: end, name: 'worker', user: 'default', ip: '10.0.0.1', count: 2, ageSum: 7 },
       ]);
       storage.getNewClientConnections = jest
         .fn()
@@ -3772,7 +3783,7 @@ describe('AnomalyService', () => {
       expect(recorded[0].message).toContain('Top clients: name worker (2 reconnects).');
     });
 
-    it('counts early reconnects when the snapshot read hits its row limit', async () => {
+    it('counts early reconnects next to a later capture of older clients', async () => {
       dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
       const history = new MemoryAdapter();
       let seeded = false;
@@ -3806,7 +3817,7 @@ describe('AnomalyService', () => {
           [row('early-1', 'retrier', 0, startTime), row('early-2', 'retrier', 0, startTime)],
           'conn-1',
         );
-        const pool = Array.from({ length: RETRY_AMP_SNAPSHOT_LIMIT + 1 }, (_, i) =>
+        const pool = Array.from({ length: 5 }, (_, i) =>
           row(`pool-${i}`, 'pool', 1_000_000, endTime),
         );
         await history.saveClientSnapshot(pool, 'conn-1');
@@ -3821,6 +3832,11 @@ describe('AnomalyService', () => {
           await seed(since, until);
           return history.getNewClientConnections(connectionId, since, until);
         });
+      storage.getClientSnapshotGroups = jest
+        .fn()
+        .mockImplementation((connectionId, start, end) =>
+          history.getClientSnapshotGroups(connectionId, start, end),
+        );
 
       const { recorded } = await runRetry();
 

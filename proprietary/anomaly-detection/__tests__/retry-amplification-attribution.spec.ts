@@ -1,7 +1,7 @@
+import type { ClientSnapshotGroupRow } from '@betterdb/shared';
 import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 import {
   ClientListEntry,
-  ClientSnapshotEntry,
   contributorKey,
   describeRetryAmplificationContributors,
   rankRetryAmplificationContributors,
@@ -12,13 +12,14 @@ function client(overrides: Partial<ClientListEntry> & { id: string }): ClientLis
   return { addr: '10.0.0.1:5000', name: '', user: 'default', age: 1000, ...overrides };
 }
 
-function snap(overrides: Partial<ClientSnapshotEntry> & { clientId: string }): ClientSnapshotEntry {
+function group(overrides: Partial<ClientSnapshotGroupRow>): ClientSnapshotGroupRow {
   return {
-    addr: '10.0.0.1:5000',
+    capturedAt: 0,
     name: '',
     user: 'default',
-    age: 1000,
-    capturedAt: 0,
+    ip: '10.0.0.1',
+    count: 1,
+    ageSum: 1000,
     ...overrides,
   };
 }
@@ -94,7 +95,7 @@ describe('retry amplification attribution', () => {
       const ranked = rankRetryAmplificationContributors({
         first,
         latest,
-        snapshots: [],
+        capture: [],
         newConnections: [],
       });
 
@@ -104,12 +105,10 @@ describe('retry amplification attribution', () => {
     });
 
     it('falls back to reconnect counts when tot-cmds is missing', () => {
-      const snapshots = [
-        snap({ clientId: 'a', name: 'worker', age: 3, capturedAt: 60_000 }),
-        snap({ clientId: 'b', name: 'worker', age: 10, capturedAt: 120_000 }),
-        snap({ clientId: 'c', name: 'worker', age: 2, capturedAt: 120_000 }),
-        snap({ clientId: 'd', name: 'cron', age: 5000, capturedAt: 120_000 }),
-        snap({ clientId: 'e', addr: '10.9.9.9:1', age: 1, capturedAt: 120_000 }),
+      const capture = [
+        group({ name: 'worker', count: 2 }),
+        group({ name: 'cron' }),
+        group({ ip: '10.9.9.9' }),
       ];
       const newConnections = [
         { name: 'worker', user: 'default', ip: '10.0.0.1', count: 3 },
@@ -119,7 +118,7 @@ describe('retry amplification attribution', () => {
       const ranked = rankRetryAmplificationContributors({
         first: readClientCommandCounts([client({ id: '1' })], 0),
         latest: null,
-        snapshots,
+        capture,
         newConnections,
       });
 
@@ -153,7 +152,7 @@ describe('retry amplification attribution', () => {
       const ranked = rankRetryAmplificationContributors({
         first,
         latest,
-        snapshots: [snap({ clientId: '9', name: 'api', age: 4, capturedAt: 10_000 })],
+        capture: [group({ name: 'api' })],
         newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
       });
 
@@ -166,7 +165,7 @@ describe('retry amplification attribution', () => {
       const ranked = rankRetryAmplificationContributors({
         first: null,
         latest: null,
-        snapshots: [],
+        capture: [],
         newConnections: [
           { name: 'api', user: 'default', ip: '10.0.0.1', count: 2 },
           { name: 'api', user: 'default', ip: '10.0.0.2', count: 3 },
@@ -182,19 +181,15 @@ describe('retry amplification attribution', () => {
       ]);
     });
 
-    it('counts live connections from the latest capture only', () => {
+    it('adds the live connections of a contributor across addresses', () => {
       const ranked = rankRetryAmplificationContributors({
         first: null,
         latest: null,
-        snapshots: [
-          snap({ clientId: '1', name: 'api', capturedAt: 100_000 }),
-          snap({ clientId: '2', name: 'api', capturedAt: 160_000 }),
-          snap({ clientId: '3', name: 'api', capturedAt: 160_000 }),
-        ],
+        capture: [group({ name: 'api', count: 2 }), group({ name: 'api', ip: '10.0.0.2' })],
         newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
       });
 
-      expect(ranked[0].connections).toBe(2);
+      expect(ranked[0].connections).toBe(3);
     });
 
     it('ignores clients that reset or vanished between snapshots and caps the list', () => {
@@ -218,7 +213,7 @@ describe('retry amplification attribution', () => {
       const ranked = rankRetryAmplificationContributors({
         first,
         latest,
-        snapshots: [],
+        capture: [],
         newConnections: [],
       });
 
@@ -244,15 +239,12 @@ describe('retry amplification attribution', () => {
         ),
         60_000,
       );
-      const snapshots = [
-        snap({ clientId: 'r1', name: 'retrier', age: 2, capturedAt: 60_000 }),
-        snap({ clientId: 'r2', name: 'retrier', age: 5, capturedAt: 60_000 }),
-      ];
+      const capture = [group({ name: 'retrier', count: 2 })];
 
       const ranked = rankRetryAmplificationContributors({
         first,
         latest,
-        snapshots,
+        capture,
         newConnections: [{ name: 'retrier', user: 'default', ip: '10.0.0.1', count: 2 }],
       });
 
@@ -275,7 +267,7 @@ describe('retry amplification attribution', () => {
         rankRetryAmplificationContributors({
           first,
           latest,
-          snapshots: [],
+          capture: [],
           newConnections: [],
         }),
       ).toEqual([]);
@@ -286,7 +278,7 @@ describe('retry amplification attribution', () => {
         rankRetryAmplificationContributors({
           first: null,
           latest: null,
-          snapshots: [],
+          capture: [],
           newConnections: [],
         }),
       ).toEqual([]);

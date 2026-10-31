@@ -1,8 +1,7 @@
-import type { NewClientConnectionGroup } from '@betterdb/shared';
+import type { ClientSnapshotGroupRow, NewClientConnectionGroup } from '@betterdb/shared';
 import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
-export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
 export const RETRY_AMP_ATTRIBUTION_MIN_WINDOWS = 2;
 export const RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS = 3;
@@ -26,15 +25,6 @@ export interface ClientListEntry {
   [field: string]: unknown;
 }
 
-export interface ClientSnapshotEntry {
-  clientId: string;
-  addr: string;
-  name: string;
-  user: string;
-  age: number;
-  capturedAt: number;
-}
-
 interface ClientCommandCount {
   key: string;
   keyKind: ContributorKeyKind;
@@ -50,7 +40,7 @@ export interface ClientCommandSnapshot {
 export interface AttributionInput {
   first: ClientCommandSnapshot | null;
   latest: ClientCommandSnapshot | null;
-  snapshots: ClientSnapshotEntry[];
+  capture: ClientSnapshotGroupRow[];
   newConnections: NewClientConnectionGroup[];
   limit?: number;
 }
@@ -61,7 +51,7 @@ interface ContributorAccumulator {
   commands: number;
   lifetimeRate: number;
   newConnections: number;
-  latestClientIds: Set<string>;
+  connections: number;
 }
 
 function hostKey(
@@ -119,7 +109,7 @@ function accumulatorFor(
       commands: 0,
       lifetimeRate: 0,
       newConnections: 0,
-      latestClientIds: new Set(),
+      connections: 0,
     };
     map.set(id, acc);
   }
@@ -149,16 +139,13 @@ function addCommandGrowth(
 function addReconnects(
   map: Map<string, ContributorAccumulator>,
   groups: NewClientConnectionGroup[],
-  snapshots: ClientSnapshotEntry[],
+  capture: ClientSnapshotGroupRow[],
 ): void {
   for (const group of groups) {
     accumulatorFor(map, hostKey(group.name, group.user, group.ip)).newConnections += group.count;
   }
-  if (snapshots.length === 0) return;
-  const latestCapture = snapshots.reduce((max, s) => Math.max(max, s.capturedAt), 0);
-  for (const snapshot of snapshots) {
-    if (snapshot.capturedAt !== latestCapture) continue;
-    accumulatorFor(map, contributorKey(snapshot)).latestClientIds.add(snapshot.clientId);
+  for (const group of capture) {
+    accumulatorFor(map, hostKey(group.name, group.user, group.ip)).connections += group.count;
   }
 }
 
@@ -170,7 +157,7 @@ export function rankRetryAmplificationContributors(
     input.first !== null &&
     input.latest !== null &&
     addCommandGrowth(map, input.first, input.latest);
-  addReconnects(map, input.newConnections, input.snapshots);
+  addReconnects(map, input.newConnections, input.capture);
 
   const contributors = [...map.values()].map((acc) => {
     const growth = hasCommandRates && acc.lifetimeRate > 0 ? acc.commands / acc.lifetimeRate : null;
@@ -179,7 +166,7 @@ export function rankRetryAmplificationContributors(
       keyKind: acc.keyKind,
       commandRateGrowth: growth,
       newConnections: acc.newConnections,
-      connections: acc.latestClientIds.size,
+      connections: acc.connections,
     };
   });
 

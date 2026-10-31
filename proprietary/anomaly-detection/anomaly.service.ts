@@ -19,7 +19,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
-  StoredClientSnapshot,
+  ClientSnapshotGroupRow,
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
@@ -226,7 +226,6 @@ import {
   ClientCommandSnapshot,
   RETRY_AMP_ATTRIBUTION_MIN_WINDOWS,
   RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
-  RETRY_AMP_SNAPSHOT_LIMIT,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
   rankRetryAmplificationContributors,
@@ -3434,11 +3433,11 @@ export class AnomalyService
         ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null)
         : null;
     const until = closedAt ?? timestamp;
-    let snapshots: StoredClientSnapshot[] = [];
+    let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
     try {
-      [snapshots, newConnections] = await Promise.all([
+      [capture, newConnections] = await Promise.all([
         this.latestClientCapture(ctx.connectionId, episodeStart, until),
         this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
       ]);
@@ -3446,12 +3445,12 @@ export class AnomalyService
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    const reconnectsKnown = snapshotsLoaded && snapshots.length > 0;
+    const reconnectsKnown = snapshotsLoaded && capture.length > 0;
     if (!reconnectsKnown && (firstSnapshot === null || latest === null)) return null;
     return rankRetryAmplificationContributors({
       first: firstSnapshot,
       latest,
-      snapshots,
+      capture,
       newConnections,
     });
   }
@@ -3460,7 +3459,7 @@ export class AnomalyService
     connectionId: string,
     startTime: number,
     endTime: number,
-  ): Promise<StoredClientSnapshot[]> {
+  ): Promise<ClientSnapshotGroupRow[]> {
     const [newest] = await this.storage.getClientSnapshots({
       connectionId,
       startTime,
@@ -3468,12 +3467,11 @@ export class AnomalyService
       limit: 1,
     });
     if (newest === undefined) return [];
-    return this.storage.getClientSnapshots({
+    return this.storage.getClientSnapshotGroups(
       connectionId,
-      startTime: newest.capturedAt,
-      endTime: newest.capturedAt,
-      limit: RETRY_AMP_SNAPSHOT_LIMIT,
-    });
+      newest.capturedAt - 1,
+      newest.capturedAt,
+    );
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
