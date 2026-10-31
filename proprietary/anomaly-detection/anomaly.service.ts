@@ -5660,7 +5660,11 @@ export class AnomalyService
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(event, ctx, () => {
+        activeByConn.get(connId)?.delete(signature);
+        const tracked = eventIdsByConn?.get(connId);
+        if (tracked?.get(signature) === event.id) tracked.delete(signature);
+      });
       active.add(signature);
       if (eventIdsByConn) eventIds.set(signature, event.id);
     }
@@ -6868,7 +6872,13 @@ export class AnomalyService
     const step = stepBacklogCoverage(coverage, coverageSec);
     if (step.escalatedTo) {
       try {
-        await this.emitBacklogCoverageRisk(ctx, sample, coverageSec!, step.escalatedTo);
+        await this.emitBacklogCoverageRisk(
+          ctx,
+          sample,
+          coverageSec!,
+          step.escalatedTo,
+          levelBefore,
+        );
       } catch (err) {
         coverage.level = levelBefore;
         throw err;
@@ -6925,6 +6935,7 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     coverageSec: number,
     level: BacklogCoverageLevel,
+    levelBefore: BacklogCoverageLevel,
   ): Promise<void> {
     const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
     const threshold =
@@ -6950,7 +6961,13 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, () => {
+      const coverage = this.backlogCoverage.get(ctx.connectionId);
+      if (coverage?.level === level) coverage.level = levelBefore;
+      if (this.backlogCoverageEventIds.get(ctx.connectionId) === event.id) {
+        this.backlogCoverageEventIds.delete(ctx.connectionId);
+      }
+    });
     this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
     if (previous && (await this.resolveAnomalyOutcome(previous)) === 'retry') {
       this.staleBacklogEventIds.set(ctx.connectionId, [

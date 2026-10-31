@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
@@ -2904,6 +2905,64 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('1664');
       expect(events[0].message).toContain('CLUSTER SETSLOT');
       expect(events[0].message).toContain('IMPORTING');
+    });
+
+    it('raises the state again when the outbox drops its unsaved event', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      now += 31_000;
+      await poll();
+      const [first] = slotEvents();
+      expect(slotEvents()).toHaveLength(1);
+
+      now += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = slotEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('raises a finding again after a drop on a gate that tracks no event ids', async () => {
+      const buildEvent = jest.fn(() => ({
+        id: randomUUID(),
+        timestamp: now,
+        metricType: MetricType.CLUSTER_TOPOLOGY,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'finding',
+        resolved: false,
+        connectionId: 'conn-1',
+      }));
+      const gate = {
+        ctx: { connectionId: 'conn-1', connectionName: 'c', client: dbClient, host: 'h', port: 1 },
+        findings: ['finding'],
+        signatureOf: (finding: string) => finding,
+        firstSeenByConn: new Map(),
+        activeByConn: new Map(),
+        minPersistMs: 0,
+        buildEvent,
+      };
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+      expect(buildEvent).toHaveBeenCalledTimes(1);
+
+      now += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+
+      expect(buildEvent).toHaveBeenCalledTimes(2);
     });
 
     it('stores the signature on a UUID event so a restart can track it again', async () => {
@@ -8872,6 +8931,25 @@ describe('AnomalyService', () => {
       for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
 
       expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].resolved).toBe(true);
+    });
+
+    it('raises the risk again when the outbox drops its unsaved event', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [first] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+
+      const polledAt = clock;
+      clock += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      clock = polledAt;
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollPrimary({ bytes: 30_000 });
+
+      const raised = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+      expect((service as any).backlogCoverageEventIds.get('conn-1')).not.toBe(first.id);
     });
 
     it('emits one escalation when a replica returns through a full resync', async () => {
