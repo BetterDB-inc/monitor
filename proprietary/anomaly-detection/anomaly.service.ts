@@ -401,6 +401,7 @@ export class AnomalyService
     if (entry.kind === 'save') entry.onDrop?.();
   });
   private correlationTicking = false;
+  private outboxDraining = false;
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -5411,13 +5412,24 @@ export class AnomalyService
   }
 
   private async correlationTick(): Promise<void> {
-    if (this.correlationTicking) return;
-    this.correlationTicking = true;
+    if (!this.correlationTicking) {
+      this.correlationTicking = true;
+      try {
+        await this.correlateAnomalies();
+      } finally {
+        this.correlationTicking = false;
+      }
+    }
+    await this.outboxTick();
+  }
+
+  private async outboxTick(): Promise<void> {
+    if (this.outboxDraining) return;
+    this.outboxDraining = true;
     try {
-      await this.correlateAnomalies();
       await this.drainPersistenceOutbox();
     } finally {
-      this.correlationTicking = false;
+      this.outboxDraining = false;
     }
   }
 
@@ -5430,7 +5442,9 @@ export class AnomalyService
 
   private async retryPersistence(entry: OutboxEntry): Promise<void> {
     if (entry.kind === 'resolve') {
-      if ((await this.resolveAnomalyOutcome(entry.id)) !== 'retry') {
+      if ((await this.resolveAnomalyOutcome(entry.id)) === 'retry') {
+        this.persistenceOutbox.defer(entry.id, Date.now());
+      } else {
         this.persistenceOutbox.settle(entry.id);
       }
       return;
@@ -5445,6 +5459,7 @@ export class AnomalyService
       this.logger.debug(
         `Retry of anomaly ${entry.id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      this.persistenceOutbox.defer(entry.id, Date.now());
     }
   }
 

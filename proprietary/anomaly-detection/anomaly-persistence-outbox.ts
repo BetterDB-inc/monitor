@@ -3,22 +3,27 @@ import { AnomalyEvent } from './types';
 
 export const OUTBOX_MAX_ENTRIES = 1000;
 export const OUTBOX_MAX_AGE_MS = 60 * 60 * 1000;
+export const OUTBOX_RETRY_BASE_MS = 10_000;
+export const OUTBOX_RETRY_MAX_MS = 60_000;
 
-export interface PendingSave {
-  kind: 'save';
+interface RetrySchedule {
   id: string;
+  enqueuedAt: number;
+  attempts?: number;
+  retryAt?: number;
+}
+
+export interface PendingSave extends RetrySchedule {
+  kind: 'save';
   anomaly: AnomalyEvent;
   ctx?: ConnectionContext;
-  enqueuedAt: number;
   rewrite?: boolean;
   onDrop?: () => void;
 }
 
-export interface PendingResolve {
+export interface PendingResolve extends RetrySchedule {
   kind: 'resolve';
-  id: string;
   resolvedAt: number;
-  enqueuedAt: number;
 }
 
 export type OutboxEntry = PendingSave | PendingResolve;
@@ -82,13 +87,21 @@ export class PersistenceOutbox {
     if (this.pending.get(id)?.kind === 'resolve') this.pending.delete(id);
   }
 
+  defer(id: string, now: number): void {
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    const attempts = entry.attempts ?? 0;
+    entry.attempts = attempts + 1;
+    entry.retryAt = now + Math.min(OUTBOX_RETRY_BASE_MS * 2 ** attempts, OUTBOX_RETRY_MAX_MS);
+  }
+
   due(now: number): OutboxEntry[] {
     for (const entry of this.pending.values()) {
       if (now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) continue;
       this.pending.delete(entry.id);
       this.onDrop(entry, 'expired');
     }
-    return [...this.pending.values()];
+    return [...this.pending.values()].filter((entry) => (entry.retryAt ?? 0) <= now);
   }
 
   private add(entry: OutboxEntry): void {

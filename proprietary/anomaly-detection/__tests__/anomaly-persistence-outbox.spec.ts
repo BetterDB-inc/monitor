@@ -2,6 +2,8 @@ import { AnomalyEvent } from '../types';
 import {
   OUTBOX_MAX_AGE_MS,
   OUTBOX_MAX_ENTRIES,
+  OUTBOX_RETRY_BASE_MS,
+  OUTBOX_RETRY_MAX_MS,
   OutboxEntry,
   PersistenceOutbox,
 } from '../anomaly-persistence-outbox';
@@ -79,6 +81,31 @@ describe('PersistenceOutbox', () => {
 
     expect(outbox.has('a')).toBe(true);
     expect(outbox.has('b')).toBe(false);
+  });
+
+  it('waits longer after each failed retry, up to the limit', () => {
+    outbox.enqueueSave(event('a'), undefined, 0);
+    expect(outbox.due(0)).toHaveLength(1);
+
+    outbox.defer('a', 0);
+    expect(outbox.due(OUTBOX_RETRY_BASE_MS - 1)).toEqual([]);
+    expect(outbox.due(OUTBOX_RETRY_BASE_MS)).toHaveLength(1);
+
+    outbox.defer('a', 0);
+    expect(outbox.due(2 * OUTBOX_RETRY_BASE_MS - 1)).toEqual([]);
+    expect(outbox.due(2 * OUTBOX_RETRY_BASE_MS)).toHaveLength(1);
+
+    for (let i = 0; i < 20; i++) outbox.defer('a', 0);
+    expect(outbox.due(OUTBOX_RETRY_MAX_MS - 1)).toEqual([]);
+    expect(outbox.due(OUTBOX_RETRY_MAX_MS)).toHaveLength(1);
+  });
+
+  it('expires a deferred entry on schedule', () => {
+    outbox.enqueueSave(event('a'), undefined, 0);
+    outbox.defer('a', OUTBOX_MAX_AGE_MS);
+
+    expect(outbox.due(OUTBOX_MAX_AGE_MS + 1)).toEqual([]);
+    expect(dropped).toEqual([['a', 'expired']]);
   });
 
   it('drops the oldest entry when full', () => {

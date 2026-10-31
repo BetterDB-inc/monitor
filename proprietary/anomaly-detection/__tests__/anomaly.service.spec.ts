@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
-import { OUTBOX_MAX_AGE_MS } from '../anomaly-persistence-outbox';
+import { OUTBOX_MAX_AGE_MS, OUTBOX_RETRY_BASE_MS } from '../anomaly-persistence-outbox';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -8096,7 +8096,40 @@ describe('AnomalyService', () => {
       await drain();
       expect(outbox().has(event.id)).toBe(true);
 
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_RETRY_BASE_MS);
       await drain();
+      expect(event.persisted).toBe(true);
+    });
+
+    it('backs off between failed retries', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('still down'));
+
+      await drain();
+      const attempts = stored(event.id).length;
+      await drain();
+
+      expect(stored(event.id)).toHaveLength(attempts);
+      expect(outbox().has(event.id)).toBe(true);
+    });
+
+    it('keeps correlating while a slow retry is running', async () => {
+      const event = buildEvent({ correlationId: 'group-1' });
+      await addUnsaved(event);
+      let release: () => void = () => undefined;
+      storage.saveAnomalyEvent.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+      const correlate = jest.spyOn(service as any, 'correlateAnomalies');
+
+      const slow = (service as any).correlationTick();
+      await flush();
+      await (service as any).correlationTick();
+
+      expect(correlate).toHaveBeenCalledTimes(2);
+      release();
+      await slow;
       expect(event.persisted).toBe(true);
     });
 
@@ -8192,8 +8225,8 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, 7_000);
     });
 
-    it('does not overlap correlation ticks', async () => {
-      const event = buildEvent();
+    it('does not overlap outbox drains', async () => {
+      const event = buildEvent({ correlationId: 'group-1' });
       await addUnsaved(event);
       let release: () => void = () => undefined;
       storage.saveAnomalyEvent.mockImplementationOnce(
@@ -8207,6 +8240,22 @@ describe('AnomalyService', () => {
       await first;
 
       expect(stored(event.id)).toHaveLength(2);
+    });
+
+    it('does not overlap correlation', async () => {
+      await addUnsaved(buildEvent());
+      let release: () => void = () => undefined;
+      storage.saveCorrelatedGroup.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+
+      const first = (service as any).correlationTick();
+      await flush();
+      await (service as any).correlationTick();
+      release();
+      await first;
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
     });
 
     it('warns when an entry is dropped', async () => {
