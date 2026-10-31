@@ -711,7 +711,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort((a, b) => b.timestamp - a.timestamp || b.id.localeCompare(a.id))
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
