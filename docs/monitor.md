@@ -153,3 +153,4 @@ demo host).
 | `MONITOR_PROVIDER_OVERRIDE` | off | Test-only override for the pre-flight provider detector |
 | `MONITOR_RECENT_OOM_WINDOW_MS` | 5 min | Health-gate window for recent OOM-correlated anomalies |
 | `MONITOR_RECENT_FAILOVER_WINDOW_MS` | 2 min | Health-gate window for replication-role changes |
+| `MONITOR_REPLICA_IO_STALE_SEC` | 30 s | Health-gate limit on `master_last_io_seconds_ago`; raise it above `repl-ping-replica-period` if that is set higher than the default |

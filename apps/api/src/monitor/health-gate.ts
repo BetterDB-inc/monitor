@@ -9,7 +9,7 @@ export interface HealthGateSignals {
   memoryPct: number;
   oomEventsRecent: number;
   replicationLagBytes: number | null;
-  replicaLinkDown: boolean;
+  replicaLinkDown: boolean | null;
   failoverInProgress: boolean;
 }
 

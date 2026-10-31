@@ -136,6 +136,20 @@ describe('evaluateHealthGate', () => {
     expect(result.allow).toBe(true);
   });
 
+  it('does not block on an unassessed replica link', () => {
+    const result = evaluateHealthGate({ ...HEALTHY_SIGNALS, replicaLinkDown: null });
+    expect(result.allow).toBe(true);
+  });
+
+  it('skips on a down replica link even when replication lag is unavailable', () => {
+    const result = evaluateHealthGate({
+      ...HEALTHY_SIGNALS,
+      replicaLinkDown: true,
+      replicationLagBytes: null,
+    });
+    expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+  });
+
   it('skips when the replica link is down', () => {
     const result = evaluateHealthGate({ ...HEALTHY_SIGNALS, replicaLinkDown: true });
     expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });

@@ -41,9 +41,11 @@ function makeInfo(overrides: {
 function makeService({
   info,
   anomalyEvents = [],
+  config = {},
 }: {
   info: unknown;
   anomalyEvents?: StoredAnomalyEvent[];
+  config?: Record<string, number>;
 }) {
   const client = { getInfoParsed: jest.fn().mockResolvedValue(info) };
   const registry = { get: jest.fn().mockReturnValue(client) } as unknown as ConnectionRegistry;
@@ -53,7 +55,7 @@ function makeService({
     }),
   } as unknown as StoragePort;
   const configService = {
-    get: jest.fn((_key: string, defaultValue: number) => defaultValue),
+    get: jest.fn((key: string, defaultValue: number) => config[key] ?? defaultValue),
   } as unknown as ConfigService;
 
   return {
@@ -73,7 +75,7 @@ describe('HealthGateService', () => {
       memoryPct: 0.1,
       oomEventsRecent: 0,
       replicationLagBytes: 0,
-      replicaLinkDown: false,
+      replicaLinkDown: null,
       failoverInProgress: false,
     });
   });
@@ -204,7 +206,7 @@ describe('HealthGateService', () => {
     });
     const result = await service.evaluate(CONNECTION_ID);
     expect(result.signals.replicationLagBytes).toBeNull();
-    expect(result.signals.replicaLinkDown).toBe(false);
+    expect(result.signals.replicaLinkDown).toBeNull();
   });
 
   it('ignores replicas still in their initial sync', async () => {
@@ -324,12 +326,27 @@ describe('HealthGateService', () => {
     expect(result.allow).toBe(true);
   });
 
-  it('ignores master link fields on a primary', async () => {
+  it('uses the configured stale I/O limit', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'slave',
+        master_link_status: 'up',
+        master_last_io_seconds_ago: '45',
+      }),
+      config: { MONITOR_REPLICA_IO_STALE_SEC: 60 },
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicaLinkDown).toBe(false);
+    expect(result.allow).toBe(true);
+  });
+
+  it('does not assess a master link on a primary', async () => {
     const { service } = makeService({
       info: makeInfo({ role: 'master', master_link_status: 'down' }),
     });
     const result = await service.evaluate(CONNECTION_ID);
-    expect(result.signals.replicaLinkDown).toBe(false);
+    expect(result.signals.replicaLinkDown).toBeNull();
+    expect(result.allow).toBe(true);
   });
 
   it('detects failover from INFO master_failover_state', async () => {

@@ -46,7 +46,7 @@ export interface PreflightHealth {
     memoryPct: number;
     oomEventsRecent: number;
     replicationLagBytes: number | null;
-    replicaLinkDown: boolean;
+    replicaLinkDown: boolean | null;
     failoverInProgress: boolean;
   };
   thresholds: {

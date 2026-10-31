@@ -70,7 +70,7 @@ export function PreflightPanel({ preflight }: Props) {
             </dd>
             <dt>Replica link</dt>
             <dd className="font-mono">
-              {preflight.health.signals.replicaLinkDown ? 'down' : 'ok'}
+              {formatReplicaLink(preflight.health.signals.replicaLinkDown)}
             </dd>
             <dt>Failover</dt>
             <dd className="font-mono">
@@ -278,6 +278,13 @@ function Badge({ tone, children }: { tone: 'ok' | 'warn'; children: React.ReactN
       {children}
     </span>
   );
+}
+
+function formatReplicaLink(down: boolean | null): string {
+  if (down === null) {
+    return 'n/a';
+  }
+  return down ? 'down' : 'ok';
 }
 
 function formatBytes(bytes: number): string {

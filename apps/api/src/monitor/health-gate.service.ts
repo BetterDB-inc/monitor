@@ -13,13 +13,13 @@ import {
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
 const REPLICA_ACK_INTERVAL_SECONDS = 1;
-const MASTER_IO_STALE_SECONDS = 30;
 
 @Injectable()
 export class HealthGateService {
   private readonly logger = new Logger(HealthGateService.name);
   private readonly oomWindowMs: number;
   private readonly failoverWindowMs: number;
+  private readonly replicaIoStaleSeconds: number;
   private readonly thresholds: HealthGateThresholds;
 
   constructor(
@@ -34,6 +34,7 @@ export class HealthGateService {
     this.failoverWindowMs = Number(
       configService.get('MONITOR_RECENT_FAILOVER_WINDOW_MS', 2 * 60 * 1000),
     );
+    this.replicaIoStaleSeconds = Number(configService.get('MONITOR_REPLICA_IO_STALE_SEC', 30));
     const memoryPct = Number(configService.get('MONITOR_MEMORY_PCT_THRESHOLD', 85));
     const lagBytes = Number(
       configService.get('MONITOR_REPLICATION_LAG_BYTES', 10 * 1024 * 1024),
@@ -49,7 +50,10 @@ export class HealthGateService {
     const info = await client.getInfoParsed();
 
     const memoryPct = readMemoryPct(info);
-    const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(info);
+    const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(
+      info,
+      this.replicaIoStaleSeconds,
+    );
     const now = Date.now();
 
     const [oomEvents, roleChangeEvents] = await Promise.all([
@@ -102,14 +106,17 @@ function readMemoryPct(info: unknown): number {
   return used / max;
 }
 
-function readReplication(info: unknown): {
+function readReplication(
+  info: unknown,
+  replicaIoStaleSeconds: number,
+): {
   replicationLagBytes: number | null;
-  replicaLinkDown: boolean;
+  replicaLinkDown: boolean | null;
   infoFailoverInProgress: boolean;
 } {
   const replication = (info as { replication?: Record<string, string> }).replication;
   if (replication === undefined) {
-    return { replicationLagBytes: null, replicaLinkDown: false, infoFailoverInProgress: false };
+    return { replicationLagBytes: null, replicaLinkDown: null, infoFailoverInProgress: false };
   }
 
   const failoverState = replication.master_failover_state;
@@ -118,17 +125,22 @@ function readReplication(info: unknown): {
 
   return {
     replicationLagBytes: furthestReplicaGap(replication),
-    replicaLinkDown: REPLICA_ROLES.has(replication.role) && isMasterLinkDown(replication),
+    replicaLinkDown: REPLICA_ROLES.has(replication.role)
+      ? isMasterLinkDown(replication, replicaIoStaleSeconds)
+      : null,
     infoFailoverInProgress,
   };
 }
 
-function isMasterLinkDown(replication: Record<string, string>): boolean {
+function isMasterLinkDown(
+  replication: Record<string, string>,
+  replicaIoStaleSeconds: number,
+): boolean {
   const linkStatus = replication.master_link_status;
   return (
     (linkStatus !== undefined && linkStatus !== 'up') ||
     replication.master_sync_in_progress === '1' ||
-    toNumber(replication.master_last_io_seconds_ago) > MASTER_IO_STALE_SECONDS
+    toNumber(replication.master_last_io_seconds_ago) > replicaIoStaleSeconds
   );
 }
 
