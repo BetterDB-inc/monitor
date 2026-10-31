@@ -270,13 +270,12 @@ export class IncidentTimelineBuilder {
       const stored =
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
-      const last = current[current.length - 1];
+      const continues = first !== undefined && this.continuesIncident(current, event);
       if (
-        first &&
+        continues &&
         !start &&
         stored?.anomalyId === event.id &&
         stored !== used &&
-        event.timestamp - last.timestamp <= this.opts.gapMs &&
         event.timestamp - first.timestamp <= this.opts.maxSpanMs
       ) {
         start = stored;
@@ -285,7 +284,7 @@ export class IncidentTimelineBuilder {
       if (
         first &&
         ((stored !== undefined && stored !== used) ||
-          event.timestamp - last.timestamp > this.opts.gapMs ||
+          !continues ||
           event.timestamp - (start?.startedAt ?? first.timestamp) > this.opts.maxSpanMs)
       ) {
         clusters.push({ events: current, start });
@@ -300,6 +299,23 @@ export class IncidentTimelineBuilder {
     }
     if (current.length > 0) clusters.push({ events: current, start });
     return clusters;
+  }
+
+  private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {
+    const last = current[current.length - 1];
+    if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
+    return this.rules().some((rule) =>
+      rule.steps.slice(1).some(
+        (step, i) =>
+          step.includes(event.metricType) &&
+          current.some(
+            (earlier) =>
+              rule.steps[i].includes(earlier.metricType) &&
+              (!rule.sameConnection || earlier.connectionId === event.connectionId) &&
+              event.timestamp - earlier.timestamp <= rule.maxSpanMs,
+          ),
+      ),
+    );
   }
 
   private toTimeline(

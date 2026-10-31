@@ -447,6 +447,75 @@ describe('IncidentTimelineBuilder', () => {
     });
   });
 
+  describe('sequence rules across a quiet gap', () => {
+    const build = (events: AnomalyEvent[], rule = escalation, boundaries: any[] = []) =>
+      new IncidentTimelineBuilder({}, (id) => id, () => [rule]).build(
+        events,
+        T0 + 20 * MIN,
+        neverRecovers,
+        boundaries,
+      );
+
+    it('keeps a later step of a rule in the incident that holds the earlier one', () => {
+      const incidents = build([
+        event({ metricType: MetricType.CONNECTIONS }),
+        event({ timestamp: T0 + 5 * MIN }),
+      ]);
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([escalation.pattern]);
+    });
+
+    it('still splits an event no rule links to the incident', () => {
+      const incidents = build([
+        event({ metricType: MetricType.MEMORY_USED }),
+        event({ timestamp: T0 + 5 * MIN, metricType: MetricType.CONNECTIONS }),
+      ]);
+
+      expect(incidents).toHaveLength(2);
+    });
+
+    it('splits past the span of the rule', () => {
+      const incidents = build([
+        event({ metricType: MetricType.CONNECTIONS }),
+        event({ timestamp: T0 + 11 * MIN }),
+      ]);
+
+      expect(incidents).toHaveLength(2);
+    });
+
+    it('splits a same-connection rule across different connections', () => {
+      const scopes = new IncidentTimelineBuilder({}, () => 'shared', () => [
+        { ...escalation, sameConnection: true },
+      ]);
+
+      const incidents = scopes.build(
+        [
+          event({ metricType: MetricType.CONNECTIONS, connectionId: 'conn-a' }),
+          event({ timestamp: T0 + 5 * MIN, connectionId: 'conn-b' }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incidents).toHaveLength(2);
+    });
+
+    it('takes in a step stamped ahead of an incident that already has a boundary', () => {
+      const cost = event({ timestamp: T0 + 5 * MIN });
+      const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };
+
+      const incidents = build(
+        [event({ metricType: MetricType.CONNECTIONS }), cost],
+        escalation,
+        [started],
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([escalation.pattern]);
+    });
+  });
+
   describe('sequence rules', () => {
     const builder = () => new IncidentTimelineBuilder({}, undefined, () => [escalation]);
 
