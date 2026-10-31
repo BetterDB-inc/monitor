@@ -1,12 +1,9 @@
 import {
-  acknowledgeRetryAmplificationFinding,
   createRetryAmplificationState,
   describeRetryAmplificationState,
-  markRetryAmplificationNotified,
   observePushCadence,
   retryAmplificationEpisodeStart,
   retryAmplificationMaxPollGap,
-  retryAmplificationNeedsNotification,
   evaluateRetryAmplification,
   readRetryAmplificationTrigger,
   RetryAmplificationFinding,
@@ -55,7 +52,6 @@ class Driver {
   commands = 1_000_000;
   errors = 0;
   findings: RetryAmplificationFinding[] = [];
-  ack = true;
   carried: Array<{ metricType: MetricType; timestamp: number }> = [];
   pollMs = 1000;
 
@@ -106,10 +102,7 @@ class Driver {
       stressActive: spec.stressActive,
       activeSaturation: spec.activeSaturation,
     });
-    if (finding !== null) {
-      if (!this.findings.includes(finding)) this.findings.push(finding);
-      if (this.ack) acknowledgeRetryAmplificationFinding(this.state, finding);
-    }
+    if (finding !== null) this.findings.push(finding);
     return finding;
   }
 }
@@ -434,30 +427,14 @@ describe('retry amplification detector', () => {
       expect(d.state.pending).toBeNull();
     });
 
-    it('keeps a critical from before the gap until it is saved', () => {
+    it('keeps a critical from before the gap', () => {
       const d = new Driver();
-      d.ack = false;
       d.baseline();
-      d.ramp(3, { p99: true, activeSaturation: [MetricType.LOAD_SATURATION] });
+      d.ramp(2, { p99: true });
+      d.window(hot(2.0, { p99: true, activeSaturation: [MetricType.LOAD_SATURATION] }));
       skipGap(d);
-      d.poll(hotSpec);
 
-      const pending = d.state.pending;
-      expect(pending?.level).toBe('critical');
-      d.t += d.pollMs;
-      expect(d.poll(hotSpec)).toBe(pending);
-    });
-
-    it('does not notify again for an unsaved finding across the gap', () => {
-      const d = new Driver();
-      d.ack = false;
-      d.baseline();
-      d.ramp(4, { p99: true });
-      markRetryAmplificationNotified(d.state, d.state.pending!);
-      skipGap(d);
-      d.poll(hotSpec);
-
-      expect(retryAmplificationNeedsNotification(d.state, d.state.pending!)).toBe(false);
+      expect(d.poll(hotSpec)?.level).toBe('critical');
     });
 
     it('raises the next episode after acknowledging a gap finding', () => {
@@ -468,23 +445,22 @@ describe('retry amplification detector', () => {
       d.poll(hotSpec);
       d.t += d.pollMs;
       expect(d.state.ackedLevel).toBe('none');
-      expect(d.state.notifiedLevel).toBe('none');
 
       d.ramp(5, { p99: true });
 
       expect(d.findings).toHaveLength(2);
     });
 
-    it('reports the closed episode start while its finding is pending', () => {
+    it('reports the closed episode start alongside its finding', () => {
       const d = new Driver();
-      d.ack = false;
       d.baseline();
       d.ramp(3, { p99: true });
       const startedAt = d.state.hotRun[0].start;
       skipGap(d);
-      d.poll(hotSpec);
+      const finding = d.poll(hotSpec);
 
-      expect(retryAmplificationEpisodeStart(d.state)).toBe(startedAt);
+      expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
+      expect(retryAmplificationEpisodeStart(d.state, null)).toBeNull();
     });
 
     it('keeps the episode through a blip shorter than two windows', () => {
@@ -627,18 +603,12 @@ describe('retry amplification detector', () => {
     expect(d.findings[0].trigger).toBe('errors');
   });
 
-  it('keeps returning an unacknowledged finding every poll', () => {
+  it('returns a finding once per level', () => {
     const d = new Driver();
-    d.ack = false;
     d.baseline();
-    d.ramp(4);
-    const finding = d.poll(hot(1.6));
-    expect(finding).not.toBeNull();
-    d.t += 1000;
-    expect(d.poll(hot(1.6))).toBe(finding);
-    acknowledgeRetryAmplificationFinding(d.state, finding!);
-    d.t += 1000;
-    expect(d.poll(hot(1.6))).toBeNull();
+    d.ramp(6);
+    expect(d.findings).toHaveLength(1);
+    expect(d.state.pending).toBeNull();
   });
 
   it('re-arms after two cold windows and fires again on a new episode', () => {
@@ -697,19 +667,6 @@ describe('retry amplification detector', () => {
     expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
   });
 
-  it('drops an unacknowledged critical once the level falls back', () => {
-    const d = new Driver();
-    d.baseline();
-    d.ramp(4);
-    expect(d.state.ackedLevel).toBe('warning');
-    d.ack = false;
-    d.window(hot(2.1, { saturation: MetricType.LOAD_SATURATION }));
-    d.window(hot(2.2));
-    expect(d.state.pending?.level).toBe('critical');
-    d.window(hot(2.3));
-    expect(d.state.pending).toBeNull();
-  });
-
   it('freezes the baseline while an episode is open', () => {
     const d = new Driver();
     d.baseline();
@@ -743,18 +700,24 @@ describe('retry amplification detector', () => {
     expect(d.findings).toHaveLength(1);
   });
 
-  it('closes a storm cut off by a counter reset and keeps its unsaved finding', () => {
+  it('closes a storm cut off by a counter reset and returns the finding of its last window', () => {
     const d = new Driver();
-    d.ack = false;
     d.baseline();
     const startedAt = d.t;
-    d.ramp(4);
-    markRetryAmplificationNotified(d.state, d.state.pending!);
+    d.ramp(3);
+    for (let i = 0; i < 59; i++) {
+      d.commands += 2000;
+      d.poll(hot(2.0), [
+        { metricType: MetricType.COMMAND_P99, timestamp: d.t },
+        { metricType: MetricType.LOAD_SATURATION, timestamp: d.t },
+      ]);
+      d.t += d.pollMs;
+    }
 
     d.t += 1000;
     const finding = d.poll(BASE, [], 10);
 
-    expect(finding).toMatchObject({ level: 'warning', windows: 4 });
+    expect(finding).toMatchObject({ level: 'critical', windows: 4 });
     expect(d.state.hotRun).toHaveLength(0);
     expect(d.state.coldWindows).toHaveLength(12);
     expect(d.state.lastEpisode).toMatchObject({
@@ -762,8 +725,7 @@ describe('retry amplification detector', () => {
       windows: 4,
       startedAt,
     });
-    expect(retryAmplificationEpisodeStart(d.state)).toBe(startedAt);
-    expect(retryAmplificationNeedsNotification(d.state, finding!)).toBe(false);
+    expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
   });
 
   describe('hot run that never goes cold twice', () => {

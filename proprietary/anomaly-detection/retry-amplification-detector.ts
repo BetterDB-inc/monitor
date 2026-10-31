@@ -140,7 +140,6 @@ export interface RetryAmplificationState {
   episodeLevel: RetryAmplificationLevel;
   episodeMovement: CoMovement | null;
   ackedLevel: RetryAmplificationLevel;
-  notifiedLevel: RetryAmplificationLevel;
   pending: RetryAmplificationFinding | null;
   lastEpisode: RetryAmplificationEpisode | null;
 }
@@ -196,7 +195,6 @@ export function createRetryAmplificationState(
     episodeLevel: 'none',
     episodeMovement: null,
     ackedLevel: 'none',
-    notifiedLevel: 'none',
     pending: null,
     lastEpisode: null,
   };
@@ -505,7 +503,6 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
   state.episodeLevel = 'none';
   state.episodeMovement = null;
   state.ackedLevel = 'none';
-  state.notifiedLevel = 'none';
   state.pending = null;
 }
 
@@ -543,7 +540,6 @@ function evaluateWindow(
   }
 
   state.coldStreak = 0;
-  if (state.hotRun.length === 0) state.notifiedLevel = 'none';
   state.hotRun.push(w);
   if (state.hotRun.length > RETRY_AMP_MAX_HOT_WINDOWS) {
     state.hotRun.splice(1, 1);
@@ -557,7 +553,6 @@ function evaluateWindow(
     LEVEL_RANK[finding.level] > LEVEL_RANK[state.episodeLevel] ? finding.level : state.episodeLevel;
   if (LEVEL_RANK[finding.level] < LEVEL_RANK[state.ackedLevel]) {
     state.ackedLevel = finding.level;
-    state.notifiedLevel = finding.level;
   }
   if (LEVEL_RANK[finding.level] > LEVEL_RANK[state.ackedLevel]) {
     state.pending = finding;
@@ -587,9 +582,9 @@ function endEpisodeAtPollGap(state: RetryAmplificationState, lastTimestamp: numb
   state.window = null;
   if (open !== null) evaluateWindow(state, open, lastTimestamp);
   if (state.hotRun.length === 0) return;
-  const { pending, notifiedLevel } = state;
+  const { pending } = state;
   closeEpisode(state, lastTimestamp, computeBaseline(state.coldWindows));
-  if (pending !== null) Object.assign(state, { pending, notifiedLevel });
+  state.pending = pending;
 }
 
 export function evaluateRetryAmplification(
@@ -604,12 +599,11 @@ export function evaluateRetryAmplification(
     sample.totalCommands < last.totalCommands
   ) {
     endEpisodeAtPollGap(state, last.timestamp);
-    const { coldWindows, lastEpisode, pending, notifiedLevel } = state;
+    const { coldWindows, lastEpisode, pending } = state;
     Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
       coldWindows,
       lastEpisode,
       pending,
-      notifiedLevel,
     });
   }
 
@@ -683,7 +677,10 @@ export function evaluateRetryAmplification(
     totalErrorReplies: sample.totalErrorReplies,
   };
 
-  return state.pending;
+  const finding = state.pending;
+  state.pending = null;
+  if (finding !== null && state.hotRun.length > 0) state.ackedLevel = finding.level;
+  return finding;
 }
 
 export interface RetryAmplificationStatus {
@@ -714,37 +711,17 @@ export function describeRetryAmplificationState(
   return {
     armed,
     classification,
-    level: classification === 'amplifying' ? (state.pending?.level ?? state.ackedLevel) : 'none',
+    level: classification === 'amplifying' ? state.ackedLevel : 'none',
     windows: hotWindowCount(state),
     baseline: armed ? computeBaseline(state.coldWindows) : null,
     lastEpisode: state.lastEpisode,
   };
 }
 
-export function retryAmplificationEpisodeStart(state: RetryAmplificationState): number | null {
+export function retryAmplificationEpisodeStart(
+  state: RetryAmplificationState,
+  finding: RetryAmplificationFinding | null,
+): number | null {
   if (state.hotRun.length > 0) return state.hotRun[0].start;
-  return state.pending !== null ? (state.lastEpisode?.startedAt ?? null) : null;
-}
-
-export function retryAmplificationNeedsNotification(
-  state: RetryAmplificationState,
-  finding: RetryAmplificationFinding,
-): boolean {
-  return LEVEL_RANK[finding.level] > LEVEL_RANK[state.notifiedLevel];
-}
-
-export function markRetryAmplificationNotified(
-  state: RetryAmplificationState,
-  finding: RetryAmplificationFinding,
-): void {
-  state.notifiedLevel = finding.level;
-}
-
-export function acknowledgeRetryAmplificationFinding(
-  state: RetryAmplificationState,
-  finding: RetryAmplificationFinding,
-): void {
-  if (state.hotRun.length > 0) state.ackedLevel = finding.level;
-  else state.notifiedLevel = 'none';
-  if (state.pending === finding) state.pending = null;
+  return finding !== null ? (state.lastEpisode?.startedAt ?? null) : null;
 }

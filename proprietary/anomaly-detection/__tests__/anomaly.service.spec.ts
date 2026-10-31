@@ -3382,8 +3382,6 @@ describe('AnomalyService', () => {
   describe('retry amplification', () => {
     async function runRetry(
       opts: {
-        failFirstEmit?: boolean;
-        failEmits?: number;
         p99Once?: boolean;
         noP99?: boolean;
         coolWindows?: number;
@@ -3393,13 +3391,8 @@ describe('AnomalyService', () => {
       } = {},
     ) {
       const recorded: any[] = [];
-      let failures = opts.failEmits ?? (opts.failFirstEmit ? 1 : 0);
       if (!opts.realEmit) {
         jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
-          if (failures > 0) {
-            failures -= 1;
-            throw new Error('storage down');
-          }
           a.persisted = true;
           recorded.push(a);
         });
@@ -3613,17 +3606,6 @@ describe('AnomalyService', () => {
 
       expect(recorded[0].severity).toBe(AnomalySeverity.CRITICAL);
       expect(recorded[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
-    });
-
-    it('retries a failed emit on the next poll', async () => {
-      dbClient.getClients = jest.fn().mockResolvedValue([
-        { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 1000, 'tot-cmds': '1000' },
-      ]);
-
-      const { recorded, errorsCaught } = await runRetry({ failFirstEmit: true });
-
-      expect(errorsCaught).toHaveLength(1);
-      expect(recorded).toHaveLength(1);
     });
 
     it('keeps reporting the contributors of the last episode once it closes', async () => {

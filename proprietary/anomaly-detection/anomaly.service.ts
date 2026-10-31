@@ -213,9 +213,6 @@ import {
   RETRY_AMP_WINDOW_MS,
   RetryAmplificationFinding,
   RetryAmplificationState,
-  acknowledgeRetryAmplificationFinding,
-  markRetryAmplificationNotified,
-  retryAmplificationNeedsNotification,
   createRetryAmplificationState,
   evaluateRetryAmplification,
   RetryAmplificationStatus,
@@ -3333,7 +3330,7 @@ export class AnomalyService
       activeSaturation: [...activeSaturation],
     });
 
-    const episodeStart = retryAmplificationEpisodeStart(state);
+    const episodeStart = retryAmplificationEpisodeStart(state, finding);
     if (episodeStart === null) {
       this.retryAmplificationFirstClients.delete(ctx.connectionId);
     } else if (state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS) {
@@ -3384,9 +3381,7 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     await this.addAnomaly(event, ctx);
 
-    const notify = retryAmplificationNeedsNotification(state, finding);
-    if (notify) markRetryAmplificationNotified(state, finding);
-    if (notify && this.webhookEventsProService) {
+    if (this.webhookEventsProService) {
       this.webhookEventsProService
         .dispatchRetryAmplificationDetected({
           level: finding.level,
@@ -3405,8 +3400,6 @@ export class AnomalyService
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
         });
     }
-
-    acknowledgeRetryAmplificationFinding(state, finding);
   }
 
   private async readClientCommandCounts(
@@ -3486,7 +3479,7 @@ export class AnomalyService
     const state = this.retryAmplificationState.get(connectionId);
     const cached = this.retryAmplificationContributors.get(connectionId);
     if (state === undefined || cached === undefined) return null;
-    const episodeStart = retryAmplificationEpisodeStart(state) ?? state.lastEpisode?.startedAt;
+    const episodeStart = retryAmplificationEpisodeStart(state, null) ?? state.lastEpisode?.startedAt;
     return episodeStart === cached.episodeStart ? cached.contributors : null;
   }
 
