@@ -8,9 +8,11 @@ jest.mock('fs', () => {
   return { ...actual, realpathSync: jest.fn(actual.realpathSync) };
 });
 import * as path from 'path';
+import { generateTlsPair } from '../../../test/helpers/tls-fixtures';
 import {
   TLS_CERT_DIR_ENV,
   assertAuthConfig,
+  assertUsableTlsMaterial,
   buildTlsOptions,
   clientCredentials,
   resolveTlsMaterial,
@@ -165,6 +167,23 @@ describe('resolveTlsMaterial', () => {
     }
     expect(message).toMatch(/Client certificate file 'missing.crt' not found/);
     expect(message).not.toContain(certDir);
+  });
+});
+
+describe('assertUsableTlsMaterial', () => {
+  it('accepts a matching certificate and key, and nothing at all', () => {
+    const pair = generateTlsPair();
+    expect(() => assertUsableTlsMaterial({ cert: pair.cert, key: pair.key })).not.toThrow();
+    expect(() => assertUsableTlsMaterial({ cert: Buffer.from(pair.cert), key: Buffer.from(pair.key) })).not.toThrow();
+    expect(() => assertUsableTlsMaterial({})).not.toThrow();
+    expect(() => assertUsableTlsMaterial({ passphrase: 'only' })).not.toThrow();
+  });
+
+  it('rejects a certificate paired with another key (mid-rotation read) and malformed PEM', () => {
+    const a = generateTlsPair('a');
+    const b = generateTlsPair('b');
+    expect(() => assertUsableTlsMaterial({ cert: a.cert, key: b.key })).toThrow(/TLS material is not usable/);
+    expect(() => assertUsableTlsMaterial({ cert: CERT, key: KEY })).toThrow(/rotation may be in progress/);
   });
 });
 

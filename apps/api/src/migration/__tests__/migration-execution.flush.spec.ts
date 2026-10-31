@@ -1,7 +1,7 @@
 type MockClient = {
   host: string;
   port: number;
-  options: { tls?: { servername?: string } };
+  options: { tls?: { servername?: string; ca?: string } };
   connect: jest.Mock;
   flushall: jest.Mock;
   disconnect: jest.Mock;
@@ -53,7 +53,7 @@ describe('MigrationExecutionService.flushTargetBeforeSync', () => {
 
     await service.flushTargetBeforeSync(
       targetAdapter,
-      { id: 't', name: 'Target', host: 'target.internal', port: 6379, tls: true, createdAt: 1 },
+      { id: 't', name: 'Target', host: 'target.internal', port: 6379, tls: true, tlsConfig: { ca: 'CA-PEM' }, createdAt: 1 },
       true,
     );
 
@@ -63,6 +63,8 @@ describe('MigrationExecutionService.flushTargetBeforeSync', () => {
     expect(nodeA.options.tls?.servername).toBe('node-a.internal');
     expect(nodeB.options.tls).toBeDefined();
     expect(nodeB.options.tls?.servername).toBeUndefined();
+    expect(nodeA.options.tls?.ca).toBe('CA-PEM');
+    expect(nodeB.options.tls?.ca).toBe('CA-PEM');
     for (const client of clients) {
       expect(client.flushall).toHaveBeenCalledTimes(1);
       expect(client.disconnect).toHaveBeenCalledTimes(1);

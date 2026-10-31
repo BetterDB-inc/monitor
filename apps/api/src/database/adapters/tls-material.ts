@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { ConnectionOptions } from 'tls';
+import { createSecureContext, type ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import { hasClientCertificate } from '@betterdb/shared';
 
@@ -172,9 +172,29 @@ export function tlsMaterialFingerprint(tlsConfig: TlsConfig | undefined): string
   return paths
     .map((filePath) => {
       const stat = fs.statSync(filePath);
-      return `${filePath}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+      // ctime cannot be preserved from userspace, so an in-place rewrite that
+      // keeps the mtime (cp -p, rsync -t) still changes the fingerprint.
+      return `${filePath}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     })
     .join('|');
+}
+
+/**
+ * Check that freshly read material is usable before adopting it: a certificate
+ * and key written separately can be read mid-rotation as a mismatched pair,
+ * and Node's `tls.connect` then throws synchronously, which iovalkey treats as
+ * terminal. `createSecureContext` performs the same parsing and key/certificate
+ * match that the handshake would, without opening a socket. Throws with a
+ * message naming the OpenSSL error.
+ */
+export function assertUsableTlsMaterial(material: TlsMaterialOptions): void {
+  if (!material.ca && !material.cert && !material.key) return;
+  try {
+    createSecureContext({ ca: material.ca, cert: material.cert, key: material.key, passphrase: material.passphrase });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`TLS material is not usable (${message}); a certificate rotation may be in progress`, { cause: error });
+  }
 }
 
 /**

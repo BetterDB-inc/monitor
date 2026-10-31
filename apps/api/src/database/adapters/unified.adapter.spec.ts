@@ -9,6 +9,7 @@ import {
   WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
+import { generateTlsPair, type TlsPair } from '../../../test/helpers/tls-fixtures';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
 // the real constructor (which would open a live Valkey connection).
@@ -787,16 +788,21 @@ describe('UnifiedDatabaseAdapter — TLS material and certificate auth', () => {
 });
 
 describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', () => {
-  const CERT_A = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
-  const CERT_B = '-----BEGIN CERTIFICATE-----\nB\n-----END CERTIFICATE-----\n';
-  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+  // Real material: refreshes validate the pair before adopting it.
+  let pairA: TlsPair;
+  let pairB: TlsPair;
   const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
   let certDir: string;
 
+  beforeAll(() => {
+    pairA = generateTlsPair('node-a');
+    pairB = generateTlsPair('node-b');
+  });
+
   beforeEach(() => {
     certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-rotation-'));
-    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT_A);
-    fs.writeFileSync(path.join(certDir, 'client.key'), KEY);
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairA.cert);
+    fs.writeFileSync(path.join(certDir, 'client.key'), pairA.key);
     process.env.BETTERDB_TLS_CERT_DIR = certDir;
   });
 
@@ -807,54 +813,73 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     jest.useRealTimers();
   });
 
-  it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
-    const adapter = new UnifiedDatabaseAdapter({
+  const fileAdapter = () =>
+    new UnifiedDatabaseAdapter({
       host: 'db.example.com',
       port: 6379,
       tls: true,
       authMode: 'certificate',
       tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
     });
-    const client = adapter.getClient();
-    expect(client.options.tls?.cert?.toString()).toBe(CERT_A);
+  const writePair = (pair: TlsPair) => {
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pair.cert);
+    fs.writeFileSync(path.join(certDir, 'client.key'), pair.key);
+  };
+  const certOf = (holder: { options: { tls?: { cert?: unknown } } }) => (holder.options.tls?.cert as Buffer | string | undefined)?.toString();
 
-    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT_B);
+  it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    expect(certOf(client)).toBe(pairA.cert);
+
+    writePair(pairB);
     client.emit('reconnecting');
 
-    expect(client.options.tls?.cert?.toString()).toBe(CERT_B);
+    expect(certOf(client)).toBe(pairB.cert);
     // SNI survives the refresh.
     expect(client.options.tls?.servername).toBe('db.example.com');
   });
 
   it('presents rotated files on every new socket, not only after a reconnect of the main client', () => {
     jest.useFakeTimers();
-    const adapter = new UnifiedDatabaseAdapter({
-      host: 'db.example.com',
-      port: 6379,
-      tls: true,
-      authMode: 'certificate',
-      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
-    });
+    const adapter = fileAdapter();
     const newSocket = () =>
       (adapter as unknown as { createValkeyClient(name: string): { options: { tls?: { cert?: Buffer | string; servername?: string } } } })
         .createValkeyClient('scratch');
-    expect(newSocket().options.tls?.cert?.toString()).toBe(CERT_A);
+    // A cached CLI client is kept current as well (it reconnects on its own).
+    const cliClient = { options: {} as { tls?: { cert?: Buffer | string } }, on: jest.fn() };
+    (adapter as unknown as { cliClient: unknown }).cliClient = cliClient;
+    expect(certOf(newSocket())).toBe(pairA.cert);
 
-    // Rotate on disk. A different size and a bumped mtime make the fingerprint change.
-    const rotated = CERT_B.replace('B', 'B-rotated');
-    fs.writeFileSync(path.join(certDir, 'client.crt'), rotated);
-    const later = new Date(Date.now() + 60_000);
-    fs.utimesSync(path.join(certDir, 'client.crt'), later, later);
+    writePair(pairB);
 
     // Within the recheck window nothing is stat-ed: scratch clients stay cheap.
-    expect(newSocket().options.tls?.cert?.toString()).toBe(CERT_A);
+    expect(certOf(newSocket())).toBe(pairA.cert);
 
     jest.advanceTimersByTime(TLS_MATERIAL_RECHECK_MS + 1);
     // A scratch client (key analytics, CLI) built now carries the new material...
-    expect(newSocket().options.tls?.cert?.toString()).toBe(rotated);
-    // ...and so does the main client's option object that cluster discovery copies.
-    expect(adapter.getClient().options.tls?.cert?.toString()).toBe(rotated);
+    expect(certOf(newSocket())).toBe(pairB.cert);
+    // ...and so do the long-lived clients' option objects (cluster discovery copies the main one).
+    expect(certOf(adapter.getClient())).toBe(pairB.cert);
     expect(adapter.getClient().options.tls?.servername).toBe('db.example.com');
+    expect(certOf(cliClient)).toBe(pairB.cert);
+  });
+
+  it('keeps the previous pair when a rotation is caught between writing the certificate and the key', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+
+    // Only the certificate has been replaced so far: the files do not match.
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairA.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairA.key);
+
+    // The key lands: the next refresh adopts the complete new pair.
+    fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairB.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairB.key);
   });
 
   it('keeps the previously loaded material when the rotated file is unreadable', () => {
@@ -867,7 +892,7 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     const client = adapter.getClient();
     fs.rmSync(path.join(certDir, 'client.crt'));
     client.emit('reconnecting');
-    expect(client.options.tls?.cert?.toString()).toBe(CERT_A);
+    expect(certOf(client)).toBe(pairA.cert);
   });
 
   it('gives up on ACL WHOAMI after the deadline instead of hanging connect()', async () => {

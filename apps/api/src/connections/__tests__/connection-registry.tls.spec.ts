@@ -16,6 +16,7 @@ jest.mock('../../database/adapters/unified.adapter', () => ({
     isConnected: jest.fn().mockReturnValue(true),
     getActiveDbIndex: jest.fn().mockReturnValue(0),
     getAuthenticatedUser: jest.fn().mockReturnValue('monitor-mtls'),
+    getObservedHostKeyFingerprint: jest.fn().mockReturnValue('SHA256:learned-on-first-use'),
     getCapabilities: jest.fn().mockReturnValue({ dbType: 'valkey', version: '9.1.0' }),
   })),
 }));
@@ -331,11 +332,16 @@ describe('ConnectionRegistry TLS material', () => {
       const AdapterMock = jest.requireMock('../../database/adapters/unified.adapter').UnifiedDatabaseAdapter as jest.Mock;
       const childAdapterOptions = AdapterMock.mock.calls.filter(([o]) => o.connectionId === 'auto-child').at(-1)?.[0];
       expect(childAdapterOptions).toMatchObject({ username: 'monitor', password: 'rotated-password' });
-      const persistedChild = storage.saveConnection.mock.calls.find(([c]) => c.id === 'auto-child')?.[0];
+      // The stored children held plaintext passwords, so boot first re-encrypts them; the
+      // last write for the auto child must carry the rotated credential.
+      const persistedChild = storage.saveConnection.mock.calls.filter(([c]) => c.id === 'auto-child').at(-1)?.[0];
       expect(persistedChild).toBeDefined();
       expect(enc.decrypt(persistedChild!.password!)).toBe('rotated-password');
       expect(registry.getConfig('adopted-child')).toMatchObject({ username: 'own-user', password: 'own-password' });
-      expect(storage.saveConnection.mock.calls.some(([c]) => c.id === 'adopted-child')).toBe(false);
+      // The adopted child is only re-encrypted, never overlaid with the environment.
+      const persistedAdopted = storage.saveConnection.mock.calls.filter(([c]) => c.id === 'adopted-child').at(-1)?.[0];
+      expect(persistedAdopted?.username).toBe('own-user');
+      expect(enc.decrypt(persistedAdopted!.password!)).toBe('own-password');
     });
 
     it('never nulls an auto-registered child ciphertext after a failed decrypt: the environment supplies the password', async () => {
@@ -393,6 +399,64 @@ describe('ConnectionRegistry TLS material', () => {
       // ...but nothing is written: a plaintext password or passphrase must never replace the encrypted record.
       expect(storage.saveConnection).not.toHaveBeenCalled();
       expect(storage.updateConnection).not.toHaveBeenCalled();
+    });
+
+    it('keeps nodes discovered from such a seed, and a learned SSH host key, in memory only', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({
+          password: enc.encrypt('stored-password'),
+          passwordEncrypted: true,
+          // Tunnelled with no pinned host key: connecting learns one (trust on first use).
+          sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password', password: enc.encrypt('ssh-pw'), secretsEncrypted: true },
+        }),
+      ]);
+      database.password = 'env-password';
+      delete process.env.ENCRYPTION_KEY;
+      try {
+        registry = await buildRegistry();
+        await registry.onModuleInit();
+        // Topology discovery adds a node under the env default.
+        const childId = await registry.addManagedChild(ENV_DEFAULT_ID, { host: '10.0.0.9', port: 6379, nodeId: 'n9', source: 'cluster' });
+
+        expect(registry.getConfig(ENV_DEFAULT_ID)?.sshTunnel?.hostKeyFingerprint).toBe('SHA256:learned-on-first-use');
+        expect(registry.getConfig(childId)).toMatchObject({ host: '10.0.0.9', password: 'env-password' });
+        expect(registry.list().some((c) => c.id === childId)).toBe(true);
+      } finally {
+        process.env.ENCRYPTION_KEY = KEY;
+        resetEncryptionService();
+      }
+      expect(storage.saveConnection).not.toHaveBeenCalled();
+    });
+
+    it('re-encrypts rows that hold plaintext secrets once a cipher is present', async () => {
+      storage.getConnections.mockResolvedValue([
+        saved({ password: 'plain-password', passwordEncrypted: false, tlsConfig: { source: 'inline', cert: CERT, key: PRIVATE_KEY, passphrase: 'pw', secretsEncrypted: false } }),
+      ]);
+
+      await registry.onModuleInit();
+
+      expect(registry.getConfig('c1')).toMatchObject({ password: 'plain-password', credentialStatus: 'valid' });
+      const persisted = storage.saveConnection.mock.calls.find(([c]) => c.id === 'c1')?.[0];
+      expect(persisted).toBeDefined();
+      expect(persisted!.passwordEncrypted).toBe(true);
+      expect(enc.decrypt(persisted!.password!)).toBe('plain-password');
+      expect(persisted!.tlsConfig?.secretsEncrypted).toBe(true);
+      expect(enc.decrypt(persisted!.tlsConfig!.key!)).toBe(PRIVATE_KEY);
+      expect(enc.decrypt(persisted!.tlsConfig!.passphrase!)).toBe('pw');
+    });
+
+    it('does not touch plaintext rows while no cipher is available', async () => {
+      storage.getConnections.mockResolvedValue([saved({ password: 'plain-password', passwordEncrypted: false })]);
+      delete process.env.ENCRYPTION_KEY;
+      try {
+        registry = await buildRegistry();
+        await registry.onModuleInit();
+      } finally {
+        process.env.ENCRYPTION_KEY = KEY;
+        resetEncryptionService();
+      }
+      expect(registry.getConfig('c1')?.password).toBe('plain-password');
+      expect(storage.saveConnection).not.toHaveBeenCalled();
     });
 
     it('rebuilds the default after a failed decrypt even when DB_PASSWORD is empty', async () => {

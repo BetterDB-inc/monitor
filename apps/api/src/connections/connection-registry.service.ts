@@ -85,6 +85,21 @@ function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * Whether a stored record carries any secret in plaintext. Used at boot to
+ * re-encrypt rows written while ENCRYPTION_KEY was unavailable (or before it
+ * was introduced) as soon as a cipher is present.
+ */
+function hasPlaintextSecrets(config: DatabaseConnectionConfig): boolean {
+  if (config.password && !config.passwordEncrypted) return true;
+  if (config.nodePassword && !config.nodePasswordEncrypted) return true;
+  const tlsConfig = config.tlsConfig;
+  if (tlsConfig && (tlsConfig.key || tlsConfig.passphrase) && !tlsConfig.secretsEncrypted) return true;
+  const tunnel = config.sshTunnel;
+  if (tunnel && (tunnel.password || tunnel.privateKey || tunnel.passphrase) && !tunnel.secretsEncrypted) return true;
+  return false;
+}
+
 function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin === 'auto' && config.membership.retiredAt !== undefined;
 }
@@ -114,6 +129,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
+  // Connections whose in-memory secrets came from the environment because the
+  // stored (encrypted) record could not be decrypted and no cipher is available.
+  // Nothing derived from them may be written while in this state: it would land
+  // in storage as plaintext. Children discovered from such a seed join the set.
+  private readonly memoryOnlySecrets = new Set<string>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -199,7 +219,17 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       for (const config of savedConnections) {
         // Decrypt password if encrypted; the env-owned default (and the nodes
         // discovered from it) follow the current environment, see syncWithEnvironment.
-        const decryptedConfig = await this.syncWithEnvironment(this.decryptConfig(config));
+        let decryptedConfig = this.decryptConfig(config);
+        // Heal rows that hold plaintext secrets (written while ENCRYPTION_KEY was
+        // unavailable, or before it was introduced) now that a cipher is present.
+        if (this.encryption && hasPlaintextSecrets(config) && decryptedConfig.credentialStatus !== 'decryption_failed') {
+          await this.storage.saveConnection(this.encryptConfig(decryptedConfig))
+            .then(() => this.logger.log(`${config.name}: re-encrypted secrets that were stored in plaintext`))
+            .catch((err) => {
+              this.logger.warn(`Failed to re-encrypt stored secrets for ${config.name}: ${err instanceof Error ? err.message : err}`);
+            });
+        }
+        decryptedConfig = await this.syncWithEnvironment(decryptedConfig);
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {
@@ -234,9 +264,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           // Trust-on-first-use: persist a newly-learned SSH host key so it is
           // verified on the next startup.
           if (this.captureLearnedHostKey(decryptedConfig, adapter)) {
-            await this.storage.saveConnection(this.encryptConfig(decryptedConfig)).catch((err) => {
-              this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
-            });
+            await this.persistLearnedHostKey(decryptedConfig);
           }
           // Mark credentials as valid after successful connection
           this.configs.set(config.id, { ...decryptedConfig, credentialStatus: 'valid' });
@@ -417,13 +445,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       // rebuilt record would write the password and TLS passphrase in plaintext,
       // and once ENCRYPTION_KEY returns they would compare equal to the
       // environment and never be re-encrypted. Use the environment values in
-      // memory only and leave storage untouched.
+      // memory only, leave storage untouched, and remember that every other
+      // write path (learned host keys, discovered children) must do the same.
+      this.memoryOnlySecrets.add(config.id);
       this.logger.warn(
         `${config.name}: credentials taken from the environment but not persisted ` +
           '(ENCRYPTION_KEY is not set; the stored encrypted record is kept)',
       );
       return synced;
     }
+    this.memoryOnlySecrets.delete(config.id);
 
     await this.storage.saveConnection(this.encryptConfig(synced)).catch((err) => {
       this.logger.warn(`Failed to persist environment-synced settings for ${config.name}: ${err instanceof Error ? err.message : err}`);
@@ -561,6 +592,27 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // service trims it and skips verification when empty).
     const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
     return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
+  }
+
+  /**
+   * Whether a record's secrets exist only in memory (see memoryOnlySecrets):
+   * the record itself, or a child of such a seed, must not be written.
+   */
+  private secretsAreMemoryOnly(config: Pick<DatabaseConnectionConfig, 'id' | 'membership'>): boolean {
+    if (this.memoryOnlySecrets.has(config.id)) return true;
+    const seedId = config.membership?.seedId;
+    return seedId !== undefined && this.memoryOnlySecrets.has(seedId);
+  }
+
+  /** Persist a config after a host key was learned, unless that would write plaintext secrets. */
+  private async persistLearnedHostKey(config: DatabaseConnectionConfig): Promise<void> {
+    if (this.secretsAreMemoryOnly(config)) {
+      this.logger.warn(`${config.name}: learned SSH host key kept in memory only (ENCRYPTION_KEY is not set; the stored encrypted record is kept)`);
+      return;
+    }
+    await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
+      this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+    });
   }
 
   /**
@@ -1212,9 +1264,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       // Trust-on-first-use: persist a newly-learned SSH host key.
       if (this.captureLearnedHostKey(current, newAdapter)) {
-        await this.storage.saveConnection(this.encryptConfig(current)).catch((err) => {
-          this.logger.warn(`Failed to persist learned SSH host key for ${current.name}: ${err instanceof Error ? err.message : err}`);
-        });
+        await this.persistLearnedHostKey(current);
       }
 
       // Update credential status to valid after successful reconnection
@@ -1392,7 +1442,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}${certificateHint(errorMsg, node)}`);
     }
     try {
-      await this.storage.saveConnection(this.encryptConfig(config));
+      if (this.secretsAreMemoryOnly(seed)) {
+        // The seed's password and TLS material came from the environment with
+        // no cipher available; the child inherits them and would be written in
+        // plaintext. Keep it in memory only; it is rediscovered (and then
+        // persisted encrypted) on the next boot with ENCRYPTION_KEY.
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: auto-registered in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
       this.configs.set(config.id, { ...config, credentialStatus, credentialError });
       this.connections.set(config.id, adapter);
     } catch (error) {

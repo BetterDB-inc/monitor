@@ -2,7 +2,7 @@ import Valkey from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
-import { createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
+import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
@@ -24,7 +24,8 @@ export interface CommandMigrationOptions {
 export async function runCommandMigration(opts: CommandMigrationOptions): Promise<void> {
   const { sourceConfig, targetConfig, sourceIsCluster, targetIsCluster, job, maxLogLines } = opts;
   const sourceClients: Valkey[] = [];
-  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster);
+  const onTlsRefreshError = (message: string) => log(job, maxLogLines, message);
+  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster, onTlsRefreshError);
 
   try {
     await targetClient.connect();
@@ -48,19 +49,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
             commandTimeout: 15_000,
             connectionName: 'BetterDB-Migration-Source',
           });
-          // iovalkey reads `options.tls` when it opens each socket: re-read
-          // file-sourced material before a reconnect so a certificate rotated
-          // mid-migration is presented (the monitor adapter does the same).
-          if (sourceConfig.tls && sourceConfig.tlsConfig?.source === 'file') {
-            client.on('reconnecting', () => {
-              try {
-                const { tls } = nodeClientAuthOptions(sourceConfig, host, hostname);
-                if (tls) client.options.tls = tls;
-              } catch (err) {
-                log(job, maxLogLines, `Keeping previously loaded TLS files for ${host}:${port}: ${err instanceof Error ? err.message : err}`);
-              }
-            });
-          }
+          attachTlsRefresh(client, sourceConfig, host, hostname, onTlsRefreshError);
           // Register before connecting: a client whose first dial fails keeps
           // reconnecting in the background unless the outer cleanup quits it.
           sourceClients.push(client);
@@ -75,7 +64,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
         await discoveryClient.quit();
       }
     } else {
-      const client = createClient(sourceConfig, 'BetterDB-Migration-Source');
+      const client = createClient(sourceConfig, 'BetterDB-Migration-Source', onTlsRefreshError);
       await client.connect();
       sourceClients.push(client);
     }

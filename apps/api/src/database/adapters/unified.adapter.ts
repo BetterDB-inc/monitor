@@ -54,7 +54,7 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_S
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
-import { assertAuthConfig, clientCredentials, resolveTlsMaterial, tlsMaterialFingerprint, type TlsMaterialOptions } from './tls-material';
+import { assertAuthConfig, assertUsableTlsMaterial, clientCredentials, resolveTlsMaterial, tlsMaterialFingerprint, type TlsMaterialOptions } from './tls-material';
 import { withTimeout } from '../../common/utils/with-timeout';
 import type { ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
@@ -245,8 +245,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * TLS_MATERIAL_RECHECK_MS, so the scratch client per database that key
    * analytics opens does not pay for file reads. `force` (used when iovalkey is
    * about to reconnect) skips the throttle and re-reads unconditionally. A read
-   * failure keeps the previously loaded material rather than breaking a working
-   * connection. Inline material never changes after construction.
+   * failure, or material that does not parse as a matching certificate and key
+   * (a rotation caught between writing the two files), keeps the previously
+   * loaded material rather than breaking a working connection. Inline material
+   * never changes after construction.
    */
   private refreshTlsMaterial(force = false): void {
     if (!this.config.tls || this.config.tlsConfig?.source !== 'file' || this.tlsSetupError) return;
@@ -257,11 +259,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       const fingerprint = tlsMaterialFingerprint(this.config.tlsConfig);
       if (!force && fingerprint === this.tlsMaterialFingerprint) return;
       const changed = fingerprint !== this.tlsMaterialFingerprint;
-      this.tlsMaterial = resolveTlsMaterial(this.config.tlsConfig);
+      const material = resolveTlsMaterial(this.config.tlsConfig);
+      assertUsableTlsMaterial(material);
+      this.tlsMaterial = material;
       this.tlsMaterialFingerprint = fingerprint;
-      // Keep the main client's options current too: cluster discovery copies
-      // them onto per-node clients without going through createValkeyClient.
+      // Keep the long-lived clients' options current too: cluster discovery
+      // copies the main client's onto per-node clients without going through
+      // createValkeyClient, and the cached CLI client reconnects on its own.
       if (this._client) this._client.options.tls = this.composeTlsOptions();
+      if (this.cliClient) this.cliClient.options.tls = this.composeTlsOptions();
       if (changed) this.logger.log('TLS files changed on disk; new sockets present the updated material');
     } catch (error) {
       this.logger.warn(
@@ -1639,6 +1645,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     this.cliClient = this.createValkeyClient('BetterDB-CLI');
+    // Same rotation pickup as the main client: re-read before the next dial.
+    this.cliClient.on('reconnecting', () => this.refreshTlsMaterial(true));
     await this.cliClient.connect();
     this.logger.log('CLI client connected');
     return this.cliClient;

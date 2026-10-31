@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { ExecutionJob } from './execution-job';
+import { generateTlsPair } from '../../../test/helpers/tls-fixtures';
 
 type MockClient = {
   host: string;
@@ -42,7 +43,8 @@ jest.mock('iovalkey', () => {
     clients.push(client);
     return client;
   });
-  return { __esModule: true, default: ctor, Cluster: jest.fn() };
+  const Cluster = jest.fn().mockImplementation(() => ({ on: jest.fn(), connect: jest.fn().mockResolvedValue(undefined), quit: jest.fn().mockResolvedValue('OK') }));
+  return { __esModule: true, default: ctor, Cluster };
 });
 
 import { parseClusterMasters, runCommandMigration } from './command-migration-worker';
@@ -131,29 +133,51 @@ describe('runCommandMigration source clients', () => {
     expect(clients.filter((c) => c.host !== 'cache.internal').every((c) => c.quit.mock.calls.length > 0)).toBe(true);
   });
 
-  it('re-reads file-sourced certificates before a source client reconnects', async () => {
+  it('re-reads file-sourced certificates before any source client reconnects (cluster masters and standalone)', async () => {
+    const pairA = generateTlsPair('a');
+    const pairB = generateTlsPair('b');
     const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-rotation-'));
     try {
       const certPath = path.join(certDir, 'client.crt');
       const keyPath = path.join(certDir, 'client.key');
-      fs.writeFileSync(certPath, CERT);
-      fs.writeFileSync(keyPath, KEY);
+      fs.writeFileSync(certPath, pairA.cert);
+      fs.writeFileSync(keyPath, pairA.key);
       const fileSource = { ...sourceConfig, tlsConfig: { source: 'file' as const, trustedPaths: true, certPath, keyPath } };
+      const job = makeJob();
       failingHosts = new Set(['10.0.0.2']); // stop before the SCAN phase
-      await runCommandMigration({ sourceConfig: fileSource, targetConfig, sourceIsCluster: true, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }).catch(() => undefined);
+      await runCommandMigration({ sourceConfig: fileSource, targetConfig, sourceIsCluster: true, targetIsCluster: false, job, maxLogLines: 50 }).catch(() => undefined);
 
       const nodeA = clients.find((c) => c.host === '10.0.0.1')!;
-      expect(nodeA.options.tls?.cert?.toString()).toBe(CERT);
-      const rotated = CERT.replace('c', 'rotated');
-      fs.writeFileSync(certPath, rotated);
+      expect(nodeA.options.tls?.cert?.toString()).toBe(pairA.cert);
+
+      // Mid-rotation (certificate replaced, key not yet): the mismatched pair is not adopted.
+      fs.writeFileSync(certPath, pairB.cert);
       nodeA.handlers['reconnecting']();
-      expect(nodeA.options.tls?.cert?.toString()).toBe(rotated);
+      expect(nodeA.options.tls?.cert?.toString()).toBe(pairA.cert);
+      expect(job.logs.some((l) => /Keeping previously loaded TLS files for 10.0.0.1:6379/.test(l))).toBe(true);
+
+      fs.writeFileSync(keyPath, pairB.key);
+      nodeA.handlers['reconnecting']();
+      expect(nodeA.options.tls?.cert?.toString()).toBe(pairB.cert);
       expect(nodeA.options.tls?.servername).toBe('node-a.internal');
 
       // An unreadable rotation keeps the loaded material instead of breaking the client.
       fs.rmSync(certPath);
       nodeA.handlers['reconnecting']();
-      expect(nodeA.options.tls?.cert?.toString()).toBe(rotated);
+      expect(nodeA.options.tls?.cert?.toString()).toBe(pairB.cert);
+
+      // The standalone branch gets the same handler through createClient.
+      clients.length = 0;
+      fs.writeFileSync(certPath, pairA.cert);
+      fs.writeFileSync(keyPath, pairA.key);
+      await runCommandMigration({ sourceConfig: fileSource, targetConfig, sourceIsCluster: false, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }).catch(() => undefined);
+      const standalone = clients.find((c) => c.host === 'cache.internal')!;
+      expect(standalone.handlers['reconnecting']).toBeDefined();
+      fs.writeFileSync(certPath, pairB.cert);
+      fs.writeFileSync(keyPath, pairB.key);
+      standalone.handlers['reconnecting']();
+      expect(standalone.options.tls?.cert?.toString()).toBe(pairB.cert);
+      expect(standalone.options.tls?.servername).toBe('cache.internal');
     } finally {
       fs.rmSync(certDir, { recursive: true, force: true });
     }
