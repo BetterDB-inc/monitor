@@ -15,7 +15,8 @@ const makePostgres = adapters.find(([name]) => name === 'PostgresAdapter')?.[1];
     const { rows } = await pool.query(
       `SELECT c.relname, i.indisvalid FROM pg_index i
        JOIN pg_class c ON c.oid = i.indexrelid
-       WHERE c.relname = ANY($1) AND pg_table_is_visible(c.oid)`,
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE c.relname = ANY($1) AND n.nspname = current_schema()`,
       [SCOPE_INDEXES],
     );
     return Object.fromEntries(rows.map((r: { relname: string; indisvalid: boolean }) => [r.relname, r.indisvalid]));
