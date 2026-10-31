@@ -452,6 +452,30 @@ describe('WebhookAnomalyIntegrationService', () => {
       expect(new Set(dispatched()).size).toBe(1500);
     });
 
+    it('reaches the oldest end of a window larger than one poll can read', async () => {
+      stored.push(
+        event('late', start + MINUTE),
+        ...Array.from({ length: 12_000 }, (_, i) => event(`e-${i}`, start + 2 * MINUTE + i)),
+      );
+
+      await poll();
+      expect(dispatched()).not.toContain('late');
+
+      await poll();
+      expect(dispatched()).toContain('late');
+      expect(new Set(dispatched()).size).toBe(12_001);
+    });
+
+    it('still sends new events first while working through a large window', async () => {
+      stored.push(...Array.from({ length: 25_000 }, (_, i) => event(`e-${i}`, start + MINUTE + i)));
+      await poll();
+
+      stored.push(event('new', start + 9 * MINUTE));
+      await poll();
+
+      expect(dispatched()).toContain('new');
+    });
+
     it('forgets events once they leave the window', async () => {
       stored.push(event('a', start + MINUTE));
       await poll();
