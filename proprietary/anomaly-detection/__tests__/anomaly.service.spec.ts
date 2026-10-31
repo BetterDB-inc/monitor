@@ -39,6 +39,9 @@ describe('AnomalyService', () => {
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
 
+  const divergenceHistory = () =>
+    service.getReplicationDivergenceHistory('conn-1', 0, Number.MAX_SAFE_INTEGER);
+
   beforeEach(async () => {
     slowLogAnalytics = {
       getLastSeenId: jest.fn().mockReturnValue(null),
@@ -3346,13 +3349,10 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
-    it('feeds the per-second rate, not the lifetime counter, and exposes the sample', async () => {
+    it('feeds the per-second rate, not the lifetime counter', async () => {
       const { buffers } = await runChurn([{ connectsPerSec: 30, clients: 100 }]);
 
       expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
-      expect(service.getConnectionChurnSample('conn-1')).toEqual(
-        expect.objectContaining({ connectsPerSec: 30, connectedClients: 100, retainedRatio: 0 }),
-      );
     });
   });
 
@@ -6172,6 +6172,45 @@ describe('AnomalyService', () => {
       expect(saved).toEqual(['a@node-1', 'b@node-2']);
     });
 
+    it('reads the members of every group with one query', async () => {
+      const stored = ['grp-1', 'grp-2'].map((correlationId, i) => ({
+        correlationId,
+        timestamp: 1_000_000 + i * 60_000,
+        pattern: 'memory_pressure',
+        severity: 'warning',
+        diagnosis: '',
+        recommendations: [],
+        anomalyCount: 1,
+        metricTypes: [],
+        connectionId: 'node-2',
+      }));
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId, correlationIds }: any) =>
+        connectionId === 'node-2' && !correlationIds ? stored : [],
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ correlationIds }: any) =>
+        correlationIds
+          ? [
+              { ...member('a', 'node-1'), correlationId: 'grp-1' },
+              { ...member('b', 'node-2'), correlationId: 'grp-2', timestamp: 1_060_000 },
+            ]
+          : [],
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(groups.map((g) => g.anomalies.map((a) => a.id))).toEqual([['b'], ['a']]);
+      const memberReads = (storage.getAnomalyEvents as jest.Mock).mock.calls.filter(
+        ([options]: any[]) => options.correlationIds,
+      );
+      expect(memberReads).toHaveLength(1);
+      expect(memberReads[0][0]).toMatchObject({
+        correlationIds: ['grp-2', 'grp-1'],
+        startTime: 1_000_000 - 5_000,
+        endTime: 1_060_000 + 5_000,
+      });
+      expect(memberReads[0][0].connectionId).toBeUndefined();
+    });
+
     it('skips groups from other members that do not involve the caller', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-1'
@@ -6461,9 +6500,9 @@ describe('AnomalyService', () => {
             ]
           : [],
       );
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
-          ? [member('a', 'node-1')]
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId, correlationIds }: any) =>
+        correlationIds
+          ? [member('a', 'node-1'), member('b', 'node-2')]
           : connectionId === 'node-2'
             ? [member('b', 'node-2')]
             : [],
@@ -6478,6 +6517,32 @@ describe('AnomalyService', () => {
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
         expect.objectContaining({ connectionId: 'node-1', correlationIds: ['grp-1'] }),
       );
+    });
+  });
+
+  describe('events read from storage', () => {
+    it('keeps resolvedAt', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([
+        {
+          id: 'a',
+          timestamp: 1_000,
+          metricType: MetricType.MEMORY_USED,
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 1,
+          baseline: 1,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 1,
+          message: '',
+          resolved: true,
+          resolvedAt: 2_000,
+        },
+      ]);
+
+      const [event] = await service.getRecentAnomalies(1, 3_000);
+
+      expect(event.resolvedAt).toBe(2_000);
     });
   });
 
@@ -6817,10 +6882,10 @@ describe('AnomalyService', () => {
         },
       });
 
-      expect(service.getReplicationStreamSample('conn-1')).toBeNull();
+      expect((service as any).replicationStream.latest('conn-1')).toBeNull();
       await poll();
 
-      const sample = service.getReplicationStreamSample('conn-1');
+      const sample = (service as any).replicationStream.latest('conn-1');
       expect(sample).toMatchObject({
         role: 'primary',
         masterReplOffset: 5000,
@@ -6845,7 +6910,7 @@ describe('AnomalyService', () => {
       await poll();
       clock.mockRestore();
 
-      const next = service.getReplicationStreamSample('conn-1');
+      const next = (service as any).replicationStream.latest('conn-1');
       expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogHistlen: 6144 });
       expect(next!.bytesPerSec).not.toBeNull();
       expect(next!.replicas[0].gapBytes).toBe(500);
@@ -6926,7 +6991,7 @@ describe('AnomalyService', () => {
       });
       const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
       expect(event.relatedMetrics).toEqual([MetricType.MEMORY_USED]);
-      expect(service.getReplicationDivergenceState('conn-1')[0]).toMatchObject({
+      expect((await divergenceHistory())[0]).toMatchObject({
         replica: '10.0.0.2:6379',
         level: 'warning',
       });
@@ -6934,7 +6999,7 @@ describe('AnomalyService', () => {
       await feed([0, 0, 0], t);
       expect(recoveredHook).toHaveBeenCalledTimes(1);
       expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379', reason: 'caught_up' });
-      expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('none');
+      expect((await divergenceHistory())[0].level).toBe('none');
     });
 
     it('retries a failed window write on the next poll and keeps detecting', async () => {
@@ -6946,7 +7011,7 @@ describe('AnomalyService', () => {
         .slice(1)
         .flatMap(([rows]: [Array<{ gapBytes: number }>]) => rows.map((r) => r.gapBytes));
       expect(saved).toEqual([2 * MiB, 4 * MiB]);
-      expect(service.getReplicationDivergenceState('conn-1')[0].windows).toHaveLength(2);
+      expect((await divergenceHistory())[0].windows).toHaveLength(2);
     });
 
     it('serves the stored gap series with the live level per replica', async () => {
@@ -7093,7 +7158,7 @@ describe('AnomalyService', () => {
 
       await feed([6, 8, 10, 12, 14, 16], T0);
 
-      expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('warning');
+      expect((await divergenceHistory())[0].level).toBe('warning');
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
       expect(restartRecoveries()).toEqual([]);
     });
@@ -7144,7 +7209,7 @@ describe('AnomalyService', () => {
 
       await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
 
-      expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('warning');
+      expect((await divergenceHistory())[0].level).toBe('warning');
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
       expect(restartRecoveries().map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
     });
@@ -7342,7 +7407,7 @@ describe('AnomalyService', () => {
 
         expect(replica.level).toBe('unobserved');
         expect(replica.latest).toBeNull();
-        expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('unobserved');
+        expect((await divergenceHistory())[0].level).toBe('unobserved');
       });
 
       it('stays in sync within one window', async () => {
@@ -7842,7 +7907,7 @@ describe('AnomalyService', () => {
         const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
 
         expect(replica.level).toBe('warning');
-        expect(service.getReplicationDivergenceState('conn-1')[0].level).toBe('warning');
+        expect((await divergenceHistory())[0].level).toBe('warning');
       });
     });
   });

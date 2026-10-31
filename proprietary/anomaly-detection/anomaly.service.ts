@@ -30,7 +30,6 @@ import {
   computeConnectionChurn,
   isChurnWithFlatPopulation,
   ConnectionChurnReading,
-  ConnectionChurnSample,
 } from './connection-churn';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
@@ -274,7 +273,6 @@ export class AnomalyService
   // Last total_connections_received reading and the derived churn sample per
   // connection; the sample is exposed for other detectors to read.
   private lastChurnReading = new Map<string, ConnectionChurnReading>();
-  private connectionChurnSamples = new Map<string, ConnectionChurnSample>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
   // config value (fetched once) so the alert can say whether eviction is even
@@ -725,7 +723,6 @@ export class AnomalyService
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
     this.lastChurnReading.delete(connectionId);
-    this.connectionChurnSamples.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
@@ -1565,17 +1562,6 @@ export class AnomalyService
   // it appear under heavy write load) can be dialed up without touching logic.
   private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
 
-  /**
-   * Detect connected_clients approaching maxclients (valkey-io/valkey#3918).
-   * Once the pool is exhausted, new connections — including operator/monitoring
-   * sessions — are refused, so warning early gives time to shed load or connect
-   * over a reserved/unix socket before that happens.
-   *
-   * State-based with hysteresis: emits only when saturation ESCALATES
-   * (none→warning, none/warning→critical), never on every poll while steady, and
-   * re-arms when it falls back below the warning threshold — so a busy-but-stable
-   * server doesn't spam alerts.
-   */
   private async detectConnectionChurn(
     ctx: ConnectionContext,
     info: Record<string, string>,
@@ -1590,7 +1576,6 @@ export class AnomalyService
     const reading = { totalReceived, connectedClients, timestamp };
     const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
     this.lastChurnReading.set(ctx.connectionId, reading);
-    this.connectionChurnSamples.set(ctx.connectionId, sample);
     if (sample.connectsPerSec === null) {
       const buffer = buffers.get(MetricType.CONNECTION_CHURN);
       const detector = detectors.get(MetricType.CONNECTION_CHURN);
@@ -1636,10 +1621,17 @@ export class AnomalyService
     detector.detect(buffer, buffer.getMean(), timestamp);
   }
 
-  getConnectionChurnSample(connectionId: string): ConnectionChurnSample | undefined {
-    return this.connectionChurnSamples.get(connectionId);
-  }
-
+  /**
+   * Detect connected_clients approaching maxclients (valkey-io/valkey#3918).
+   * Once the pool is exhausted, new connections — including operator/monitoring
+   * sessions — are refused, so warning early gives time to shed load or connect
+   * over a reserved/unix socket before that happens.
+   *
+   * State-based with hysteresis: emits only when saturation ESCALATES
+   * (none→warning, none/warning→critical), never on every poll while steady, and
+   * re-arms when it falls back below the warning threshold — so a busy-but-stable
+   * server doesn't spam alerts.
+   */
   private async detectClientSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
@@ -5601,6 +5593,7 @@ export class AnomalyService
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       resolved: s.resolved,
+      resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,
     };
   }
@@ -5791,57 +5784,32 @@ export class AnomalyService
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, limit);
 
-    const groups: CorrelatedAnomalyGroup[] = [];
-    for (const s of stored) {
-      const storedAnomalies = await Promise.all(
-        connectionIds.map((id) =>
-          this.storage.getAnomalyEvents({
-            startTime: s.timestamp - this.correlationIntervalMs,
-            endTime: s.timestamp + this.correlationIntervalMs,
-            connectionId: id,
-            correlationIds: [s.correlationId],
-            limit: this.maxRecentEvents,
-          }),
-        ),
-      );
-      const anomalies = [
-        ...new Map(
-          storedAnomalies
-            .flat()
-            .filter((a) => a.correlationId === s.correlationId)
-            .map((a) => [a.id, this.storedToAnomalyEvent(a)]),
-        ).values(),
-      ].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-
-      groups.push({
-        correlationId: s.correlationId,
-        timestamp: s.timestamp,
-        pattern: s.pattern as AnomalyPattern,
-        severity: s.severity as AnomalySeverity,
-        diagnosis: s.diagnosis,
-        recommendations: s.recommendations,
-        anomalies,
-      });
+    if (stored.length === 0) return [];
+    const timestamps = stored.map((s) => s.timestamp);
+    const members = await this.storage.getAnomalyEvents({
+      startTime: Math.min(...timestamps) - this.correlationIntervalMs,
+      endTime: Math.max(...timestamps) + this.correlationIntervalMs,
+      correlationIds: stored.map((s) => s.correlationId),
+      limit: this.maxRecentEvents * stored.length,
+    });
+    const membersByGroup = new Map<string, AnomalyEvent[]>();
+    for (const member of members) {
+      if (!member.correlationId) continue;
+      const anomalies = membersByGroup.get(member.correlationId) ?? [];
+      anomalies.push(this.storedToAnomalyEvent(member));
+      membersByGroup.set(member.correlationId, anomalies);
     }
 
-    return groups;
-  }
-
-  getReplicationStreamSample(connectionId: string): ReplicationStreamSample | null {
-    return this.replicationStream.latest(connectionId);
-  }
-
-  getReplicationDivergenceState(
-    connectionId: string,
-  ): Array<{ replica: string; level: string; windows: DivergenceWindow[] }> {
-    const state = this.divergenceState.get(connectionId);
-    if (!state) return [];
-    const now = Date.now();
-    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
-    return [...state.replicas.values()].map((r) => ({
-      replica: r.addr,
-      level: replicaObservedLevel(state, r.addr, now, staleAfterMs),
-      windows: [...r.windows],
+    return stored.map((s) => ({
+      correlationId: s.correlationId,
+      timestamp: s.timestamp,
+      pattern: s.pattern as AnomalyPattern,
+      severity: s.severity as AnomalySeverity,
+      diagnosis: s.diagnosis,
+      recommendations: s.recommendations,
+      anomalies: (membersByGroup.get(s.correlationId) ?? []).sort(
+        (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
+      ),
     }));
   }
 

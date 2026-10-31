@@ -1603,6 +1603,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private replicationDivergenceWindows: StoredReplicationDivergenceWindow[] = [];
+  private replicationDivergenceWindowKeys = new Set<string>();
+
+  private replicationDivergenceWindowKey(
+    connectionId: string,
+    w: Pick<StoredReplicationDivergenceWindow, 'replicaAddr' | 'windowStart' | 'windowEnd'>,
+  ): string {
+    return JSON.stringify([connectionId, w.replicaAddr, w.windowStart, w.windowEnd]);
+  }
 
   async saveReplicationDivergenceWindows(
     windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
@@ -1610,14 +1618,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   ): Promise<number> {
     let saved = 0;
     for (const w of windows) {
-      const exists = this.replicationDivergenceWindows.some(
-        (stored) =>
-          stored.connectionId === connectionId &&
-          stored.replicaAddr === w.replicaAddr &&
-          stored.windowStart === w.windowStart &&
-          stored.windowEnd === w.windowEnd,
-      );
-      if (exists) continue;
+      const key = this.replicationDivergenceWindowKey(connectionId, w);
+      if (this.replicationDivergenceWindowKeys.has(key)) continue;
+      this.replicationDivergenceWindowKeys.add(key);
       this.replicationDivergenceWindows.push({ id: randomUUID(), connectionId, ...w });
       saved++;
     }
@@ -1658,6 +1661,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const before = this.replicationDivergenceWindows.length;
     this.replicationDivergenceWindows = this.replicationDivergenceWindows.filter(
       (w) => w.windowEnd >= cutoffTimestamp || (connectionId !== undefined && w.connectionId !== connectionId),
+    );
+    this.replicationDivergenceWindowKeys = new Set(
+      this.replicationDivergenceWindows.map((w) => this.replicationDivergenceWindowKey(w.connectionId, w)),
     );
     return before - this.replicationDivergenceWindows.length;
   }

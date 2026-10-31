@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { ReplicationDivergencePanel, formatGap } from './ReplicationDivergencePanel';
+import { ReplicationDivergencePanel } from './ReplicationDivergencePanel';
 import { PaymentRequiredError } from '@/api/client';
 import type { ReplicaDivergenceHistory } from '@/types/anomaly';
 
@@ -42,7 +42,7 @@ describe('ReplicationDivergencePanel', () => {
 
     expect(screen.getByText('10.0.0.2:6379')).toBeInTheDocument();
     expect(screen.getByText('Diverging')).toBeInTheDocument();
-    expect(screen.getByText('8.0 MiB')).toBeInTheDocument();
+    expect(screen.getByText('8.00 MB')).toBeInTheDocument();
     expect(screen.getByText('8s')).toBeInTheDocument();
     expect(screen.getByText('Critical')).toHaveClass('bg-destructive', 'text-destructive-foreground');
     expect(screen.getByText('In sync')).toBeInTheDocument();
@@ -128,11 +128,5 @@ describe('ReplicationDivergencePanel', () => {
 
     expect(screen.getByText('10.0.0.2:6379')).toBeInTheDocument();
     expect(screen.getByRole('alert')).toBeInTheDocument();
-  });
-
-  it('formats gap sizes across units', () => {
-    expect(formatGap(512)).toBe('512 B');
-    expect(formatGap(2048)).toBe('2.0 KiB');
-    expect(formatGap(3 * 1024 ** 3)).toBe('3.0 GiB');
   });
 });

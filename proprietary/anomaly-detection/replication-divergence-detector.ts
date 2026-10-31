@@ -1,3 +1,5 @@
+import { formatBytes } from '@app/scaling-readiness/dimension-inputs';
+import { median } from '../latency-regression/regression-detector';
 import { ReplicationStreamSample } from './replication-stream';
 import { MetricType } from './types';
 
@@ -148,12 +150,6 @@ export function createDivergenceState(): DivergenceConnectionState {
     closedWindowCount: 0,
     lastWindowEnd: null,
   };
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 function writesStopped(window: DivergenceWindow): boolean {
@@ -636,13 +632,6 @@ export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.OPS_PER_SEC,
   MetricType.CLUSTER_TOPOLOGY,
 ]);
-
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
-  return `${Math.round(bytes)} B`;
-}
 
 function describeReason(finding: DivergenceFinding): string {
   switch (finding.reason) {

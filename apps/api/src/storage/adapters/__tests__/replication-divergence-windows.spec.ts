@@ -254,3 +254,42 @@ describe('saving replication divergence windows before initialization', () => {
     );
   });
 });
+
+describe('MemoryAdapter replication divergence window dedupe', () => {
+  const window = (windowStart: number) => ({
+    replicaAddr: '10.0.0.2:6379',
+    windowStart,
+    windowEnd: windowStart + 30_000,
+    gapBytes: 1,
+    bytesPerSec: 1,
+    secondsBehind: 1,
+  });
+
+  it('dedupes saves without scanning the stored windows', async () => {
+    const adapter = new MemoryAdapter();
+    await adapter.saveReplicationDivergenceWindows([window(1)], 'c1');
+    const scan = jest.spyOn((adapter as any).replicationDivergenceWindows, 'some');
+
+    expect(await adapter.saveReplicationDivergenceWindows([window(1), window(2)], 'c1')).toBe(1);
+
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it('saves a window again once it has been pruned', async () => {
+    const adapter = new MemoryAdapter();
+    await adapter.saveReplicationDivergenceWindows([window(1)], 'c1');
+    await adapter.pruneOldReplicationDivergenceWindows(Number.MAX_SAFE_INTEGER, 'c1');
+
+    expect(await adapter.saveReplicationDivergenceWindows([window(1)], 'c1')).toBe(1);
+  });
+
+  it('keeps the key of a window another connection still holds', async () => {
+    const adapter = new MemoryAdapter();
+    await adapter.saveReplicationDivergenceWindows([window(1)], 'c1');
+    await adapter.saveReplicationDivergenceWindows([window(1)], 'c2');
+    await adapter.pruneOldReplicationDivergenceWindows(Number.MAX_SAFE_INTEGER, 'c1');
+
+    expect(await adapter.saveReplicationDivergenceWindows([window(1)], 'c2')).toBe(0);
+    expect(await adapter.saveReplicationDivergenceWindows([window(1)], 'c1')).toBe(1);
+  });
+});
