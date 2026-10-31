@@ -10856,6 +10856,41 @@ describe('AnomalyService', () => {
         expect(raised[1].severity).toBe(AnomalySeverity.WARNING);
       });
 
+      it('stops tracking a dropped event so recovery does not resolve it', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        const [first] = events();
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+        const retried = events().find((e) => e.id !== first.id);
+
+        expect((service as any).clientSaturationEventIds.get('conn-1')).toEqual([retried?.id]);
+
+        await pollWith(clients(50));
+
+        const resolved = storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id);
+        expect(resolved).toContain(retried?.id);
+        expect(resolved).not.toContain(first.id);
+      });
+
+      it('keeps tracking the later event when an older one is dropped', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        const [first] = events();
+        await pollWith(clients(97));
+        const critical = events()[1];
+        storage.saveAnomalyEvent.mockReset();
+        healSaves();
+        await (service as any).persistAnomaly(critical, mockCtx);
+
+        await expireOutbox();
+
+        expect(first.persisted).not.toBe(true);
+        expect((service as any).clientSaturationEventIds.get('conn-1')).toEqual([critical.id]);
+      });
+
       it('leaves no state behind when the connection went away before the drop', async () => {
         failSaves();
         await pollWith(clients(85));

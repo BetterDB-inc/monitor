@@ -1985,6 +1985,10 @@ export class AnomalyService
     previous: 'none' | 'warning' | 'critical',
   ): () => void {
     return () => {
+      const tracked = this.clientSaturationEventIds.get(connectionId) ?? [];
+      const remaining = tracked.filter((id) => id !== eventId);
+      if (remaining.length > 0) this.clientSaturationEventIds.set(connectionId, remaining);
+      else this.clientSaturationEventIds.delete(connectionId);
       if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
       this.clientSaturationRaisedBy.delete(connectionId);
       const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
