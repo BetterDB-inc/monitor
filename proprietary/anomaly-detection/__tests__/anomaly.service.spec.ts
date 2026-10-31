@@ -3627,6 +3627,27 @@ describe('AnomalyService', () => {
       expect((service as any).retryAmplificationState.get('conn-1').ackedLevel).toBe('none');
     });
 
+    it('keeps the level when an older event is dropped after a newer one was saved', async () => {
+      const { recorded } = await runRetry();
+      const addAnomaly = (service as any).addAnomaly as jest.SpyInstance;
+      const [, , onDrop] = addAnomaly.mock.calls.find(
+        ([event]: [any]) => event.id === recorded[0].id,
+      );
+      const level = (service as any).retryAmplificationState.get('conn-1').ackedLevel;
+      addAnomaly.mockRestore();
+
+      await (service as any).addLatchedAnomaly(
+        { ...recorded[0], id: 'newer' },
+        mockCtx,
+        'conn-1',
+        jest.fn(),
+      );
+      onDrop();
+
+      expect(level).not.toBe('none');
+      expect((service as any).retryAmplificationState.get('conn-1').ackedLevel).toBe(level);
+    });
+
     it('keeps a P99 regression as stress past the hold while the latency guard reports it degraded', async () => {
       (service as any).recentAnomalies.push({
         id: 'old-p99',

@@ -3417,7 +3417,12 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, retryAmplificationRearm(state, finding));
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      ctx.connectionId,
+      retryAmplificationRearm(state, finding),
+    );
 
     if (this.webhookEventsProService) {
       this.webhookEventsProService
