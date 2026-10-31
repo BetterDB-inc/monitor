@@ -35,6 +35,7 @@ export const SUSTAINED_DEGRADATION_FACTOR = 2.0;
 export const SUSTAINED_MIN_BASELINE_SAMPLES = 30;
 export const SUSTAINED_BASELINE_EXCLUDE_MS = 5 * 60 * 1000;
 export const SUSTAINED_COOLDOWN_MS = 30 * 60 * 1000;
+export const SUSTAINED_DEGRADATION_MESSAGE = 'Sustained P99 latency degradation';
 /** Minimum absolute degradation (current - baseline) to count, in microseconds. */
 export const MIN_ABS_DEGRADATION_US = 1000;
 export const CONSECUTIVE_REQUIRED = 5;
@@ -102,6 +103,10 @@ function describeCommands(commands: CommandRegression[]): string {
         `${c.command} p99 ${formatMs(c.currentP99Us)} (baseline ${formatMs(c.baselineP99Us)}, ${c.degradationFactor.toFixed(1)}x)`,
     )
     .join('; ');
+}
+
+export function regressedCommands(message: string): string[] {
+  return [...message.matchAll(/(\S+) p99 /g)].map(([, command]) => command).sort();
 }
 
 const TOPOLOGY_NOTE =
@@ -437,7 +442,7 @@ export class RegressionDetector {
         nowMs,
       );
 
-      let message = `Sustained P99 latency degradation: ${describeCommands([regression])}.`;
+      let message = `${SUSTAINED_DEGRADATION_MESSAGE}: ${describeCommands([regression])}.`;
       if (correlated) message += TOPOLOGY_NOTE;
 
       findings.push({

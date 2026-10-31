@@ -16,6 +16,9 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
+import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
+import { formatBytes } from '../lib/utils';
+import type { ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
   AlertCircle,
@@ -111,6 +114,17 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
   node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
+  reshard_pressure: { icon: Database, label: 'Reshard Pressure', color: 'var(--chart-warning)' },
+  recovery_amplification: {
+    icon: Database,
+    label: 'Recovery Amplification',
+    color: 'var(--destructive)',
+  },
+  replication_divergence: {
+    icon: Database,
+    label: 'Replication Divergence',
+    color: 'var(--destructive)',
+  },
   unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
 };
 
@@ -155,6 +169,11 @@ const METRIC_LABELS: Record<string, string> = {
   persistence_child: 'Persistence Child',
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
+  connection_churn: 'Connection Churn',
+  reshard_shard_skew: 'Reshard Shard Skew',
+  backlog_coverage_risk: 'Backlog Coverage Risk',
+  resync_escalation: 'Resync Escalation',
+  replication_divergence: 'Replication Divergence',
 };
 
 function formatTime(ts: number): string {
@@ -165,7 +184,8 @@ function formatTime(ts: number): string {
   });
 }
 
-function formatValue(value: number, metric: string): string {
+export function formatValue(value: number, metric: string): string {
+  if (metric === 'replication_divergence') return formatBytes(value);
   if (metric === 'memory_used' || metric === 'memory_overhead') {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
@@ -276,6 +296,15 @@ export function AnomalyDashboard() {
   const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
+    refetchKey: currentConnection?.id,
+  });
+
+  const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
+    ReplicaDivergenceHistory[]
+  >({
+    fetcher: () =>
+      currentConnection?.id ? metricsApi.getReplicationDivergence() : Promise.resolve([]),
+    interval: 10000,
     refetchKey: currentConnection?.id,
   });
 
@@ -407,6 +436,11 @@ export function AnomalyDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <ReplicationDivergencePanel
+        replicas={replicationDivergence ?? undefined}
+        error={replicationDivergenceError}
+      />
 
       {/* Charts Row */}
       <div className="grid md:grid-cols-2 gap-4">

@@ -22,6 +22,15 @@ import { MonitorCaptureService } from './monitor-capture.service';
 export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const LATE_ANOMALY_LOOKBACK_MS = 5 * 60_000;
+const INSERTED_WATERMARK_MARGIN_MS = 5_000;
+
+interface AnomalyScan {
+  from: number;
+  offset: number;
+  insertedSince: number;
+  newestInsert: number;
+}
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -53,6 +62,10 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CaptureTriggerRegistry.name);
   private pollHandle?: NodeJS.Timeout;
   private lastAnomalyAt: number;
+  private replayFloor: number;
+  private insertedWatermark = 0;
+  private anomalyScan: AnomalyScan | null = null;
+  private readonly seenAnomalies = new Map<string, number>();
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
   private ticking = false;
@@ -69,11 +82,15 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     // anyway, but starting from 0 still means an unbounded scan on first
     // tick. Tests can reset via the test seam below.
     this.lastAnomalyAt = Date.now();
+    this.replayFloor = this.lastAnomalyAt + 1;
   }
 
   /** Test seam — reset the anomaly watermark so specs see all stored events. */
   resetAnomalyWatermark(): void {
     this.lastAnomalyAt = 0;
+    this.replayFloor = 0;
+    this.insertedWatermark = 0;
+    this.anomalyScan = null;
   }
 
   setOptions(options: CaptureTriggerRegistryOptions): void {
@@ -194,38 +211,55 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processNewAnomalies(): Promise<void> {
-    const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
+    const startTime =
+      this.lastAnomalyAt === 0
+        ? 0
+        : Math.max(this.replayFloor, this.lastAnomalyAt + 1 - LATE_ANOMALY_LOOKBACK_MS);
+    for (const [id, timestamp] of this.seenAnomalies) {
+      if (timestamp < startTime) this.seenAnomalies.delete(id);
+    }
     const pageSize = 200;
-    // Drain pagination by walking offset until storage returns fewer rows
-    // than requested. Cap total work per tick so a runaway backlog can't
-    // starve other tick steps.
-    const maxPerTick = 5000;
-    const collected: StoredAnomalyEvent[] = [];
-    for (let offset = 0; offset < maxPerTick; offset += pageSize) {
+    const maxScannedPerTick = 5000;
+    const scan = this.anomalyScan ?? {
+      from: startTime,
+      offset: 0,
+      insertedSince: this.insertedWatermark,
+      newestInsert: 0,
+    };
+    const resuming = this.anomalyScan !== null;
+    let resumeAt: AnomalyScan | null = null;
+    const sorted: StoredAnomalyEvent[] = [];
+    for (let read = 0; ; read += pageSize) {
       const page = await this.storage.getAnomalyEvents({
-        startTime,
+        startTime: scan.from,
+        insertedSince: scan.insertedSince,
+        order: 'asc',
         limit: pageSize,
-        offset,
+        offset: scan.offset + read,
       });
-      if (page.length === 0) {
-        break;
+      if (!resuming) {
+        for (const evt of page) {
+          scan.newestInsert = Math.max(scan.newestInsert, evt.insertedAt ?? 0);
+        }
       }
-      collected.push(...page);
+      sorted.push(...page.filter((evt) => !this.seenAnomalies.has(evt.id)));
       if (page.length < pageSize) {
         break;
       }
+      if (read + pageSize >= maxScannedPerTick) {
+        resumeAt = { ...scan, offset: scan.offset + read + pageSize };
+        break;
+      }
     }
-    if (collected.length === 0) {
-      return;
-    }
-    // Storage returns DESC by timestamp; iterate oldest-first so a partial
-    // drain still leaves a coherent watermark.
-    const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
     let maxTs = this.lastAnomalyAt;
     for (const evt of sorted) {
       if (evt.timestamp > maxTs) {
         maxTs = evt.timestamp;
       }
+      if (this.seenAnomalies.has(evt.id)) {
+        continue;
+      }
+      this.seenAnomalies.set(evt.id, evt.timestamp);
       if (!evt.connectionId) {
         continue;
       }
@@ -239,6 +273,13 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.lastAnomalyAt = maxTs;
+    this.anomalyScan = resumeAt;
+    if (!resumeAt) {
+      this.insertedWatermark = Math.max(
+        this.insertedWatermark,
+        scan.newestInsert - INSERTED_WATERMARK_MARGIN_MS,
+      );
+    }
   }
 
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {

@@ -81,6 +81,41 @@ describe('Correlator', () => {
     });
   });
 
+  describe('RESHARD_PRESSURE pattern', () => {
+    it('needs only the skew event', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it('wins over a latency pattern in the same window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.COMMAND_P99, timestamp: now }),
+        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it.each([MetricType.REPLICATION_ROLE, MetricType.CLUSTER_STATE])(
+      'leaves a window with %s to the failover diagnosis',
+      (metricType) => {
+        const now = Date.now();
+        const groups = correlator.correlate([
+          makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now }),
+          makeAnomaly({ metricType, timestamp: now + 100 }),
+        ]);
+
+        expect(groups).toHaveLength(1);
+        expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      },
+    );
+  });
+
   describe('NODE_FAILOVER pattern', () => {
     it('matches on REPLICATION_ROLE metric', () => {
       const anomaly = makeAnomaly({
@@ -90,6 +125,17 @@ describe('Correlator', () => {
       });
 
       const groups = correlator.correlate([anomaly]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+
+    it('keeps the failover diagnosis when divergence shares the window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.REPLICATION_DIVERGENCE, timestamp: now }),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 100 }),
+      ]);
+
       expect(groups).toHaveLength(1);
       expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
     });
@@ -260,6 +306,78 @@ describe('Correlator', () => {
     });
   });
 
+  describe('COMMAND_P99 input', () => {
+    it('maps a standalone P99 regression to SLOW_QUERIES', () => {
+      const groups = correlator.correlate([makeAnomaly({ metricType: MetricType.COMMAND_P99 })]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.SLOW_QUERIES);
+      expect(groups[0].diagnosis).toContain('P99');
+    });
+
+    it('lets a co-occurring failover take precedence', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, metricType: MetricType.REPLICATION_ROLE }),
+        makeAnomaly({ timestamp: t + 1000, metricType: MetricType.COMMAND_P99 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+    });
+  });
+
+  describe('scope partitioning', () => {
+    it('keeps anomalies from different connections in separate groups', () => {
+      const baseTime = 1000000;
+      const a1 = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.CONNECTIONS,
+        connectionId: 'conn-a',
+      });
+      const a2 = makeAnomaly({
+        timestamp: baseTime + 1000,
+        metricType: MetricType.OPS_PER_SEC,
+        connectionId: 'conn-b',
+      });
+
+      const groups = correlator.correlate([a1, a2]);
+
+      expect(groups).toHaveLength(2);
+      expect(groups.map((g) => g.anomalies[0].connectionId)).toEqual(['conn-a', 'conn-b']);
+    });
+
+    it('groups nodes that resolve to the same scope', () => {
+      const scoped = new Correlator(5000, (a) => (a.connectionId === 'node-2' ? 'seed' : a.connectionId ?? ''));
+      const baseTime = 1000000;
+      const roleChange = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.REPLICATION_ROLE,
+        connectionId: 'node-2',
+      });
+      const slowlog = makeAnomaly({
+        timestamp: baseTime + 1000,
+        metricType: MetricType.SLOWLOG_LAST_ID,
+        connectionId: 'seed',
+      });
+
+      const groups = scoped.correlate([roleChange, slowlog]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      expect(groups[0].anomalies).toHaveLength(2);
+    });
+
+    it('returns groups in chronological order across scopes', () => {
+      const baseTime = 1000000;
+      const late = makeAnomaly({ timestamp: baseTime + 3000, connectionId: 'conn-a' });
+      const early = makeAnomaly({ timestamp: baseTime, connectionId: 'conn-b' });
+
+      const groups = correlator.correlate([late, early]);
+
+      expect(groups.map((g) => g.timestamp)).toEqual([baseTime, baseTime + 3000]);
+    });
+  });
+
   describe('single metric pattern matching', () => {
     it('matches ACL_DENIED to AUTH_ATTACK pattern', () => {
       const anomaly = makeAnomaly({
@@ -277,6 +395,34 @@ describe('Correlator', () => {
 
       const groups = correlator.correlate([anomaly]);
       expect(groups[0].pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+    });
+  });
+
+  describe('related metrics', () => {
+    it('keeps detector-stamped related metrics after grouping', () => {
+      const baseTime = 1000000;
+      const stamped = makeAnomaly({
+        timestamp: baseTime,
+        metricType: MetricType.CONNECTIONS,
+        relatedMetrics: [MetricType.MEMORY_USED],
+      });
+      correlator.correlate([
+        stamped,
+        makeAnomaly({ timestamp: baseTime + 1000, metricType: MetricType.OPS_PER_SEC }),
+      ]);
+
+      expect(stamped.relatedMetrics).toEqual([MetricType.MEMORY_USED, MetricType.OPS_PER_SEC]);
+    });
+
+    it('sets the other members for an unstamped event', () => {
+      const baseTime = 1000000;
+      const unstamped = makeAnomaly({ timestamp: baseTime, metricType: MetricType.CONNECTIONS });
+      correlator.correlate([
+        unstamped,
+        makeAnomaly({ timestamp: baseTime + 1000, metricType: MetricType.OPS_PER_SEC }),
+      ]);
+
+      expect(unstamped.relatedMetrics).toEqual([MetricType.OPS_PER_SEC]);
     });
   });
 
@@ -388,6 +534,140 @@ describe('Correlator', () => {
       const recs = correlator.getPatternRecommendations(AnomalyPattern.SLOW_QUERIES);
       expect(recs.length).toBeGreaterThan(0);
       expect(recs).toContain('Review slow log entries to identify problematic commands');
+    });
+  });
+
+  describe('REPLICATION_DIVERGENCE pattern', () => {
+    const divergence = (overrides: Partial<AnomalyEvent> = {}) =>
+      makeAnomaly({
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        zScore: 0,
+        message: 'WARNING: Replica 10.0.0.2:6379 is 8.0 MiB behind the primary',
+        connectionId: 'c1',
+        ...overrides,
+      });
+
+    it('reads a lone warning as still being watched', () => {
+      const groups = correlator.correlate([divergence()]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(groups[0].diagnosis).toContain('watching whether it catches up');
+    });
+
+    it('does not claim a write burst it has no evidence for', () => {
+      const [group] = correlator.correlate([
+        divergence({
+          message:
+            'WARNING: Replica 10.0.0.2:6379 is 8.0 MiB behind the primary; ' +
+            'the replica has not acknowledged the stream for over 10s.',
+        }),
+      ]);
+      expect(group.diagnosis).not.toContain('write burst');
+      expect(group.recommendations).toContain(
+        'If bulk writes or resharding are driving it, throttle them until the replica catches up',
+      );
+    });
+
+    it('reads a critical divergence as sustained', () => {
+      const [group] = correlator.correlate([divergence({ severity: AnomalySeverity.CRITICAL })]);
+      expect(group.diagnosis).toContain('Sustained replication divergence');
+    });
+
+    it('groups divergence with memory pressure into one compound diagnosis', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(groups[0].diagnosis).toContain('alongside memory growth');
+    });
+
+    it.each([
+      [MetricType.CLUSTER_STATE, AnomalyPattern.NODE_FAILOVER],
+      [MetricType.ACL_DENIED, AnomalyPattern.AUTH_ATTACK],
+    ])('leaves a window with %s to %s', (metricType, pattern) => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(pattern);
+    });
+
+    it.each([MetricType.PERSISTENCE_CHILD, MetricType.SLOWLOG_LAST_ID, MetricType.CONNECTIONS])(
+      'keeps the divergence diagnosis alongside %s',
+      (metricType) => {
+        const now = Date.now();
+        const [group] = correlator.correlate([
+          divergence({ timestamp: now }),
+          makeAnomaly({ metricType, timestamp: now + 100, connectionId: 'c1' }),
+        ]);
+        expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      },
+    );
+
+    it('keeps the divergence diagnosis alongside memory growth with evictions', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+        makeAnomaly({ metricType: MetricType.EVICTED_KEYS, timestamp: now + 200, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+    });
+
+    it('names CPU saturation when it shares the window', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(group.diagnosis).toContain('alongside CPU saturation');
+    });
+
+    it('leaves a saturation window with a failover to saturation', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 200, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
+    });
+
+    it('names signals the detector stamped from outside the correlation window', () => {
+      const [group] = correlator.correlate([
+        divergence({
+          relatedMetrics: [MetricType.REPL_BUFFER_PRESSURE, MetricType.CLUSTER_TOPOLOGY],
+        }),
+      ]);
+      expect(group.diagnosis).toContain('replica output-buffer pressure');
+      expect(group.diagnosis).toContain('slot migration');
+    });
+
+    it('keeps stamped related metrics after grouping', () => {
+      const now = Date.now();
+      const stamped = divergence({ timestamp: now, relatedMetrics: [MetricType.FORK_MEMORY_RISK] });
+      correlator.correlate([
+        stamped,
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(stamped.relatedMetrics).toEqual(
+        expect.arrayContaining([MetricType.FORK_MEMORY_RISK, MetricType.MEMORY_USED]),
+      );
     });
   });
 });

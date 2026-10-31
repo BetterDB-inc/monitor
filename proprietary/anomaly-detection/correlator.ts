@@ -8,6 +8,7 @@ import {
   AnomalyType,
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
+import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
 
 interface PatternRule {
   pattern: AnomalyPattern;
@@ -18,19 +19,68 @@ interface PatternRule {
   check?: (anomalies: AnomalyEvent[]) => boolean;
 }
 
+export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
+
+const DIVERGENCE_YIELDS_TO: ReadonlySet<MetricType> = new Set([
+  MetricType.ACL_DENIED,
+  MetricType.REPLICATION_ROLE,
+  MetricType.CLUSTER_STATE,
+]);
+
+function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent[]): string {
+  const divergence = anomalies.filter((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE);
+  const metrics = new Set<MetricType>([
+    ...anomalies.map((a) => a.metricType),
+    ...divergence.flatMap((a) => a.relatedMetrics ?? []),
+  ]);
+  const signals = [
+    ...new Set(
+      [...metrics]
+        .map((m) => DIVERGENCE_COMPOUND_SIGNALS.get(m))
+        .filter((label): label is string => label !== undefined),
+    ),
+  ];
+  const critical = divergence.some((a) => a.severity === AnomalySeverity.CRITICAL);
+  if (!critical && signals.length === 0) return fallback;
+  const context = signals.length > 0 ? ` alongside ${signals.join(', ')}` : '';
+  return (
+    `Sustained replication divergence${context} — the replica is not keeping up, ` +
+    'and the pressures can compound while client throughput and latency still look healthy'
+  );
+}
+
+const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
+
 export class Correlator {
   private readonly correlationWindowMs: number;
   private readonly patternRules: PatternRule[];
+  private readonly scopeOf: CorrelationScopeResolver;
 
-  constructor(correlationWindowMs: number = 5000) {
+  constructor(
+    correlationWindowMs: number = 5000,
+    scopeOf: CorrelationScopeResolver = scopeByConnection,
+  ) {
     this.correlationWindowMs = correlationWindowMs;
+    this.scopeOf = scopeOf;
     this.patternRules = this.initializePatternRules();
   }
 
   private initializePatternRules(): PatternRule[] {
     return [
-      // First so a window holding the saturation marker plus its side effects
-      // (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
+      {
+        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
+        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
+        check: (anomalies) => !anomalies.some((a) => DIVERGENCE_YIELDS_TO.has(a.metricType)),
+        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
+        recommendations: [
+          'Compare the replica offset gap with the primary write rate over the next few minutes',
+          'Check replica host CPU, disk and network for a slow apply path',
+          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
+          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
+        ],
+      },
+      // Before failover so a window holding the saturation marker plus its side
+      // effects (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
       {
         pattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
         requiredMetrics: [MetricType.CPU_UTILIZATION],
@@ -92,6 +142,25 @@ export class Correlator {
           'Review cluster-level slow queries across nodes',
           'Inspect CLUSTER INFO for partially-failed slots',
           'Confirm no split-brain scenario exists',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.RESHARD_PRESSURE,
+        requiredMetrics: [MetricType.RESHARD_SHARD_SKEW],
+        optionalMetrics: [
+          MetricType.COMMAND_P99,
+          MetricType.LOAD_SATURATION,
+          MetricType.CPU_UTILIZATION,
+          MetricType.MEMORY_USED,
+          MetricType.OPS_PER_SEC,
+        ],
+        diagnosis:
+          'Slot migration is concentrating load on one shard while the cluster aggregate looks healthy',
+        recommendations: [
+          'Pause or slow the reshard until the skewed shard recovers',
+          'Reduce the keys moved per batch, or schedule the migration for a lower write period',
+          'Check the source and target shards for slow commands and large keys in the moving slots',
+          'Rebalance slots once the migration finishes if the skew remains',
         ],
       },
       {
@@ -299,6 +368,17 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.SLOW_QUERIES,
+        requiredMetrics: [MetricType.COMMAND_P99],
+        diagnosis: 'Per-command P99 latency regression detected',
+        recommendations: [
+          'Compare per-command P99 before and after the regression in latencystats history',
+          'Check for a recent server upgrade or config change on this instance',
+          'Look for concurrent resharding, resync or persistence activity',
+          'Review the commands named in the regression for larger payloads',
+        ],
+      },
+      {
         pattern: AnomalyPattern.CACHE_THRASHING,
         requiredMetrics: [MetricType.KEYSPACE_MISSES],
         diagnosis: 'High cache miss rate detected',
@@ -318,26 +398,22 @@ export class Correlator {
     // Sort by timestamp
     const sorted = [...anomalies].sort((a, b) => a.timestamp - b.timestamp);
 
-    // Group anomalies by time windows
-    const windows: AnomalyEvent[][] = [];
-    let currentWindow: AnomalyEvent[] = [];
-    let windowStart = sorted[0].timestamp;
-
+    // Partition by topology scope first so unrelated instances alerting in the
+    // same few seconds never share a group; nodes of one cluster still do.
+    const partitions = new Map<string, AnomalyEvent[]>();
     for (const anomaly of sorted) {
-      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
-        currentWindow.push(anomaly);
+      const scope = this.scopeOf(anomaly);
+      const partition = partitions.get(scope);
+      if (partition) {
+        partition.push(anomaly);
       } else {
-        if (currentWindow.length > 0) {
-          windows.push(currentWindow);
-        }
-        currentWindow = [anomaly];
-        windowStart = anomaly.timestamp;
+        partitions.set(scope, [anomaly]);
       }
     }
 
-    if (currentWindow.length > 0) {
-      windows.push(currentWindow);
-    }
+    const windows = [...partitions.values()]
+      .flatMap((partition) => this.splitIntoWindows(partition))
+      .sort((a, b) => a[0].timestamp - b[0].timestamp);
 
     // Correlate each window
     const groups: CorrelatedAnomalyGroup[] = [];
@@ -388,6 +464,30 @@ export class Correlator {
     return groups;
   }
 
+  private splitIntoWindows(sorted: AnomalyEvent[]): AnomalyEvent[][] {
+    const windows: AnomalyEvent[][] = [];
+    let currentWindow: AnomalyEvent[] = [];
+    let windowStart = sorted[0].timestamp;
+
+    for (const anomaly of sorted) {
+      if (anomaly.timestamp - windowStart <= this.correlationWindowMs) {
+        currentWindow.push(anomaly);
+      } else {
+        if (currentWindow.length > 0) {
+          windows.push(currentWindow);
+        }
+        currentWindow = [anomaly];
+        windowStart = anomaly.timestamp;
+      }
+    }
+
+    if (currentWindow.length > 0) {
+      windows.push(currentWindow);
+    }
+
+    return windows;
+  }
+
   private detectPattern(anomalies: AnomalyEvent[]): PatternRule | null {
     const metricTypes = new Set(anomalies.map((a) => a.metricType));
 
@@ -417,9 +517,10 @@ export class Correlator {
     // Update correlation ID on all anomalies
     anomalies.forEach((a) => {
       a.correlationId = correlationId;
-      a.relatedMetrics = anomalies
+      const members = anomalies
         .filter((other) => other.id !== a.id)
         .map((other) => other.metricType);
+      a.relatedMetrics = [...new Set([...(a.relatedMetrics ?? []), ...members])];
     });
 
     // Determine overall severity (highest severity wins)
@@ -449,6 +550,10 @@ export class Correlator {
    * For NODE_FAILOVER, dynamically mention slowlog correlation if present.
    */
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
+    if (rule.pattern === AnomalyPattern.REPLICATION_DIVERGENCE) {
+      return describeReplicationDivergence(rule.diagnosis, anomalies);
+    }
+
     if (rule.pattern === AnomalyPattern.NODE_FAILOVER) {
       const hasSlowlogSpike = anomalies.some((a) => a.metricType === MetricType.SLOWLOG_LAST_ID);
       const hasClusterState = anomalies.some((a) => a.metricType === MetricType.CLUSTER_STATE);

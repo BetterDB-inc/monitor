@@ -38,6 +38,7 @@ export async function runRetentionSweep(
     },
     { name: 'anomaly_events', fn: () => storage.pruneOldAnomalyEvents(cutoff) },
     { name: 'correlated_groups', fn: () => storage.pruneOldCorrelatedGroups(cutoff) },
+    { name: 'incident_boundaries', fn: () => storage.pruneOldIncidentBoundaries(cutoff) },
     { name: 'key_patterns', fn: () => storage.pruneOldKeyPatternSnapshots(cutoff) },
     { name: 'hot_keys', fn: () => storage.pruneOldHotKeys(cutoff) },
     { name: 'acl_entries', fn: () => storage.pruneOldEntries(cutoff) },
@@ -59,6 +60,10 @@ export async function runRetentionSweep(
     // reclaims rows left behind by removed or unreachable connections.
     { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(sampleCutoff) },
     { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(sampleCutoff) },
+    {
+      name: 'replication_divergence_windows',
+      fn: () => storage.pruneOldReplicationDivergenceWindows(sampleCutoff),
+    },
     {
       name: 'vector_index_snapshots',
       fn: () => storage.pruneOldVectorIndexSnapshots(sampleCutoff),

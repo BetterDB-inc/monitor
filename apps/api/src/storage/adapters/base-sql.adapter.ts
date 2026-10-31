@@ -202,12 +202,15 @@ export class RowMappers {
       message: row.message,
       correlationId: row.correlation_id,
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
+      replicaAddr: row.replica_addr ?? undefined,
       resolved: this.dialect.fromBoolean(row.resolved),
       resolvedAt: row.resolved_at ? (typeof row.resolved_at === 'string' ? parseInt(row.resolved_at, 10) : row.resolved_at) : undefined,
       durationMs: row.duration_ms ? (typeof row.duration_ms === 'string' ? parseInt(row.duration_ms, 10) : row.duration_ms) : undefined,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      scopeId: row.scope_id ?? undefined,
+      insertedAt: row.created_at ? new Date(row.created_at).getTime() : undefined,
     };
   }
 
@@ -227,6 +230,8 @@ export class RowMappers {
       sourceHost: row.source_host,
       sourcePort: row.source_port,
       connectionId: row.connection_id,
+      anomalyIds: row.anomaly_ids ? this.dialect.fromArray(row.anomaly_ids) : undefined,
+      scopeId: row.scope_id ?? undefined,
     };
   }
 

@@ -158,12 +158,15 @@ export interface StoredAnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: string[];
+  replicaAddr?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  scopeId?: string;
+  insertedAt?: number;
 }
 
 // Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
@@ -208,6 +211,30 @@ export interface StoredCorrelatedGroup {
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  anomalyIds?: string[];
+  scopeId?: string;
+}
+
+export interface AnomalyEventCursor {
+  timestamp: number;
+  id: string;
+}
+
+export interface StoredIncidentBoundary {
+  scopeId: string;
+  startedAt: number;
+  anomalyId: string;
+}
+
+export interface IncidentBoundaryQuery {
+  scopeIds?: string[];
+  startTime: number;
+  endTime?: number;
+}
+
+export interface AnomalyScopeFilter {
+  id: string;
+  connectionIds: string[];
 }
 
 export interface AnomalyQueryOptions {
@@ -220,6 +247,16 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  order?: 'asc' | 'desc';
+  after?: AnomalyEventCursor;
+  scope?: AnomalyScopeFilter;
+  insertedSince?: number;
+}
+
+export interface CorrelatedGroupQueryOptions
+  extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
+  patterns?: string[];
+  involvingConnectionId?: string;
 }
 
 export interface AnomalyStats {
@@ -369,6 +406,25 @@ export interface LatencyStatsHistoryQueryOptions {
    * baselines (6h/≥5 upgrade, 24h/≥30 sustained) would be starved despite older rows in storage.
    * Default 10,000.
    */
+  limit?: number;
+}
+
+export interface StoredReplicationDivergenceWindow {
+  id: string;
+  connectionId: string;
+  replicaAddr: string;
+  windowStart: number;
+  windowEnd: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+}
+
+export interface ReplicationDivergenceWindowQueryOptions {
+  connectionId: string;
+  replicaAddr?: string;
+  startTime: number;
+  endTime: number;
   limit?: number;
 }
 
@@ -590,11 +646,27 @@ export interface StoragePort {
    * false only when no anomaly with that id exists.
    */
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
+  /**
+   * Resolve an anomaly only if it is still open. Returns true only when this
+   * call resolved it, so a caller can tell it apart from one already resolved.
+   */
+  resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
-  getCorrelatedGroups(options?: AnomalyQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroups(options?: CorrelatedGroupQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+  ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number>;
+
+  getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]>;
+
+  pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number>;
 
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
   saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;
@@ -747,6 +819,15 @@ export interface StoragePort {
   ): Promise<number>;
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]>;
+  pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(

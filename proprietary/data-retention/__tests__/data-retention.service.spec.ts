@@ -26,6 +26,7 @@ describe('DataRetentionService', () => {
       pruneOldClientAnalyticsRollups: jest.fn().mockResolvedValue(22),
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(4),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(5),
+      pruneOldIncidentBoundaries: jest.fn().mockResolvedValue(0),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(6),
       pruneOldHotKeys: jest.fn().mockResolvedValue(21),
       pruneOldEntries: jest.fn().mockResolvedValue(7),
@@ -41,6 +42,7 @@ describe('DataRetentionService', () => {
       pruneOldOtelSpans: jest.fn().mockResolvedValue(17),
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(18),
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(19),
+      pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(24),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(20),
       pruneOldKvCacheFootprintSnapshots: jest.fn().mockResolvedValue(22),
       pruneOldKvCacheEngineSamples: jest.fn().mockResolvedValue(23),
@@ -86,6 +88,7 @@ describe('DataRetentionService', () => {
     'pruneOldClientAnalyticsRollups',
     'pruneOldAnomalyEvents',
     'pruneOldCorrelatedGroups',
+    'pruneOldIncidentBoundaries',
     'pruneOldKeyPatternSnapshots',
     'pruneOldHotKeys',
     'pruneOldEntries',
@@ -119,6 +122,7 @@ describe('DataRetentionService', () => {
     'pruneOldLatencyStatsSamples',
     'pruneOldVectorIndexSnapshots',
     'pruneOldKvCacheEngineSamples',
+    'pruneOldReplicationDivergenceWindows',
   ] as const;
 
   it('community tier uses 7-day cutoff and calls all prune methods', async () => {

@@ -1989,6 +1989,65 @@ server.tool(
 );
 
 server.tool(
+  'get_incident_timeline',
+  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). Use to answer "what happened, in what order, and has it recovered".',
+  {
+    limit: z.number().optional().describe('Max incidents to return, newest first (default 20)'),
+    startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_incident_timeline', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/incidents${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Anomaly detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
+  'get_replication_divergence',
+  'Get replication divergence for a primary: the per-replica offset gap series (bytes behind, write rate, seconds behind, live alert level, `behind` when it lags under the alert thresholds or has an event left open by a restart, or `unobserved` when the replica is not connected) and the divergence events from the anomaly store; `eventsUnavailable: true` means the events could not be read, not that there are none. Use when a replica is falling behind under write load, to see whether the gap is growing, at a ceiling, or not closing after the burst. Companion to get_anomalies.',
+  {
+    limit: z.number().optional().describe('Max divergence events to return (default 100)'),
+    startTime: z
+      .number()
+      .optional()
+      .describe('Start time (Unix timestamp ms; default 1h ago for the gap series, 24h ago for events)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, startTime, instanceId }) =>
+    withTelemetry('get_replication_divergence', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, startTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/history/replication-divergence${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return unavailableResult('Replication divergence detection');
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
+      }
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+server.tool(
   'get_largest_keys',
   'Get the largest keys from key analytics snapshots, ranked by measured memory usage. Coverage note: snapshots track the biggest collections by element count, so a memory-heavy key with few elements may not be tracked. Companion to get_hot_keys, which ranks by access frequency. Use to find memory hogs, bloated hashes/sets, or candidates for TTL/eviction. Requires BetterDB Pro (keyAnalytics).',
   {

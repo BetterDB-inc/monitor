@@ -255,3 +255,10 @@ export function evaluateResyncLoop(
 export function acknowledgeResyncLoopFinding(state: ResyncLoopState): void {
   state.alerted = true;
 }
+
+export function resyncLoopRearm(state: ResyncLoopState): () => void {
+  const { downWindowStart } = state;
+  return () => {
+    if (state.downWindowStart === downWindowStart) state.alerted = false;
+  };
+}

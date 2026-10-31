@@ -9,11 +9,14 @@ describe('McpAnomalyController', () => {
   let controller: McpAnomalyController;
   const svc = {
     getRecentAnomalies: jest.fn(),
+    getIncidentTimelines: jest.fn(),
+    getReplicationDivergenceHistory: jest.fn(),
   };
 
   beforeEach(async () => {
     jest.clearAllMocks();
     svc.getRecentAnomalies.mockResolvedValue([{ id: 'a1' }]);
+    svc.getReplicationDivergenceHistory.mockResolvedValue([{ replica: '10.0.0.2:6379' }]);
     const mod = await Test.createTestingModule({
       controllers: [McpAnomalyController],
       providers: [{ provide: AnomalyService, useValue: svc }],
@@ -37,6 +40,34 @@ describe('McpAnomalyController', () => {
       10,
       'inst1',
     );
+  });
+
+  it('replication divergence returns per-replica series with divergence events', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(10_000_000);
+    const res = await controller.getReplicationDivergence('inst1', '5', undefined);
+    expect(res).toEqual({ replicas: [{ replica: '10.0.0.2:6379' }], events: [{ id: 'a1' }] });
+    expect(svc.getReplicationDivergenceHistory).toHaveBeenCalledWith('inst1', 10_000_000 - 3_600_000, 10_000_000);
+    expect(svc.getRecentAnomalies).toHaveBeenCalledWith(
+      10_000_000 - 86_400_000,
+      undefined,
+      undefined,
+      'replication_divergence',
+      5,
+      'inst1',
+    );
+    jest.restoreAllMocks();
+  });
+
+  it('replication divergence keeps the replica series when events cannot be read', async () => {
+    svc.getRecentAnomalies.mockRejectedValueOnce(new Error('db down'));
+
+    const res = await controller.getReplicationDivergence('inst1', undefined, undefined);
+
+    expect(res).toEqual({
+      replicas: [{ replica: '10.0.0.2:6379' }],
+      events: [],
+      eventsUnavailable: true,
+    });
   });
 
   it('anomalies rejects unknown metricType with 400', async () => {
@@ -81,5 +112,20 @@ describe('McpAnomalyController', () => {
     }
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
+  it('incidents forwards the instance, start time and limit', async () => {
+    svc.getIncidentTimelines.mockResolvedValueOnce([{ incidentId: 'i1' }]);
+
+    const res = await controller.getIncidents('inst1', '5', '5000');
+
+    expect(res).toEqual([{ incidentId: 'i1' }]);
+    expect(svc.getIncidentTimelines).toHaveBeenCalledWith('inst1', 5000, undefined, 5);
+  });
+
+  it('incidents maps service failures to 500', async () => {
+    svc.getIncidentTimelines.mockRejectedValueOnce(new Error('boom'));
+
+    await expect(controller.getIncidents('inst1')).rejects.toBeInstanceOf(HttpException);
   });
 });

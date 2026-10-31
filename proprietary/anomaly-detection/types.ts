@@ -64,6 +64,12 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
+  CONNECTION_CHURN = 'connection_churn',
+  RESHARD_SHARD_SKEW = 'reshard_shard_skew',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
+  BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
+  RESYNC_ESCALATION = 'resync_escalation',
 }
 
 /**
@@ -104,6 +110,11 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.CONNECTION_CHURN,
+  MetricType.RESHARD_SHARD_SKEW,
+  MetricType.REPLICATION_DIVERGENCE,
+  MetricType.BACKLOG_COVERAGE_RISK,
+  MetricType.RESYNC_ESCALATION,
 ]);
 
 export enum AnomalySeverity {
@@ -129,6 +140,9 @@ export enum AnomalyPattern {
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
+  RESHARD_PRESSURE = 'reshard_pressure',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
+  RECOVERY_AMPLIFICATION = 'recovery_amplification',
   UNKNOWN = 'unknown',
 }
 
@@ -146,8 +160,11 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
+  scopeId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.
    * createControlPlaneSaturationEvent) to mark an event that represents a
@@ -211,4 +228,10 @@ export interface AnomalySummary {
   byPattern: Record<AnomalyPattern, number>;
   activeEvents: number;
   resolvedEvents: number;
+}
+
+export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
+
+export interface AnomalyEventSink {
+  ingestExternalAnomaly(event: AnomalyEvent): void;
 }
