@@ -64,6 +64,7 @@ import {
   ClientLockoutState,
   LOCKOUT_MIN_STREAK,
   LOCKOUT_UTILIZATION_PCT,
+  clientLockoutRearm,
   commitClientLockoutLevel,
   createClientLockoutState,
   evaluateClientLockout,
@@ -163,7 +164,7 @@ import {
 import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import { OutboxEntry, PersistenceOutbox } from './anomaly-persistence-outbox';
 import {
-  DIVERGENCE_CORRELATED_METRICS,
+  DIVERGENCE_COMPOUND_SIGNALS,
   DIVERGENCE_FLOOR_BYTES,
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_ORPHAN_PAGE_SIZE,
@@ -283,6 +284,9 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const CORRELATION_ID_CHUNK_SIZE = 500;
+const MAX_CORRELATED_GROUP_RESULTS = 1_000;
+const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
 
 @Injectable()
 export class AnomalyService
@@ -440,8 +444,11 @@ export class AnomalyService
   private removedDivergenceSweeps = new Set<string>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
+    if (entry.kind === 'save') entry.onDrop?.();
   });
   private correlationTicking = false;
+  private outboxDraining = false;
+  private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -1154,7 +1161,7 @@ export class AnomalyService
             if (currentRole === 0) {
               // master → replica demotion (failover started)
               const failoverEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-failover-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.DROP,
@@ -1193,7 +1200,7 @@ export class AnomalyService
             } else if (currentRole === 1) {
               // replica → master promotion (failover completed)
               const promotionEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-promotion-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.SPIKE,
@@ -1380,7 +1387,7 @@ export class AnomalyService
               const isFailure = lastState === 'ok' && clusterState === 'fail';
               if (isRecovery || isFailure) {
                 const clusterEvent: AnomalyEvent = {
-                  id: `${ctx.connectionId}-cluster-state-${timestamp}`,
+                  id: randomUUID(),
                   timestamp,
                   metricType: MetricType.CLUSTER_STATE,
                   anomalyType: isFailure ? AnomalyType.DROP : AnomalyType.SPIKE,
@@ -1792,7 +1799,7 @@ export class AnomalyService
 
     const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, clientLockoutRearm(state, finding.level));
     commitClientLockoutLevel(state, finding.level);
   }
 
@@ -2581,7 +2588,6 @@ export class AnomalyService
     return fresh;
   }
 
-  // Emits each drift; a failed emit releases its claim for retry.
   private async emitAclDrifts<T extends { nodes: Array<{ connectionId: string }> }>(
     drifts: T[],
     buildEvent: (drift: T) => AnomalyEvent,
@@ -2593,16 +2599,7 @@ export class AnomalyService
       this.logger.warn(`Anomaly detected: ${event.message}`);
       // Attributed to the first node of the group, frequently NOT this poll's connection.
       const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-      let emitFailure: string | null = null;
-      try {
-        await this.addAnomaly(event, attributedCtx);
-      } catch (emitErr) {
-        emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
-      }
-      if (emitFailure !== null) {
-        active.delete(signature(drift));
-        this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
-      }
+      await this.addAnomaly(event, attributedCtx, () => active.delete(signature(drift)));
     }
   }
 
@@ -3024,7 +3021,7 @@ export class AnomalyService
             `in-engine cluster-wide CONFIG SET exists.`;
 
         const event: AnomalyEvent = {
-          id: `config-drift-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CONFIG_DRIFT,
           anomalyType: AnomalyType.SPIKE,
@@ -4612,7 +4609,7 @@ export class AnomalyService
     }
 
     return {
-      id: `${ctx.connectionId}-persistence-${kind}-${reason}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.PERSISTENCE_CHILD,
       anomalyType: AnomalyType.SPIKE,
@@ -4656,7 +4653,7 @@ export class AnomalyService
             : `slots ${conflict.slotStart}-${conflict.slotEnd}`;
 
         const event: AnomalyEvent = {
-          id: `${ctx.connectionId}-dup-primary-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CLUSTER_TOPOLOGY,
           anomalyType: AnomalyType.SPIKE,
@@ -4725,7 +4722,7 @@ export class AnomalyService
               ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
               : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
           return {
-            id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.CLUSTER_TOPOLOGY,
             anomalyType: AnomalyType.SPIKE,
@@ -4928,7 +4925,7 @@ export class AnomalyService
             `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
             `on slots outside this node's ranges).`;
           return {
-            id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.ORPHANED_SLOT_KEYS,
             anomalyType: AnomalyType.SPIKE,
@@ -5005,7 +5002,7 @@ export class AnomalyService
                 `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
                 `investigate if it persists.`;
           return {
-            id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.HOSTNAME_STALENESS,
             anomalyType: AnomalyType.SPIKE,
@@ -5296,7 +5293,7 @@ export class AnomalyService
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
         buildEvent: (a, signature) => ({
-          id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
@@ -5756,7 +5753,11 @@ export class AnomalyService
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    onDrop?: () => void,
+  ): Promise<void> {
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
@@ -5764,20 +5765,22 @@ export class AnomalyService
     }
 
     this.countAnomaly(anomaly, ctx);
+    if (ctx) this.anomalyContexts.set(anomaly, ctx);
 
     try {
       await this.persistAnomaly(anomaly, ctx);
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
-      this.persistenceOutbox.enqueueSave(anomaly, ctx, Date.now());
+      this.persistenceOutbox.enqueueSave(anomaly, ctx, Date.now(), onDrop);
     }
   }
 
   private async persistAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
-    const connectionId = ctx?.connectionId || anomaly.connectionId;
+    const context = ctx ?? this.anomalyContexts.get(anomaly);
+    const connectionId = context?.connectionId || anomaly.connectionId;
     if (!connectionId) return;
     const wasResolved = anomaly.resolved;
-    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
     anomaly.persisted = true;
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
@@ -5787,13 +5790,24 @@ export class AnomalyService
   }
 
   private async correlationTick(): Promise<void> {
-    if (this.correlationTicking) return;
-    this.correlationTicking = true;
+    if (!this.correlationTicking) {
+      this.correlationTicking = true;
+      try {
+        await this.correlateAnomalies();
+      } finally {
+        this.correlationTicking = false;
+      }
+    }
+    await this.outboxTick();
+  }
+
+  private async outboxTick(): Promise<void> {
+    if (this.outboxDraining) return;
+    this.outboxDraining = true;
     try {
-      await this.correlateAnomalies();
       await this.drainPersistenceOutbox();
     } finally {
-      this.correlationTicking = false;
+      this.outboxDraining = false;
     }
   }
 
@@ -5806,7 +5820,9 @@ export class AnomalyService
 
   private async retryPersistence(entry: OutboxEntry): Promise<void> {
     if (entry.kind === 'resolve') {
-      if ((await this.resolveAnomalyOutcome(entry.id)) !== 'retry') {
+      if ((await this.resolveAnomalyOutcome(entry.id)) === 'retry') {
+        this.persistenceOutbox.defer(entry.id, Date.now());
+      } else {
         this.persistenceOutbox.settle(entry.id);
       }
       return;
@@ -5821,6 +5837,7 @@ export class AnomalyService
       this.logger.debug(
         `Retry of anomaly ${entry.id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      this.persistenceOutbox.defer(entry.id, Date.now());
     }
   }
 
@@ -5900,6 +5917,7 @@ export class AnomalyService
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
       if (uncorrelated.length === 0) return;
 
+      const priorRelatedMetrics = new Map(uncorrelated.map((a) => [a.id, a.relatedMetrics]));
       const newGroups = this.correlator.correlate(uncorrelated);
       if (newGroups.length === 0) return;
 
@@ -5928,7 +5946,10 @@ export class AnomalyService
           if (connectionId) await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
         } catch (err) {
           this.logger.error('Failed to persist correlated group:', err);
-          for (const anomaly of group.anomalies) anomaly.correlationId = undefined;
+          for (const anomaly of group.anomalies) {
+            anomaly.correlationId = undefined;
+            anomaly.relatedMetrics = priorRelatedMetrics.get(anomaly.id);
+          }
           continue;
         }
 
@@ -6094,7 +6115,6 @@ export class AnomalyService
   ): Promise<StoredCorrelatedGroup[]> {
     if (siblings.length === 0) return [];
     const pageSize = 10_000;
-    const chunkSize = 500;
     const seen = new Set<string>();
     const found = new Map<string, StoredCorrelatedGroup>();
     const inWindow = (g: StoredCorrelatedGroup) =>
@@ -6120,17 +6140,18 @@ export class AnomalyService
         seen.add(e.correlationId);
         candidates.push(e.correlationId);
       }
-      for (let i = 0; i < candidates.length && found.size < limit; i += chunkSize) {
-        const chunk = candidates.slice(i, i + chunkSize);
-        for (const id of siblings) {
-          const groups = await this.storage.getCorrelatedGroups({
-            pattern: pattern as string,
-            correlationIds: chunk,
-            limit: chunk.length,
-            connectionId: id,
-          });
-          for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
-        }
+      for (
+        let i = 0;
+        i < candidates.length && found.size < limit;
+        i += CORRELATION_ID_CHUNK_SIZE
+      ) {
+        const chunk = candidates.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+        const groups = await this.storage.getCorrelatedGroups({
+          pattern: pattern as string,
+          correlationIds: chunk,
+          limit: chunk.length,
+        });
+        for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
       }
       if (page.length < pageSize) break;
     }
@@ -6141,10 +6162,13 @@ export class AnomalyService
     startTime?: number,
     endTime?: number,
     pattern?: AnomalyPattern,
-    limit = 50,
+    limit = DEFAULT_CORRELATED_GROUP_RESULTS,
     connectionId?: string,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(Math.trunc(limit), MAX_CORRELATED_GROUP_RESULTS))
+      : DEFAULT_CORRELATED_GROUP_RESULTS;
 
     if (!startTime || startTime >= cacheThreshold) {
       let groups = [...this.recentGroups];
@@ -6152,50 +6176,47 @@ export class AnomalyService
         groups = groups.filter((g) => g.anomalies.some((a) => a.connectionId === connectionId));
       if (pattern) groups = groups.filter((g) => g.pattern === pattern);
       if (endTime) groups = groups.filter((g) => g.timestamp <= endTime);
-      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, boundedLimit);
     }
 
-    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
-    const own = await Promise.all(
-      (connectionId ? [connectionId] : connectionIds).map((id) =>
-        this.storage.getCorrelatedGroups({
-          startTime,
-          endTime,
-          pattern: pattern as string,
-          limit,
-          connectionId: id,
-        }),
-      ),
-    );
+    const own = await this.storage.getCorrelatedGroups({
+      startTime,
+      endTime,
+      pattern: pattern as string,
+      limit: boundedLimit,
+      connectionId,
+    });
     const found = connectionId
       ? await this.siblingGroupsInvolving(
           connectionId,
-          connectionIds.filter((id): id is string => !!id && id !== connectionId),
-          new Set(own.flat().map((s) => s.correlationId)),
+          this.scopeConnectionIds(connectionId).filter((id) => id !== connectionId),
+          new Set(own.map((s) => s.correlationId)),
           startTime,
           endTime,
           pattern,
-          limit,
+          boundedLimit,
         )
       : [];
-    const stored = [...new Map([...own.flat(), ...found].map((s) => [s.correlationId, s])).values()]
+    const stored = [...new Map([...own, ...found].map((s) => [s.correlationId, s])).values()]
       .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+      .slice(0, boundedLimit);
 
-    if (stored.length === 0) return [];
-    const timestamps = stored.map((s) => s.timestamp);
-    const members = await this.storage.getAnomalyEvents({
-      startTime: Math.min(...timestamps) - this.correlationIntervalMs,
-      endTime: Math.max(...timestamps) + this.correlationIntervalMs,
-      correlationIds: stored.map((s) => s.correlationId),
-      limit: this.maxRecentEvents * stored.length,
-    });
     const membersByGroup = new Map<string, AnomalyEvent[]>();
-    for (const member of members) {
-      if (!member.correlationId) continue;
-      const anomalies = membersByGroup.get(member.correlationId) ?? [];
-      anomalies.push(this.storedToAnomalyEvent(member));
-      membersByGroup.set(member.correlationId, anomalies);
+    for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
+      const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+      const timestamps = chunk.map((s) => s.timestamp);
+      const members = await this.storage.getAnomalyEvents({
+        startTime: Math.min(...timestamps) - this.correlationIntervalMs,
+        endTime: Math.max(...timestamps) + this.correlationIntervalMs,
+        correlationIds: chunk.map((s) => s.correlationId),
+        limit: this.maxRecentEvents * chunk.length,
+      });
+      for (const member of members) {
+        if (!member.correlationId) continue;
+        const anomalies = membersByGroup.get(member.correlationId) ?? [];
+        anomalies.push(this.storedToAnomalyEvent(member));
+        membersByGroup.set(member.correlationId, anomalies);
+      }
     }
 
     return stored.map((s) => ({
@@ -6253,10 +6274,12 @@ export class AnomalyService
     }
     const now = Date.now();
     const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
+    const orphans = this.divergenceOrphans.get(connectionId);
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
-        const level = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const observed = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const level = observed === 'none' && orphans?.has(replica) ? 'behind' : observed;
         return {
           replica,
           level,
@@ -6457,7 +6480,7 @@ export class AnomalyService
             (a) =>
               a.connectionId === ctx.connectionId &&
               a.timestamp >= finding.spanStart &&
-              DIVERGENCE_CORRELATED_METRICS.has(a.metricType),
+              DIVERGENCE_COMPOUND_SIGNALS.has(a.metricType),
           )
           .map((a) => a.metricType),
       ),
@@ -6707,8 +6730,8 @@ export class AnomalyService
    *   - `retry`:    a transient storage error, or a cache-present event storage
    *                 momentarily couldn't confirm. The outbox keeps retrying it.
    *   - `gone`:     the event exists in neither the cache nor storage, so it can
-   *                 never be resolved (e.g. a deterministic string id the Postgres
-   *                 UUID PK rejected, since evicted from recentAnomalies). Callers
+   *                 never be resolved (e.g. a save the outbox gave up on, since
+   *                 evicted from recentAnomalies). Callers
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
@@ -6718,8 +6741,7 @@ export class AnomalyService
       this.persistenceOutbox.unsavedAnomaly(anomalyId);
     const resolvedAt = this.persistenceOutbox.resolvedAt(anomalyId) ?? Date.now();
 
-    // Memory-only event (never durably stored — e.g. a deterministic string id
-    // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
+    // Memory-only event (never durably stored): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;

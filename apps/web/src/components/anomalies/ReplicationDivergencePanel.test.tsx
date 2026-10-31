@@ -50,6 +50,24 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getAllByText('collecting')).toHaveLength(3);
   });
 
+  it('does not call a replica behind under the alert thresholds in sync', () => {
+    render(
+      <ReplicationDivergencePanel
+        replicas={[
+          {
+            replica: '10.0.0.2:6379',
+            level: 'behind',
+            latest: window(8 * MiB, 8),
+            windows: [window(8 * MiB, 8)],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Lagging')).toBeInTheDocument();
+    expect(screen.queryByText('In sync')).not.toBeInTheDocument();
+  });
+
   it('shows how old the latest gap is', () => {
     const replicas: ReplicaDivergenceHistory[] = [
       {

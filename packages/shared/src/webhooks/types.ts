@@ -350,9 +350,6 @@ export interface LatencyRegressionCommand {
   callsPerMin: number;
 }
 
-/**
- * Payload for latency.regression.detected (see valkey/valkey#3527).
- */
 export interface ReplicationDivergenceData {
   replica: string;
   level: 'warning' | 'critical';
@@ -379,6 +376,9 @@ export interface ReplicationRecoveredData {
   connectionId?: string;
 }
 
+/**
+ * Payload for latency.regression.detected (see valkey/valkey#3527).
+ */
 export interface LatencyRegressionDetectedData {
   kind: 'upgrade_regression' | 'sustained_degradation';
   previousVersion?: string;

@@ -2830,7 +2830,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, id DESC
       LIMIT ? OFFSET ?
     `;
 
