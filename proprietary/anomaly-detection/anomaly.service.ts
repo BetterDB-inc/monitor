@@ -425,6 +425,7 @@ export class AnomalyService
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
+  private clientSaturationRaisedBy = new Map<string, string>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -736,6 +737,7 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
+    this.clientSaturationRaisedBy.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
@@ -1682,16 +1684,31 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      // Await the emit so a failure propagates to the poll error handler. The
-      // stored level is advanced only AFTER a successful emit (below), so a failed
-      // escalation is retried on the next poll rather than being silently swallowed
-      // by the hysteresis.
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(
+        event,
+        ctx,
+        this.clientSaturationRearm(ctx.connectionId, event.id, prev),
+      );
+      this.clientSaturationRaisedBy.set(ctx.connectionId, event.id);
     }
 
-    // Advance the level last: on escalation only after addAnomaly resolved; on
-    // steady/de-escalation immediately (the latter re-arms alerting on recovery).
+    // Advance the level last: on steady/de-escalation this re-arms alerting on recovery.
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  private clientSaturationRearm(
+    connectionId: string,
+    eventId: string,
+    previous: 'none' | 'warning' | 'critical',
+  ): () => void {
+    return () => {
+      if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
+      this.clientSaturationRaisedBy.delete(connectionId);
+      const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
+      if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
+        this.clientSaturationLevel.set(connectionId, previous);
+      }
+    };
   }
 
   /**

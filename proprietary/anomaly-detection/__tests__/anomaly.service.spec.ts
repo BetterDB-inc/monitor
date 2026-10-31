@@ -8158,6 +8158,166 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('detectors re-armed by an outbox drop', () => {
+    let now: number;
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const infoWith = (over: {
+      clients?: Record<string, string>;
+      memory?: Record<string, string>;
+      stats?: Record<string, string>;
+      replication?: Record<string, string>;
+      persistence?: Record<string, string>;
+      server?: Record<string, string>;
+    }) => ({
+      server: { role: 'master', ...over.server },
+      clients: { connected_clients: '10', blocked_clients: '0', ...over.clients },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', ...over.memory },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        ...over.stats,
+      },
+      ...(over.replication ? { replication: over.replication } : {}),
+      ...(over.persistence ? { persistence: over.persistence } : {}),
+    });
+
+    const pollWith = async (info: Parameters<typeof infoWith>[0], times = 1) => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(info));
+      for (let i = 0; i < times; i += 1) {
+        await poll();
+        now += 1_000;
+      }
+    };
+
+    const eventsOf = (metricType: MetricType) =>
+      service.getRecentEvents(100, metricType).reverse();
+
+    const failSaves = () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+    };
+
+    const healSaves = () => {
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+    };
+
+    const expireOutbox = async () => {
+      const polledAt = now;
+      now = polledAt + OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      now = polledAt;
+    };
+
+    const expectRaisedAgain = (metricType: MetricType, first: AnomalyEvent) => {
+      const raised = eventsOf(metricType);
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    };
+
+    describe('client saturation', () => {
+      const clients = (connected: number) => ({
+        clients: { connected_clients: String(connected), maxclients: '100' },
+      });
+      const events = () => eventsOf(MetricType.CLIENT_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(clients(85), 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        expectRaisedAgain(MetricType.CLIENT_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        await pollWith(clients(50));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(clients(85));
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(clients(85));
+        failSaves();
+        await pollWith(clients(97));
+        const critical = events()[1];
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(97));
+
+        const raised = events();
+        expect(raised).toHaveLength(3);
+        expect(raised[2].severity).toBe(AnomalySeverity.CRITICAL);
+        expect(raised[2].id).not.toBe(critical.id);
+      });
+
+      it('raises the lower level when a dropped escalation was never followed', async () => {
+        failSaves();
+        await pollWith(clients(97));
+        await pollWith(clients(85));
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised[1].severity).toBe(AnomalySeverity.WARNING);
+      });
+
+      it('leaves no state behind when the connection went away before the drop', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        (service as any).clientSaturationLevel.delete('conn-1');
+        (service as any).clientSaturationRaisedBy.delete('conn-1');
+
+        await expireOutbox();
+
+        expect((service as any).clientSaturationLevel.has('conn-1')).toBe(false);
+      });
+    });
+
+  });
+
   describe('persistence outbox', () => {
     const stored = (id: string) =>
       storage.saveAnomalyEvent.mock.calls.map(([event]) => event).filter((event) => event.id === id);
