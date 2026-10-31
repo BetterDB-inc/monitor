@@ -5536,6 +5536,7 @@ export class AnomalyService
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
       if (uncorrelated.length === 0) return;
 
+      const priorRelatedMetrics = new Map(uncorrelated.map((a) => [a.id, a.relatedMetrics]));
       const newGroups = this.correlator.correlate(uncorrelated);
       if (newGroups.length === 0) return;
 
@@ -5564,7 +5565,10 @@ export class AnomalyService
           if (connectionId) await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
         } catch (err) {
           this.logger.error('Failed to persist correlated group:', err);
-          for (const anomaly of group.anomalies) anomaly.correlationId = undefined;
+          for (const anomaly of group.anomalies) {
+            anomaly.correlationId = undefined;
+            anomaly.relatedMetrics = priorRelatedMetrics.get(anomaly.id);
+          }
           continue;
         }
 

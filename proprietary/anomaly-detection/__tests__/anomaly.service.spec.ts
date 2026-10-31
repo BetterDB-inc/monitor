@@ -6166,6 +6166,30 @@ describe('AnomalyService', () => {
       expect(saved).toEqual(['a@node-1', 'b@node-2']);
     });
 
+    it('leaves the related metrics as they were when a group fails to save', async () => {
+      const kept = {
+        ...member('a', 'node-1'),
+        correlationId: undefined,
+        metricType: MetricType.CONNECTIONS,
+        relatedMetrics: ['connections'],
+      };
+      const bare = {
+        ...member('b', 'node-2'),
+        correlationId: undefined,
+        metricType: MetricType.CONNECTIONS,
+      };
+      (service as any).recentAnomalies.push(kept, bare);
+      storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('storage down'));
+      const correlate = jest.spyOn((service as any).correlator, 'correlate');
+
+      await (service as any).correlateAnomalies();
+
+      expect(correlate.mock.results[0].value).toHaveLength(1);
+      expect(kept.correlationId).toBeUndefined();
+      expect(kept.relatedMetrics).toEqual(['connections']);
+      expect(bare).not.toHaveProperty('relatedMetrics', expect.anything());
+    });
+
     it('reads the members of every group with one query', async () => {
       const stored = ['grp-1', 'grp-2'].map((correlationId, i) => ({
         correlationId,
