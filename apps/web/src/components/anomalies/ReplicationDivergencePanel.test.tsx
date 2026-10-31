@@ -50,6 +50,31 @@ describe('ReplicationDivergencePanel', () => {
     expect(screen.getAllByText('collecting')).toHaveLength(3);
   });
 
+  it('shows how old the latest gap is', () => {
+    const replicas: ReplicaDivergenceHistory[] = [
+      {
+        replica: '10.0.0.2:6379',
+        level: 'critical',
+        latest: { ...window(4 * MiB, null), end: Date.now() - 5 * 60_000 },
+        windows: [],
+      },
+    ];
+
+    render(<ReplicationDivergencePanel replicas={replicas} />);
+
+    expect(screen.getByText('5m ago')).toBeInTheDocument();
+  });
+
+  it('shows no age without a latest gap', () => {
+    render(
+      <ReplicationDivergencePanel
+        replicas={[{ replica: '10.0.0.2:6379', level: 'none', latest: null, windows: [] }]}
+      />,
+    );
+
+    expect(screen.queryByText(/ago$/)).not.toBeInTheDocument();
+  });
+
   it('says so when the history could not be loaded', () => {
     render(<ReplicationDivergencePanel replicas={undefined} error={new Error('boom')} />);
 
