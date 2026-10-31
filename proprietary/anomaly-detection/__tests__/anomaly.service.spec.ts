@@ -3385,6 +3385,7 @@ describe('AnomalyService', () => {
         failFirstEmit?: boolean;
         failEmits?: number;
         p99Once?: boolean;
+        noP99?: boolean;
         coolWindows?: number;
         realEmit?: boolean;
         cpuEvent?: Record<string, unknown>;
@@ -3410,7 +3411,7 @@ describe('AnomalyService', () => {
       for (let w = 0; w < 18 + (opts.coolWindows ?? 0); w++) {
         const hot = w >= 12 && w < 18;
         const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
-        if (hot && (!opts.p99Once || w === 12)) {
+        if (hot && !opts.noP99 && (!opts.p99Once || w === 12)) {
           (service as any).recentAnomalies.push({
             id: `p99-${w}`,
             timestamp: ts + 5_000,
@@ -3543,6 +3544,22 @@ describe('AnomalyService', () => {
 
       expect(recorded).toHaveLength(1);
       expect(recorded[0].message).toContain('sustained latency regression');
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    });
+
+    it('keeps a P99 regression as stress past the hold while the latency guard reports it degraded', async () => {
+      (service as any).recentAnomalies.push({
+        id: 'old-p99',
+        timestamp: 1_000_000 - 60 * 60_000,
+        metricType: MetricType.COMMAND_P99,
+        connectionId: 'conn-1',
+        resolved: false,
+      });
+      service.reportLatencyDegraded('conn-1', true);
+
+      const { recorded } = await runRetry({ noP99: true });
+
+      expect(recorded).toHaveLength(1);
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     });
 

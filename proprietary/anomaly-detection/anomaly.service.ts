@@ -3291,15 +3291,17 @@ export class AnomalyService
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
+    const degraded = this.latencyDegraded.get(ctx.connectionId);
     const stressActive =
-      this.latencyDegraded.get(ctx.connectionId) !== false &&
-      connectionEvents.some((a) => {
-      return (
-        !a.resolved &&
-        RETRY_AMP_STRESS_METRICS.includes(a.metricType) &&
-        timestamp - a.timestamp <= RETRY_AMP_STRESS_HOLD_MS
-      );
-    });
+      degraded === true ||
+      (degraded === undefined &&
+        connectionEvents.some((a) => {
+          return (
+            !a.resolved &&
+            RETRY_AMP_STRESS_METRICS.includes(a.metricType) &&
+            timestamp - a.timestamp <= RETRY_AMP_STRESS_HOLD_MS
+          );
+        }));
     const activeSaturation = new Set<MetricType>();
     for (const a of connectionEvents) {
       if (
