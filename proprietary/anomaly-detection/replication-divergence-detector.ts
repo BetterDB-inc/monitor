@@ -576,14 +576,15 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.clearing = false;
 }
 
-export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
-  MetricType.MEMORY_USED,
-  MetricType.MEMORY_OVERHEAD,
-  MetricType.REPL_BUFFER_PRESSURE,
-  MetricType.FORK_MEMORY_RISK,
-  MetricType.INPUT_KBPS,
-  MetricType.OPS_PER_SEC,
-  MetricType.CLUSTER_TOPOLOGY,
+export const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new Map([
+  [MetricType.MEMORY_USED, 'memory growth'],
+  [MetricType.MEMORY_OVERHEAD, 'memory overhead'],
+  [MetricType.REPL_BUFFER_PRESSURE, 'replica output-buffer pressure'],
+  [MetricType.FORK_MEMORY_RISK, 'fork copy-on-write pressure'],
+  [MetricType.INPUT_KBPS, 'write-rate spike'],
+  [MetricType.OPS_PER_SEC, 'write-rate spike'],
+  [MetricType.CLUSTER_TOPOLOGY, 'slot migration'],
+  [MetricType.CPU_UTILIZATION, 'CPU saturation'],
 ]);
 
 function describeReason(finding: DivergenceFinding): string {

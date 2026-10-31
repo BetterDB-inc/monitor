@@ -552,8 +552,6 @@ describe('Correlator', () => {
     it.each([
       [MetricType.CLUSTER_STATE, AnomalyPattern.NODE_FAILOVER],
       [MetricType.ACL_DENIED, AnomalyPattern.AUTH_ATTACK],
-      [MetricType.PERSISTENCE_CHILD, AnomalyPattern.PERSISTENCE_STALL],
-      [MetricType.SLOWLOG_LAST_ID, AnomalyPattern.SLOW_QUERIES],
     ])('leaves a window with %s to %s', (metricType, pattern) => {
       const now = Date.now();
       const [group] = correlator.correlate([
@@ -563,14 +561,56 @@ describe('Correlator', () => {
       expect(group.pattern).toBe(pattern);
     });
 
-    it('leaves memory growth with evictions to MEMORY_PRESSURE', () => {
+    it.each([MetricType.PERSISTENCE_CHILD, MetricType.SLOWLOG_LAST_ID, MetricType.CONNECTIONS])(
+      'keeps the divergence diagnosis alongside %s',
+      (metricType) => {
+        const now = Date.now();
+        const [group] = correlator.correlate([
+          divergence({ timestamp: now }),
+          makeAnomaly({ metricType, timestamp: now + 100, connectionId: 'c1' }),
+        ]);
+        expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      },
+    );
+
+    it('keeps the divergence diagnosis alongside memory growth with evictions', () => {
       const now = Date.now();
       const [group] = correlator.correlate([
         divergence({ timestamp: now }),
         makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
         makeAnomaly({ metricType: MetricType.EVICTED_KEYS, timestamp: now + 200, connectionId: 'c1' }),
       ]);
-      expect(group.pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+      expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+    });
+
+    it('names CPU saturation when it shares the window', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+      expect(group.diagnosis).toContain('alongside CPU saturation');
+    });
+
+    it('leaves a saturation window with a failover to saturation', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 200, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
     });
 
     it('names signals the detector stamped from outside the correlation window', () => {

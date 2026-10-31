@@ -153,7 +153,7 @@ import {
 import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import { OutboxEntry, PersistenceOutbox } from './anomaly-persistence-outbox';
 import {
-  DIVERGENCE_CORRELATED_METRICS,
+  DIVERGENCE_COMPOUND_SIGNALS,
   DIVERGENCE_FLOOR_BYTES,
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_ORPHAN_PAGE_SIZE,
@@ -6077,7 +6077,7 @@ export class AnomalyService
             (a) =>
               a.connectionId === ctx.connectionId &&
               a.timestamp >= finding.spanStart &&
-              DIVERGENCE_CORRELATED_METRICS.has(a.metricType),
+              DIVERGENCE_COMPOUND_SIGNALS.has(a.metricType),
           )
           .map((a) => a.metricType),
       ),
