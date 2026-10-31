@@ -169,7 +169,18 @@ function furthestReplicaGap(
   if (primaryOffset === null) {
     return null;
   }
-  return Math.max(0, ...readAckedOffsets(replication).map((offset) => primaryOffset - offset));
+  const ackedOffsets = readAckedOffsets(replication);
+  if (ackedOffsets.length === 0) {
+    return REPLICA_ROLES.has(replication.role) || hasConnectedReplicas(replication) ? null : 0;
+  }
+  return Math.max(0, primaryOffset - Math.min(...ackedOffsets));
+}
+
+function hasConnectedReplicas(replication: Record<string, string>): boolean {
+  return (
+    toNumber(replication.connected_slaves) > 0 ||
+    Object.keys(replication).some((key) => REPLICA_LINE_KEY.test(key))
+  );
 }
 
 function readAckedOffsets(replication: Record<string, string>): number[] {

@@ -14,6 +14,7 @@ function makeInfo(overrides: {
   master_repl_offset?: string;
   slave_repl_offset?: string;
   master_failover_state?: string;
+  connected_slaves?: string;
   master_link_status?: string;
   master_sync_in_progress?: string;
   master_last_io_seconds_ago?: string;
@@ -29,6 +30,7 @@ function makeInfo(overrides: {
       master_repl_offset:
         'master_repl_offset' in overrides ? overrides.master_repl_offset : '1000',
       slave_repl_offset: overrides.slave_repl_offset,
+      connected_slaves: overrides.connected_slaves,
       master_failover_state: overrides.master_failover_state,
       master_link_status: overrides.master_link_status,
       master_sync_in_progress: overrides.master_sync_in_progress,
@@ -264,7 +266,7 @@ describe('HealthGateService', () => {
       }),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.signals.replicationLagBytes).toBeNull();
     expect(result.allow).toBe(true);
   });
 
@@ -370,9 +372,35 @@ describe('HealthGateService', () => {
     expect(result.allow).toBe(true);
   });
 
+  it.each([
+    ['a replica still in its initial sync', 'ip=10.0.0.3,port=6379,state=wait_bgsave,offset=0,lag=0'],
+    ['a replica without an acked offset', 'ip=10.0.0.3,port=6379,state=online,offset=0,lag=12'],
+  ])('reports lag as unavailable when the only replica is %s', async (_name, line) => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        connected_slaves: '1',
+        replicas: { slave0: line },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBeNull();
+    expect(result.allow).toBe(true);
+  });
+
+  it('reports lag as unavailable when connected replicas have no slaveN lines', async () => {
+    const { service } = makeService({
+      info: makeInfo({ role: 'master', master_repl_offset: '100000000', connected_slaves: '2' }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBeNull();
+    expect(result.allow).toBe(true);
+  });
+
   it('reports no lag on a primary without replicas', async () => {
     const { service } = makeService({
-      info: makeInfo({ role: 'master', master_repl_offset: '999999999' }),
+      info: makeInfo({ role: 'master', master_repl_offset: '999999999', connected_slaves: '0' }),
     });
     const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
@@ -390,7 +418,7 @@ describe('HealthGateService', () => {
       }),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.signals.replicationLagBytes).toBeNull();
     expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
   });
