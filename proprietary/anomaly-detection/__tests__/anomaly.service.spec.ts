@@ -8877,6 +8877,16 @@ describe('AnomalyService', () => {
         expect(resyncs()[0].resolved).toBe(true);
       });
 
+      it('stamps an escalation raised at online with the disconnect', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replica: false });
+        const disconnectedAt = clock;
+        clock += 60_000;
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+        expect(resyncs()[0].timestamp).toBe(disconnectedAt);
+      });
+
       it('resolves an escalation raised at online on the next poll', async () => {
         await pollPrimary({ bytes: 2000 });
         await pollPrimary({ bytes: 2000, replica: false });

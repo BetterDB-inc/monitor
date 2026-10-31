@@ -112,6 +112,7 @@ export interface ResyncEscalationState {
 
 export interface ResyncEscalation {
   addr: string;
+  occurredAt: number;
   disconnectedForMs: number;
   coverageSec: number | null;
   fullSyncs: number;
@@ -168,6 +169,7 @@ export function observeResyncEscalation(
     state.pending.delete(addr);
     escalations.push({
       addr,
+      occurredAt: sample.timestamp,
       disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
       coverageSec: disconnect.coverageSec,
       fullSyncs: 1,
@@ -197,6 +199,7 @@ export function observeResyncEscalation(
       state.attributedFullSyncs += Math.max(0, fullSyncs);
       escalations.push({
         addr,
+        occurredAt: disconnect.disconnectAt,
         disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
         coverageSec: disconnect.coverageSec,
         fullSyncs: Math.max(0, fullSyncs),

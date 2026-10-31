@@ -6867,11 +6867,11 @@ export class AnomalyService
     const state = this.resyncEscalation.get(ctx.connectionId) ?? createResyncEscalationState();
     this.resyncEscalation.set(ctx.connectionId, state);
     for (const escalation of observeResyncEscalation(state, sample, counters, coverageSec)) {
-      const event = this.buildResyncEscalationEvent(ctx, sample, escalation);
+      const event = this.buildResyncEscalationEvent(ctx, escalation);
       await this.addAnomaly(event, ctx);
       this.resyncEscalationEvents.set(ctx.connectionId, [
         ...(this.resyncEscalationEvents.get(ctx.connectionId) ?? []),
-        { id: event.id, addr: escalation.addr, since: event.timestamp },
+        { id: event.id, addr: escalation.addr, since: sample.timestamp },
       ]);
     }
   }
@@ -6944,7 +6944,6 @@ export class AnomalyService
 
   private buildResyncEscalationEvent(
     ctx: ConnectionContext,
-    sample: ReplicationStreamSample,
     escalation: ResyncEscalation,
   ): AnomalyEvent {
     const seconds = escalation.disconnectedForMs / 1000;
@@ -6960,7 +6959,7 @@ export class AnomalyService
       .join(', ');
     const event: AnomalyEvent = {
       id: randomUUID(),
-      timestamp: sample.timestamp,
+      timestamp: escalation.occurredAt,
       metricType: MetricType.RESYNC_ESCALATION,
       anomalyType: AnomalyType.SPIKE,
       severity: AnomalySeverity.WARNING,

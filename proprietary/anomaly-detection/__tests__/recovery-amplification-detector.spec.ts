@@ -163,6 +163,7 @@ describe('observeResyncEscalation', () => {
     expect(rest).toEqual([]);
     expect(escalation).toEqual({
       addr: '10.0.0.2:6379',
+      occurredAt: T0 + 1000,
       disconnectedForMs: 30_000,
       coverageSec: 40,
       fullSyncs: 1,
@@ -274,6 +275,32 @@ describe('observeResyncEscalation', () => {
         recoveredAt: null,
       }));
 
+      expect(matchSequence(entries, rule)).toHaveLength(2);
+    });
+
+    it('places an escalation found by the counters ahead of the cost it caused', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, back(T0), counters(), 40);
+      observeResyncEscalation(state, gone(T0 + 1000), counters(), null);
+      const [escalation] = observeResyncEscalation(state, back(T0 + 90_000), counters(1), 40);
+      const rule = getSequenceRules().find(
+        (r) => r.pattern === AnomalyPattern.RECOVERY_AMPLIFICATION,
+      )!;
+      const entries: IncidentTimelineEntry[] = [
+        [MetricType.RESYNC_ESCALATION, escalation.occurredAt],
+        [MetricType.FORK_MEMORY_RISK, T0 + 5000],
+        [MetricType.REPL_BUFFER_PRESSURE, T0 + 30_000],
+      ].map(([metricType, timestamp]) => ({
+        anomalyId: `${metricType}`,
+        connectionId: REPLICA_A,
+        timestamp: timestamp as number,
+        metricType: metricType as MetricType,
+        severity: AnomalySeverity.WARNING,
+        message: '',
+        recoveredAt: null,
+      }));
+
+      expect(escalation.occurredAt).toBe(T0 + 1000);
       expect(matchSequence(entries, rule)).toHaveLength(2);
     });
 
