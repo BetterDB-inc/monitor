@@ -55,6 +55,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private pollHandle?: NodeJS.Timeout;
   private lastAnomalyAt: number;
   private replayFloor: number;
+  private anomalyScanCursor = 0;
   private readonly seenAnomalies = new Map<string, number>();
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
@@ -79,6 +80,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   resetAnomalyWatermark(): void {
     this.lastAnomalyAt = 0;
     this.replayFloor = 0;
+    this.anomalyScanCursor = 0;
   }
 
   setOptions(options: CaptureTriggerRegistryOptions): void {
@@ -207,17 +209,23 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (timestamp < startTime) this.seenAnomalies.delete(id);
     }
     const pageSize = 200;
-    const maxPerTick = 5000;
+    const maxScannedPerTick = 5000;
+    const scanFrom = Math.max(startTime, this.anomalyScanCursor);
     const sorted: StoredAnomalyEvent[] = [];
-    for (let offset = 0; sorted.length < maxPerTick; offset += pageSize) {
+    for (let offset = 0; ; offset += pageSize) {
       const page = await this.storage.getAnomalyEvents({
-        startTime,
+        startTime: scanFrom,
         order: 'asc',
         limit: pageSize,
         offset,
       });
       sorted.push(...page.filter((evt) => !this.seenAnomalies.has(evt.id)));
       if (page.length < pageSize) {
+        this.anomalyScanCursor = 0;
+        break;
+      }
+      if (offset + pageSize >= maxScannedPerTick) {
+        this.anomalyScanCursor = page[page.length - 1].timestamp;
         break;
       }
     }

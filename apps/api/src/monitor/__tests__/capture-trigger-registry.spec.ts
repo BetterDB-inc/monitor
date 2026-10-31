@@ -341,6 +341,31 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('bounds each tick and still reaches a new event past a busy lookback', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger(anyTrigger);
+      for (let i = 0; i < 5_300; i++) {
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 + i }),
+          CONNECTION_ID,
+        );
+      }
+      await registry.tick();
+      await registry.tick();
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: trigger.createdAt + 20_000 }),
+        CONNECTION_ID,
+      );
+      const reads = jest.spyOn(storage, 'getAnomalyEvents');
+      await registry.tick();
+      expect(reads.mock.calls.length).toBeLessThanOrEqual(25);
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
     it('does not act twice on an event inside the lookback', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
