@@ -8557,6 +8557,85 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('persistence child', () => {
+      const IDLE = {
+        rdb_bgsave_in_progress: '0',
+        rdb_current_bgsave_time_sec: '-1',
+        rdb_last_bgsave_status: 'ok',
+        current_save_keys_processed: '0',
+        current_save_keys_total: '0',
+        aof_rewrite_in_progress: '0',
+        aof_current_rewrite_time_sec: '-1',
+        aof_last_bgrewrite_status: 'ok',
+      };
+      const events = () => eventsOf(MetricType.PERSISTENCE_CHILD);
+
+      it('raises the failed save again when the outbox drops its unsaved event', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(failed);
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the stall again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: '1000',
+            current_save_keys_total: '42657',
+          },
+        });
+        failSaves();
+        await pollWith(running(5));
+        now += 61_000;
+        await pollWith(running(66));
+        now += 1_000;
+        await pollWith(running(68));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(70));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the long-running save again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number, processed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: String(processed),
+            current_save_keys_total: '100000000',
+          },
+        });
+        await pollWith(running(100, 1000));
+        failSaves();
+        now += 30_000;
+        await pollWith(running(130, 2000));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.WARNING);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(140, 3000));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+    });
+
     describe('control-plane saturation', () => {
       const events = () =>
         eventsOf(MetricType.CPU_UTILIZATION).filter(

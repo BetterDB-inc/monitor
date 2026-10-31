@@ -4104,6 +4104,10 @@ export class AnomalyService
           await this.addAnomaly(
             this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx),
             ctx,
+            () => {
+              if (kind === 'rdb') state.rdbErrorReported = false;
+              else state.aofErrorReported = false;
+            },
           );
           if (kind === 'rdb') state.rdbErrorReported = true;
           else state.aofErrorReported = true;
@@ -4199,6 +4203,9 @@ export class AnomalyService
       await this.addAnomaly(
         this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx),
         ctx,
+        () => {
+          track.reportedStall = false;
+        },
       );
       return;
     }
@@ -4208,6 +4215,9 @@ export class AnomalyService
       await this.addAnomaly(
         this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx),
         ctx,
+        () => {
+          track.warnedLong = false;
+        },
       );
     }
   }
