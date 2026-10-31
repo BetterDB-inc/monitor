@@ -5,7 +5,13 @@ import { useIsDemo } from '../contexts/DemoContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { useTelemetry } from '../hooks/useTelemetry';
 import { fetchApi } from '../api/client';
-import { parseConnectionUrl, ParsedConnection } from '../utils/connectionUrl';
+import {
+  parseConnectionUrl,
+  ParsedConnection,
+  isSingleLabelHost,
+  isLocalhostHost,
+  singleLabelHostCloudError,
+} from '../utils/connectionUrl';
 import { openAddConnection } from '../lib/addConnectionIntent';
 
 interface PageEmptyState {
@@ -229,10 +235,6 @@ function ProviderGuidesInfo() {
   );
 }
 
-function isLocalhostHost(host: string): boolean {
-  const h = host.trim().toLowerCase();
-  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
-}
 
 interface QuickConnectProps {
   isCloudDomain: boolean;
@@ -288,6 +290,11 @@ function QuickConnect({ isCloudDomain, onConnected, capture }: QuickConnectProps
       setError(
         'localhost is not reachable from the cloud. Please provide a publicly accessible host.',
       );
+      return;
+    }
+    if (isCloudDomain && isSingleLabelHost(result.value.host)) {
+      setError(singleLabelHostCloudError(result.value.host));
+      capture('quick_connect_failed', { source: 'empty_state', reason: 'single_label_host' });
       return;
     }
     await saveConnection(result.value);

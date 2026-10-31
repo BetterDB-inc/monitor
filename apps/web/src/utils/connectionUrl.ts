@@ -134,3 +134,46 @@ export function parseConnectionUrl(input: string): ParseConnectionUrlResult {
     },
   };
 }
+
+/**
+ * True for a single-label hostname such as "valkey" or "my-db": no dots, not an
+ * IP address, not localhost. Those resolve only through a local search domain
+ * (Docker service names, /etc/hosts), so self-hosted setups use them, but the
+ * cloud can never reach one. Callers apply this in cloud mode only.
+ */
+export function isSingleLabelHost(host: string): boolean {
+  const h = bareHost(host);
+  return h.length > 0 && !h.includes('.') && !h.includes(':') && !isLocalhostHost(h);
+}
+
+/**
+ * Reduces raw Host-field input to the hostname alone: drops IPv6 brackets, a
+ * trailing ":port" and a trailing dot, and lowercases it. The manual form's
+ * Host field is free text, so "valkey:6379" or "localhost:6379" can arrive
+ * here unsplit. Only a value with exactly one colon has a port stripped; two
+ * or more colons without brackets is a bare IPv6 address and is kept whole.
+ */
+function bareHost(host: string): string {
+  let h = host.trim().toLowerCase();
+  const bracketed = h.match(/^\[([^\]]*)\](?::\d*)?$/);
+  if (bracketed) {
+    h = bracketed[1];
+  } else if (h.split(':').length === 2) {
+    h = h.slice(0, h.indexOf(':'));
+  }
+  return h.replace(/\.$/, '');
+}
+
+/**
+ * True for a loopback host: localhost, 127.x, ::1 or 0.0.0.0. A trailing dot
+ * ("localhost.") is the fully qualified form of the same name and still
+ * resolves to loopback, so it is stripped first, along with any ":port".
+ */
+export function isLocalhostHost(host: string): boolean {
+  const h = bareHost(host);
+  return h === 'localhost' || h === '::1' || h === '0.0.0.0' || /^127\./.test(h);
+}
+
+export function singleLabelHostCloudError(host: string): string {
+  return `"${host.trim()}" isn't a full hostname, so it can't be reached from the cloud. Use the complete address, e.g. my-db.example.com.`;
+}

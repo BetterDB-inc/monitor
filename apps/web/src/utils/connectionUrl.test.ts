@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { parseConnectionUrl, looksLikeConnectionUrl } from './connectionUrl';
+import {
+  parseConnectionUrl,
+  looksLikeConnectionUrl,
+  isSingleLabelHost,
+  isLocalhostHost,
+  singleLabelHostCloudError,
+} from './connectionUrl';
 
 function expectOk(input: string) {
   const result = parseConnectionUrl(input);
@@ -119,5 +125,63 @@ describe('looksLikeConnectionUrl', () => {
   it('rejects bare hostnames', () => {
     expect(looksLikeConnectionUrl('redis.example.com')).toBe(false);
     expect(looksLikeConnectionUrl('localhost')).toBe(false);
+  });
+});
+
+describe('isSingleLabelHost', () => {
+  it('flags hosts without a domain', () => {
+    expect(isSingleLabelHost('Fffhgddgbgf345544')).toBe(true);
+    expect(isSingleLabelHost('valkey')).toBe(true);
+    expect(isSingleLabelHost('my-db.')).toBe(true);
+  });
+
+  it('accepts fully qualified hosts, IPs and localhost', () => {
+    expect(isSingleLabelHost('my-db.upstash.io')).toBe(false);
+    expect(isSingleLabelHost('10.0.0.5')).toBe(false);
+    expect(isSingleLabelHost('::1')).toBe(false);
+    expect(isSingleLabelHost('2001:db8::1')).toBe(false);
+    expect(isSingleLabelHost('localhost')).toBe(false);
+    expect(isSingleLabelHost('')).toBe(false);
+  });
+
+  it('names the host in the cloud error', () => {
+    expect(singleLabelHostCloudError(' valkey ')).toContain('"valkey"');
+  });
+});
+
+describe('isLocalhostHost', () => {
+  it('matches loopback hosts, including the trailing-dot form', () => {
+    for (const host of ['localhost', 'LOCALHOST', 'localhost.', '127.0.0.1', '127.1.2.3', '::1', '0.0.0.0']) {
+      expect(isLocalhostHost(host)).toBe(true);
+    }
+  });
+
+  it('does not match other hosts', () => {
+    expect(isLocalhostHost('my-db.example.com')).toBe(false);
+    expect(isLocalhostHost('localhost.example.com')).toBe(false);
+    expect(isLocalhostHost('10.0.0.5')).toBe(false);
+  });
+
+  it('keeps localhost. out of the single-label bucket', () => {
+    expect(isSingleLabelHost('localhost.')).toBe(false);
+  });
+});
+
+describe('host checks on raw Host-field input', () => {
+  it('strips a trailing port before checking', () => {
+    expect(isSingleLabelHost('valkey:6379')).toBe(true);
+    expect(isSingleLabelHost('my-db.example.com:6379')).toBe(false);
+    expect(isLocalhostHost('localhost:6379')).toBe(true);
+    expect(isLocalhostHost('localhost.:6379')).toBe(true);
+    expect(isLocalhostHost('127.0.0.1:6379')).toBe(true);
+    expect(isSingleLabelHost('localhost:6379')).toBe(false);
+  });
+
+  it('keeps bare and bracketed IPv6 addresses intact', () => {
+    expect(isLocalhostHost('::1')).toBe(true);
+    expect(isLocalhostHost('[::1]')).toBe(true);
+    expect(isLocalhostHost('[::1]:6379')).toBe(true);
+    expect(isSingleLabelHost('2001:db8::1')).toBe(false);
+    expect(isSingleLabelHost('[2001:db8::1]:6379')).toBe(false);
   });
 });
