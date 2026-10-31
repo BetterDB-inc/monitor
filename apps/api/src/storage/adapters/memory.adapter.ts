@@ -646,7 +646,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private upsertAnomalyEvent(event: StoredAnomalyEvent): void {
     const idx = this.anomalyEvents.findIndex((e) => e.id === event.id);
     if (idx < 0) {
-      this.anomalyEvents.push(event);
+      this.anomalyEvents.push({ ...event, insertedAt: Date.now() });
       return;
     }
     const existing = this.anomalyEvents[idx];
@@ -708,6 +708,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       filtered = filtered.filter((e) => e.connectionId === options.connectionId);
     if (options.startTime) filtered = filtered.filter((e) => e.timestamp >= options.startTime!);
     if (options.endTime) filtered = filtered.filter((e) => e.timestamp <= options.endTime!);
+    if (options.insertedSince)
+      filtered = filtered.filter((e) => e.insertedAt! >= options.insertedSince!);
     if (options.severity) filtered = filtered.filter((e) => e.severity === options.severity);
     if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
     if (options.resolved !== undefined)

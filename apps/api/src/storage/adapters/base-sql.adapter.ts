@@ -210,6 +210,7 @@ export class RowMappers {
       sourcePort: row.source_port,
       connectionId: row.connection_id,
       scopeId: row.scope_id ?? undefined,
+      insertedAt: row.created_at ? new Date(row.created_at).getTime() : undefined,
     };
   }
 

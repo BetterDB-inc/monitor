@@ -166,6 +166,7 @@ export interface StoredAnomalyEvent {
   sourcePort?: number;
   connectionId?: string;
   scopeId?: string;
+  insertedAt?: number;
 }
 
 // Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
@@ -249,6 +250,7 @@ export interface AnomalyQueryOptions {
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
   scope?: AnomalyScopeFilter;
+  insertedSince?: number;
 }
 
 export interface CorrelatedGroupQueryOptions

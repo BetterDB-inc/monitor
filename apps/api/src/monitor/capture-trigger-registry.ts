@@ -23,6 +23,14 @@ export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const LATE_ANOMALY_LOOKBACK_MS = 5 * 60_000;
+const INSERTED_WATERMARK_MARGIN_MS = 5_000;
+
+interface AnomalyScan {
+  from: number;
+  offset: number;
+  insertedSince: number;
+  newestInsert: number;
+}
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -55,7 +63,8 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private pollHandle?: NodeJS.Timeout;
   private lastAnomalyAt: number;
   private replayFloor: number;
-  private anomalyScan: { from: number; offset: number } | null = null;
+  private insertedWatermark = 0;
+  private anomalyScan: AnomalyScan | null = null;
   private readonly seenAnomalies = new Map<string, number>();
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
@@ -80,6 +89,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   resetAnomalyWatermark(): void {
     this.lastAnomalyAt = 0;
     this.replayFloor = 0;
+    this.insertedWatermark = 0;
     this.anomalyScan = null;
   }
 
@@ -210,27 +220,36 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
     const pageSize = 200;
     const maxScannedPerTick = 5000;
-    const scan = this.anomalyScan ?? { from: startTime, offset: 0 };
+    const scan = this.anomalyScan ?? {
+      from: startTime,
+      offset: 0,
+      insertedSince: this.insertedWatermark,
+      newestInsert: 0,
+    };
+    const resuming = this.anomalyScan !== null;
+    let resumeAt: AnomalyScan | null = null;
     const sorted: StoredAnomalyEvent[] = [];
     for (let read = 0; ; read += pageSize) {
       const page = await this.storage.getAnomalyEvents({
         startTime: scan.from,
+        insertedSince: scan.insertedSince,
         order: 'asc',
         limit: pageSize,
         offset: scan.offset + read,
       });
+      if (!resuming) {
+        for (const evt of page) {
+          scan.newestInsert = Math.max(scan.newestInsert, evt.insertedAt ?? 0);
+        }
+      }
       sorted.push(...page.filter((evt) => !this.seenAnomalies.has(evt.id)));
       if (page.length < pageSize) {
-        this.anomalyScan = null;
         break;
       }
       if (read + pageSize >= maxScannedPerTick) {
-        this.anomalyScan = { from: scan.from, offset: scan.offset + read + pageSize };
+        resumeAt = { ...scan, offset: scan.offset + read + pageSize };
         break;
       }
-    }
-    if (sorted.length === 0) {
-      return;
     }
     let maxTs = this.lastAnomalyAt;
     for (const evt of sorted) {
@@ -254,6 +273,13 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.lastAnomalyAt = maxTs;
+    this.anomalyScan = resumeAt;
+    if (!resumeAt) {
+      this.insertedWatermark = Math.max(
+        this.insertedWatermark,
+        scan.newestInsert - INSERTED_WATERMARK_MARGIN_MS,
+      );
+    }
   }
 
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {

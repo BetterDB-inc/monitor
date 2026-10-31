@@ -36,6 +36,22 @@ describe.each<[string, AdapterFactory]>(adapters)(
       await cleanup();
     });
 
+    it('filters by the time a row was saved, not its own timestamp', async () => {
+      await storage.saveAnomalyEvent(event(randomUUID()), CONN);
+
+      const [saved] = await storage.getAnomalyEvents({ connectionId: CONN });
+      const insertedSince = saved.insertedAt!;
+      const atWatermark = await storage.getAnomalyEvents({ connectionId: CONN, insertedSince });
+      const later = await storage.getAnomalyEvents({
+        connectionId: CONN,
+        insertedSince: insertedSince + 3_600_000,
+      });
+
+      expect(insertedSince).toBeGreaterThan(TIMESTAMP);
+      expect(atWatermark.map((e) => e.id)).toEqual([saved.id]);
+      expect(later).toEqual([]);
+    });
+
     it('returns events that share a timestamp in id order across pages', async () => {
       const ids = Array.from({ length: 12 }, () => randomUUID());
       for (const id of ids) await storage.saveAnomalyEvent(event(id), CONN);
