@@ -284,7 +284,7 @@ function formatReplicaLink(down: boolean | null | undefined): string {
   if (down === null || down === undefined) {
     return 'n/a';
   }
-  return down ? 'down' : 'ok';
+  return down ? 'unhealthy' : 'ok';
 }
 
 function formatBytes(bytes: number): string {
