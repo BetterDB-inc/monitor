@@ -5905,19 +5905,8 @@ export class AnomalyService
         `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
       );
 
+      const savedGroups: typeof newGroups = [];
       for (const group of newGroups) {
-        this.logger.warn(
-          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
-        );
-
-        // Get connectionId from first anomaly in group (all should have same connectionId)
-        const groupConnectionId = group.anomalies[0]?.connectionId;
-        this.prometheusService.incrementCorrelatedGroup(
-          group.pattern,
-          group.severity,
-          groupConnectionId,
-        );
-
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
           timestamp: group.timestamp,
@@ -5931,28 +5920,40 @@ export class AnomalyService
           sourcePort: this.configService.get('database.port'),
         };
 
+        // Get connectionId from first anomaly in group (all should have same connectionId)
+        const connectionId = group.anomalies[0]?.connectionId;
         try {
-          // Get connectionId from first anomaly in group (all should have same connectionId)
-          const connectionId = group.anomalies[0]?.connectionId;
-          if (connectionId) {
-            await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
-            for (const anomaly of group.anomalies) {
-              await this.storage.saveAnomalyEvent(
-                this.toStoredAnomalyEvent(anomaly),
-                anomaly.connectionId ?? connectionId,
-              );
-              anomaly.persisted = true;
-              this.persistenceOutbox.settleSave(anomaly.id);
-            }
-          }
+          if (connectionId) await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
         } catch (err) {
           this.logger.error('Failed to persist correlated group:', err);
+          for (const anomaly of group.anomalies) anomaly.correlationId = undefined;
+          continue;
+        }
+
+        this.logger.warn(
+          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
+        );
+        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+        savedGroups.push(group);
+
+        if (!connectionId) continue;
+        try {
+          for (const anomaly of group.anomalies) {
+            await this.storage.saveAnomalyEvent(
+              this.toStoredAnomalyEvent(anomaly),
+              anomaly.connectionId ?? connectionId,
+            );
+            anomaly.persisted = true;
+            this.persistenceOutbox.settleSave(anomaly.id);
+          }
+        } catch (err) {
+          this.logger.error('Failed to persist correlated group members:', err);
         }
       }
 
-      this.recentGroups.push(...newGroups);
+      this.recentGroups.push(...savedGroups);
       this.lastHourGroups.push(
-        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
+        ...savedGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
       );
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);

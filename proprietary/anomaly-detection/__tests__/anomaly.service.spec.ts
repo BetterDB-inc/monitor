@@ -9079,6 +9079,29 @@ describe('AnomalyService', () => {
         expect((service as any).persistenceOutbox.size).toBe(0);
       });
 
+      it('regroups the events when their group fails to save', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('storage down'));
+
+        await (service as any).correlateAnomalies();
+
+        expect(attempt.correlationId).toBeUndefined();
+        expect((service as any).recentGroups).toEqual([]);
+        expect(prometheusService.incrementCorrelatedGroup).not.toHaveBeenCalled();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].correlationId).toBeUndefined();
+
+        await (service as any).correlateAnomalies();
+
+        expect(attempt.correlationId).toBeDefined();
+        expect((service as any).recentGroups).toHaveLength(1);
+        expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
+      });
+
       it('keeps a retried event in its correlated group', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         const t = await feed([2, 4, 6, 8, 10], T0);
