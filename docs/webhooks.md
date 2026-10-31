@@ -75,7 +75,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
 | `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds or went away, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
-| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. `command_p99` and `replication_divergence` are excluded; they send `latency.regression.detected` and `replication.divergence` instead |
+| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
@@ -1037,7 +1037,7 @@ These events fire immediately without hysteresis:
 
 - `instance.down` / `instance.up` (state change events)
 - `client.blocked` (each occurrence)
-- `anomaly.detected` (each detection, except `command_p99` and `replication_divergence`, which have their own events)
+- `anomaly.detected` (each detection, except `command_p99`, `retry_amplification` and `replication_divergence`, which have their own events)
 - `acl.violation` (each violation)
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)
