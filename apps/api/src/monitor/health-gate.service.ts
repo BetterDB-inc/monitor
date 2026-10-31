@@ -145,8 +145,8 @@ function isMasterLinkDown(
 }
 
 function furthestReplicaGap(replication: Record<string, string>): number | null {
-  const masterOffset = parseInt(replication.master_repl_offset ?? '', 10);
-  if (isNaN(masterOffset)) {
+  const masterOffset = parseOffset(replication.master_repl_offset);
+  if (masterOffset === null) {
     return null;
   }
   let gap = 0;
@@ -155,12 +155,18 @@ function furthestReplicaGap(replication: Record<string, string>): number | null 
       continue;
     }
     const fields = InfoParser.parseKvLine(value, ',');
-    if (fields.state !== 'online' || !isAckOverdue(fields.lag)) {
+    const offset = parseOffset(fields.offset);
+    if (offset === null || fields.state !== 'online' || !isAckOverdue(fields.lag)) {
       continue;
     }
-    gap = Math.max(gap, masterOffset - toNumber(fields.offset));
+    gap = Math.max(gap, masterOffset - offset);
   }
   return gap;
+}
+
+function parseOffset(raw: string | undefined): number | null {
+  const offset = parseInt(raw ?? '', 10);
+  return isNaN(offset) ? null : offset;
 }
 
 function isAckOverdue(lagSeconds: string | undefined): boolean {

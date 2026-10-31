@@ -142,6 +142,22 @@ describe('HealthGateService', () => {
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
+  it.each([
+    ['missing', 'ip=10.0.0.2,port=6379,state=online,lag=4'],
+    ['unparseable', 'ip=10.0.0.2,port=6379,state=online,offset=abc,lag=4'],
+  ])('leaves out a replica whose offset is %s', async (_name, line) => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: line },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+  });
+
   it('reads replicaN lines as well as slaveN lines', async () => {
     const { service } = makeService({
       info: makeInfo({

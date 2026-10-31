@@ -280,8 +280,8 @@ function Badge({ tone, children }: { tone: 'ok' | 'warn'; children: React.ReactN
   );
 }
 
-function formatReplicaLink(down: boolean | null): string {
-  if (down === null) {
+function formatReplicaLink(down: boolean | null | undefined): string {
+  if (down === null || down === undefined) {
     return 'n/a';
   }
   return down ? 'down' : 'ok';
