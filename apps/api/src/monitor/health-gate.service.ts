@@ -2,12 +2,18 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { InfoParser } from '../database/parsers/info.parser';
 import {
   HealthGateResult,
   HealthGateSignals,
   HealthGateThresholds,
   evaluateHealthGate,
 } from './health-gate';
+
+const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
+const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
+const REPLICA_ACK_INTERVAL_SECONDS = 1;
+const MASTER_IO_STALE_SECONDS = 30;
 
 @Injectable()
 export class HealthGateService {
@@ -43,7 +49,7 @@ export class HealthGateService {
     const info = await client.getInfoParsed();
 
     const memoryPct = readMemoryPct(info);
-    const { replicationLagBytes, infoFailoverInProgress } = readReplication(info);
+    const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(info);
     const now = Date.now();
 
     const [oomEvents, roleChangeEvents] = await Promise.all([
@@ -55,6 +61,7 @@ export class HealthGateService {
       memoryPct,
       oomEventsRecent: oomEvents,
       replicationLagBytes,
+      replicaLinkDown,
       failoverInProgress: infoFailoverInProgress || roleChangeEvents > 0,
     };
 
@@ -96,44 +103,56 @@ function readMemoryPct(info: unknown): number {
 }
 
 function readReplication(info: unknown): {
-  replicationLagBytes: number;
+  replicationLagBytes: number | null;
+  replicaLinkDown: boolean;
   infoFailoverInProgress: boolean;
 } {
   const replication = (info as { replication?: Record<string, string> }).replication;
   if (replication === undefined) {
-    return { replicationLagBytes: 0, infoFailoverInProgress: false };
+    return { replicationLagBytes: null, replicaLinkDown: false, infoFailoverInProgress: false };
   }
-
-  const isPrimary = replication.role === 'master' || replication.role === 'primary';
-  const lag = isPrimary ? furthestReplicaGap(replication) : 0;
 
   const failoverState = replication.master_failover_state;
   const infoFailoverInProgress =
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
-  return { replicationLagBytes: lag, infoFailoverInProgress };
+  return {
+    replicationLagBytes: furthestReplicaGap(replication),
+    replicaLinkDown: REPLICA_ROLES.has(replication.role) && isMasterLinkDown(replication),
+    infoFailoverInProgress,
+  };
 }
 
-function furthestReplicaGap(replication: Record<string, string>): number {
-  const masterOffset = toNumber(replication.master_repl_offset);
+function isMasterLinkDown(replication: Record<string, string>): boolean {
+  const linkStatus = replication.master_link_status;
+  return (
+    (linkStatus !== undefined && linkStatus !== 'up') ||
+    replication.master_sync_in_progress === '1' ||
+    toNumber(replication.master_last_io_seconds_ago) > MASTER_IO_STALE_SECONDS
+  );
+}
+
+function furthestReplicaGap(replication: Record<string, string>): number | null {
+  const masterOffset = parseInt(replication.master_repl_offset ?? '', 10);
+  if (isNaN(masterOffset)) {
+    return null;
+  }
   let gap = 0;
   for (const [key, value] of Object.entries(replication)) {
-    if (!/^slave\d+$/.test(key) || typeof value !== 'string') {
+    if (!REPLICA_LINE_KEY.test(key)) {
       continue;
     }
-    const fields = new Map(
-      value.split(',').map((pair) => {
-        const eq = pair.indexOf('=');
-        return [pair.slice(0, eq), pair.slice(eq + 1)] as const;
-      }),
-    );
-    const offset = toNumber(fields.get('offset'));
-    if (fields.get('state') !== 'online' || offset <= 0) {
+    const fields = InfoParser.parseKvLine(value, ',');
+    if (fields.state !== 'online' || !isAckOverdue(fields.lag)) {
       continue;
     }
-    gap = Math.max(gap, masterOffset - offset);
+    gap = Math.max(gap, masterOffset - toNumber(fields.offset));
   }
   return gap;
+}
+
+function isAckOverdue(lagSeconds: string | undefined): boolean {
+  return lagSeconds === undefined || toNumber(lagSeconds) > REPLICA_ACK_INTERVAL_SECONDS;
 }
 
 function toNumber(raw: string | undefined): number {

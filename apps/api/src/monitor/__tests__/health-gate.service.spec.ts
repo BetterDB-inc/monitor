@@ -1,6 +1,8 @@
 import type { ConfigService } from '@nestjs/config';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { StoragePort, StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
+import { InfoParser } from '../../database/parsers/info.parser';
+import { MetricsParser } from '../../database/parsers/metrics.parser';
 import { HealthGateService } from '../health-gate.service';
 
 const CONNECTION_ID = 'conn-1';
@@ -12,6 +14,9 @@ function makeInfo(overrides: {
   master_repl_offset?: string;
   slave_repl_offset?: string;
   master_failover_state?: string;
+  master_link_status?: string;
+  master_sync_in_progress?: string;
+  master_last_io_seconds_ago?: string;
   replicas?: Record<string, string>;
 } = {}): unknown {
   return {
@@ -21,9 +26,13 @@ function makeInfo(overrides: {
     },
     replication: {
       role: overrides.role ?? 'master',
-      master_repl_offset: overrides.master_repl_offset,
+      master_repl_offset:
+        'master_repl_offset' in overrides ? overrides.master_repl_offset : '1000',
       slave_repl_offset: overrides.slave_repl_offset,
       master_failover_state: overrides.master_failover_state,
+      master_link_status: overrides.master_link_status,
+      master_sync_in_progress: overrides.master_sync_in_progress,
+      master_last_io_seconds_ago: overrides.master_last_io_seconds_ago,
       ...overrides.replicas,
     },
   };
@@ -64,6 +73,7 @@ describe('HealthGateService', () => {
       memoryPct: 0.1,
       oomEventsRecent: 0,
       replicationLagBytes: 0,
+      replicaLinkDown: false,
       failoverInProgress: false,
     });
   });
@@ -100,6 +110,103 @@ describe('HealthGateService', () => {
     },
   );
 
+  it.each(['0', '1'])(
+    'does not count writes since the last ack when a replica acked %ss ago',
+    async (lag) => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'master',
+          master_repl_offset: '100000000',
+          replicas: {
+            slave0: `ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=${lag}`,
+          },
+        }),
+      });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(result.signals.replicationLagBytes).toBe(0);
+      expect(result.allow).toBe(true);
+    },
+  );
+
+  it('falls back to the byte gap when a replica line has no lag field', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000' },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('reads replicaN lines as well as slaveN lines', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'primary',
+        master_repl_offset: '100000000',
+        replicas: { replica0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=4' },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('skips replica fields without a key=value shape', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'state=online, offset=50000000,garbage,__proto__=x,lag=4' },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('evaluates replication from raw INFO through the real parsers', async () => {
+    const raw = [
+      '# Memory',
+      'used_memory:1000',
+      'maxmemory:10000',
+      '# Replication',
+      'role:master',
+      'connected_slaves:1',
+      'slave0:ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=4',
+      'master_failover_state:no-failover',
+      'master_repl_offset:100000000',
+      '',
+    ].join('\r\n');
+    const { service } = makeService({
+      info: MetricsParser.parseInfoToTyped(InfoParser.parse(raw)),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('reports lag as unavailable when master_repl_offset is missing', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: undefined,
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=4' },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBeNull();
+    expect(result.allow).toBe(true);
+  });
+
+  it('reports lag as unavailable when INFO has no replication section', async () => {
+    const { service } = makeService({
+      info: { memory: { used_memory: '1000', maxmemory: '10000' } },
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBeNull();
+    expect(result.signals.replicaLinkDown).toBe(false);
+  });
+
   it('ignores replicas still in their initial sync', async () => {
     const { service } = makeService({
       info: makeInfo({
@@ -116,7 +223,22 @@ describe('HealthGateService', () => {
     expect(result.allow).toBe(true);
   });
 
-  it('ignores an online replica that has not acked its first offset yet', async () => {
+  it('ignores an online replica that came online within the last ack interval', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=0,lag=0',
+        },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+  });
+
+  it('counts an online replica that stopped acking while it loads an RDB', async () => {
     const { service } = makeService({
       info: makeInfo({
         role: 'master',
@@ -127,8 +249,8 @@ describe('HealthGateService', () => {
       }),
     });
     const result = await service.evaluate(CONNECTION_ID);
-    expect(result.signals.replicationLagBytes).toBe(0);
-    expect(result.allow).toBe(true);
+    expect(result.signals.replicationLagBytes).toBe(100_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
   it('reports no lag on a primary without replicas', async () => {
@@ -143,17 +265,71 @@ describe('HealthGateService', () => {
   it("does not read lag from a replica's own offsets", async () => {
     const { service } = makeService({
       info: makeInfo({
-        role: 'replica',
+        role: 'slave',
         master_repl_offset: '100000000',
         slave_repl_offset: '50000000',
-        replicas: {
-          slave0: 'ip=10.0.0.4,port=6379,state=online,offset=50000000,lag=0',
-        },
+        master_link_status: 'up',
+        master_last_io_seconds_ago: '1',
       }),
     });
     const result = await service.evaluate(CONNECTION_ID);
     expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
+  });
+
+  it.each(['slave', 'replica', 'active-replica'])(
+    'measures the sub-replicas of a chained %s',
+    async (role) => {
+      const { service } = makeService({
+        info: makeInfo({
+          role,
+          master_repl_offset: '100000000',
+          master_link_status: 'up',
+          replicas: {
+            slave0: 'ip=10.0.0.4,port=6379,state=online,offset=50000000,lag=4',
+          },
+        }),
+      });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(result.signals.replicationLagBytes).toBe(50_000_000);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+    },
+  );
+
+  it.each([
+    ['slave', { master_link_status: 'down' }],
+    ['replica', { master_link_status: 'down' }],
+    ['active-replica', { master_link_status: 'down' }],
+    ['slave', { master_link_status: 'up', master_sync_in_progress: '1' }],
+    ['slave', { master_link_status: 'up', master_last_io_seconds_ago: '31' }],
+  ])('skips a %s whose link is unhealthy: %j', async (role, link) => {
+    const { service } = makeService({ info: makeInfo({ role, ...link }) });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicaLinkDown).toBe(true);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+  });
+
+  it('allows a replica on an idle link between primary pings', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'slave',
+        master_link_status: 'up',
+        master_sync_in_progress: '0',
+        master_last_io_seconds_ago: '30',
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicaLinkDown).toBe(false);
+    expect(result.allow).toBe(true);
+  });
+
+  it('ignores master link fields on a primary', async () => {
+    const { service } = makeService({
+      info: makeInfo({ role: 'master', master_link_status: 'down' }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(result.signals.replicaLinkDown).toBe(false);
   });
 
   it('detects failover from INFO master_failover_state', async () => {

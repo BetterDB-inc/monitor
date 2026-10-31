@@ -12,7 +12,7 @@ function makeService({
   acl = { username: 'default', hasMonitor: true },
   health = {
     allow: true,
-    signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
+    signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, replicaLinkDown: false, failoverInProgress: false },
     thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
   },
   monitorSupport,
@@ -144,7 +144,7 @@ describe('PreflightService', () => {
     const health = {
       allow: false,
       skipReason: 'memory_above_threshold',
-      signals: { memoryPct: 0.95, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
+      signals: { memoryPct: 0.95, oomEventsRecent: 0, replicationLagBytes: 0, replicaLinkDown: false, failoverInProgress: false },
       thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
     };
     const { service } = makeService({
