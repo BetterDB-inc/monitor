@@ -379,6 +379,7 @@ export class AnomalyService
   private stuckReplicaFirstSeen = new Map<string, Map<string, number>>();
   private activeStuckReplicas = new Map<string, Set<string>>();
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
+  private readonly connectionClusterKeys = new Map<string, string>();
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
@@ -854,6 +855,7 @@ export class AnomalyService
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.reshardSnapshot.delete(connectionId);
+    this.connectionClusterKeys.delete(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
@@ -1549,6 +1551,7 @@ export class AnomalyService
         }
 
         if (nodes) {
+          this.rememberClusterKey(ctx.connectionId, nodes);
           // Orphaned keys in unowned slots after a persistence load
           // (valkey#539): unreachable data silently holding memory. NOT a
           // gossip race — the engine loads persistence files the same way
@@ -6023,9 +6026,28 @@ export class AnomalyService
     }
   }
 
+  private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
+    const clusterKey = clusterKeyFromNodes(nodes);
+    if (clusterKey) this.connectionClusterKeys.set(connectionId, clusterKey);
+    else this.connectionClusterKeys.delete(connectionId);
+  }
+
+  private seedIdOf(connectionId: string): string | undefined {
+    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId;
+  }
+
   private correlationScopeOf(connectionId: string | undefined): string {
     if (!connectionId) return '';
-    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
+    const seedId = this.seedIdOf(connectionId);
+    if (seedId) return seedId;
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    if (!clusterKey) return connectionId;
+    if (this.connectionRegistry.listMembers(connectionId).length > 0) return connectionId;
+    for (const [peer, peerKey] of this.connectionClusterKeys) {
+      const peerSeedId = peerKey === clusterKey ? this.seedIdOf(peer) : undefined;
+      if (peerSeedId) return peerSeedId;
+    }
+    return clusterKey;
   }
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => {
@@ -6448,6 +6470,9 @@ export class AnomalyService
         connectionId,
         ...(this.connectionRegistry.getConfig(scope) ? [scope] : []),
         ...members.map((m) => m.id),
+        ...[...this.connectionClusterKeys.keys()].filter(
+          (peer) => this.correlationScopeOf(peer) === scope,
+        ),
       ]),
     ];
   }

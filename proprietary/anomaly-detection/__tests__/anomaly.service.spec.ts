@@ -1628,6 +1628,47 @@ describe('AnomalyService', () => {
       await polling;
     });
 
+    it('correlates shards added as separate connections', async () => {
+      await pollCluster(6000, false);
+
+      expect((service as any).correlationScopeOf('conn-b')).toBe(
+        (service as any).correlationScopeOf('conn-a'),
+      );
+      expect((service as any).scopeConnectionIds('conn-a').sort()).toEqual([
+        'conn-a',
+        'conn-b',
+        'conn-c',
+      ]);
+    });
+
+    it('puts a separately added shard in the scope of a discovered topology', async () => {
+      await pollCluster(6000, false);
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'conn-b' ? { id, membership: { seedId: 'conn-a' } } : { id },
+      );
+      registry.listMembers.mockImplementation((seedId: string) =>
+        seedId === 'conn-a' ? [{ id: 'conn-b' }] : [],
+      );
+
+      expect((service as any).correlationScopeOf('conn-c')).toBe('conn-a');
+      expect((service as any).correlationScopeOf('conn-a')).toBe('conn-a');
+      expect((service as any).scopeConnectionIds('conn-c').sort()).toEqual([
+        'conn-a',
+        'conn-b',
+        'conn-c',
+      ]);
+    });
+
+    it('leaves the scope of a removed connection', async () => {
+      await pollCluster(6000, false);
+
+      (service as any).onConnectionRemoved('conn-b');
+
+      expect((service as any).correlationScopeOf('conn-b')).toBe('conn-b');
+      expect((service as any).scopeConnectionIds('conn-a')).not.toContain('conn-b');
+    });
+
     it('alerts once when a shard stays above the cluster median during a reshard', async () => {
       await pollCluster(18_000, true);
       await pollCluster(18_000, true);
