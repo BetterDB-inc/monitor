@@ -82,6 +82,8 @@ export interface MemoryOverheadState {
   invalidSampleStreak: number;
   /** Whether the persistent-inconsistency note was emitted for the current run. */
   inconsistencyNoted: boolean;
+  ackedFinding: MemoryOverheadFinding | null;
+  notedFinding: MemoryOverheadFinding | null;
 }
 
 export interface MemoryOverheadFinding {
@@ -126,7 +128,13 @@ const COMPONENT_REMEDY: Record<keyof OverheadComponents, string> = {
 };
 
 export function createMemoryOverheadState(): MemoryOverheadState {
-  return { ackedLevel: 'none', invalidSampleStreak: 0, inconsistencyNoted: false };
+  return {
+    ackedLevel: 'none',
+    invalidSampleStreak: 0,
+    inconsistencyNoted: false,
+    ackedFinding: null,
+    notedFinding: null,
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -316,7 +324,28 @@ export function acknowledgeMemoryOverheadFinding(
 ): void {
   if (finding.level === 'info') {
     state.inconsistencyNoted = true;
+    state.notedFinding = finding;
     return;
   }
   state.ackedLevel = finding.level;
+  state.ackedFinding = finding;
+}
+
+export function memoryOverheadRearm(
+  state: MemoryOverheadState,
+  finding: MemoryOverheadFinding,
+): () => void {
+  const previousLevel = state.ackedLevel;
+  return () => {
+    if (state.notedFinding === finding) {
+      state.notedFinding = null;
+      state.inconsistencyNoted = false;
+      return;
+    }
+    if (state.ackedFinding !== finding) return;
+    state.ackedFinding = null;
+    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
+      state.ackedLevel = previousLevel;
+    }
+  };
 }

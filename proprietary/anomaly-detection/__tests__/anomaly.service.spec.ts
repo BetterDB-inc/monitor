@@ -2224,6 +2224,27 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('raises the conflict again when the outbox drops its unsaved event', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      await poll();
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      const [first] = conflicts();
+      expect(conflicts()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = conflicts();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
     it('dedupes a persistent conflict to a single alert across polls', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
       await poll();
@@ -4801,6 +4822,27 @@ describe('AnomalyService', () => {
       // Attributed to a real member of the drifting group, not whichever
       // connection's poll happened to run the scan.
       expect(['conn-a', 'conn-b']).toContain(events[0].connectionId);
+    });
+
+    it('raises the drift again when the outbox drops its unsaved event', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll(ctxA);
+      await poll(ctxB);
+      await poll(ctxA);
+      const [first] = driftEvents();
+      expect(driftEvents()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll(ctxA);
+
+      const raised = driftEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
     it('does not alert when only one node of a group is monitored', async () => {
@@ -9411,6 +9453,612 @@ describe('AnomalyService', () => {
 
         expect(replica.level).toBe('warning');
         expect((await divergenceHistory())[0].level).toBe('warning');
+      });
+    });
+  });
+
+  describe('detectors re-armed by an outbox drop', () => {
+    let now: number;
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const infoWith = (over: {
+      clients?: Record<string, string>;
+      memory?: Record<string, string>;
+      stats?: Record<string, string>;
+      replication?: Record<string, string>;
+      persistence?: Record<string, string>;
+      server?: Record<string, string>;
+    }) => ({
+      server: { role: 'master', ...over.server },
+      clients: { connected_clients: '10', blocked_clients: '0', ...over.clients },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', ...over.memory },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        ...over.stats,
+      },
+      ...(over.replication ? { replication: over.replication } : {}),
+      ...(over.persistence ? { persistence: over.persistence } : {}),
+    });
+
+    const pollWith = async (info: Parameters<typeof infoWith>[0], times = 1) => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(info));
+      for (let i = 0; i < times; i += 1) {
+        await poll();
+        now += 1_000;
+      }
+    };
+
+    const eventsOf = (metricType: MetricType) =>
+      service.getRecentEvents(100, metricType).reverse();
+
+    const failSaves = () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+    };
+
+    const healSaves = () => {
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+    };
+
+    const expireOutbox = async () => {
+      const polledAt = now;
+      now = polledAt + OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      now = polledAt;
+    };
+
+    const expectRaisedAgain = (metricType: MetricType, first: AnomalyEvent) => {
+      const raised = eventsOf(metricType);
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    };
+
+    describe('client saturation', () => {
+      const clients = (connected: number) => ({
+        clients: { connected_clients: String(connected), maxclients: '100' },
+      });
+      const events = () => eventsOf(MetricType.CLIENT_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(clients(85), 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        expectRaisedAgain(MetricType.CLIENT_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        await pollWith(clients(50));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(clients(85));
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(clients(85));
+        failSaves();
+        await pollWith(clients(97));
+        const critical = events()[1];
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(97));
+
+        const raised = events();
+        expect(raised).toHaveLength(3);
+        expect(raised[2].severity).toBe(AnomalySeverity.CRITICAL);
+        expect(raised[2].id).not.toBe(critical.id);
+      });
+
+      it('raises the lower level when a dropped escalation was never followed', async () => {
+        failSaves();
+        await pollWith(clients(97));
+        await pollWith(clients(85));
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised[1].severity).toBe(AnomalySeverity.WARNING);
+      });
+
+      it('leaves no state behind when the connection went away before the drop', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        (service as any).clientSaturationLevel.delete('conn-1');
+        (service as any).clientSaturationRaisedBy.delete('conn-1');
+
+        await expireOutbox();
+
+        expect((service as any).clientSaturationLevel.has('conn-1')).toBe(false);
+      });
+    });
+
+    describe('load saturation', () => {
+      const busy = (usec: number) => ({
+        stats: {
+          instantaneous_eventloop_duration_usec: String(usec),
+          instantaneous_eventloop_cycles_per_sec: '1000',
+        },
+      });
+      const events = () => eventsOf(MetricType.LOAD_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(busy(900), 4);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(900));
+
+        expectRaisedAgain(MetricType.LOAD_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        await pollWith(busy(100));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(busy(900), 3);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(busy(900), 3);
+        failSaves();
+        await pollWith(busy(990), 3);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(990));
+
+        const raised = events();
+        expect(raised.map((e) => e.severity)).toEqual([
+          AnomalySeverity.WARNING,
+          AnomalySeverity.CRITICAL,
+          AnomalySeverity.CRITICAL,
+        ]);
+      });
+    });
+
+    describe('memory overhead', () => {
+      const overhead = {
+        memory: {
+          maxmemory: '1000',
+          maxmemory_policy: 'noeviction',
+          used_memory: '800',
+          used_memory_overhead: '700',
+          used_memory_startup: '100',
+          used_memory_dataset: '100',
+        },
+      };
+      const quiet = {
+        memory: { ...overhead.memory, used_memory_overhead: '150' },
+      };
+      const inconsistent = {
+        memory: { ...overhead.memory, used_memory_overhead: '900' },
+      };
+      const events = () => eventsOf(MetricType.MEMORY_OVERHEAD);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(overhead, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(overhead);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(overhead);
+        await pollWith(quiet);
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(overhead);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('raises the inconsistency note again when the outbox drops it', async () => {
+        failSaves();
+        await pollWith(inconsistent, 11);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.INFO);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(inconsistent);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('leaves the level armed when only the note is dropped', async () => {
+        await pollWith(overhead);
+        failSaves();
+        await pollWith(inconsistent, 10);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+      });
+    });
+
+    describe('fork memory risk', () => {
+      const GB = 1024 * 1024 * 1024;
+      const risky = {
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      const events = () => eventsOf(MetricType.FORK_MEMORY_RISK);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(risky, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(risky);
+
+        expectRaisedAgain(MetricType.FORK_MEMORY_RISK, first);
+      });
+    });
+
+    describe('COB pressure', () => {
+      const HARD = 256 * 1024 * 1024;
+      const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+      const replicated = {
+        memory: { mem_clients_slaves: '0' },
+        replication: { connected_slaves: '1', sync_full: '1' },
+      };
+      const events = () => eventsOf(MetricType.REPL_BUFFER_PRESSURE);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue(LIMIT_RAW);
+        dbClient.getClients = jest
+          .fn()
+          .mockResolvedValue([{ addr: '10.0.0.5:6380', omem: HARD * 0.7 }]);
+        failSaves();
+        await pollWith(replicated, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(replicated);
+
+        expectRaisedAgain(MetricType.REPL_BUFFER_PRESSURE, first);
+      });
+    });
+
+    describe('replica resync loop', () => {
+      const looping = (syncing: string) => ({
+        replication: {
+          role: 'slave',
+          master_link_status: 'down',
+          master_sync_in_progress: syncing,
+        },
+        server: { role: 'slave' },
+      });
+      const events = () => eventsOf(MetricType.RESYNC_LOOP);
+
+      const loop = async () => {
+        for (const syncing of ['1', '0', '1', '0', '1', '0']) {
+          await pollWith(looping(syncing));
+          now += 60_000;
+        }
+      };
+
+      it('raises the loop again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await loop();
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(looping('1'));
+
+        expectRaisedAgain(MetricType.RESYNC_LOOP, first);
+      });
+    });
+
+    describe('persistence child', () => {
+      const IDLE = {
+        rdb_bgsave_in_progress: '0',
+        rdb_current_bgsave_time_sec: '-1',
+        rdb_last_bgsave_status: 'ok',
+        current_save_keys_processed: '0',
+        current_save_keys_total: '0',
+        aof_rewrite_in_progress: '0',
+        aof_current_rewrite_time_sec: '-1',
+        aof_last_bgrewrite_status: 'ok',
+      };
+      const events = () => eventsOf(MetricType.PERSISTENCE_CHILD);
+
+      it('raises the failed save again when the outbox drops its unsaved event', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(failed);
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the stall again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: '1000',
+            current_save_keys_total: '42657',
+          },
+        });
+        failSaves();
+        await pollWith(running(5));
+        now += 61_000;
+        await pollWith(running(66));
+        now += 1_000;
+        await pollWith(running(68));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(70));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the long-running save again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number, processed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: String(processed),
+            current_save_keys_total: '100000000',
+          },
+        });
+        await pollWith(running(100, 1000));
+        failSaves();
+        now += 30_000;
+        await pollWith(running(130, 2000));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.WARNING);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(140, 3000));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+    });
+
+    describe('large-reply pressure', () => {
+      it('raises the offender again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(
+          Array.from({ length: 5 }, (_, i) => ({
+            id: i + 1,
+            timestamp: 1000,
+            duration: 20000,
+            command: ['GET', `k${i}`],
+            clientAddress: '127.0.0.1:1234',
+            clientName: '',
+            type: 'large-reply' as const,
+          })),
+        );
+        failSaves();
+        await pollWith({}, 2);
+        const [first] = eventsOf(MetricType.LARGE_REPLY_PRESSURE);
+        expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith({});
+
+        expectRaisedAgain(MetricType.LARGE_REPLY_PRESSURE, first);
+      });
+    });
+
+    describe('tracked topology gate', () => {
+      let built = 0;
+      const topologyEvent = () => ({
+        id: `finding-${(built += 1)}`,
+        timestamp: now,
+        metricType: MetricType.CLUSTER_TOPOLOGY,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'finding',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+
+      it('raises a finding again on a gate that tracks no event ids', async () => {
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(buildEvent).toHaveBeenCalledTimes(1);
+
+        await expireOutbox();
+        healSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('forgets the tracked id of a dropped event so it is not resolved later', async () => {
+        const eventIdsByConn = new Map<string, Map<string, string>>();
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn,
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(1);
+
+        await expireOutbox();
+
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(0);
+      });
+    });
+
+    describe('control-plane saturation', () => {
+      const events = () =>
+        eventsOf(MetricType.CPU_UTILIZATION).filter(
+          (e) => e.severity === AnomalySeverity.CRITICAL && e.zScore === 0,
+        );
+
+      it('raises the episode again on fresh evidence after the outbox drops it', async () => {
+        let counter = 100;
+        const pollSaturated = async (slaves: string) => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...infoWith({ replication: { connected_slaves: slaves } }),
+            cpu: { used_cpu_sys: String(counter / 2), used_cpu_user: String(counter / 2) },
+          });
+          await poll();
+          counter += 9.5;
+          now += 10_000;
+        };
+
+        failSaves();
+        for (let i = 0; i < 6; i += 1) await pollSaturated('3');
+        await pollSaturated('1');
+        await pollSaturated('1');
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollSaturated('3');
+        await pollSaturated('1');
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
       });
     });
   });
