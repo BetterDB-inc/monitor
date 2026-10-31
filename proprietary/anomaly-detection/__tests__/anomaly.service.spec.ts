@@ -3540,6 +3540,17 @@ describe('AnomalyService', () => {
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     });
 
+    it('re-arms the level when the outbox drops the event', async () => {
+      const { recorded } = await runRetry();
+      const [, , onDrop] = (service as any).addAnomaly.mock.calls.find(
+        ([event]: [any]) => event.id === recorded[0].id,
+      );
+
+      onDrop();
+
+      expect((service as any).retryAmplificationState.get('conn-1').ackedLevel).toBe('none');
+    });
+
     it('keeps a P99 regression as stress past the hold while the latency guard reports it degraded', async () => {
       (service as any).recentAnomalies.push({
         id: 'old-p99',

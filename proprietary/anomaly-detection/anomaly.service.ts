@@ -218,6 +218,7 @@ import {
   RetryAmplificationStatus,
   describeRetryAmplificationState,
   retryAmplificationEpisodeStart,
+  retryAmplificationRearm,
   observePushCadence,
   retryAmplificationMaxPollGap,
 } from './retry-amplification-detector';
@@ -3379,7 +3380,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, retryAmplificationRearm(state, finding));
 
     if (this.webhookEventsProService) {
       this.webhookEventsProService

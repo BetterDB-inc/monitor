@@ -4,6 +4,7 @@ import {
   observePushCadence,
   retryAmplificationEpisodeStart,
   retryAmplificationMaxPollGap,
+  retryAmplificationRearm,
   evaluateRetryAmplification,
   readRetryAmplificationTrigger,
   RetryAmplificationFinding,
@@ -609,6 +610,46 @@ describe('retry amplification detector', () => {
     d.ramp(6);
     expect(d.findings).toHaveLength(1);
     expect(d.state.pending).toBeNull();
+  });
+
+  describe('retryAmplificationRearm', () => {
+    it('raises the level again when its event is dropped during the episode', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+
+      rearm();
+      d.window(hot(2.0));
+      d.window(hot(2.1));
+
+      expect(d.findings.map((f) => f.level)).toEqual(['warning', 'warning']);
+    });
+
+    it('leaves a level that has moved on alone', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+      d.windows(hot(2.0, { saturation: MetricType.LOAD_SATURATION }), 2);
+
+      rearm();
+
+      expect(d.state.ackedLevel).toBe('critical');
+    });
+
+    it('leaves a later episode alone', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+      d.windows(BASE, 2);
+      d.ramp(4);
+
+      rearm();
+
+      expect(d.state.ackedLevel).toBe('warning');
+    });
   });
 
   it('re-arms after two cold windows and fires again on a new episode', () => {

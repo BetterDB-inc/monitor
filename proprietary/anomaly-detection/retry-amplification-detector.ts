@@ -725,3 +725,14 @@ export function retryAmplificationEpisodeStart(
   if (state.hotRun.length > 0) return state.hotRun[0].start;
   return finding !== null ? (state.lastEpisode?.startedAt ?? null) : null;
 }
+
+export function retryAmplificationRearm(
+  state: RetryAmplificationState,
+  finding: RetryAmplificationFinding,
+): () => void {
+  const episodeStart = state.hotRun[0]?.start;
+  return () => {
+    if (episodeStart === undefined || state.hotRun[0]?.start !== episodeStart) return;
+    if (state.ackedLevel === finding.level) state.ackedLevel = 'none';
+  };
+}
