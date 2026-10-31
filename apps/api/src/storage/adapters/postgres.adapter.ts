@@ -2887,7 +2887,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         source_host, source_port, connection_id
       FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, id DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
