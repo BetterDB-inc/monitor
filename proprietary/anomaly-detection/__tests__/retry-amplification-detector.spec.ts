@@ -852,6 +852,19 @@ describe('retry amplification detector', () => {
       );
     });
 
+    it('reports the current level after the episode falls back from critical', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4, { saturation: MetricType.LOAD_SATURATION });
+      d.window(hot(2.1));
+      d.window(hot(2.2));
+
+      expect(describeRetryAmplificationState(d.state)).toMatchObject({
+        classification: 'amplifying',
+        level: 'warning',
+      });
+    });
+
     it('reports a fresh state as unarmed', () => {
       expect(describeRetryAmplificationState(createRetryAmplificationState())).toEqual(
         expect.objectContaining({ armed: false, classification: 'none', baseline: null }),

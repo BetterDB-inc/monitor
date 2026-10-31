@@ -714,7 +714,7 @@ export function describeRetryAmplificationState(
   return {
     armed,
     classification,
-    level: state.episodeLevel,
+    level: classification === 'amplifying' ? (state.pending?.level ?? state.ackedLevel) : 'none',
     windows: hotWindowCount(state),
     baseline: armed ? computeBaseline(state.coldWindows) : null,
     lastEpisode: state.lastEpisode,
