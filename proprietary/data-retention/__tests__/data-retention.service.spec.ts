@@ -101,7 +101,6 @@ describe('DataRetentionService', () => {
     'pruneOldAiCacheSamples',
     'pruneOldOtelSpans',
     'pruneOldKvCacheFootprintSnapshots',
-    'pruneOldReplicationDivergenceWindows',
   ] as const;
 
   // Rollups compare bucket_start, so they get the cutoff aligned down to its
@@ -121,6 +120,7 @@ describe('DataRetentionService', () => {
     'pruneOldLatencyStatsSamples',
     'pruneOldVectorIndexSnapshots',
     'pruneOldKvCacheEngineSamples',
+    'pruneOldReplicationDivergenceWindows',
   ] as const;
 
   it('community tier uses 7-day cutoff and calls all prune methods', async () => {
