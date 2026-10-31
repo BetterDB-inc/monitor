@@ -1,3 +1,4 @@
+import { leastSquaresSlope } from '../cache-simulator/growth-fit';
 import { median } from '../latency-regression/regression-detector';
 import { MetricType } from './types';
 
@@ -304,19 +305,6 @@ function pearson(xs: number[], ys: number[]): number | null {
   return cov / Math.sqrt(vx * vy);
 }
 
-function slope(values: number[]): number {
-  const n = values.length;
-  const mx = (n - 1) / 2;
-  const my = values.reduce((s, v) => s + v, 0) / n;
-  let num = 0;
-  let den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (i - mx) * (values[i] - my);
-    den += (i - mx) ** 2;
-  }
-  return den === 0 ? 0 : num / den;
-}
-
 type LoadPattern = 'stress' | 'latency' | 'step';
 
 interface CoMovement {
@@ -349,7 +337,8 @@ function coMovement(run: RetryAmplificationWindow[]): CoMovement | null {
 
 function isRising(run: RetryAmplificationWindow[]): boolean {
   const loads = run.map((w) => w.cmdsPerClient);
-  return slope(loads) >= 0 && loads[loads.length - 1] >= loads[0] * RETRY_AMP_MIN_LOAD_RISE;
+  const trend = leastSquaresSlope(loads.map((y, x) => ({ x, y })));
+  return trend >= 0 && loads[loads.length - 1] >= loads[0] * RETRY_AMP_MIN_LOAD_RISE;
 }
 
 function isHeldStep(run: RetryAmplificationWindow[], base: WindowBaseline): boolean {
