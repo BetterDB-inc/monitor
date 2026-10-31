@@ -41,6 +41,12 @@ export class PersistenceOutbox {
   }
 
   enqueueRewrite(anomaly: AnomalyEvent, now: number): void {
+    const resolvedAt = this.resolvedAt(anomaly.id);
+    if (resolvedAt !== undefined) {
+      anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
+      this.pending.delete(anomaly.id);
+    }
     this.add({ kind: 'save', id: anomaly.id, anomaly, enqueuedAt: now, rewrite: true });
   }
 
