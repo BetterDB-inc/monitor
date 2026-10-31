@@ -1,3 +1,5 @@
+import { median } from '../latency-regression/regression-detector';
+
 export const RESHARD_MIN_PRIMARIES = 3;
 export const RESHARD_MIN_CLUSTER_OPS = 1000;
 export const RESHARD_QUIET_POLLS = 2;
@@ -49,12 +51,6 @@ const SKEW_RULES: SkewRule[] = [
   { metric: 'memory', read: (s) => s.usedMemory, factor: 1.3, floor: 256 * 1024 * 1024 },
   { metric: 'write P99', read: (s) => s.writeP99Us, factor: 3, floor: 1000 },
 ];
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
 
 export function reshardMarkerSignature(
   migrating: readonly { slot: number }[],
