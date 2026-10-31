@@ -426,6 +426,42 @@ describe('WebhookAnomalyIntegrationService', () => {
       expect(dispatched()).toEqual(['a']);
     });
 
+    it('skips a poll while the previous one runs and keeps its cursor', async () => {
+      stored.push(
+        ...Array.from({ length: 11_000 }, (_, i) => event(`e-${i}`, start + MINUTE + i)),
+      );
+      const query = storageClient.getAnomalyEvents.getMockImplementation()!;
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      storageClient.getAnomalyEvents.mockImplementationOnce(async (options: any) => {
+        await held;
+        return query(options);
+      });
+
+      const first = poll();
+      await poll();
+
+      expect(storageClient.getAnomalyEvents).toHaveBeenCalledTimes(1);
+
+      release();
+      await first;
+
+      expect(storageClient.getAnomalyEvents).toHaveBeenCalledTimes(10);
+      expect((service as any).scanCursor).toBe(10_000);
+    });
+
+    it('polls again after a poll fails', async () => {
+      storageClient.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+      stored.push(event('a', start + MINUTE));
+
+      await poll();
+      await poll();
+
+      expect(dispatched()).toEqual(['a']);
+    });
+
     it('does not send events from before it started', async () => {
       stored.push(event('old', start - MINUTE));
 
