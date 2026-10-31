@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { InfoParser } from '../database/parsers/info.parser';
 import {
@@ -12,7 +13,7 @@ import {
 
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
-const REPLICA_ACK_INTERVAL_SECONDS = 1;
+const REPLICA_ACK_SAMPLE_GAP_MS = 1100;
 
 @Injectable()
 export class HealthGateService {
@@ -47,10 +48,12 @@ export class HealthGateService {
 
   async evaluate(connectionId: string): Promise<HealthGateResult> {
     const client = this.connectionRegistry.get(connectionId);
-    const info = await client.getInfoParsed();
+    const baseline = await client.getInfoParsed();
+    const info = hasAckedReplica(baseline) ? await sampleAfterAckGap(client) : baseline;
 
     const memoryPct = readMemoryPct(info);
     const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(
+      baseline,
       info,
       this.replicaIoStaleSeconds,
     );
@@ -106,7 +109,21 @@ function readMemoryPct(info: unknown): number {
   return used / max;
 }
 
+async function sampleAfterAckGap(client: DatabasePort) {
+  await new Promise((resolve) => setTimeout(resolve, REPLICA_ACK_SAMPLE_GAP_MS));
+  return client.getInfoParsed();
+}
+
+function readReplicationSection(info: unknown): Record<string, string> | undefined {
+  return (info as { replication?: Record<string, string> }).replication;
+}
+
+function hasAckedReplica(info: unknown): boolean {
+  return readAckedOffsets(readReplicationSection(info) ?? {}).length > 0;
+}
+
 function readReplication(
+  baseline: unknown,
   info: unknown,
   replicaIoStaleSeconds: number,
 ): {
@@ -114,7 +131,7 @@ function readReplication(
   replicaLinkDown: boolean | null;
   infoFailoverInProgress: boolean;
 } {
-  const replication = (info as { replication?: Record<string, string> }).replication;
+  const replication = readReplicationSection(info);
   if (replication === undefined) {
     return { replicationLagBytes: null, replicaLinkDown: null, infoFailoverInProgress: false };
   }
@@ -124,7 +141,7 @@ function readReplication(
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
   return {
-    replicationLagBytes: furthestReplicaGap(replication),
+    replicationLagBytes: furthestReplicaGap(readReplicationSection(baseline), replication),
     replicaLinkDown: REPLICA_ROLES.has(replication.role)
       ? isMasterLinkDown(replication, replicaIoStaleSeconds)
       : null,
@@ -144,28 +161,24 @@ function isMasterLinkDown(
   );
 }
 
-function furthestReplicaGap(replication: Record<string, string>): number | null {
-  const masterOffset = parseNumber(replication.master_repl_offset);
-  if (masterOffset === null) {
+function furthestReplicaGap(
+  baseline: Record<string, string> | undefined,
+  replication: Record<string, string>,
+): number | null {
+  const primaryOffset = parseNumber(baseline?.master_repl_offset);
+  if (primaryOffset === null) {
     return null;
   }
-  let gap = 0;
-  for (const [key, value] of Object.entries(replication)) {
-    if (!REPLICA_LINE_KEY.test(key)) {
-      continue;
-    }
-    const fields = InfoParser.parseKvLine(value, ',');
-    const offset = parseNumber(fields.offset);
-    if (!offset || fields.state !== 'online' || !isAckOverdue(fields.lag)) {
-      continue;
-    }
-    gap = Math.max(gap, masterOffset - offset);
-  }
-  return gap;
+  return Math.max(0, ...readAckedOffsets(replication).map((offset) => primaryOffset - offset));
 }
 
-function isAckOverdue(lagSeconds: string | undefined): boolean {
-  return lagSeconds === undefined || toNumber(lagSeconds) > REPLICA_ACK_INTERVAL_SECONDS;
+function readAckedOffsets(replication: Record<string, string>): number[] {
+  return Object.entries(replication)
+    .filter(([key]) => REPLICA_LINE_KEY.test(key))
+    .map(([, value]) => InfoParser.parseKvLine(value, ','))
+    .filter((fields) => fields.state === 'online')
+    .map((fields) => parseNumber(fields.offset))
+    .filter((offset): offset is number => offset !== null && offset > 0);
 }
 
 function parseNumber(raw: string | undefined): number | null {

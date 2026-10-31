@@ -40,14 +40,18 @@ function makeInfo(overrides: {
 
 function makeService({
   info,
+  nextInfo = info,
   anomalyEvents = [],
   config = {},
 }: {
   info: unknown;
+  nextInfo?: unknown;
   anomalyEvents?: StoredAnomalyEvent[];
   config?: Record<string, number>;
 }) {
-  const client = { getInfoParsed: jest.fn().mockResolvedValue(info) };
+  const client = {
+    getInfoParsed: jest.fn().mockResolvedValueOnce(info).mockResolvedValue(nextInfo),
+  };
   const registry = { get: jest.fn().mockReturnValue(client) } as unknown as ConnectionRegistry;
   const storage = {
     getAnomalyEvents: jest.fn().mockImplementation(({ metricType }: { metricType?: string }) => {
@@ -66,10 +70,24 @@ function makeService({
   };
 }
 
+async function evaluateSettled(service: HealthGateService) {
+  const pending = service.evaluate(CONNECTION_ID);
+  await jest.runAllTimersAsync();
+  return pending;
+}
+
 describe('HealthGateService', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   it('allows the capture for a healthy primary with no recent anomalies', async () => {
     const { service } = makeService({ info: makeInfo({ used_memory: '1000', maxmemory: '10000' }) });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.allow).toBe(true);
     expect(result.signals).toEqual({
       memoryPct: 0.1,
@@ -82,14 +100,14 @@ describe('HealthGateService', () => {
 
   it('treats memoryPct as 0 when maxmemory is not set', async () => {
     const { service } = makeService({ info: makeInfo({ used_memory: '999999', maxmemory: '0' }) });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.memoryPct).toBe(0);
     expect(result.allow).toBe(true);
   });
 
   it('skips when memoryPct is at or above the threshold', async () => {
     const { service } = makeService({ info: makeInfo({ used_memory: '9000', maxmemory: '10000' }) });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
   });
 
@@ -106,31 +124,123 @@ describe('HealthGateService', () => {
           },
         }),
       });
-      const result = await service.evaluate(CONNECTION_ID);
+      const result = await evaluateSettled(service);
       expect(result.signals.replicationLagBytes).toBe(50_000_000);
       expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
     },
   );
 
-  it.each(['0', '1'])(
-    'does not count writes since the last ack when a replica acked %ss ago',
+  it('counts a replica that is far behind even when it acked within the last second', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '600000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=90000000,lag=0' },
+      }),
+      nextInfo: makeInfo({
+        role: 'master',
+        master_repl_offset: '610000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=100000000,lag=0' },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(500_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it.each(['0', '1', '2'])(
+    'does not count in-flight writes on a busy primary when a replica acked %ss ago',
     async (lag) => {
       const { service } = makeService({
         info: makeInfo({
           role: 'master',
           master_repl_offset: '100000000',
-          replicas: {
-            slave0: `ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=${lag}`,
-          },
+          replicas: { slave0: `ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=${lag}` },
+        }),
+        nextInfo: makeInfo({
+          role: 'master',
+          master_repl_offset: '130000000',
+          replicas: { slave0: `ip=10.0.0.2,port=6379,state=online,offset=100000000,lag=${lag}` },
         }),
       });
-      const result = await service.evaluate(CONNECTION_ID);
+      const result = await evaluateSettled(service);
       expect(result.signals.replicationLagBytes).toBe(0);
       expect(result.allow).toBe(true);
     },
   );
 
-  it('falls back to the byte gap when a replica line has no lag field', async () => {
+  it('reports no negative lag once a replica passes the first primary offset', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=0' },
+      }),
+      nextInfo: makeInfo({
+        role: 'master',
+        master_repl_offset: '130000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=125000000,lag=0' },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(0);
+  });
+
+  it('counts a stalled replica by its gap to the first primary offset', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=2' },
+      }),
+      nextInfo: makeInfo({
+        role: 'master',
+        master_repl_offset: '130000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=3' },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('waits past one replica ack interval before taking the second sample', async () => {
+    const info = makeInfo({
+      role: 'master',
+      replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
+    });
+    const { service, client } = makeService({ info });
+    const pending = service.evaluate(CONNECTION_ID);
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+    await jest.advanceTimersByTimeAsync(100);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    await pending;
+  });
+
+  it('takes one sample when no replica can be measured', async () => {
+    const { service, client } = makeService({ info: makeInfo({ role: 'master' }) });
+    await evaluateSettled(service);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the other signals from the latest sample', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        used_memory: '1000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
+      }),
+      nextInfo: makeInfo({
+        role: 'master',
+        used_memory: '9000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
+  });
+
+  it('measures a replica line that has no lag field', async () => {
     const { service } = makeService({
       info: makeInfo({
         role: 'master',
@@ -138,7 +248,7 @@ describe('HealthGateService', () => {
         replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000' },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
@@ -153,7 +263,7 @@ describe('HealthGateService', () => {
         replicas: { slave0: line },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.allow).toBe(true);
   });
@@ -166,7 +276,7 @@ describe('HealthGateService', () => {
         replicas: { replica0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=4' },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
@@ -178,7 +288,7 @@ describe('HealthGateService', () => {
         replicas: { slave0: 'state=online, offset=50000000,garbage,__proto__=x,lag=4' },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
@@ -198,7 +308,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: MetricsParser.parseInfoToTyped(InfoParser.parse(raw)),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
@@ -211,7 +321,7 @@ describe('HealthGateService', () => {
         replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=4' },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBeNull();
     expect(result.allow).toBe(true);
   });
@@ -220,7 +330,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: { memory: { used_memory: '1000', maxmemory: '10000' } },
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBeNull();
     expect(result.signals.replicaLinkDown).toBeNull();
   });
@@ -236,7 +346,7 @@ describe('HealthGateService', () => {
         },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.allow).toBe(true);
   });
@@ -255,7 +365,7 @@ describe('HealthGateService', () => {
         },
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.allow).toBe(true);
   });
@@ -264,7 +374,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: makeInfo({ role: 'master', master_repl_offset: '999999999' }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.allow).toBe(true);
   });
@@ -279,7 +389,7 @@ describe('HealthGateService', () => {
         master_last_io_seconds_ago: '1',
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
@@ -298,7 +408,7 @@ describe('HealthGateService', () => {
           },
         }),
       });
-      const result = await service.evaluate(CONNECTION_ID);
+      const result = await evaluateSettled(service);
       expect(result.signals.replicationLagBytes).toBe(50_000_000);
       expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
     },
@@ -312,7 +422,7 @@ describe('HealthGateService', () => {
     ['slave', { master_link_status: 'up', master_last_io_seconds_ago: '31' }],
   ])('skips a %s whose link is unhealthy: %j', async (role, link) => {
     const { service } = makeService({ info: makeInfo({ role, ...link }) });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicaLinkDown).toBe(true);
     expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
   });
@@ -326,7 +436,7 @@ describe('HealthGateService', () => {
         master_last_io_seconds_ago: '30',
       }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
   });
@@ -340,7 +450,7 @@ describe('HealthGateService', () => {
       }),
       config: { MONITOR_REPLICA_IO_STALE_SEC: 60 },
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
   });
@@ -349,7 +459,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: makeInfo({ role: 'master', master_link_status: 'down' }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.replicaLinkDown).toBeNull();
     expect(result.allow).toBe(true);
   });
@@ -358,7 +468,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: makeInfo({ master_failover_state: 'waiting-for-sync' }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result).toMatchObject({ allow: false, skipReason: 'failover_in_progress' });
     expect(result.signals.failoverInProgress).toBe(true);
   });
@@ -367,7 +477,7 @@ describe('HealthGateService', () => {
     const { service } = makeService({
       info: makeInfo({ master_failover_state: 'no-failover' }),
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.failoverInProgress).toBe(false);
     expect(result.allow).toBe(true);
   });
@@ -393,7 +503,7 @@ describe('HealthGateService', () => {
         },
       ],
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.failoverInProgress).toBe(true);
     expect(result).toMatchObject({ allow: false, skipReason: 'failover_in_progress' });
   });
@@ -419,14 +529,14 @@ describe('HealthGateService', () => {
         },
       ],
     });
-    const result = await service.evaluate(CONNECTION_ID);
+    const result = await evaluateSettled(service);
     expect(result.signals.oomEventsRecent).toBe(1);
     expect(result).toMatchObject({ allow: false, skipReason: 'recent_oom' });
   });
 
   it('queries storage scoped to the requested connectionId', async () => {
     const { service, storage } = makeService({ info: makeInfo() });
-    await service.evaluate(CONNECTION_ID);
+    await evaluateSettled(service);
     expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
       expect.objectContaining({ connectionId: CONNECTION_ID, metricType: 'memory_used' }),
     );
