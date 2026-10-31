@@ -9,6 +9,7 @@ const HEALTHY_SIGNALS: HealthGateSignals = {
   memoryPct: 0.4,
   oomEventsRecent: 0,
   replicationLagBytes: 0,
+  replicaLinkDown: false,
   failoverInProgress: false,
 };
 
@@ -101,6 +102,7 @@ describe('evaluateHealthGate', () => {
         memoryPct: 0.95,
         oomEventsRecent: 3,
         replicationLagBytes: 0,
+        replicaLinkDown: false,
         failoverInProgress: false,
       });
       expect(result.skipReason).toBe('memory_above_threshold');
@@ -111,6 +113,7 @@ describe('evaluateHealthGate', () => {
         memoryPct: 0.4,
         oomEventsRecent: 1,
         replicationLagBytes: 0,
+        replicaLinkDown: false,
         failoverInProgress: true,
       });
       expect(result.skipReason).toBe('recent_oom');
@@ -121,10 +124,35 @@ describe('evaluateHealthGate', () => {
         memoryPct: 0.4,
         oomEventsRecent: 0,
         replicationLagBytes: 100 * 1024 * 1024,
+        replicaLinkDown: false,
         failoverInProgress: true,
       });
       expect(result.skipReason).toBe('failover_in_progress');
     });
+  });
+
+  it('does not block on an unavailable replication lag', () => {
+    const result = evaluateHealthGate({ ...HEALTHY_SIGNALS, replicationLagBytes: null });
+    expect(result.allow).toBe(true);
+  });
+
+  it('does not block on an unassessed replica link', () => {
+    const result = evaluateHealthGate({ ...HEALTHY_SIGNALS, replicaLinkDown: null });
+    expect(result.allow).toBe(true);
+  });
+
+  it('skips on a down replica link even when replication lag is unavailable', () => {
+    const result = evaluateHealthGate({
+      ...HEALTHY_SIGNALS,
+      replicaLinkDown: true,
+      replicationLagBytes: null,
+    });
+    expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+  });
+
+  it('skips when the replica link is down', () => {
+    const result = evaluateHealthGate({ ...HEALTHY_SIGNALS, replicaLinkDown: true });
+    expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
   });
 });
 

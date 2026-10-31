@@ -28,6 +28,7 @@ const SKIP_REASON_LABELS: Record<string, string> = {
   memory_above_threshold: 'Memory above threshold',
   recent_oom: 'Recent OOM event',
   failover_in_progress: 'Failover in progress',
+  replica_link_unhealthy: 'Replica link unhealthy',
   replication_lag_elevated: 'Replication lag elevated',
 };
 
@@ -63,7 +64,13 @@ export function PreflightPanel({ preflight }: Props) {
             <dd className="font-mono">{preflight.health.signals.oomEventsRecent}</dd>
             <dt>Replication lag</dt>
             <dd className="font-mono">
-              {formatBytes(preflight.health.signals.replicationLagBytes)}
+              {preflight.health.signals.replicationLagBytes === null
+                ? 'unavailable'
+                : formatBytes(preflight.health.signals.replicationLagBytes)}
+            </dd>
+            <dt>Replica link</dt>
+            <dd className="font-mono">
+              {formatReplicaLink(preflight.health.signals.replicaLinkDown)}
             </dd>
             <dt>Failover</dt>
             <dd className="font-mono">
@@ -271,6 +278,13 @@ function Badge({ tone, children }: { tone: 'ok' | 'warn'; children: React.ReactN
       {children}
     </span>
   );
+}
+
+function formatReplicaLink(down: boolean | null | undefined): string {
+  if (down === null || down === undefined) {
+    return 'n/a';
+  }
+  return down ? 'unhealthy' : 'ok';
 }
 
 function formatBytes(bytes: number): string {

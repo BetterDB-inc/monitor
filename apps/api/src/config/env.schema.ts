@@ -237,6 +237,7 @@ export const envSchema = z
       .int()
       .min(0)
       .default(10 * 1024 * 1024),
+    MONITOR_REPLICA_IO_STALE_SEC: z.coerce.number().int().min(1).default(30),
     MONITOR_PERSISTENCE_STALL_SEC: z.coerce.number().int().min(1).default(60),
     MONITOR_PERSISTENCE_WARN_SEC: z.coerce.number().int().min(1).default(120),
     MONITOR_PERSISTENCE_CRIT_SEC: z.coerce.number().int().min(1).default(600),

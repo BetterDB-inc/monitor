@@ -48,9 +48,14 @@ opens. Surface findings:
   hosted instances stay quiet.
 - **ACL banner** — when the connection user is missing `+monitor`, an
   `ACL SETUSER` snippet is rendered with a copy-to-clipboard button.
-- **Health gate** — memory pressure, recent OOM events, replication lag,
-  and active failover. The gate only blocks anomaly-triggered and
-  scheduled captures; manual sessions surface the report as a warning.
+- **Health gate** — memory pressure, recent OOM events, active failover,
+  an unhealthy replica link, and replication lag. Lag compares each
+  replica's acked offset with the primary offset from about a second
+  earlier, so writes still in flight do not count; this adds a wait of
+  about a second when a replica can be measured. Lag or link state that
+  cannot be read shows as unavailable and does not block. The gate only
+  blocks anomaly-triggered and scheduled captures; manual sessions
+  surface the report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested
   duration based on the live ops/sec.
 
@@ -152,3 +157,5 @@ demo host).
 | `MONITOR_PROVIDER_OVERRIDE` | off | Test-only override for the pre-flight provider detector |
 | `MONITOR_RECENT_OOM_WINDOW_MS` | 5 min | Health-gate window for recent OOM-correlated anomalies |
 | `MONITOR_RECENT_FAILOVER_WINDOW_MS` | 2 min | Health-gate window for replication-role changes |
+| `MONITOR_REPLICATION_LAG_BYTES` | 10 MB | Health-gate limit on how far the furthest-behind replica's acked offset is from the primary offset about a second earlier |
+| `MONITOR_REPLICA_IO_STALE_SEC` | 30 s | Health-gate limit on `master_last_io_seconds_ago`; a link is unhealthy when the value is strictly greater, so keep this comfortably above `repl-ping-replica-period` |
