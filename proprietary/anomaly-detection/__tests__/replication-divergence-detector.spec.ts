@@ -7,7 +7,6 @@ import {
   DivergenceOutcome,
   acknowledgeDivergence,
   acknowledgeRecovery,
-  claimDivergenceDispatch,
   createDivergenceState,
   describeDivergence,
   divergenceWindowMs,
@@ -16,8 +15,6 @@ import {
   staleAckWindow,
   replicaObservedLevel,
   requeueClosedWindows,
-  takeUnsavedDivergence,
-  trackUnsavedDivergence,
   assessOrphanedReplica,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample, ReplicationStreamTracker } from '../replication-stream';
@@ -798,83 +795,6 @@ describe('observeDivergence', () => {
       replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000);
 
       expect(h.state.observed.has(ADDR)).toBe(true);
-    });
-  });
-
-  describe('an alert that was sent but never saved', () => {
-    function sendWithoutSaving(h: Harness): void {
-      for (const gap of [2, 4, 6, 8, 10]) {
-        for (const outcome of h.window({ gap: gap * MiB, rate: MiB }, false)) {
-          if (outcome.kind !== 'divergence') continue;
-          claimDivergenceDispatch(h.state, outcome);
-          trackUnsavedDivergence(h.state, outcome.addr, 'attempt-1');
-        }
-      }
-    }
-
-    it('reports the sent level while no event holds it', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      expect(h.state.replicas.get(ADDR)?.level).toBe('none');
-      expect(replicaObservedLevel(h.state, ADDR, 0, 1_000)).toBe('warning');
-    });
-
-    it('counts as diverging for an event left open by a restart', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      expect(assessOrphanedReplica(h.state, ADDR, 0)).toBe('diverging');
-    });
-
-    it('clears the replica when it drops out', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      const absent = { gap: 0, rate: MiB, present: false };
-      const gone = h.windows([absent, absent, absent], false).flat();
-      const cleared = gone.filter((o) => o.kind === 'cleared');
-
-      expect(cleared[0]).toEqual({ kind: 'cleared', addr: ADDR, eventId: null, gapBytes: null });
-      acknowledgeRecovery(h.state, ADDR);
-      h.windows([absent, absent]);
-      expect(h.state.replicas.size).toBe(0);
-    });
-
-    it('keeps retrying the sent finding after the gap stops growing', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      const plateau = h.windows(
-        [10, 10, 10].map((m) => ({ gap: m * MiB, rate: MiB })),
-        false,
-      );
-
-      expect(plateau.flat()).toEqual([
-        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
-        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
-        expect.objectContaining({ kind: 'divergence', level: 'warning', reason: 'growth' }),
-      ]);
-    });
-
-    it('stops retrying once the finding is saved', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      const [first, ...rest] = h.windows(
-        [10, 10, 10].map((m) => ({ gap: m * MiB, rate: MiB })),
-      );
-
-      expect(first).toHaveLength(1);
-      expect(rest.flat()).toEqual([]);
-    });
-
-    it('hands over each unsaved attempt once', () => {
-      const h = new Harness();
-      sendWithoutSaving(h);
-
-      expect(takeUnsavedDivergence(h.state, ADDR)).toEqual(['attempt-1']);
-      expect(takeUnsavedDivergence(h.state, ADDR)).toEqual([]);
     });
   });
 
