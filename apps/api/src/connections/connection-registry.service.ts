@@ -1,10 +1,12 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, tlsConfigStatus } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
+import { assertAuthConfig } from '../database/adapters/tls-material';
+import { encryptTlsConfig, decryptTlsConfig, sanitizeTlsConfigInput } from './tls-config-secrets';
 import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 import { EnvelopeEncryptionService, getEncryptionService } from '../common/utils/encryption';
 import { RuntimeCapabilityTracker } from './runtime-capability-tracker.service';
@@ -17,6 +19,23 @@ import type { DesiredNode } from '../topology/membership-diff';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
 import { ENV_DEFAULT_ID } from './connection.constants';
+
+/** Field-by-field comparison of TLS material (ignores the server-managed flags). */
+function sameTlsMaterial(a: DatabaseConnectionConfig['tlsConfig'], b: DatabaseConnectionConfig['tlsConfig']): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return (
+    (a.source ?? 'inline') === (b.source ?? 'inline') &&
+    (a.ca ?? '') === (b.ca ?? '') &&
+    (a.caPath ?? '') === (b.caPath ?? '') &&
+    (a.cert ?? '') === (b.cert ?? '') &&
+    (a.certPath ?? '') === (b.certPath ?? '') &&
+    (a.key ?? '') === (b.key ?? '') &&
+    (a.keyPath ?? '') === (b.keyPath ?? '') &&
+    (a.passphrase ?? '') === (b.passphrase ?? '') &&
+    (a.trustedPaths ?? false) === (b.trustedPaths ?? false)
+  );
+}
 
 export const CHILD_CONNECT_TIMEOUT_MS = 10_000;
 
@@ -66,6 +85,21 @@ function sameHost(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * Whether a stored record carries any secret in plaintext. Used at boot to
+ * re-encrypt rows written while ENCRYPTION_KEY was unavailable (or before it
+ * was introduced) as soon as a cipher is present.
+ */
+function hasPlaintextSecrets(config: DatabaseConnectionConfig): boolean {
+  if (config.password && !config.passwordEncrypted) return true;
+  if (config.nodePassword && !config.nodePasswordEncrypted) return true;
+  const tlsConfig = config.tlsConfig;
+  if (tlsConfig && (tlsConfig.key || tlsConfig.passphrase) && !tlsConfig.secretsEncrypted) return true;
+  const tunnel = config.sshTunnel;
+  if (tunnel && (tunnel.password || tunnel.privateKey || tunnel.passphrase) && !tunnel.secretsEncrypted) return true;
+  return false;
+}
+
 function isRetiredAuto(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin === 'auto' && config.membership.retiredAt !== undefined;
 }
@@ -95,6 +129,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   private startupConnectionErrors: Array<{ name: string; host: string; port: number; error: string }> = [];
   private readonly seedLocks = new Map<string, Promise<unknown>>();
   private readonly removalListeners = new Set<ConnectionRemovalListener>();
+  // Connections whose in-memory secrets came from the environment because the
+  // stored (encrypted) record could not be decrypted and no cipher is available.
+  // Nothing derived from them may be written while in this state: it would land
+  // in storage as plaintext. Children discovered from such a seed join the set.
+  private readonly memoryOnlySecrets = new Set<string>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -178,8 +217,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       for (const config of savedConnections) {
-        // Decrypt password if encrypted
-        const decryptedConfig = this.decryptConfig(config);
+        // Decrypt password if encrypted; the env-owned default (and the nodes
+        // discovered from it) follow the current environment, see syncWithEnvironment.
+        let decryptedConfig = this.decryptConfig(config);
+        // Heal rows that hold plaintext secrets (written while ENCRYPTION_KEY was
+        // unavailable, or before it was introduced) now that a cipher is present.
+        if (this.encryption && hasPlaintextSecrets(config) && decryptedConfig.credentialStatus !== 'decryption_failed') {
+          await this.storage.saveConnection(this.encryptConfig(decryptedConfig))
+            .then(() => this.logger.log(`${config.name}: re-encrypted secrets that were stored in plaintext`))
+            .catch((err) => {
+              this.logger.warn(`Failed to re-encrypt stored secrets for ${config.name}: ${err instanceof Error ? err.message : err}`);
+            });
+        }
+        decryptedConfig = await this.syncWithEnvironment(decryptedConfig);
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {
@@ -188,7 +238,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           const adapter = this.createAdapter(decryptedConfig);
           this.connections.set(config.id, adapter);
           this.logger.warn(
-            `Skipping connection to ${config.name}: password decryption failed. ` +
+            `Skipping connection to ${config.name}: credential decryption failed (${decryptedConfig.credentialError ?? 'unknown reason'}). ` +
             'Fix ENCRYPTION_KEY and restart, or use POST /connections/{id}/reconnect after fixing.'
           );
           if (config.isDefault) {
@@ -214,9 +264,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
           // Trust-on-first-use: persist a newly-learned SSH host key so it is
           // verified on the next startup.
           if (this.captureLearnedHostKey(decryptedConfig, adapter)) {
-            await this.storage.saveConnection(this.encryptConfig(decryptedConfig)).catch((err) => {
-              this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
-            });
+            await this.persistLearnedHostKey(decryptedConfig);
           }
           // Mark credentials as valid after successful connection
           this.configs.set(config.id, { ...decryptedConfig, credentialStatus: 'valid' });
@@ -283,13 +331,135 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return authErrorPatterns.some(pattern => pattern.test(errorMsg));
   }
 
+  /** Why an OTLP push (external) request is invalid, or null when it is fine. Shared by test and save. */
+  private externalRequestRejection(request: CreateConnectionRequest): string | null {
+    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.tlsConfig || request.authMode === 'certificate' || request.sshTunnel?.enabled) {
+      return 'OTLP push connections take no credentials, TLS or SSH tunnel';
+    }
+    return null;
+  }
+
   private assertValidExternalRequest(request: CreateConnectionRequest): void {
-    if (request.password || request.username || request.nodePassword || request.nodeUsername || request.tls || request.sshTunnel?.enabled) {
-      throw new Error('OTLP push connections take no credentials, TLS or SSH tunnel');
+    const rejection = this.externalRequestRejection(request);
+    if (rejection) {
+      throw new Error(rejection);
     }
     if (this.findIdByHostPort(request.host, request.port)) {
       throw new Error(`A connection for ${request.host}:${request.port} already exists`);
     }
+  }
+
+  /**
+   * The env-configured default connection is persisted once so it survives a
+   * restart without DB_HOST, but while DB_HOST is set the environment is its
+   * source of truth: host, port, credentials, TLS flag, TLS material and auth
+   * mode are all rebuilt from the current `database` config on every load, and
+   * the stored copy is rewritten only when something differs. That is what makes
+   * a rotated DB_PASSWORD or DB_TLS_*_FILE, or a newly enabled DB_TLS, take
+   * effect on restart, and it never persists a record derived from a failed
+   * decrypt (the password comes from the environment, not from storage).
+   *
+   * Nodes auto-registered from the env default inherit its credentials, TLS
+   * flag, material and auth mode the same way, so they authenticate with the
+   * rotated password and present the rotated certificate too. Adopted children
+   * (user-created connections matched into the topology) keep their own settings.
+   *
+   * A record whose stored secrets failed to decrypt is always rebuilt: the
+   * environment supplies every secret, so this is the recovery path for a
+   * changed ENCRYPTION_KEY and it must not depend on the env password happening
+   * to differ from the (now unreadable) stored one.
+   */
+  private async syncWithEnvironment(config: DatabaseConnectionConfig): Promise<DatabaseConnectionConfig> {
+    if (!process.env.DB_HOST) {
+      return config;
+    }
+    const dbConfig = this.configService.get('database');
+    if (!dbConfig) {
+      return config;
+    }
+    const envTlsConfig: DatabaseConnectionConfig['tlsConfig'] = dbConfig.tlsConfig
+      ? { ...dbConfig.tlsConfig, secretsEncrypted: false }
+      : undefined;
+
+    const decryptFailed = config.credentialStatus === 'decryption_failed';
+    const sameCredentials =
+      !decryptFailed &&
+      (config.username ?? '') === (dbConfig.username ?? '') &&
+      (config.password ?? '') === (dbConfig.password ?? '');
+    const sameTls =
+      (config.tls ?? false) === (dbConfig.tls ?? false) &&
+      sameTlsMaterial(config.tlsConfig, envTlsConfig) &&
+      (config.authMode ?? 'password') === (dbConfig.authMode ?? 'password');
+
+    let synced: DatabaseConnectionConfig;
+    if (config.id === ENV_DEFAULT_ID) {
+      const same =
+        sameCredentials &&
+        sameTls &&
+        config.host === dbConfig.host &&
+        config.port === dbConfig.port;
+      if (same) {
+        return config;
+      }
+      synced = {
+        ...config,
+        host: dbConfig.host,
+        port: dbConfig.port,
+        username: dbConfig.username,
+        password: dbConfig.password,
+        passwordEncrypted: false,
+        tls: dbConfig.tls ?? false,
+        tlsConfig: envTlsConfig,
+        authMode: dbConfig.authMode,
+        // Everything that could have failed to decrypt was just replaced from env.
+        credentialStatus: 'unknown',
+        credentialError: undefined,
+        updatedAt: Date.now(),
+      };
+      this.logger.log('Default connection updated from the environment (DB_* settings changed since it was stored)');
+    } else if (config.membership?.seedId === ENV_DEFAULT_ID && config.membership.origin === 'auto') {
+      if (sameCredentials && sameTls) {
+        return config;
+      }
+      // Same derivation as addManagedChild: the env default carries no separate
+      // data-node credentials, so children authenticate exactly like the seed.
+      synced = {
+        ...config,
+        username: dbConfig.username,
+        password: dbConfig.password,
+        passwordEncrypted: false,
+        tls: dbConfig.tls ?? false,
+        tlsConfig: envTlsConfig,
+        authMode: dbConfig.authMode,
+        credentialStatus: 'unknown',
+        credentialError: undefined,
+        updatedAt: Date.now(),
+      };
+      this.logger.log(`${config.name}: credentials and TLS settings updated from the environment (follows the default connection)`);
+    } else {
+      return config;
+    }
+
+    if (decryptFailed && !this.encryption) {
+      // The stored record is encrypted and the cipher is missing: persisting the
+      // rebuilt record would write the password and TLS passphrase in plaintext,
+      // and once ENCRYPTION_KEY returns they would compare equal to the
+      // environment and never be re-encrypted. Use the environment values in
+      // memory only, leave storage untouched, and remember that every other
+      // write path (learned host keys, discovered children) must do the same.
+      this.memoryOnlySecrets.add(config.id);
+      this.logger.warn(
+        `${config.name}: credentials taken from the environment but not persisted ` +
+          '(ENCRYPTION_KEY is not set; the stored encrypted record is kept)',
+      );
+      return synced;
+    }
+    this.memoryOnlySecrets.delete(config.id);
+
+    await this.storage.saveConnection(this.encryptConfig(synced)).catch((err) => {
+      this.logger.warn(`Failed to persist environment-synced settings for ${config.name}: ${err instanceof Error ? err.message : err}`);
+    });
+    return synced;
   }
 
   private async createEnvDefaultConnection(): Promise<void> {
@@ -308,10 +478,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: dbConfig.password,
       dbIndex: 0,
       tls: dbConfig.tls ?? false,
+      tlsConfig: dbConfig.tlsConfig,
+      authMode: dbConfig.authMode,
       isDefault: true,
       createdAt: now,
       updatedAt: now,
     };
+    assertAuthConfig(config);
 
     // Create and test connection BEFORE persisting state
     const adapter = this.createAdapter(config);
@@ -364,6 +537,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       connectionName,
       tls: config.tls,
       tlsServername: config.membership?.origin === 'auto' ? config.membership.hostname : undefined,
+      tlsConfig: config.tlsConfig,
+      authMode: config.authMode,
       connectionId: config.id,
       sshTunnel: config.sshTunnel,
       sshTunnelService: config.sshTunnel?.enabled ? this.sshTunnelService : undefined,
@@ -393,7 +568,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    result = { ...result, sshTunnel: this.encryptSshTunnel(result.sshTunnel) };
+    result = {
+      ...result,
+      sshTunnel: this.encryptSshTunnel(result.sshTunnel),
+      tlsConfig: encryptTlsConfig(result.tlsConfig, this.encryption),
+    };
     return result;
   }
 
@@ -413,6 +592,29 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     // service trims it and skips verification when empty).
     const hostKeyFingerprint = rest.hostKeyFingerprint?.trim() || undefined;
     return { ...rest, hostKeyFingerprint, secretsEncrypted: false };
+  }
+
+  /**
+   * Whether a record's secrets exist only in memory (see memoryOnlySecrets):
+   * the record itself, or an auto-registered child of such a seed (it inherits
+   * the seed's secrets), must not be written. An adopted child keeps its own
+   * stored credentials, so the seed's state says nothing about it.
+   */
+  private secretsAreMemoryOnly(config: Pick<DatabaseConnectionConfig, 'id' | 'membership'>): boolean {
+    if (this.memoryOnlySecrets.has(config.id)) return true;
+    const membership = config.membership;
+    return membership?.origin === 'auto' && this.memoryOnlySecrets.has(membership.seedId);
+  }
+
+  /** Persist a config after a host key was learned, unless that would write plaintext secrets. */
+  private async persistLearnedHostKey(config: DatabaseConnectionConfig): Promise<void> {
+    if (this.secretsAreMemoryOnly(config)) {
+      this.logger.warn(`${config.name}: learned SSH host key kept in memory only (ENCRYPTION_KEY is not set; the stored encrypted record is kept)`);
+      return;
+    }
+    await this.storage.saveConnection(this.encryptConfig(config)).catch((err) => {
+      this.logger.warn(`Failed to persist learned SSH host key for ${config.name}: ${err instanceof Error ? err.message : err}`);
+    });
   }
 
   /**
@@ -455,25 +657,31 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Decrypt the secret fields of a persisted SSH tunnel config for use.
-   * Returns the tunnel unchanged (secrets dropped) if the key is unavailable.
+   * Returns the tunnel with its secrets dropped if the key is unavailable or
+   * wrong, and reports that through `onError` so the caller treats the record
+   * as a credential-decryption failure (it must never be written back, or the
+   * ciphertext would be replaced by the dropped fields).
    */
   private decryptSshTunnel(
     tunnel: DatabaseConnectionConfig['sshTunnel'],
+    onError: (message: string) => void = () => undefined,
   ): DatabaseConnectionConfig['sshTunnel'] {
     if (!tunnel || !tunnel.secretsEncrypted) {
       return tunnel;
     }
+    const hasSecrets = Boolean(tunnel.password || tunnel.privateKey || tunnel.passphrase);
+    const dropped: DatabaseConnectionConfig['sshTunnel'] = {
+      ...tunnel,
+      password: undefined,
+      privateKey: undefined,
+      passphrase: undefined,
+      secretsEncrypted: false,
+    };
     if (!this.encryption) {
-      this.logger.error(
-        'ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable',
-      );
-      return {
-        ...tunnel,
-        password: undefined,
-        privateKey: undefined,
-        passphrase: undefined,
-        secretsEncrypted: false,
-      };
+      if (hasSecrets) {
+        onError('ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable');
+      }
+      return dropped;
     }
     try {
       return {
@@ -484,16 +692,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         secretsEncrypted: false,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`,
-      );
-      return {
-        ...tunnel,
-        password: undefined,
-        privateKey: undefined,
-        passphrase: undefined,
-        secretsEncrypted: false,
-      };
+      if (hasSecrets) {
+        onError(`Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`);
+      }
+      return dropped;
     }
   }
 
@@ -527,10 +729,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
   private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
-    const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
+    let secretError: string | undefined;
+    const reportSecretError = (message: string) => {
+      secretError ??= message;
+      this.logger.error(`${config.name}: ${message}`);
+    };
+    const sshTunnel = this.decryptSshTunnel(config.sshTunnel, reportSecretError);
+    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, reportSecretError);
+    // A dropped TLS client key or SSH tunnel secret is a credential-decryption
+    // failure just like a dropped password: the connection cannot authenticate
+    // until ENCRYPTION_KEY is fixed, reconnect() only re-reads storage for
+    // decryption_failed, and the status keeps every write path (boot
+    // re-encryption, environment sync) from persisting the dropped fields over
+    // the stored ciphertext.
+    const secretFailure: Pick<DatabaseConnectionConfig, 'credentialStatus' | 'credentialError'> = secretError
+      ? { credentialStatus: 'decryption_failed', credentialError: secretError }
+      : {};
 
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, sshTunnel, credentialStatus: 'unknown' };
+      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown', ...secretFailure };
     }
 
     if (!this.encryption) {
@@ -542,6 +759,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -552,9 +770,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
         credentialStatus: 'unknown', // Will be validated on connection attempt
+        ...secretFailure,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Decryption failed';
@@ -564,6 +784,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return {
         ...config,
         sshTunnel,
+        tlsConfig,
         password: undefined,
         credentialStatus: 'decryption_failed',
         credentialError: errorMsg,
@@ -622,12 +843,18 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       nodePassword: request.nodePassword,
       dbIndex: request.dbIndex,
       tls: request.tls,
+      // Material is meaningless (and would still be stored encrypted) without TLS.
+      tlsConfig: request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined,
+      authMode: request.authMode,
       sshTunnel: this.sanitizeSshTunnelInput(request.sshTunnel),
       connectionType: request.connectionType,
       isDefault: false, // Will be set via setDefault() if requested
       createdAt: now,
       updatedAt: now,
     };
+    if (config.connectionType !== 'external') {
+      assertAuthConfig(config);
+    }
 
     // Create and connect adapter BEFORE persisting to storage
     // This ensures we don't end up with config in storage but no working connection
@@ -836,7 +1063,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   async testConnection(request: CreateConnectionRequest): Promise<TestConnectionResponse> {
     if (request.connectionType === 'external') {
-      return { success: true, message: 'Waiting for first OTLP sample' };
+      // Same rule as addConnection, so a test cannot pass for a config save rejects.
+      const rejection = this.externalRequestRejection(request);
+      return rejection ? { success: false, error: rejection } : { success: true, message: 'Waiting for first OTLP sample' };
+    }
+    try {
+      assertAuthConfig(request);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Invalid TLS configuration' };
     }
     const adapter = new UnifiedDatabaseAdapter({
       host: request.host,
@@ -844,6 +1078,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
+      tlsConfig: request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined,
+      authMode: request.authMode,
       dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
       connectionId: `test:${randomUUID()}`,
@@ -864,6 +1100,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         };
       }
       const capabilities = adapter.getCapabilities();
+      const authenticatedUser = adapter.getAuthenticatedUser?.();
       await adapter.disconnect();
 
       this.usageTelemetry?.trackTestConnection({
@@ -877,6 +1114,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       return {
         success: true,
+        authenticatedUser,
         capabilities: {
           dbType: capabilities.dbType,
           version: capabilities.version,
@@ -937,6 +1175,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         username: config.username,
         dbIndex: config.dbIndex,
         tls: config.tls,
+        tlsConfig: tlsConfigStatus(config.tlsConfig),
+        authMode: config.authMode,
+        authenticatedUser: isConnected ? connection?.getAuthenticatedUser?.() : undefined,
         sshTunnel: config.sshTunnel
           ? {
               enabled: config.sshTunnel.enabled,
@@ -989,11 +1230,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const storedConfig = storedConfigs.find(c => c.id === id);
 
       if (storedConfig) {
-        config = this.withLiveTopology(id, this.decryptConfig(storedConfig));
+        config = this.withLiveTopology(id, await this.syncWithEnvironment(this.decryptConfig(storedConfig)));
         if (config.credentialStatus === 'decryption_failed') {
           // Still failing - update in-memory config with latest error and bail
           this.configs.set(id, this.withLiveTopology(id, config));
-          throw new Error(`Password decryption still failing: ${config.credentialError}`);
+          throw new Error(`Credential decryption still failing: ${config.credentialError}`);
         }
         // Decryption succeeded this time - continue with connection attempt
         this.logger.log(`Decryption succeeded for ${config.name}`);
@@ -1029,9 +1270,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
       // Trust-on-first-use: persist a newly-learned SSH host key.
       if (this.captureLearnedHostKey(current, newAdapter)) {
-        await this.storage.saveConnection(this.encryptConfig(current)).catch((err) => {
-          this.logger.warn(`Failed to persist learned SSH host key for ${current.name}: ${err instanceof Error ? err.message : err}`);
-        });
+        await this.persistLearnedHostKey(current);
       }
 
       // Update credential status to valid after successful reconnection
@@ -1185,6 +1424,11 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
       dbIndex: 0,
       tls: seed.tls,
+      // Discovered nodes sit behind the same PKI as the seed: reuse its CA and
+      // client certificate, and keep certificate-only auth if that is how the
+      // seed authenticates.
+      tlsConfig: seed.tlsConfig,
+      authMode: seed.authMode,
       connectionType: 'direct',
       isDefault: false,
       createdAt: now,
@@ -1204,7 +1448,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Auto-registered ${config.name} but could not connect: ${errorMsg}${certificateHint(errorMsg, node)}`);
     }
     try {
-      await this.storage.saveConnection(this.encryptConfig(config));
+      if (this.secretsAreMemoryOnly(seed)) {
+        // The seed's password and TLS material came from the environment with
+        // no cipher available; the child inherits them and would be written in
+        // plaintext. Keep it in memory only; it is rediscovered (and then
+        // persisted encrypted) on the next boot with ENCRYPTION_KEY.
+        this.memoryOnlySecrets.add(config.id);
+        this.logger.warn(`${config.name}: auto-registered in memory only (ENCRYPTION_KEY is not set; inherited secrets are not written)`);
+      } else {
+        await this.storage.saveConnection(this.encryptConfig(config));
+      }
       this.configs.set(config.id, { ...config, credentialStatus, credentialError });
       this.connections.set(config.id, adapter);
     } catch (error) {

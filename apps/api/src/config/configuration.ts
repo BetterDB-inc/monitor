@@ -1,4 +1,7 @@
+import { accessSync, constants as fsConstants } from 'fs';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import { isTrueFlag } from './env-normalize';
+import { dbAuthModeSchema } from './env.schema';
 
 export interface DatabaseConfig {
   host: string;
@@ -7,6 +10,45 @@ export interface DatabaseConfig {
   password: string;
   type: 'valkey' | 'redis' | 'auto';
   tls: boolean;
+  /** Custom CA / client certificate for the env-configured connection (DB_TLS_*_FILE). */
+  tlsConfig?: TlsConfig;
+  /** DB_AUTH_MODE: `password` (default) or `certificate` (no AUTH; identity from the client cert). */
+  authMode?: DatabaseAuthMode;
+}
+
+/**
+ * A PEM file path named by an env var. The operator owns the environment, so
+ * the path is trusted as-is (no allowlist directory). It is checked for
+ * readability now so startup fails loudly rather than silently connecting
+ * without the certificate, but the content is read by the adapter each time a
+ * socket opens, so a rotated file (cert-manager, mounted secrets) is picked up
+ * on reconnect without a restart.
+ */
+function pemPathFromEnv(name: string): string | undefined {
+  const filePath = process.env[name]?.trim();
+  if (!filePath) return undefined;
+  try {
+    accessSync(filePath, fsConstants.R_OK);
+  } catch (error) {
+    throw new Error(`${name}: cannot read ${filePath}: ${error instanceof Error ? error.message : error}`, { cause: error });
+  }
+  return filePath;
+}
+
+function envTlsConfig(): TlsConfig | undefined {
+  // The files are TLS material; a non-TLS deployment must not fail to start
+  // because a stale DB_TLS_*_FILE path is still set in its environment.
+  if (!isTrueFlag(process.env.DB_TLS)) return undefined;
+  const caPath = pemPathFromEnv('DB_TLS_CA_FILE');
+  const certPath = pemPathFromEnv('DB_TLS_CERT_FILE');
+  const keyPath = pemPathFromEnv('DB_TLS_KEY_FILE');
+  const passphrase = process.env.DB_TLS_KEY_PASSPHRASE || undefined;
+  if (!caPath && !certPath && !keyPath) return undefined;
+  return { source: 'file', caPath, certPath, keyPath, passphrase, trustedPaths: true };
+}
+
+function envAuthMode(): DatabaseAuthMode | undefined {
+  return dbAuthModeSchema.parse(process.env.DB_AUTH_MODE);
 }
 
 export interface StorageConfig {
@@ -58,6 +100,10 @@ export default (): AppConfig => ({
     // isTrueFlag trims whitespace so a trailing newline from a secret store does
     // not silently disable TLS.
     tls: isTrueFlag(process.env.DB_TLS),
+    // Custom CA (private PKI) and client certificate (mutual TLS) for the env
+    // connection, read from files so Kubernetes/Docker secrets mount directly.
+    tlsConfig: envTlsConfig(),
+    authMode: envAuthMode(),
   },
   storage: {
     type: 'sqlite',

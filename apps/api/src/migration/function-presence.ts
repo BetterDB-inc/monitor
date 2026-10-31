@@ -1,4 +1,6 @@
 import Valkey from 'iovalkey';
+import { nodeClientAuthOptions } from './execution/client-factory';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 import {
   probeSourceFunctions,
   aggregateFunctionPresence,
@@ -12,6 +14,7 @@ interface ClusterNodeLike {
   flags: string[];
   slots: number[][];
   address?: string; // host:port@bus
+  hostname?: string; // announced hostname (cluster-announce-hostname), when any
 }
 
 /** The bits of a source adapter this module needs. */
@@ -25,6 +28,8 @@ interface ClusterProbeConfig {
   username?: string;
   password?: string;
   tls?: boolean;
+  tlsConfig?: TlsConfig;
+  authMode?: DatabaseAuthMode;
 }
 
 const UNREACHABLE_FLAGS = ['fail', 'noaddr', 'handshake'];
@@ -86,9 +91,9 @@ export async function probeSourceFunctionsClusterAware(
         client = new Valkey({
           host,
           port,
-          username: config.username || undefined,
-          password: config.password || undefined,
-          tls: config.tls ? {} : undefined,
+          // CLUSTER NODES reports IPs; verify against the hostname the node
+          // announces so a DNS-only certificate still validates.
+          ...nodeClientAuthOptions(config, host, master.hostname),
           ...NODE_CONNECT_OPTIONS,
           maxRetriesPerRequest: 1,
         });

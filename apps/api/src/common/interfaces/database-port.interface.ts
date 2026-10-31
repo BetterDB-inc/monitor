@@ -129,4 +129,9 @@ export interface DatabasePort {
    * (trust-on-first-use). Present only on adapters that support SSH tunnels.
    */
   getObservedHostKeyFingerprint?(): string | undefined;
+  /**
+   * ACL user the server reported for the live session (`ACL WHOAMI`), when the
+   * adapter probed it on connect. Lets a certificate-mapped identity be verified.
+   */
+  getAuthenticatedUser?(): string | undefined;
 }

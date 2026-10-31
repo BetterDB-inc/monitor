@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import type { SshTunnelStatus, TopologyMembership } from '@betterdb/shared';
+import type { DatabaseAuthMode, SshTunnelStatus, TlsConfigStatus, TopologyMembership } from '@betterdb/shared';
 import { setCurrentConnectionId, fetchApi } from '../api/client';
 import { isUnavailableMember } from '../utils/connectionType';
 import { CONNECTION_PARAM } from '../lib/connectionParam';
@@ -44,6 +44,12 @@ export interface Connection {
   membership?: TopologyMembership;
   /** Redacted tunnel summary; present when the connection is reached through SSH. */
   sshTunnel?: SshTunnelStatus;
+  /** Redacted TLS material summary; present when a custom CA or client certificate is configured. */
+  tlsConfig?: TlsConfigStatus;
+  /** How the monitor authenticates; absent means password. */
+  authMode?: DatabaseAuthMode;
+  /** ACL user the server reports for the live connection (ACL WHOAMI). */
+  authenticatedUser?: string;
 }
 
 export interface ConnectionContextValue {

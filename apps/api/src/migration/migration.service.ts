@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Valkey from 'iovalkey';
+import { nodeClientAuthOptions } from './execution/client-factory';
 import type { MigrationAnalysisRequest, MigrationAnalysisResult, StartAnalysisResponse, DataTypeBreakdown, DataTypeCount, TtlDistribution, Incompatibility } from '@betterdb/shared';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { AnalysisJob } from './analysis/analysis-job';
@@ -254,15 +255,21 @@ export class MigrationService {
             continue;
           }
 
-          const client = new Valkey({
-            host,
-            port,
-            username: config?.username || undefined,
-            password: config?.password || undefined,
-            tls: config?.tls ? {} : undefined,
-            ...NODE_CONNECT_OPTIONS,
-            connectionName: 'BetterDB-Migration-Analysis',
-          });
+          // Resolving TLS material (file reads) can throw; that must mark this
+          // master unreachable, not fail the whole analysis job.
+          let client: Valkey;
+          try {
+            client = new Valkey({
+              host,
+              port,
+              ...nodeClientAuthOptions(config ?? {}, host, master.hostname),
+              ...NODE_CONNECT_OPTIONS,
+              connectionName: 'BetterDB-Migration-Analysis',
+            });
+          } catch {
+            unreachableMasters.push(`${host}:${port}`);
+            continue;
+          }
           tempClients.push(client);
           try {
             await connectWithin(client, NODE_CONNECT_TIMEOUT_MS);
@@ -516,11 +523,16 @@ export class MigrationService {
       const incompatibilities: Incompatibility[] = [];
 
       if (unreachableMasters.length > 0) {
+        // With no master scanned at all the analysis has checked nothing, so it
+        // must block rather than let the migration proceed on an empty pre-flight.
+        const nothingScanned = scanClients.length === 0;
         incompatibilities.push({
-          severity: 'warning',
+          severity: nothingScanned ? 'blocking' : 'warning',
           category: 'cluster_topology',
-          title: 'Source master unreachable',
-          detail: `Could not connect to ${unreachableMasters.join(', ')}. Keys, memory and command history on ${unreachableMasters.length === 1 ? 'this master are' : 'these masters are'} missing from the analysis.`,
+          title: nothingScanned ? 'No source master reachable' : 'Source master unreachable',
+          detail: nothingScanned
+            ? `Could not connect to any source master (${unreachableMasters.join(', ')}). Check the connection's TLS material and credentials; nothing was analysed.`
+            : `Could not connect to ${unreachableMasters.join(', ')}. Keys, memory and command history on ${unreachableMasters.length === 1 ? 'this master are' : 'these masters are'} missing from the analysis.`,
         });
       }
 

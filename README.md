@@ -205,6 +205,11 @@ docker run -d \
 | `DB_USERNAME` | No | `default` | Valkey/Redis ACL username |
 | `DB_TYPE` | No | `auto` | Database type: `auto`, `valkey`, or `redis` |
 | `DB_TLS` | No | `false` | Set to `true` to connect to the monitored database over TLS (required by managed providers such as Aiven or ElastiCache Serverless) |
+| `DB_TLS_CA_FILE` | No | - | Path to a PEM CA bundle used to verify the database server certificate. Needed when the server certificate is issued by a private CA (see [Mutual TLS](#mutual-tls-client-certificates)) |
+| `DB_TLS_CERT_FILE` | No | - | Path to a PEM client certificate presented to the database (mutual TLS). Use together with `DB_TLS_KEY_FILE` |
+| `DB_TLS_KEY_FILE` | No | - | Path to the PEM private key matching `DB_TLS_CERT_FILE` |
+| `DB_TLS_KEY_PASSPHRASE` | No | - | Passphrase for `DB_TLS_KEY_FILE`, if the key is encrypted |
+| `DB_AUTH_MODE` | No | `password` | `password` sends `AUTH` with `DB_USERNAME`/`DB_PASSWORD`; `certificate` sends no `AUTH` so the server maps the client certificate to an ACL user (Valkey `tls-auth-clients-user`). Requires `DB_TLS=true` and a client certificate + key |
 | `STORAGE_TYPE` | No | `memory` | Storage backend: `memory` or `postgres` |
 | `STORAGE_URL` | Conditional | - | PostgreSQL connection URL (required if `STORAGE_TYPE=postgres`) |
 | `STORAGE_SSL_CA` | No | - | Path (or trusted HTTPS URL) to a CA cert used to verify the PostgreSQL server. For managed providers with their own CA (e.g. Aiven), supply the project CA here for full chain + hostname verification. Takes precedence over `STORAGE_SSL_NO_VERIFY` |
@@ -217,11 +222,27 @@ docker run -d \
 | `BETTERDB_OFFLINE_LICENSE_FILE` | No | - | Path to a signed offline license `.jwt` for **air-gapped** hosts (see below) |
 | `BETTERDB_OFFLINE_LICENSE` | No | - | Offline license token as an inline JWT string |
 | `BETTERDB_DATA_DIR` | No | `/app/data` | Directory for persisted license state (mount a writable volume) |
-| `ENCRYPTION_KEY` | No | - | Key (min 16 chars) used to envelope-encrypt stored connection passwords and SSH tunnel secrets at rest. Without it, secrets are stored in plaintext |
+| `ENCRYPTION_KEY` | No | - | Key (min 16 chars) used to envelope-encrypt stored connection passwords, TLS private keys and SSH tunnel secrets at rest. Without it, secrets are stored in plaintext; rows found in plaintext are re-encrypted on the next start once the key is set. If the key is missing while encrypted rows exist, env-configured credentials are used in memory only and never written back unencrypted |
 | `BETTERDB_SSH_KEY_DIR` | No | - | Directory that server-side SSH private keys must live in. Enables the "server file path" key source for [SSH tunnels](#ssh-tunnels); a connection's key path must resolve inside it. Unset disables file-based keys (inline pasted keys still work) |
+| `BETTERDB_TLS_CERT_DIR` | No | - | Directory that server-side TLS files (CA bundle, client certificate, key) must live in. Enables the "server file paths" source for [mutual TLS](#mutual-tls-client-certificates) on UI-added connections; a connection's paths must resolve inside it. Unset disables file paths (pasted PEM still works) |
 | `BETTERDB_TELEMETRY` | No | `true` | Set `false` to disable anonymous telemetry |
 
 Full reference, including AI, webhook tuning, and health-gate thresholds: [docs/configuration.md](docs/configuration.md). For OTLP trace ingest and metrics/event export, see [docs/opentelemetry.md](docs/opentelemetry.md).
+
+### Mutual TLS (client certificates)
+
+When **Use TLS** is on, a connection can also carry TLS material:
+
+- a **CA bundle** so the server certificate is verified against a private PKI instead of the public CA store, and
+- a **client certificate + private key** that BetterDB presents during the handshake (mutual TLS), for servers that run `tls-auth-clients yes`.
+
+The certificate is passed to the TLS socket exactly as supplied, so its subject (CN) is whatever your CA issued. Material is either **pasted as PEM** (the private key and passphrase are encrypted at rest when `ENCRYPTION_KEY` is set) or referenced by **server file paths** inside `BETTERDB_TLS_CERT_DIR`, the same allowlist model as SSH keys. The env-configured default connection takes the same material from `DB_TLS_CA_FILE`, `DB_TLS_CERT_FILE`, `DB_TLS_KEY_FILE` and `DB_TLS_KEY_PASSPHRASE`.
+
+**Certificate-only authentication.** Valkey can map a field of the client certificate to an ACL user (`tls-auth-clients-user`). For that mapping to hold, the client must not send `AUTH` afterwards, which would re-authenticate the session as a different user or fail outright. Choose **Client certificate (mTLS)** as the authentication method (or `DB_AUTH_MODE=certificate`) and BetterDB sends no `AUTH` at all; username and password are ignored. BetterDB then runs `ACL WHOAMI` after connecting and shows the resolved user in the connection test result and in the connection status (`authenticatedUser`), so you can confirm the certificate mapped to the intended account rather than falling back to `default`.
+
+Cluster and Sentinel nodes discovered from a seed connection reuse the seed's CA, client certificate and authentication mode. Server certificate verification is always on; there is no option to disable it.
+
+**Rotation.** File-sourced material (`BETTERDB_TLS_CERT_DIR` paths, and the `DB_TLS_*_FILE` paths of the env-configured connection) is watched for changes: the files are stat-checked at most every few seconds when a socket is opened and re-read when they changed, so a replaced certificate is presented by every new connection (reconnects, key-analytics scans, the CLI, discovered cluster nodes) without a restart. New material is checked to parse as a matching certificate and key before it is adopted, so a rotation caught between writing the two files keeps the previous pair until both are in place. Already-open sockets keep running on the old handshake until they reconnect; use `POST /connections/{id}/reconnect` to force that. While `DB_HOST` is set, the env-configured default connection and the nodes auto-registered from it are rebuilt from the current `DB_*` settings on every start, so a changed username, password, `DB_TLS`, certificate paths or `DB_AUTH_MODE` always win over the stored copy (connections you created yourself keep their own settings, even when they were adopted into the default's topology). Pasted PEM is fixed at save time; re-create the connection to rotate it.
 
 ### SSH Tunnels
 

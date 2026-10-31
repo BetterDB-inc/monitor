@@ -54,18 +54,27 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_S
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
+import { assertAuthConfig, assertUsableTlsMaterial, clientCredentials, resolveTlsMaterial, tlsMaterialFingerprint, type TlsMaterialOptions } from './tls-material';
+import { withTimeout } from '../../common/utils/with-timeout';
+import type { ConnectionOptions } from 'tls';
+import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
-  username: string;
-  password: string;
+  /** ACL username; ignored (no AUTH sent) when `authMode` is `certificate`. */
+  username?: string;
+  password?: string;
   connectionName?: string;
   /** Logical database index the clients SELECT on connect (defaults to 0). */
   dbIndex?: number;
   tls?: boolean;
   /** Hostname the TLS certificate is verified against when `host` is a bare IP. */
   tlsServername?: string;
+  /** Custom CA and client certificate material (secrets already decrypted); used when `tls` is on. */
+  tlsConfig?: TlsConfig;
+  /** `password` (default) sends AUTH; `certificate` sends none and relies on the client cert. */
+  authMode?: DatabaseAuthMode;
   /** Optional SSH tunnel used to reach the database (secrets already decrypted). */
   sshTunnel?: SshTunnelConfig;
   /** Tunnel manager; required when sshTunnel is enabled. */
@@ -75,6 +84,17 @@ export interface UnifiedDatabaseAdapterConfig {
 }
 
 export const QUIT_TIMEOUT_MS = 2_000;
+// Upper bound on the best-effort ACL WHOAMI probe after connect. The client
+// has no commandTimeout, so without this a server that stops answering after
+// capability detection would leave connect() (and every Test Connection) hung.
+export const WHOAMI_TIMEOUT_MS = 5_000;
+
+/**
+ * How often, at most, file-sourced TLS material is stat-checked for changes when
+ * a new socket is opened. Keeps rotation pickup near-immediate without a file
+ * read per key-analytics scratch client.
+ */
+export const TLS_MATERIAL_RECHECK_MS = 5_000;
 
 // Minimum per-database share of the key-analytics sample budget (capped at the
 // database's own key count), so a small database next to a huge sibling still
@@ -148,13 +168,27 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // the current key-analytics collection. See probeGraphKey.
   private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
   private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
+  // Custom CA / client certificate, read at construction and re-read from disk
+  // when the files change (see refreshTlsMaterial). A resolution failure is
+  // deferred to connect() so it surfaces as a connection error instead of a
+  // constructor throw.
+  private tlsMaterial: TlsMaterialOptions = {};
+  private tlsMaterialFingerprint: string | undefined;
+  private tlsMaterialCheckedAt = 0;
+  private tlsSetupError: Error | null = null;
+  // ACL user the server reported on the last successful connect (ACL WHOAMI).
+  // Lets the UI confirm which identity a client certificate mapped to.
+  private authenticatedUser: string | undefined;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
+    // In certificate mode both are undefined, so iovalkey sends no AUTH and the
+    // server keeps the ACL user derived from the client certificate.
+    const { username, password } = clientCredentials(this.config);
     return new Valkey({
       host: this.connectHost,
       port: this.connectPort,
-      username: this.config.username,
-      password: this.config.password,
+      username,
+      password,
       // Logical database the client SELECTs on connect. Defaults to the
       // connection's configured dbIndex; key-analytics scans override it to
       // visit sibling databases discovered via INFO keyspace.
@@ -170,8 +204,105 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // points at localhost, but the certificate is still for the real host.
       // An auto-registered node reached by IP also accepts a certificate
       // issued for the hostname its cluster announces for it.
-      tls: this.config.tls ? tlsIdentityOptions(this.config.host, this.config.tlsServername) : undefined,
+      // Custom CA and client certificate (mutual TLS) ride on the same object.
+      tls: this.tlsOptions(),
     });
+  }
+
+  /**
+   * The full `tls` option for a new socket: SNI/identity plus the current
+   * material, re-read from disk first when the files changed.
+   */
+  private tlsOptions(): ConnectionOptions | undefined {
+    if (!this.config.tls) return undefined;
+    this.refreshTlsMaterial();
+    return this.composeTlsOptions();
+  }
+
+  private composeTlsOptions(): ConnectionOptions | undefined {
+    if (!this.config.tls) return undefined;
+    return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial };
+  }
+
+  /**
+   * Load (or reload) the material and remember what was on disk at that moment.
+   * Material that does not form a usable pair (files caught mid-rotation) is
+   * still adopted: there is nothing better to fall back to, the first
+   * handshake fails with the reason logged here instead of an opaque OpenSSL
+   * error, and the files are re-read before every reconnect so the connection
+   * heals on its own once the pair is complete.
+   */
+  private loadTlsMaterial(): void {
+    const material = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
+    try {
+      assertUsableTlsMaterial(material);
+    } catch (error) {
+      this.logger.warn(`${error instanceof Error ? error.message : error}; the files are re-read before each reconnect`);
+    }
+    this.tlsMaterial = material;
+    try {
+      this.tlsMaterialFingerprint = this.config.tls ? tlsMaterialFingerprint(this.config.tlsConfig) : undefined;
+    } catch {
+      this.tlsMaterialFingerprint = undefined;
+    }
+    this.tlsMaterialCheckedAt = Date.now();
+  }
+
+  /**
+   * Re-read file-sourced material when the files changed on disk, so every new
+   * socket presents the current certificate even while the main socket stays
+   * up: the main client's reconnects, key-analytics scratch clients, the CLI
+   * client, a client rebuilt after a tunnel re-establish, and the per-node
+   * clients cluster discovery builds from this client's `options.tls`. The
+   * check is a stat-based fingerprint compared at most once per
+   * TLS_MATERIAL_RECHECK_MS, so the scratch client per database that key
+   * analytics opens does not pay for file reads. `force` (used when iovalkey is
+   * about to reconnect) skips the throttle and re-reads unconditionally. A read
+   * failure, or material that does not parse as a matching certificate and key
+   * (a rotation caught between writing the two files), keeps the previously
+   * loaded material rather than breaking a working connection. Inline material
+   * never changes after construction.
+   */
+  private refreshTlsMaterial(force = false): void {
+    if (!this.config.tls || this.config.tlsConfig?.source !== 'file' || this.tlsSetupError) return;
+    const now = Date.now();
+    if (!force && now - this.tlsMaterialCheckedAt < TLS_MATERIAL_RECHECK_MS) return;
+    this.tlsMaterialCheckedAt = now;
+    try {
+      const fingerprint = tlsMaterialFingerprint(this.config.tlsConfig);
+      if (!force && fingerprint === this.tlsMaterialFingerprint) return;
+      const changed = fingerprint !== this.tlsMaterialFingerprint;
+      const material = resolveTlsMaterial(this.config.tlsConfig);
+      assertUsableTlsMaterial(material);
+      this.tlsMaterial = material;
+      this.tlsMaterialFingerprint = fingerprint;
+      // Keep the long-lived clients' options current too: cluster discovery
+      // copies the main client's onto per-node clients without going through
+      // createValkeyClient, and the cached CLI client reconnects on its own.
+      if (this._client) this._client.options.tls = this.composeTlsOptions();
+      if (this.cliClient) this.cliClient.options.tls = this.composeTlsOptions();
+      if (changed) this.logger.log('TLS files changed on disk; new sockets present the updated material');
+    } catch (error) {
+      this.logger.warn(
+        `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+  }
+
+  /**
+   * Retry a TLS setup that failed at construction (for example a secret volume
+   * mounted a moment after the API started). A configuration error (certificate
+   * mode without a certificate) is permanent and keeps throwing; a file read
+   * failure is retried on every connect and, once it succeeds, the existing
+   * client's socket options are updated so the next dial presents the material.
+   */
+  private ensureTlsMaterial(): void {
+    if (!this.tlsSetupError) return;
+    assertAuthConfig(this.config);
+    this.loadTlsMaterial();
+    this.tlsSetupError = null;
+    if (this._client) this._client.options.tls = this.composeTlsOptions();
+    this.logger.log('TLS material loaded on retry');
   }
 
   private initClient(): void {
@@ -197,6 +328,33 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       if (this._client !== client) return;
       this.connected = false;
     });
+
+    // iovalkey reads `options.tls` when it opens each socket, so refreshing it
+    // here lets an automatic reconnect present a rotated certificate from disk.
+    client.on('reconnecting', () => {
+      if (this._client !== client) return;
+      this.refreshTlsMaterial(true);
+      const tls = this.composeTlsOptions();
+      if (tls) client.options.tls = tls;
+    });
+
+    // After an automatic reconnect the server may map the session to a
+    // different ACL user (rotated certificate, changed ACL); refresh the cached
+    // identity so list() does not keep reporting the previous one. The first
+    // `ready` is the initial connect, which doConnect() probes itself after the
+    // handshake SELECT and capability detection; probing here as well would
+    // queue a second WHOAMI ahead of those and could overwrite the fresher value.
+    let initialReady = true;
+    client.on('ready', () => {
+      if (this._client !== client) return;
+      if (initialReady) {
+        initialReady = false;
+        return;
+      }
+      void this.probeAuthenticatedUser(client).then((user) => {
+        if (this._client === client) this.authenticatedUser = user;
+      });
+    });
   }
 
   constructor(config: UnifiedDatabaseAdapterConfig) {
@@ -209,6 +367,13 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     if (this.usesTunnel && !config.sshTunnelService) {
       throw new Error('sshTunnelService is required when an SSH tunnel is configured');
+    }
+
+    try {
+      assertAuthConfig(config);
+      this.loadTlsMaterial();
+    } catch (error) {
+      this.tlsSetupError = error instanceof Error ? error : new Error(String(error));
     }
 
     // Without a tunnel, create the client eagerly (existing behaviour). With a
@@ -296,6 +461,26 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.observedHostKeyFingerprint;
   }
 
+  /** ACL user the server reported for the current session, when known. */
+  getAuthenticatedUser(): string | undefined {
+    return this.authenticatedUser;
+  }
+
+  /**
+   * Ask the server which ACL user this session runs as. Best effort: servers
+   * without ACL (Redis < 6) or users without the permission simply yield
+   * undefined. In certificate mode this is the only way to see whether the
+   * certificate mapped to the intended user or fell back to `default`.
+   */
+  private async probeAuthenticatedUser(client: Valkey = this.client): Promise<string | undefined> {
+    try {
+      const reply = await withTimeout(client.call('ACL', 'WHOAMI'), WHOAMI_TIMEOUT_MS, 'ACL WHOAMI timed out');
+      return typeof reply === 'string' && reply !== '' ? reply : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private connectPromise: Promise<void> | null = null;
 
   async connect(): Promise<void> {
@@ -312,6 +497,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   private async doConnect(): Promise<void> {
     try {
+      this.ensureTlsMaterial();
       if (this.usesTunnel && !this.tunnelActive) {
         await this.establishTunnel();
       }
@@ -361,6 +547,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       this.logger.log('Connected successfully');
       await this.detectCapabilities();
       this.logger.log(`Detected ${this.capabilities?.dbType} ${this.capabilities?.version}`);
+      this.authenticatedUser = await this.probeAuthenticatedUser();
+      if (this.authenticatedUser) {
+        this.logger.log(`Authenticated as ACL user '${this.authenticatedUser}'`);
+      }
     } catch (error) {
       this.connected = false;
       await this.teardownTunnel();
@@ -1468,6 +1658,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     }
 
     this.cliClient = this.createValkeyClient('BetterDB-CLI');
+    // Same rotation pickup as the main client: re-read before the next dial.
+    this.cliClient.on('reconnecting', () => this.refreshTlsMaterial(true));
     await this.cliClient.connect();
     this.logger.log('CLI client connected');
     return this.cliClient;
@@ -1482,6 +1674,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   getClient(): Valkey {
+    // Callers copy `options.tls` onto per-node clients (cluster discovery), so
+    // make sure it reflects the certificate files currently on disk.
+    this.refreshTlsMaterial();
     // Throws a clear "connection not established" error (via the getter) rather
     // than handing back an undefined that blows up as a TypeError in the caller.
     return this.client;
