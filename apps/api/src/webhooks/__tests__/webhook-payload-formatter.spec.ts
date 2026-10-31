@@ -36,6 +36,52 @@ describe('webhook-payload-formatter', () => {
   });
 });
 
+describe('webhook-payload-formatter: retry amplification', () => {
+  const message =
+    'WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while connected ' +
+    'clients stay flat at ~120; load is rising with stress (r=0.97). Trigger: a latency regression ' +
+    '(COMMAND_P99). Without client backoff the loop keeps feeding itself. ' +
+    'Top clients: name checkout (cmds 4.8×, 12 reconnects).';
+  const payload: WebhookPayload = {
+    ...base,
+    event: WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
+    data: { metricType: 'retry_amplification', value: 1.9, baseline: 1, message },
+  };
+
+  it('shows the whole message in Slack and links to the anomalies page', () => {
+    const body = JSON.stringify(toSlack(payload, 'https://betterdb.example.com'));
+    expect(body).toContain('Trigger: a latency regression');
+    expect(body).toContain('Top clients: name checkout');
+    expect(body).toContain('https://betterdb.example.com/anomalies');
+    expect(body).not.toContain('/dashboard');
+  });
+
+  it('shows the whole message in Discord and links to the anomalies page', () => {
+    const discord = toDiscord(payload, 'https://betterdb.example.com') as {
+      embeds: Array<{ description: string; url: string }>;
+    };
+    expect(discord.embeds[0].description).toContain('Top clients: name checkout');
+    expect(discord.embeds[0].url).toBe('https://betterdb.example.com/anomalies');
+  });
+
+  it('stays within the Slack and Discord text limits', () => {
+    const long = { ...payload, data: { message: '<'.repeat(5_000) } };
+    const blocks = toSlack(long)['blocks'] as Array<{ text?: { text: string } }>;
+    const discord = toDiscord(long) as { embeds: Array<{ description: string }> };
+    for (const block of blocks) {
+      expect(block.text?.text.length ?? 0).toBeLessThanOrEqual(3_000);
+    }
+    expect(discord.embeds[0].description.length).toBeLessThanOrEqual(4_096);
+  });
+
+  it('adds no body for a message that already fits the title', () => {
+    const blocks = toSlack(base)['blocks'] as unknown[];
+    const discord = toDiscord(base) as { embeds: Array<{ description?: string }> };
+    expect(blocks).toHaveLength(3);
+    expect(discord.embeds[0].description).toBeUndefined();
+  });
+});
+
 describe('webhook-payload-formatter: untrusted text', () => {
   // ACL LOG records the username an unauthenticated client *tried*, so
   // `AUTH <!channel> x` / `AUTH @everyone x` reaches client.blocked verbatim.

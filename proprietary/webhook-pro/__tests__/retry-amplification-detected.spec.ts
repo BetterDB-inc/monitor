@@ -59,9 +59,19 @@ describe('WebhookEventsProService - dispatchRetryAmplificationDetected', () => {
     const { connectionId, ...payload } = data;
     expect(webhookDispatcher.dispatchEvent).toHaveBeenCalledWith(
       WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
-      payload,
+      expect.objectContaining(payload),
       connectionId,
     );
+  });
+
+  it('adds the fields the chat formatters map', async () => {
+    await service.dispatchRetryAmplificationDetected({ ...data, loadRatio: 2.1234 });
+
+    expect(webhookDispatcher.dispatchEvent.mock.calls[0][1]).toMatchObject({
+      metricType: 'retry_amplification',
+      value: 2.12,
+      baseline: 1,
+    });
   });
 
   it('skips the event without a Pro license', async () => {

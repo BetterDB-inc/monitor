@@ -388,6 +388,9 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
       {
+        metricType: 'retry_amplification',
+        value: Math.round(data.loadRatio * 100) / 100,
+        baseline: 1,
         level: data.level,
         trigger: data.trigger,
         windows: data.windows,

@@ -102,7 +102,8 @@ Compliance and audit events for regulated environments:
 Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
 `generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
 blocks and `discord` sends an embed with the same fields (instance, metric,
-value/baseline, link back to `/anomalies` or `/dashboard`).
+value/baseline, link back to `/anomalies` or `/dashboard`). A `message` too
+long for the title is shown in full below it.
 HMAC headers are still sent for all formats; Slack/Discord ignore them.
 
 Getting the webhook URL: Slack — create an app and enable an **Incoming
@@ -537,10 +538,13 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 
 This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
 
-`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
 
 ```json
 {
+  "metricType": "retry_amplification",
+  "value": 1.9,
+  "baseline": 1,
   "level": "warning",
   "trigger": "latency",
   "windows": 3,
