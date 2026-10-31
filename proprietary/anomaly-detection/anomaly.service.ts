@@ -452,6 +452,8 @@ export class AnomalyService
   private correlationTicking = false;
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
+  private readonly latchHolders = new Map<string, string>();
+  private readonly anomalyLatches = new WeakMap<AnomalyEvent, string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -1819,7 +1821,12 @@ export class AnomalyService
 
     const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, clientLockoutRearm(state, finding.level));
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      ctx.connectionId,
+      clientLockoutRearm(state, finding.level),
+    );
     commitClientLockoutLevel(state, finding.level);
   }
 
@@ -2564,6 +2571,7 @@ export class AnomalyService
         (drift) => this.buildAclDriftEvent(timestamp, drift),
         aclDriftSignature,
         this.activeAclDriftSignatures,
+        'replication',
       );
 
       const newClusterDrifts = this.claimAclDrifts(
@@ -2576,6 +2584,7 @@ export class AnomalyService
         (drift) => this.buildAclClusterDriftEvent(timestamp, drift),
         aclClusterDriftSignature,
         this.activeAclClusterDriftSignatures,
+        'cluster',
       );
     } catch (err) {
       this.logger.debug(
@@ -2613,13 +2622,17 @@ export class AnomalyService
     buildEvent: (drift: T) => AnomalyEvent,
     signature: (drift: T) => string,
     active: Set<string>,
+    scope: string,
   ): Promise<void> {
     for (const drift of drifts) {
       const event = buildEvent(drift);
       this.logger.warn(`Anomaly detected: ${event.message}`);
       // Attributed to the first node of the group, frequently NOT this poll's connection.
       const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-      await this.addAnomaly(event, attributedCtx, () => active.delete(signature(drift)));
+      const sig = signature(drift);
+      await this.addLatchedAnomaly(event, attributedCtx, `${scope}:${sig}`, () =>
+        active.delete(sig),
+      );
     }
   }
 
@@ -3066,7 +3079,7 @@ export class AnomalyService
         // this scan, so we must not pass the polling ctx. Falls back to the
         // event's connectionId (storage-only) if the node isn't resolvable.
         const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
-        await this.addAnomaly(event, attributedCtx, () => {
+        await this.addLatchedAnomaly(event, attributedCtx, signature, () => {
           this.activeConfigDriftSignatures.delete(signature);
         });
       }
@@ -3609,12 +3622,17 @@ export class AnomalyService
 
       const offenders = detectLargeReplyPressure(entries, thresholdBytes);
 
-      const active = this.activeLargeReplyOffenders.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeLargeReplyOffenders,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(offenders.map(largeReplyPressureSignature));
 
       for (const offender of offenders) {
         const signature = largeReplyPressureSignature(offender);
         if (active.has(signature)) continue; // already alerted for this command
+        active.add(signature);
 
         const event: AnomalyEvent = {
           id: randomUUID(),
@@ -3632,14 +3650,16 @@ export class AnomalyService
           connectionId: ctx.connectionId,
         };
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx, () => {
+        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
           this.activeLargeReplyOffenders.get(ctx.connectionId)?.delete(signature);
         });
       }
 
       // Keep only signatures still offending so a resolved-then-recurring
       // command alerts again (mirrors activeTopologyConflicts).
-      this.activeLargeReplyOffenders.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (err) {
       this.logger.debug(
         `Failed to check large-reply commandlog pressure for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -4471,9 +4491,10 @@ export class AnomalyService
       const errorReported = kind === 'rdb' ? state.rdbErrorReported : state.aofErrorReported;
       if (status === 'err') {
         if (!errorReported) {
-          await this.addAnomaly(
+          await this.addLatchedAnomaly(
             this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx),
             ctx,
+            `${ctx.connectionId}:${kind}:error`,
             () => {
               if (kind === 'rdb') state.rdbErrorReported = false;
               else state.aofErrorReported = false;
@@ -4570,9 +4591,10 @@ export class AnomalyService
       // with different thresholds and messages. Prefer the frozen-progress
       // reason when both trip (a stuck child is the more actionable signal).
       const reason = frozenStall ? 'stall' : 'exceeded';
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx),
         ctx,
+        `${ctx.connectionId}:${kind}:stall`,
         () => {
           track.reportedStall = false;
         },
@@ -4582,9 +4604,10 @@ export class AnomalyService
 
     if (!track.reportedStall && !track.warnedLong && elapsedSec >= this.persistenceWarnSec) {
       track.warnedLong = true;
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx),
         ctx,
+        `${ctx.connectionId}:${kind}:long`,
         () => {
           track.warnedLong = false;
         },
@@ -4664,12 +4687,17 @@ export class AnomalyService
     try {
       const conflicts = detectDuplicatePrimaries(nodes);
 
-      const active = this.activeTopologyConflicts.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeTopologyConflicts,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
         if (active.has(signature)) continue; // already alerted for this conflict
+        active.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -4698,7 +4726,7 @@ export class AnomalyService
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx, () => {
+        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
           this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
         });
       }
@@ -4706,7 +4734,9 @@ export class AnomalyService
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (topologyErr) {
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
@@ -5520,8 +5550,10 @@ export class AnomalyService
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
     const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
-    const active = activeByConn.get(connId) ?? new Set<string>();
-    const eventIds = eventIdsByConn?.get(connId) ?? new Map<string, string>();
+    const active = this.connectionClaims(activeByConn, connId, () => new Set<string>());
+    const eventIds = eventIdsByConn
+      ? this.connectionClaims(eventIdsByConn, connId, () => new Map<string, string>())
+      : new Map<string, string>();
     const currentSignatures = new Set(findings.map(signatureOf));
 
     // Forget recovered signatures so their grace window restarts if they recur.
@@ -5573,13 +5605,13 @@ export class AnomalyService
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx, () => {
+      active.add(signature);
+      if (eventIdsByConn) eventIds.set(signature, event.id);
+      await this.addLatchedAnomaly(event, ctx, `${connId}:${signature}`, () => {
         activeByConn.get(connId)?.delete(signature);
         const tracked = eventIdsByConn?.get(connId);
         if (tracked?.get(signature) === event.id) tracked.delete(signature);
       });
-      active.add(signature);
-      if (eventIdsByConn) eventIds.set(signature, event.id);
     }
 
     // Auto-resolve (when wired): a recovered signature (has an emitted event id
@@ -5604,16 +5636,14 @@ export class AnomalyService
         }
         if (outcome !== 'retry') eventIds.delete(sig);
       }
-      eventIdsByConn.set(connId, eventIds);
     }
 
     firstSeenByConn.set(connId, firstSeen);
-    activeByConn.set(
-      connId,
-      // Keep signatures active this poll AND preserved ones (unreachable nodes),
-      // so a transient connectivity gap doesn't drop a still-open finding.
-      new Set([...active].filter((sig) => currentSignatures.has(sig) || isPreserved(sig))),
-    );
+    // Keep signatures active this poll AND preserved ones (unreachable nodes),
+    // so a transient connectivity gap doesn't drop a still-open finding.
+    for (const sig of active) {
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
+    }
   }
 
   /**
@@ -5805,6 +5835,35 @@ export class AnomalyService
     }
   }
 
+  private async addLatchedAnomaly(
+    anomaly: AnomalyEvent,
+    ctx: ConnectionContext | undefined,
+    scope: string,
+    rearm: () => void,
+  ): Promise<void> {
+    const latch = `${anomaly.metricType}:${scope}`;
+    this.latchHolders.set(latch, anomaly.id);
+    this.anomalyLatches.set(anomaly, latch);
+    await this.addAnomaly(anomaly, ctx, () => {
+      if (this.releaseLatch(anomaly)) rearm();
+    });
+  }
+
+  private releaseLatch(anomaly: AnomalyEvent): boolean {
+    const latch = this.anomalyLatches.get(anomaly);
+    if (latch === undefined || this.latchHolders.get(latch) !== anomaly.id) return false;
+    this.latchHolders.delete(latch);
+    return true;
+  }
+
+  private connectionClaims<T>(byConn: Map<string, T>, connectionId: string, create: () => T): T {
+    const existing = byConn.get(connectionId);
+    if (existing !== undefined) return existing;
+    const claims = create();
+    byConn.set(connectionId, claims);
+    return claims;
+  }
+
   private async persistAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
     const context = ctx ?? this.anomalyContexts.get(anomaly);
     const connectionId = context?.connectionId || anomaly.connectionId;
@@ -5812,6 +5871,7 @@ export class AnomalyService
     const wasResolved = anomaly.resolved;
     await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
     anomaly.persisted = true;
+    this.releaseLatch(anomaly);
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();

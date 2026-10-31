@@ -2245,6 +2245,60 @@ describe('AnomalyService', () => {
       expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
+    it('raises a conflict again when its drop lands while a later conflict saves', async () => {
+      const secondConflict = ['nodeXXXXXXXX', 'nodeYYYYYYYY'].map((id, i) => ({
+        ...splitBrainNodes[0],
+        id,
+        address: `10.0.0.${i + 8}:6379@16379`,
+        flags: ['master'],
+        slots: [[5461, 10922]],
+      }));
+      const raisedFor = (id: string) =>
+        service
+          .getRecentEvents()
+          .filter(
+            (e) =>
+              e.metricType === MetricType.CLUSTER_TOPOLOGY && e.message.includes(id.slice(0, 8)),
+          );
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue([
+        ...splitBrainNodes,
+        ...secondConflict,
+      ]);
+      storage.saveAnomalyEvent.mockImplementationOnce(() => {
+        (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        return Promise.reject(new Error('storage down'));
+      });
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      expect(raisedFor('nodeAAAAAAAA')).toHaveLength(2);
+      expect(raisedFor('nodeXXXXXXXX')).toHaveLength(1);
+    });
+
+    it('stays quiet when an older conflict is dropped after a newer one was saved', async () => {
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(splitBrainNodes);
+      await poll();
+      expect(conflicts()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll();
+
+      expect(conflicts()).toHaveLength(2);
+    });
+
     it('dedupes a persistent conflict to a single alert across polls', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
       await poll();
@@ -4845,6 +4899,26 @@ describe('AnomalyService', () => {
       expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
+    it('stays quiet when an older drift is dropped after a newer one was saved', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const drifted = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+      const aligned = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll(ctxA);
+      await poll(drifted);
+      expireConfigRecheck('conn-b');
+      await poll(aligned);
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      expireConfigRecheck('conn-b');
+      await poll(drifted);
+      expect(driftEvents()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll(ctxA);
+
+      expect(driftEvents()).toHaveLength(2);
+    });
+
     it('does not alert when only one node of a group is monitored', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-solo', config: { maxmemory: '1000000' } });
       await poll(ctxA);
@@ -6508,6 +6582,21 @@ describe('AnomalyService', () => {
       expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
+    it('stays quiet when an older advisory is dropped after a newer one was saved', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '100', rejected_connections: '25' });
+      await pollWith({ connected_clients: '100', rejected_connections: '25' });
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollWith({ connected_clients: '100', rejected_connections: '40' });
+      expect(lockoutEvents()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await pollWith({ connected_clients: '100', rejected_connections: '40' });
+
+      expect(lockoutEvents()).toHaveLength(2);
+    });
+
     it('describes a refusal-only WARNING as refusals, not as sustained saturation', async () => {
       await pollWith({ connected_clients: '100', rejected_connections: '10' });
       await pollWith({ connected_clients: '120', rejected_connections: '25' });
@@ -6803,6 +6892,23 @@ describe('AnomalyService', () => {
       const raised = driftEvents();
       expect(raised).toHaveLength(2);
       expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('stays quiet when an older drift is dropped after a newer one was saved', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      await poll();
+      expect(driftEvents()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll();
+
+      expect(driftEvents()).toHaveLength(2);
     });
 
     it('never puts rule material into the event', async () => {
@@ -10023,6 +10129,248 @@ describe('AnomalyService', () => {
         await expireOutbox();
 
         expect(eventIdsByConn.get('conn-1')?.size).toBe(0);
+      });
+    });
+
+    describe('an older event dropped after a newer one was saved', () => {
+      const IDLE = {
+        rdb_bgsave_in_progress: '0',
+        rdb_current_bgsave_time_sec: '-1',
+        rdb_last_bgsave_status: 'ok',
+        current_save_keys_processed: '0',
+        current_save_keys_total: '0',
+        aof_rewrite_in_progress: '0',
+        aof_current_rewrite_time_sec: '-1',
+        aof_last_bgrewrite_status: 'ok',
+      };
+      const running = (elapsed: number, processed: number) => ({
+        persistence: {
+          ...IDLE,
+          rdb_bgsave_in_progress: '1',
+          rdb_current_bgsave_time_sec: String(elapsed),
+          current_save_keys_processed: String(processed),
+          current_save_keys_total: '100000000',
+        },
+      });
+      const persistenceEvents = () => eventsOf(MetricType.PERSISTENCE_CHILD);
+
+      const expireOutboxDuringNextSave = (skip = 0) => {
+        const save = storage.saveAnomalyEvent;
+        const fail = () => Promise.reject(new Error('storage down'));
+        for (let i = 0; i < skip; i += 1) save.mockImplementationOnce(fail);
+        save.mockImplementationOnce(() => {
+          (service as any).persistenceOutbox.due(now + OUTBOX_MAX_AGE_MS + 1);
+          return fail();
+        });
+      };
+
+      const expectOlderUnsaved = (events: AnomalyEvent[]) => {
+        expect(events).toHaveLength(2);
+        expect(events[0].persisted).not.toBe(true);
+        expect(events[1].persisted).toBe(true);
+      };
+
+      it('keeps the failed-save latch', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed);
+        await pollWith({ persistence: IDLE });
+        healSaves();
+        await pollWith(failed);
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(failed);
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the stall latch of a new child reusing the track', async () => {
+        failSaves();
+        await pollWith(running(50, 1000));
+        now += 61_000;
+        await pollWith(running(55, 1000));
+        await pollWith(running(1, 1000));
+        healSaves();
+        now += 61_000;
+        await pollWith(running(62, 1000));
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(running(63, 1000));
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the long-running latch of a new child reusing the track', async () => {
+        await pollWith(running(100, 1000));
+        failSaves();
+        await pollWith(running(130, 2000));
+        await pollWith(running(1, 10));
+        healSaves();
+        await pollWith(running(125, 20));
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(running(126, 30));
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the large-reply claim', async () => {
+        const entries = Array.from({ length: 5 }, (_, i) => ({
+          id: i + 1,
+          timestamp: 1000,
+          duration: 20000,
+          command: ['GET', `k${i}`],
+          clientAddress: '127.0.0.1:1234',
+          clientName: '',
+          type: 'large-reply' as const,
+        }));
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+        failSaves();
+        await pollWith({});
+        commandLogAnalytics.getCachedEntries.mockReturnValue([]);
+        await pollWith({});
+        healSaves();
+        commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+        await pollWith({});
+        expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith({});
+
+        expectOlderUnsaved(eventsOf(MetricType.LARGE_REPLY_PRESSURE));
+      });
+
+      it('keeps the topology gate claim', async () => {
+        let built = 0;
+        const buildEvent = jest.fn(() => ({
+          id: `gate-${(built += 1)}`,
+          timestamp: now,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message: 'finding',
+          resolved: false,
+          connectionId: 'conn-1',
+        }));
+        const gate = {
+          ctx: mockCtx,
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+          timestamp: now,
+        };
+        const run = (findings: string[]) =>
+          (service as any).applyTopologyPersistenceGate({ ...gate, findings });
+
+        failSaves();
+        await run(['finding']);
+        await run([]);
+        healSaves();
+        await run(['finding']);
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+
+        await expireOutbox();
+        await run(['finding']);
+
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps a large-reply drop that lands while a later offender saves', async () => {
+        const offending = (commands: string[]) =>
+          commands.flatMap((command, c) =>
+            Array.from({ length: 5 }, (_, i) => ({
+              id: c * 10 + i + 1,
+              timestamp: 1000,
+              duration: 20000,
+              command: [command, `k${i}`],
+              clientAddress: '127.0.0.1:1234',
+              clientName: '',
+              type: 'large-reply' as const,
+            })),
+          );
+        const raisedFor = (command: string) =>
+          eventsOf(MetricType.LARGE_REPLY_PRESSURE).filter((e) =>
+            e.message.startsWith(`WARNING: ${command} `),
+          );
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET']));
+        failSaves();
+        await pollWith({});
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET', 'LRANGE']));
+        expireOutboxDuringNextSave();
+        await pollWith({});
+        healSaves();
+        await pollWith({});
+
+        expect(raisedFor('GET')).toHaveLength(2);
+        expect(raisedFor('LRANGE')).toHaveLength(1);
+      });
+
+      it('keeps a gate drop that lands while a later finding saves', async () => {
+        let built = 0;
+        const buildEvent = jest.fn((finding: string) => ({
+          id: `${finding}-${(built += 1)}`,
+          timestamp: now,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message: finding,
+          resolved: false,
+          connectionId: 'conn-1',
+        }));
+        const gate = {
+          ctx: mockCtx,
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+          timestamp: now,
+        };
+        const run = (findings: string[]) =>
+          (service as any).applyTopologyPersistenceGate({ ...gate, findings });
+        const raisedFor = (finding: string) =>
+          buildEvent.mock.calls.filter((call) => call[0] === finding);
+
+        failSaves();
+        expireOutboxDuringNextSave(1);
+        await run(['first', 'second']);
+        healSaves();
+        await run(['first', 'second']);
+
+        expect(raisedFor('first')).toHaveLength(2);
+        expect(raisedFor('second')).toHaveLength(1);
+      });
+
+      it('holds no latch once every event is saved or dropped', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed);
+        expect((service as any).latchHolders.size).toBe(1);
+
+        await expireOutbox();
+        expect((service as any).latchHolders.size).toBe(0);
+
+        healSaves();
+        await pollWith(failed);
+        expect((service as any).latchHolders.size).toBe(0);
       });
     });
 
