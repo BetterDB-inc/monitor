@@ -224,9 +224,22 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial };
   }
 
-  /** Load (or reload) the material and remember what was on disk at that moment. */
+  /**
+   * Load (or reload) the material and remember what was on disk at that moment.
+   * Material that does not form a usable pair (files caught mid-rotation) is
+   * still adopted: there is nothing better to fall back to, the first
+   * handshake fails with the reason logged here instead of an opaque OpenSSL
+   * error, and the files are re-read before every reconnect so the connection
+   * heals on its own once the pair is complete.
+   */
   private loadTlsMaterial(): void {
-    this.tlsMaterial = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
+    const material = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
+    try {
+      assertUsableTlsMaterial(material);
+    } catch (error) {
+      this.logger.warn(`${error instanceof Error ? error.message : error}; the files are re-read before each reconnect`);
+    }
+    this.tlsMaterial = material;
     try {
       this.tlsMaterialFingerprint = this.config.tls ? tlsMaterialFingerprint(this.config.tlsConfig) : undefined;
     } catch {

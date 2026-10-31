@@ -56,6 +56,33 @@ export function attachTlsRefresh(
 }
 
 /**
+ * Cluster node clients are created by iovalkey's connection pool with
+ * `retryStrategy: null`: a node whose socket drops is ended and rebuilt from the
+ * Cluster's `redisOptions`, so `reconnecting` never fires on a node and a
+ * per-node reconnect hook would never run. Instead, each time the pool adds a
+ * node (`+node`, emitted before the lazy node's first dial) the files are
+ * re-read and validated, the new node is given the current material, and the
+ * Cluster's `redisOptions.tls` is refreshed so every node the pool builds later
+ * starts from it. Unusable or unreadable files leave both as they were.
+ */
+function refreshClusterNodeTls(
+  cluster: Cluster,
+  node: Valkey,
+  config: Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>,
+  onError?: TlsRefreshErrorHandler,
+): void {
+  try {
+    const { tls } = nodeClientAuthOptions(config);
+    if (!tls) return;
+    assertUsableTlsMaterial(tls);
+    node.options.tls = tls;
+    if (cluster.options.redisOptions) cluster.options.redisOptions.tls = tls;
+  } catch (error) {
+    onError?.(`Keeping previously loaded TLS files for ${node.options.host}:${node.options.port}: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+/**
  * Create a standalone Valkey client from a connection config.
  */
 export function createClient(config: DatabaseConnectionConfig, name: string, onTlsRefreshError?: TlsRefreshErrorHandler): Valkey {
@@ -101,11 +128,11 @@ export function createTargetClient(
       ...(config.tls ? { dnsLookup: (address: string, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) => callback(null, address, 4) } : {}),
     },
   );
-  // Each node client copies redisOptions at creation; updating the parent later
-  // would not reach it, so hook every node as the pool adds it. No host here:
-  // the Cluster path carries no per-node identity options (see above).
+  // Node clients never emit `reconnecting` (see refreshClusterNodeTls), so the
+  // files are re-read as each node is added. No host here: the Cluster path
+  // carries no per-node identity options (see above).
   if (config.tls && config.tlsConfig?.source === 'file') {
-    cluster.on('+node', (node: Valkey) => attachTlsRefresh(node, config, undefined, undefined, onTlsRefreshError));
+    cluster.on('+node', (node: Valkey) => refreshClusterNodeTls(cluster, node, config, onTlsRefreshError));
   }
 
   return cluster as unknown as Valkey;

@@ -65,8 +65,15 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       }
     } else {
       const client = createClient(sourceConfig, 'BetterDB-Migration-Source', onTlsRefreshError);
-      await client.connect();
+      // Register before connecting so the outer cleanup quits it, and stop the
+      // reconnect loop iovalkey starts when the first dial fails.
       sourceClients.push(client);
+      try {
+        await client.connect();
+      } catch (err) {
+        client.disconnect();
+        throw err;
+      }
     }
 
     log(job, maxLogLines, `Connected to source (${sourceClients.length} node(s))`);

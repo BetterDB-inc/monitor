@@ -428,6 +428,38 @@ describe('ConnectionRegistry TLS material', () => {
       expect(storage.saveConnection).not.toHaveBeenCalled();
     });
 
+    it('still pins a learned SSH host key on an adopted child of such a seed (it has its own credentials)', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ password: enc.encrypt('stored-password'), passwordEncrypted: true }),
+        saved({
+          id: 'adopted-child',
+          name: 'Adopted',
+          host: '10.0.0.3',
+          isDefault: false,
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n3', origin: 'adopted', source: 'cluster' },
+          username: 'own-user',
+          password: 'own-password',
+          passwordEncrypted: false,
+          sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password', password: 'ssh-pw', secretsEncrypted: false },
+        }),
+      ]);
+      database.password = 'env-password';
+      delete process.env.ENCRYPTION_KEY;
+      try {
+        registry = await buildRegistry();
+        await registry.onModuleInit();
+      } finally {
+        process.env.ENCRYPTION_KEY = KEY;
+        resetEncryptionService();
+      }
+      // The seed is memory-only, the adopted child is not: its learned key is written so the
+      // tunnel stays pinned across restarts. Nothing of the seed's reaches storage.
+      expect(registry.getConfig('adopted-child')?.sshTunnel?.hostKeyFingerprint).toBe('SHA256:learned-on-first-use');
+      const persisted = storage.saveConnection.mock.calls.map(([c]) => c);
+      expect(persisted.map((c) => c.id)).toEqual(['adopted-child']);
+      expect(persisted[0]).toMatchObject({ password: 'own-password', sshTunnel: { hostKeyFingerprint: 'SHA256:learned-on-first-use' } });
+    });
+
     it('re-encrypts rows that hold plaintext secrets once a cipher is present', async () => {
       storage.getConnections.mockResolvedValue([
         saved({ password: 'plain-password', passwordEncrypted: false, tlsConfig: { source: 'inline', cert: CERT, key: PRIVATE_KEY, passphrase: 'pw', secretsEncrypted: false } }),

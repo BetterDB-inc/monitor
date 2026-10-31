@@ -596,12 +596,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Whether a record's secrets exist only in memory (see memoryOnlySecrets):
-   * the record itself, or a child of such a seed, must not be written.
+   * the record itself, or an auto-registered child of such a seed (it inherits
+   * the seed's secrets), must not be written. An adopted child keeps its own
+   * stored credentials, so the seed's state says nothing about it.
    */
   private secretsAreMemoryOnly(config: Pick<DatabaseConnectionConfig, 'id' | 'membership'>): boolean {
     if (this.memoryOnlySecrets.has(config.id)) return true;
-    const seedId = config.membership?.seedId;
-    return seedId !== undefined && this.memoryOnlySecrets.has(seedId);
+    const membership = config.membership;
+    return membership?.origin === 'auto' && this.memoryOnlySecrets.has(membership.seedId);
   }
 
   /** Persist a config after a host key was learned, unless that would write plaintext secrets. */

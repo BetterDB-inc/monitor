@@ -7,7 +7,7 @@ import { generateTlsPair } from '../../../test/helpers/tls-fixtures';
 type MockClient = {
   host: string;
   port: number;
-  options: { tls?: { servername?: string; cert?: Buffer | string } };
+  options: { connectionName?: string; tls?: { servername?: string; cert?: Buffer | string } };
   handlers: Record<string, () => void>;
   on: jest.Mock;
   connect: jest.Mock;
@@ -22,7 +22,7 @@ let clusterNodesRaw = '';
 let failingHosts = new Set<string>();
 
 jest.mock('iovalkey', () => {
-  const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; tls?: { servername?: string } }) => {
+  const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; connectionName?: string; tls?: { servername?: string } }) => {
     const handlers: Record<string, () => void> = {};
     const client: MockClient = {
       host: opts.host,
@@ -131,6 +131,19 @@ describe('runCommandMigration source clients', () => {
     expect(failed?.quit).toHaveBeenCalled();
     // Every client the worker opened is quit by the outer cleanup, failed one included.
     expect(clients.filter((c) => c.host !== 'cache.internal').every((c) => c.quit.mock.calls.length > 0)).toBe(true);
+  });
+
+  it('tears down a standalone source client whose connect fails instead of leaving it reconnecting', async () => {
+    failingHosts = new Set(['cache.internal']);
+
+    await expect(
+      runCommandMigration({ sourceConfig, targetConfig, sourceIsCluster: false, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }),
+    ).rejects.toThrow('Connection is closed.');
+
+    const standalone = clients.find((c) => c.host === 'cache.internal' && c.options.connectionName === 'BetterDB-Migration-Source');
+    expect(standalone).toBeDefined();
+    expect(standalone!.disconnect).toHaveBeenCalled();
+    expect(standalone!.quit).toHaveBeenCalled();
   });
 
   it('re-reads file-sourced certificates before any source client reconnects (cluster masters and standalone)', async () => {

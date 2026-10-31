@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Logger } from '@nestjs/common';
 import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
@@ -826,6 +827,28 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     fs.writeFileSync(path.join(certDir, 'client.key'), pair.key);
   };
   const certOf = (holder: { options: { tls?: { cert?: unknown } } }) => (holder.options.tls?.cert as Buffer | string | undefined)?.toString();
+
+  it('adopts a mismatched pair at construction with a warning rather than failing, so the reconnect refresh can heal it', () => {
+    // Files caught mid-rotation at boot: certificate B next to key A.
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const adapter = fileAdapter();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/TLS material is not usable.*re-read before each reconnect/));
+      const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string }; tlsSetupError: Error | null });
+      expect(material.tlsSetupError).toBeNull();
+      expect(material.tlsMaterial.cert?.toString()).toBe(pairB.cert);
+
+      // The key lands: the forced re-read before a reconnect adopts the complete pair.
+      fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+      (adapter as unknown as { refreshTlsMaterial(force: boolean): void }).refreshTlsMaterial(true);
+      const client = (adapter as unknown as { _client: { options: { tls?: { cert?: unknown; key?: unknown } } } })._client;
+      expect(certOf(client)).toBe(pairB.cert);
+      expect((client.options.tls?.key as Buffer | string | undefined)?.toString()).toBe(pairB.key);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
     const adapter = fileAdapter();
