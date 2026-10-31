@@ -60,6 +60,16 @@ describe('PersistenceOutbox', () => {
     expect(outbox.due(0).map((entry) => entry.kind === 'save' && entry.rewrite)).toEqual([true, undefined]);
   });
 
+  it('lets a rewrite carry a pending resolve', () => {
+    const anomaly = event('a');
+    outbox.enqueueResolve('a', 100, 0);
+
+    outbox.enqueueRewrite(anomaly, 0);
+
+    expect(outbox.unsavedAnomaly('a')).toBe(anomaly);
+    expect(anomaly).toMatchObject({ resolved: true, resolvedAt: 100 });
+  });
+
   it('settles a resolve but leaves a pending save', () => {
     outbox.enqueueSave(event('a'), undefined, 0);
     outbox.enqueueResolve('b', 100, 0);
