@@ -225,6 +225,7 @@ export interface ReplicationInfo {
   master_sync_left_bytes?: string;
   master_sync_last_io_seconds_ago?: string;
   master_link_down_since_seconds?: string;
+  [replicaLine: `slave${number}`]: string | undefined;
 }
 
 export interface CpuInfo {

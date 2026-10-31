@@ -64,6 +64,9 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
+  CONNECTION_CHURN = 'connection_churn',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
 }
 
 /**
@@ -104,6 +107,8 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.CONNECTION_CHURN,
+  MetricType.REPLICATION_DIVERGENCE,
 ]);
 
 export enum AnomalySeverity {
@@ -129,6 +134,7 @@ export enum AnomalyPattern {
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
   UNKNOWN = 'unknown',
 }
 
@@ -146,7 +152,9 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.
@@ -211,4 +219,10 @@ export interface AnomalySummary {
   byPattern: Record<AnomalyPattern, number>;
   activeEvents: number;
   resolvedEvents: number;
+}
+
+export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
+
+export interface AnomalyEventSink {
+  ingestExternalAnomaly(event: AnomalyEvent): void;
 }

@@ -2,11 +2,7 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
-import {
-  otelSpanCap,
-  otelSpanCapCheckInterval,
-  otelSpanLowWaterMark,
-} from '../otel-span-cap';
+import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership } from '@betterdb/shared';
 import type {
@@ -58,6 +54,8 @@ import {
   StoredCommandLogEntry,
   StoredCommandStatsSample,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -128,7 +126,11 @@ import type {
 } from '@betterdb/shared';
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { clientAddrIp, foldClientAnalyticsStats, mapClientAnalyticsRollupRow } from './client-analytics-stats';
+import {
+  clientAddrIp,
+  foldClientAnalyticsStats,
+  mapClientAnalyticsRollupRow,
+} from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
 import { InvitationPostgresRepository } from './repositories/invitation.postgres.repository';
@@ -849,10 +851,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1 AND connection_id = $2', [
-        olderThanTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'acl_audit',
+        'captured_at < $1 AND connection_id = $2',
+        [olderThanTimestamp, connectionId],
+      );
     }
 
     return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanTimestamp]);
@@ -1159,13 +1163,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1 AND connection_id = $2', [
-        olderThanTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'client_snapshots',
+        'captured_at < $1 AND connection_id = $2',
+        [olderThanTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [olderThanTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'client_snapshots', 'captured_at < $1', [
+      olderThanTimestamp,
+    ]);
   }
 
   async getClientSnapshotBounds(
@@ -1186,7 +1194,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { earliest: Number(row.earliest), latest: Number(row.latest) };
   }
 
-  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+  async getClientSnapshotNextCapturedAt(
+    connectionId: string,
+    afterExclusive: number,
+  ): Promise<number | null> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -1370,7 +1381,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [connectionId, sinceBucket],
     );
     const row = result.rows[0];
-    return row ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) } : null;
+    return row
+      ? { peak: Number(row.peak_connections), capturedAt: Number(row.peak_captured_at) }
+      : null;
   }
 
   async pruneOldClientAnalyticsRollups(
@@ -1617,6 +1630,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
@@ -2127,6 +2142,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON latency_stats_samples(connection_id, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
         ON latency_stats_samples(captured_at);
+
+      CREATE TABLE IF NOT EXISTS replication_divergence_windows (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start BIGINT NOT NULL,
+        window_end BIGINT NOT NULL,
+        gap_bytes DOUBLE PRECISION NOT NULL,
+        bytes_per_sec DOUBLE PRECISION,
+        seconds_behind DOUBLE PRECISION
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
+        ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
+      CREATE INDEX IF NOT EXISTS idx_repl_div_end
+        ON replication_divergence_windows(window_end);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -2708,16 +2741,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       [
         event.id,
         event.timestamp,
@@ -2731,7 +2765,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.threshold,
         event.message,
         event.correlationId || null,
-        event.relatedMetrics || [],
+        event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2756,7 +2791,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2771,7 +2806,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.threshold,
         event.message,
         event.correlationId || null,
-        event.relatedMetrics || [],
+        event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2785,16 +2821,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       values,
     );
 
@@ -2832,6 +2869,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
+    if (options.correlationIds) {
+      conditions.push(`correlation_id = ANY($${paramIndex++})`);
+      params.push(options.correlationIds);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2841,12 +2882,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
       FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, id DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
@@ -2944,15 +2985,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = await this.pool.query('SELECT 1 FROM anomaly_events WHERE id = $1', [id]);
     return (existing.rowCount ?? 0) > 0;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `UPDATE anomaly_events
+       SET resolved = true, resolved_at = $2, duration_ms = $2 - timestamp
+       WHERE id = $1 AND resolved = false`,
+      [id, resolvedAt],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'anomaly_events',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedPostgresDelete(this.pool, 'anomaly_events', 'timestamp < $1', [cutoffTimestamp]);
@@ -3016,6 +3071,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
+    if (options.correlationIds) {
+      conditions.push(`correlation_id = ANY($${paramIndex++})`);
+      params.push(options.correlationIds);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
@@ -3040,13 +3099,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'correlated_anomaly_groups',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'correlated_anomaly_groups', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKeyPatternSnapshots(
@@ -3385,13 +3448,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'key_pattern_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'key_pattern_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveHotKeys(entries: HotKeyEntry[], connectionId: string): Promise<number> {
@@ -3563,10 +3630,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'hot_key_stats',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
     return chunkedPostgresDelete(this.pool, 'hot_key_stats', 'captured_at < $1', [cutoffTimestamp]);
@@ -3877,13 +3946,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'command_log_entries',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'command_log_entries', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Snapshot Methods
@@ -3971,13 +4044,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Histogram Methods
@@ -4045,13 +4122,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_histograms',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_histograms', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Memory Snapshot Methods
@@ -4173,13 +4254,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'memory_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'memory_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveScalingReadinessScore(score: StoredScalingReadinessScore): Promise<void> {
@@ -4284,10 +4369,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return settings;
   }
 
-
   private kvCacheSnapshotFromRow(r: Record<string, any>): KvCacheFootprintSnapshot {
     const json = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
-    const nullableNumber = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+    const nullableNumber = (v: unknown): number | null =>
+      v === null || v === undefined ? null : Number(v);
     return {
       connectionId: r.connection_id,
       timestamp: Number(r.timestamp),
@@ -4359,17 +4444,42 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          other_dbs, per_model)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
       [
-        s.connectionId, s.timestamp, s.detected, s.layout, s.scannedKeys, s.matchedKeys,
-        s.sampledKeys, s.scanComplete, s.primariesScanned, s.primariesTotal, s.chunksEst, s.bytesEst, s.usedMemory, s.maxmemory,
-        s.maxmemoryPolicy, s.lmcacheMemoryShare, s.noTtlRatio, s.orphanRatio, s.evictedKeysDelta, s.evictedKeysIntervalMs,
-        JSON.stringify(s.otherDbs), JSON.stringify(s.perModel),
+        s.connectionId,
+        s.timestamp,
+        s.detected,
+        s.layout,
+        s.scannedKeys,
+        s.matchedKeys,
+        s.sampledKeys,
+        s.scanComplete,
+        s.primariesScanned,
+        s.primariesTotal,
+        s.chunksEst,
+        s.bytesEst,
+        s.usedMemory,
+        s.maxmemory,
+        s.maxmemoryPolicy,
+        s.lmcacheMemoryShare,
+        s.noTtlRatio,
+        s.orphanRatio,
+        s.evictedKeysDelta,
+        s.evictedKeysIntervalMs,
+        JSON.stringify(s.otherDbs),
+        JSON.stringify(s.perModel),
       ],
     );
   }
 
-  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+  async getKvCacheFootprintSnapshots(
+    query: KvCacheFootprintQuery,
+  ): Promise<KvCacheFootprintSnapshot[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    const params = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER, query.limit ?? 2000];
+    const params = [
+      query.connectionId,
+      query.from ?? 0,
+      query.to ?? Number.MAX_SAFE_INTEGER,
+      query.limit ?? 2000,
+    ];
     const result = query.bucketMs
       ? await this.pool.query(
           `SELECT * FROM (
@@ -4395,12 +4505,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSnapshotFromRow(r));
   }
 
-  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheFootprintSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'kv_cache_footprint_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'kv_cache_footprint_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async saveKvCacheEngineSamples(samples: KvCacheEngineSample[]): Promise<void> {
@@ -4412,9 +4532,19 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       const values: unknown[] = [];
       const placeholders = chunk.map((s, i) => {
         values.push(
-          s.engineId, s.connectionId, s.modelName, s.timestamp, s.requestedTokens, s.hitTokens,
-          s.lookupTokens, s.lookupHits, s.remoteReadBytes, s.remoteWriteBytes, s.remoteReadRequests,
-          s.remoteWriteRequests, s.remotePingErrors,
+          s.engineId,
+          s.connectionId,
+          s.modelName,
+          s.timestamp,
+          s.requestedTokens,
+          s.hitTokens,
+          s.lookupTokens,
+          s.lookupHits,
+          s.remoteReadBytes,
+          s.remoteWriteBytes,
+          s.remoteReadRequests,
+          s.remoteWriteRequests,
+          s.remotePingErrors,
         );
         const base = i * columns;
         return `(${Array.from({ length: columns }, (_, c) => `$${base + c + 1}`).join(', ')})`;
@@ -4432,7 +4562,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheEngineSamples(query: KvCacheSampleQuery): Promise<KvCacheEngineSample[]> {
     if (!this.pool) throw new Error('Database not initialized');
-    if (query.bucketMs) return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
+    if (query.bucketMs)
+      return this.getBucketedKvCacheEngineSamples(query, Math.ceil(query.bucketMs));
     const { where, params } = this.kvCacheSampleFilter(query);
     params.push(query.limit ?? 50_000);
     const result = await this.pool.query(
@@ -4445,12 +4576,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSampleFromRow(r));
   }
 
-  private async getBucketedKvCacheEngineSamples(query: KvCacheSampleQuery, bucketMs: number): Promise<KvCacheEngineSample[]> {
+  private async getBucketedKvCacheEngineSamples(
+    query: KvCacheSampleQuery,
+    bucketMs: number,
+  ): Promise<KvCacheEngineSample[]> {
     const { where, params } = this.kvCacheSampleFilter(query);
     params.push(bucketMs);
     const bucket = `$${params.length}::bigint`;
     params.push(query.limit ?? 50_000);
-    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(', ');
+    const sums = KV_CACHE_SAMPLE_COUNTER_COLUMNS.map(
+      (column) => `SUM(${column}) AS ${column}`,
+    ).join(', ');
     const result = await this.pool!.query(
       `SELECT * FROM (
          SELECT engine_id, connection_id, model_name, (timestamp / ${bucket}) * ${bucket} AS bucket_ts, ${sums}
@@ -4463,7 +4599,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((r) => this.kvCacheSampleFromRow({ ...r, timestamp: r.bucket_ts }));
   }
 
-  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+  async getKvCacheSampleTotals(
+    query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>,
+  ): Promise<KvCacheSampleTotals> {
     if (!this.pool) throw new Error('Database not initialized');
     const { where, params } = this.kvCacheSampleFilter(query);
     const result = await this.pool.query(
@@ -4471,11 +4609,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
        FROM kv_cache_engine_samples WHERE ${where.join(' AND ')}`,
       params,
     );
-    return { requestedTokens: Number(result.rows[0].requested), hitTokens: Number(result.rows[0].hit) };
+    return {
+      requestedTokens: Number(result.rows[0].requested),
+      hitTokens: Number(result.rows[0].hit),
+    };
   }
 
-  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): { where: string[]; params: unknown[] } {
-    const params: unknown[] = [query.connectionId, query.from ?? 0, query.to ?? Number.MAX_SAFE_INTEGER];
+  private kvCacheSampleFilter(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): {
+    where: string[];
+    params: unknown[];
+  } {
+    const params: unknown[] = [
+      query.connectionId,
+      query.from ?? 0,
+      query.to ?? Number.MAX_SAFE_INTEGER,
+    ];
     const where = ['connection_id = $1', 'timestamp >= $2', 'timestamp <= $3'];
     if (query.engineId !== undefined) {
       params.push(query.engineId);
@@ -4488,12 +4636,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return { where, params };
   }
 
-  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheEngineSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1 AND connection_id = $2', [cutoffTimestamp, connectionId]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'kv_cache_engine_samples',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
-    return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'kv_cache_engine_samples', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async deleteKvCacheEngineSamples(engineId: string): Promise<void> {
@@ -4519,8 +4677,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          last_error = EXCLUDED.last_error
        RETURNING *`,
       [
-        e.id, e.connectionId, e.name, e.source, e.scrapeUrl, e.scrapeAuthHeader,
-        e.scrapeAuthEncrypted, e.otlpEngineId, e.enabled, e.createdAt, e.lastSeenAt, e.lastError,
+        e.id,
+        e.connectionId,
+        e.name,
+        e.source,
+        e.scrapeUrl,
+        e.scrapeAuthHeader,
+        e.scrapeAuthEncrypted,
+        e.otlpEngineId,
+        e.enabled,
+        e.createdAt,
+        e.lastSeenAt,
+        e.lastError,
       ],
     );
     return this.kvCacheEngineFromRow(result.rows[0]);
@@ -4531,7 +4699,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result =
       connectionId === undefined
         ? await this.pool.query('SELECT * FROM kv_cache_engines ORDER BY created_at ASC')
-        : await this.pool.query('SELECT * FROM kv_cache_engines WHERE connection_id = $1 ORDER BY created_at ASC', [connectionId]);
+        : await this.pool.query(
+            'SELECT * FROM kv_cache_engines WHERE connection_id = $1 ORDER BY created_at ASC',
+            [connectionId],
+          );
     return result.rows.map((r) => this.kvCacheEngineFromRow(r));
   }
 
@@ -4549,7 +4720,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async getKvCacheSettings(connectionId: string): Promise<KvCacheSettings | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    const result = await this.pool.query('SELECT * FROM kv_cache_settings WHERE connection_id = $1', [connectionId]);
+    const result = await this.pool.query(
+      'SELECT * FROM kv_cache_settings WHERE connection_id = $1',
+      [connectionId],
+    );
     if (result.rows.length === 0) return null;
     const row = result.rows[0];
     return {
@@ -4571,14 +4745,25 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          hit_rate_threshold = EXCLUDED.hit_rate_threshold,
          eviction_alert_enabled = EXCLUDED.eviction_alert_enabled,
          updated_at = EXCLUDED.updated_at`,
-      [settings.connectionId, settings.hitRateAlertEnabled, settings.hitRateThreshold, settings.evictionAlertEnabled, settings.updatedAt],
+      [
+        settings.connectionId,
+        settings.hitRateAlertEnabled,
+        settings.hitRateThreshold,
+        settings.evictionAlertEnabled,
+        settings.updatedAt,
+      ],
     );
     return settings;
   }
 
   async deleteKvCacheConnectionData(connectionId: string): Promise<void> {
     if (!this.pool) throw new Error('Database not initialized');
-    for (const table of ['kv_cache_footprint_snapshots', 'kv_cache_engine_samples', 'kv_cache_engines', 'kv_cache_settings']) {
+    for (const table of [
+      'kv_cache_footprint_snapshots',
+      'kv_cache_engine_samples',
+      'kv_cache_engines',
+      'kv_cache_settings',
+    ]) {
       await chunkedPostgresDelete(this.pool, table, 'connection_id = $1', [connectionId]);
     }
   }
@@ -4744,13 +4929,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'command_stats_samples',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'command_stats_samples', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // Latency Stats Sample Methods (INFO latencystats)
@@ -4842,13 +5031,108 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'latency_stats_samples',
+        'captured_at < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [
+      cutoffTimestamp,
+    ]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
+
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    for (const w of windows) {
+      const base = values.length;
+      placeholders.push(`(${Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        w.replicaAddr,
+        w.windowStart,
+        w.windowEnd,
+        w.gapBytes,
+        w.bytesPerSec,
+        w.secondsBehind,
+      );
+    }
+
+    const result = await this.pool.query(
+      `INSERT INTO replication_divergence_windows
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+       VALUES ${placeholders.join(', ')}
+       ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
+      values,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const params: (string | number)[] = [options.connectionId];
+    let replicaFilter = '';
+    if (options.replicaAddr) {
+      params.push(options.replicaAddr);
+      replicaFilter = `AND replica_addr = $${params.length}`;
+    }
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+    const startIdx = params.length - 2;
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
+         FROM replication_divergence_windows
+         WHERE connection_id = $1 ${replicaFilter} AND window_end >= $${startIdx} AND window_end <= $${startIdx + 1}
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY window_end ASC`,
+      params,
+    );
+    const rows = result.rows;
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      replicaAddr: row.replica_addr,
+      windowStart: Number(row.window_start),
+      windowEnd: Number(row.window_end),
+      gapBytes: Number(row.gap_bytes),
+      bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
+      secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+    }));
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'replication_divergence_windows',
+        'window_end < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedPostgresDelete(this.pool, 'replication_divergence_windows', 'window_end < $1', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods
@@ -4897,9 +5181,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rowCount ?? 0;
   }
 
-  async getAiCacheHistory(
-    options: AiCacheHistoryQueryOptions,
-  ): Promise<StoredAiCacheSample[]> {
+  async getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const filters: string[] = [];
@@ -4961,20 +5243,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }));
   }
 
-  async pruneOldAiCacheSamples(
-    cutoffTimestamp: number,
-    connectionId?: string,
-  ): Promise<number> {
+  async pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'ai_cache_samples',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'ai_cache_samples', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // OTLP Trace Methods
@@ -5211,7 +5494,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     // An error on an idle dedicated connection must not crash the process.
     client.on('error', (err: unknown) => {
       if (!this.closing) {
-        console.warn(`Index build connection error: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `Index build connection error: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     });
     await client.connect();
@@ -5297,7 +5582,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           await this.waitForIndexLockRetry();
           if (this.closing) return;
           if (await this.isIndexValid(client, indexName, tableName)) {
-            console.log(`Index ${indexName} was built by another instance; ready after ${Date.now() - started}ms`);
+            console.log(
+              `Index ${indexName} was built by another instance; ready after ${Date.now() - started}ms`,
+            );
             break;
           }
         }
@@ -5627,13 +5914,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.pool) throw new Error('Database not initialized');
 
     if (connectionId) {
-      return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1 AND connection_id = $2', [
-        cutoffTimestamp,
-        connectionId,
-      ]);
+      return chunkedPostgresDelete(
+        this.pool,
+        'vector_index_snapshots',
+        'timestamp < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
     }
 
-    return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1', [cutoffTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'vector_index_snapshots', 'timestamp < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   // CVE Inspection Methods
@@ -6542,10 +6833,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows[0]?.count ?? 0;
   }
 
-  async saveCaptureSession(
-    session: StoredCaptureSession,
-    connectionId: string,
-  ): Promise<string> {
+  async saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string> {
     if (!this.pool) throw new Error('Database not initialized');
 
     await this.pool.query(
@@ -6581,10 +6869,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getCaptureSession(id: string): Promise<StoredCaptureSession | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    const result = await this.pool.query(
-      'SELECT * FROM capture_sessions WHERE id = $1',
-      [id],
-    );
+    const result = await this.pool.query('SELECT * FROM capture_sessions WHERE id = $1', [id]);
 
     return result.rows.length > 0 ? this.mapCaptureSessionRow(result.rows[0]) : null;
   }
@@ -6632,7 +6917,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private mapCaptureSessionRow(row: Record<string, unknown>): StoredCaptureSession {
-    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
     const toOptionalNumber = (v: unknown): number | undefined => {
       if (v === null || v === undefined) return undefined;
       return toNumber(v);
@@ -6999,7 +7285,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [sessionId],
     );
 
-    const toNumber = (v: unknown): number => (typeof v === 'string' ? parseInt(v, 10) : (v as number));
+    const toNumber = (v: unknown): number =>
+      typeof v === 'string' ? parseInt(v, 10) : (v as number);
 
     return result.rows.map((row) => ({
       sessionId: row.session_id as string,

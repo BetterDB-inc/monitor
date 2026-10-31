@@ -74,6 +74,7 @@ export interface ForkMemoryState {
   ackedLevel: ForkRiskLevel;
   /** Kind of the acknowledged finding, so a live risk isn't masked by a projected one. */
   ackedKind: ForkRiskKind;
+  ackedFinding: ForkMemoryFinding | null;
 }
 
 export interface ForkMemoryFinding {
@@ -99,7 +100,7 @@ function severityScore(level: ForkRiskLevel, kind: ForkRiskKind): number {
 }
 
 export function createForkMemoryState(): ForkMemoryState {
-  return { ackedLevel: 'none', ackedKind: 'projected-fork-oom' };
+  return { ackedLevel: 'none', ackedKind: 'projected-fork-oom', ackedFinding: null };
 }
 
 function formatBytes(bytes: number): string {
@@ -279,4 +280,19 @@ export function acknowledgeForkMemoryFinding(
 ): void {
   state.ackedLevel = finding.level;
   state.ackedKind = finding.kind;
+  state.ackedFinding = finding;
+}
+
+export function forkMemoryRearm(state: ForkMemoryState, finding: ForkMemoryFinding): () => void {
+  const { ackedLevel: previousLevel, ackedKind: previousKind } = state;
+  return () => {
+    if (state.ackedFinding !== finding) return;
+    state.ackedFinding = null;
+    if (
+      severityScore(previousLevel, previousKind) < severityScore(state.ackedLevel, state.ackedKind)
+    ) {
+      state.ackedLevel = previousLevel;
+      state.ackedKind = previousKind;
+    }
+  };
 }
