@@ -14,6 +14,26 @@ function fillBuffer(buffer: MetricBuffer, count: number, value: number): void {
 describe('SpikeDetector', () => {
   const MIN_SAMPLES = 5;
 
+  describe('resetRun', () => {
+    it('clears a consecutive run even while the mean sits above an absolute threshold', () => {
+      const detector = new SpikeDetector(MetricType.CONNECTIONS, {
+        warningZScore: 3,
+        criticalZScore: 5,
+        warningThreshold: 10,
+        criticalThreshold: 1000,
+        consecutiveRequired: 2,
+        cooldownMs: 0,
+      });
+      const buffer = new MetricBuffer(MetricType.CONNECTIONS, 100, MIN_SAMPLES);
+      fillBuffer(buffer, MIN_SAMPLES, 100);
+
+      expect(detector.detect(buffer, 500, 1_000)).toBeNull();
+      detector.resetRun();
+
+      expect(detector.detect(buffer, 500, 2_000)).toBeNull();
+    });
+  });
+
   describe('warmup guard', () => {
     it('returns null when buffer is not ready', () => {
       const buffer = new MetricBuffer(MetricType.CONNECTIONS, 100, MIN_SAMPLES);

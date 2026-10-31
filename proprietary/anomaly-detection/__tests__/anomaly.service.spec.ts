@@ -3585,7 +3585,9 @@ describe('AnomalyService', () => {
     });
 
     it('retries a failed emit on the next poll without re-reading CLIENT LIST', async () => {
-      dbClient.getClients = jest.fn().mockResolvedValue([]);
+      dbClient.getClients = jest.fn().mockResolvedValue([
+        { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 1000, 'tot-cmds': '1000' },
+      ]);
 
       const { recorded, errorsCaught } = await runRetry({ failFirstEmit: true });
 
@@ -3595,7 +3597,9 @@ describe('AnomalyService', () => {
     });
 
     it('reuses the attribution while an emit keeps failing across windows', async () => {
-      dbClient.getClients = jest.fn().mockResolvedValue([]);
+      dbClient.getClients = jest.fn().mockResolvedValue([
+        { id: '1', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 1000, 'tot-cmds': '1000' },
+      ]);
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       const { recorded, errorsCaught } = await runRetry({ failEmits: 2 });
@@ -3654,7 +3658,7 @@ describe('AnomalyService', () => {
 
       await runRetry();
 
-      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(1);
       expect((service as any).retryAmplificationFirstClients.get('conn-1').episodeStart).not.toBe(1);
     });
 
@@ -3674,7 +3678,7 @@ describe('AnomalyService', () => {
 
       expect(dbClient.getClients).toHaveBeenCalledTimes(2);
       expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionId: 'conn-1', limit: RETRY_AMP_SNAPSHOT_LIMIT }),
+        expect.objectContaining({ connectionId: 'conn-1', limit: 1 }),
       );
       expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
       expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
@@ -3718,7 +3722,27 @@ describe('AnomalyService', () => {
 
       await runRetry({ coolWindows: 0 });
 
-      expect(dbClient.getClients).toHaveBeenCalledTimes(RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS + 1);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS);
+    });
+
+    it('reads only the latest client capture of an episode', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      const capturedAt = 1_700_000_000_000;
+      storage.getClientSnapshots = jest.fn().mockImplementation(async ({ limit }) =>
+        limit === 1
+          ? [{ clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt }]
+          : [
+              { clientId: 'a', addr: '10.0.0.1:1', name: 'worker', user: 'default', age: 2, capturedAt },
+              { clientId: 'b', addr: '10.0.0.1:2', name: 'worker', user: 'default', age: 5, capturedAt },
+            ],
+      );
+
+      await runRetry();
+
+      const [latest, capture] = (storage.getClientSnapshots as jest.Mock).mock.calls.map((c) => c[0]);
+      expect(latest).toMatchObject({ limit: 1 });
+      expect(capture).toMatchObject({ startTime: capturedAt, endTime: capturedAt });
+      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(2);
     });
 
     it('falls back to reconnects from stored snapshots without tot-cmds', async () => {

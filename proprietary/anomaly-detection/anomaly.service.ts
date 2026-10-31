@@ -19,6 +19,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
+  StoredClientSnapshot,
   WebhookEventType,
 } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
@@ -1623,9 +1624,7 @@ export class AnomalyService
     this.lastChurnReading.set(ctx.connectionId, reading);
     this.connectionChurnSamples.set(ctx.connectionId, sample);
     if (sample.connectsPerSec === null) {
-      const buffer = buffers.get(MetricType.CONNECTION_CHURN);
-      const detector = detectors.get(MetricType.CONNECTION_CHURN);
-      if (buffer && detector) this.resetSpikeRun(detector, buffer, timestamp);
+      detectors.get(MetricType.CONNECTION_CHURN)?.resetRun();
       return;
     }
 
@@ -1647,7 +1646,7 @@ export class AnomalyService
     buffer.addSample(sample.connectsPerSec, timestamp);
     const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
     if (!elevated || !isChurnWithFlatPopulation(sample)) {
-      this.resetSpikeRun(detector, buffer, timestamp);
+      detector.resetRun();
       return;
     }
 
@@ -1661,10 +1660,6 @@ export class AnomalyService
       `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
     await this.addAnomaly(anomaly, ctx);
-  }
-
-  private resetSpikeRun(detector: SpikeDetector, buffer: MetricBuffer, timestamp: number): void {
-    detector.detect(buffer, buffer.getMean(), timestamp);
   }
 
   getConnectionChurnSample(connectionId: string): ConnectionChurnSample | undefined {
@@ -3469,28 +3464,25 @@ export class AnomalyService
     episodeStart: number,
     closedAt?: number,
   ): Promise<RetryAmplificationContributor[] | null> {
+    const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
+    const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
     const latest =
-      closedAt === undefined ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null) : null;
+      closedAt === undefined && firstSnapshot !== null
+        ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null)
+        : null;
     const until = closedAt ?? timestamp;
-    let snapshots: Awaited<ReturnType<StoragePort['getClientSnapshots']>> = [];
+    let snapshots: StoredClientSnapshot[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
     try {
       [snapshots, newConnections] = await Promise.all([
-        this.storage.getClientSnapshots({
-          connectionId: ctx.connectionId,
-          startTime: episodeStart,
-          endTime: until,
-          limit: RETRY_AMP_SNAPSHOT_LIMIT,
-        }),
+        this.latestClientCapture(ctx.connectionId, episodeStart, until),
         this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
       ]);
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
-    const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
     const reconnectsKnown = snapshotsLoaded && snapshots.length > 0;
     if (!reconnectsKnown && (firstSnapshot === null || latest === null)) return null;
     return rankRetryAmplificationContributors({
@@ -3498,6 +3490,26 @@ export class AnomalyService
       latest,
       snapshots,
       newConnections,
+    });
+  }
+
+  private async latestClientCapture(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<StoredClientSnapshot[]> {
+    const [newest] = await this.storage.getClientSnapshots({
+      connectionId,
+      startTime,
+      endTime,
+      limit: 1,
+    });
+    if (newest === undefined) return [];
+    return this.storage.getClientSnapshots({
+      connectionId,
+      startTime: newest.capturedAt,
+      endTime: newest.capturedAt,
+      limit: RETRY_AMP_SNAPSHOT_LIMIT,
     });
   }
 

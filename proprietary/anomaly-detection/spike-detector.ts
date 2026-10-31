@@ -153,6 +153,10 @@ export class SpikeDetector {
     };
   }
 
+  resetRun(): void {
+    this.consecutiveCounts.delete(this.metricType);
+  }
+
   private generateMessage(
     type: AnomalyType,
     severity: AnomalySeverity,

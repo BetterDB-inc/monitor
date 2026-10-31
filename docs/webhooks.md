@@ -495,7 +495,7 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 
 This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
 
-`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read. The generic `anomaly.detected` event is sent as well.
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
 
 ```json
 {
