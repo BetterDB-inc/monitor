@@ -655,25 +655,31 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Decrypt the secret fields of a persisted SSH tunnel config for use.
-   * Returns the tunnel unchanged (secrets dropped) if the key is unavailable.
+   * Returns the tunnel with its secrets dropped if the key is unavailable or
+   * wrong, and reports that through `onError` so the caller treats the record
+   * as a credential-decryption failure (it must never be written back, or the
+   * ciphertext would be replaced by the dropped fields).
    */
   private decryptSshTunnel(
     tunnel: DatabaseConnectionConfig['sshTunnel'],
+    onError: (message: string) => void = () => undefined,
   ): DatabaseConnectionConfig['sshTunnel'] {
     if (!tunnel || !tunnel.secretsEncrypted) {
       return tunnel;
     }
+    const hasSecrets = Boolean(tunnel.password || tunnel.privateKey || tunnel.passphrase);
+    const dropped: DatabaseConnectionConfig['sshTunnel'] = {
+      ...tunnel,
+      password: undefined,
+      privateKey: undefined,
+      passphrase: undefined,
+      secretsEncrypted: false,
+    };
     if (!this.encryption) {
-      this.logger.error(
-        'ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable',
-      );
-      return {
-        ...tunnel,
-        password: undefined,
-        privateKey: undefined,
-        passphrase: undefined,
-        secretsEncrypted: false,
-      };
+      if (hasSecrets) {
+        onError('ENCRYPTION_KEY not set but SSH tunnel secrets are encrypted; tunnel credentials unavailable');
+      }
+      return dropped;
     }
     try {
       return {
@@ -684,16 +690,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         secretsEncrypted: false,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`,
-      );
-      return {
-        ...tunnel,
-        password: undefined,
-        privateKey: undefined,
-        passphrase: undefined,
-        secretsEncrypted: false,
-      };
+      if (hasSecrets) {
+        onError(`Failed to decrypt SSH tunnel secrets: ${error instanceof Error ? error.message : error}`);
+      }
+      return dropped;
     }
   }
 
@@ -727,21 +727,25 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Sets credentialStatus to 'decryption_failed' if decryption fails.
    */
   private decryptSeedPassword(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
-    const sshTunnel = this.decryptSshTunnel(config.sshTunnel);
-    let tlsError: string | undefined;
-    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, (message) => {
-      tlsError = message;
+    let secretError: string | undefined;
+    const reportSecretError = (message: string) => {
+      secretError ??= message;
       this.logger.error(`${config.name}: ${message}`);
-    });
-    // A dropped TLS client key is a credential-decryption failure just like a
-    // dropped password: the connection cannot authenticate until ENCRYPTION_KEY
-    // is fixed, and reconnect() only re-reads storage for decryption_failed.
-    const tlsFailure: Pick<DatabaseConnectionConfig, 'credentialStatus' | 'credentialError'> = tlsError
-      ? { credentialStatus: 'decryption_failed', credentialError: tlsError }
+    };
+    const sshTunnel = this.decryptSshTunnel(config.sshTunnel, reportSecretError);
+    const tlsConfig = decryptTlsConfig(config.tlsConfig, this.encryption, reportSecretError);
+    // A dropped TLS client key or SSH tunnel secret is a credential-decryption
+    // failure just like a dropped password: the connection cannot authenticate
+    // until ENCRYPTION_KEY is fixed, reconnect() only re-reads storage for
+    // decryption_failed, and the status keeps every write path (boot
+    // re-encryption, environment sync) from persisting the dropped fields over
+    // the stored ciphertext.
+    const secretFailure: Pick<DatabaseConnectionConfig, 'credentialStatus' | 'credentialError'> = secretError
+      ? { credentialStatus: 'decryption_failed', credentialError: secretError }
       : {};
 
     if (!config.passwordEncrypted || !config.password) {
-      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown', ...tlsFailure };
+      return { ...config, sshTunnel, tlsConfig, credentialStatus: 'unknown', ...secretFailure };
     }
 
     if (!this.encryption) {
@@ -768,7 +772,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         password: this.encryption.decrypt(config.password),
         passwordEncrypted: false, // Mark as decrypted in memory
         credentialStatus: 'unknown', // Will be validated on connection attempt
-        ...tlsFailure,
+        ...secretFailure,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : 'Decryption failed';

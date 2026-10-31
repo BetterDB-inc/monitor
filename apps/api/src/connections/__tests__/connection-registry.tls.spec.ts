@@ -445,6 +445,49 @@ describe('ConnectionRegistry TLS material', () => {
       expect(enc.decrypt(persisted!.tlsConfig!.passphrase!)).toBe('pw');
     });
 
+    it('does not re-encrypt a row whose SSH tunnel secrets failed to decrypt (the ciphertext is kept)', async () => {
+      // Mixed row: plaintext password, tunnel encrypted under a key that no longer matches.
+      const foreign = new EnvelopeEncryptionService('a-different-encryption-key-entirely');
+      const sshTunnel: DatabaseConnectionConfig['sshTunnel'] = {
+        enabled: true,
+        host: 'bastion.internal',
+        port: 22,
+        username: 'ops',
+        authMethod: 'privateKey',
+        privateKey: foreign.encrypt(PRIVATE_KEY),
+        passphrase: foreign.encrypt('pw'),
+        secretsEncrypted: true,
+      };
+      storage.getConnections.mockResolvedValue([saved({ password: 'plain-password', passwordEncrypted: false, sshTunnel })]);
+
+      await registry.onModuleInit();
+
+      const config = registry.getConfig('c1');
+      expect(config?.credentialStatus).toBe('decryption_failed');
+      expect(config?.credentialError).toContain('SSH tunnel');
+      expect(config?.sshTunnel?.privateKey).toBeUndefined();
+      expect(storage.saveConnection).not.toHaveBeenCalled();
+    });
+
+    it('does not treat an encrypted-flagged tunnel without secret fields as a failed decrypt', async () => {
+      // encryptSshTunnel flags every tunnel, including one that only names a key file.
+      const sshTunnel: DatabaseConnectionConfig['sshTunnel'] = {
+        enabled: true,
+        host: 'bastion.internal',
+        port: 22,
+        username: 'ops',
+        authMethod: 'privateKey',
+        keySource: 'file',
+        privateKeyPath: '/etc/betterdb/bastion.pem',
+        secretsEncrypted: true,
+      };
+      storage.getConnections.mockResolvedValue([saved({ password: enc.encrypt('db-password'), passwordEncrypted: true, sshTunnel })]);
+
+      await registry.onModuleInit();
+
+      expect(registry.getConfig('c1')).toMatchObject({ password: 'db-password', credentialStatus: 'valid' });
+    });
+
     it('does not touch plaintext rows while no cipher is available', async () => {
       storage.getConnections.mockResolvedValue([saved({ password: 'plain-password', passwordEncrypted: false })]);
       delete process.env.ENCRYPTION_KEY;
