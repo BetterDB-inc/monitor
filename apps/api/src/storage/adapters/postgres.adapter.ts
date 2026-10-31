@@ -1634,6 +1634,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_metric ON anomaly_events(metric_type, timestamp DESC);
@@ -2754,14 +2756,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -2779,6 +2782,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.message,
         event.correlationId || null,
         event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2804,7 +2808,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2820,6 +2825,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.message,
         event.correlationId || null,
         event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2834,7 +2840,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
@@ -2842,6 +2848,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -2908,7 +2915,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM anomaly_events

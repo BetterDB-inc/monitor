@@ -16,10 +16,8 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
-import {
-  ReplicationDivergencePanel,
-  formatGap,
-} from '../components/anomalies/ReplicationDivergencePanel';
+import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
+import { formatBytes } from '../lib/utils';
 import type { ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
@@ -187,7 +185,7 @@ function formatTime(ts: number): string {
 }
 
 export function formatValue(value: number, metric: string): string {
-  if (metric === 'replication_divergence') return formatGap(value);
+  if (metric === 'replication_divergence') return formatBytes(value);
   if (metric === 'memory_used' || metric === 'memory_overhead') {
     if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
     if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;

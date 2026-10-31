@@ -160,6 +160,7 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
   resolved: boolean;
   resolvedAt?: number;
   connectionId?: string;

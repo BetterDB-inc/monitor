@@ -374,7 +374,7 @@ Detection works on windows of at least 30 seconds, or three poll intervals if th
   "slopeBytesPerWindow": -1048576,
   "windowCount": 2,
   "correlatedSignals": ["memory_used"],
-  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600.0 MiB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows.",
+  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600 MB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows.",
   "timestamp": 1706457600000,
   "instance": { "host": "10.0.0.1", "port": 6379 },
   "connectionId": "conn-1"

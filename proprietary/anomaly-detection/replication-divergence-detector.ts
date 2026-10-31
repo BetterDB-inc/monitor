@@ -1,3 +1,5 @@
+import { formatBytes } from '@app/scaling-readiness/dimension-inputs';
+import { median } from '../latency-regression/regression-detector';
 import { ReplicationStreamSample } from './replication-stream';
 import { MetricType } from './types';
 
@@ -52,10 +54,7 @@ export interface ReplicaDivergenceState {
   addr: string;
   windows: DivergenceWindow[];
   level: DivergenceLevel;
-  dispatchedLevel: DivergenceLevel;
-  dispatchedReason: DivergenceReason;
   eventId: string | null;
-  unsavedEventIds: string[];
   spanStart: number | null;
   baselineRate: number | null;
   subside: SubsideTracking | null;
@@ -76,6 +75,7 @@ export interface DivergenceConnectionState {
   lastSampleAt: number | null;
   lastObservedAt: number | null;
   windowPeakRate: number | null;
+  lastRateEwma: number | null;
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
@@ -136,6 +136,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     lastSampleAt: null,
     lastObservedAt: null,
     windowPeakRate: null,
+    lastRateEwma: null,
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
@@ -146,12 +147,6 @@ export function createDivergenceState(): DivergenceConnectionState {
     closedWindowCount: 0,
     lastWindowEnd: null,
   };
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 function writesStopped(window: DivergenceWindow): boolean {
@@ -181,10 +176,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     addr,
     windows: [],
     level: 'none',
-    dispatchedLevel: 'none',
-    dispatchedReason: 'growth',
     eventId: null,
-    unsavedEventIds: [],
     spanStart: null,
     baselineRate: null,
     subside: null,
@@ -193,12 +185,6 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     staleSince: null,
     clearing: false,
   };
-}
-
-function activeLevel(replica: ReplicaDivergenceState): DivergenceLevel {
-  return LEVEL_RANK[replica.dispatchedLevel] > LEVEL_RANK[replica.level]
-    ? replica.dispatchedLevel
-    : replica.level;
 }
 
 function contiguous(previous: DivergenceWindow, next: DivergenceWindow): boolean {
@@ -263,7 +249,7 @@ function evaluateReplica(
 
   if (!isBehind(last)) {
     replica.subside = null;
-    if (activeLevel(replica) === 'none') return null;
+    if (replica.level === 'none') return null;
     replica.belowFloorStreak++;
     if (replica.belowFloorStreak < DIVERGENCE_RECOVERED_WINDOWS) return null;
     return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes: last.gapBytes };
@@ -282,12 +268,12 @@ function evaluateReplica(
     reason = 'ceiling';
   }
 
-  if (activeLevel(replica) === 'none' && target !== 'none') {
+  if (replica.baselineRate === null && (replica.level !== 'none' || target !== 'none')) {
     replica.baselineRate = baselineRate(rateHistory, streak);
   }
 
   const stopped = writesStopped(last);
-  if ((activeLevel(replica) !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
+  if ((replica.level !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
     if (replica.subside === null) {
       replica.subside = { referenceGap: last.gapBytes, windows: 0 };
     } else if (last.gapBytes <= DIVERGENCE_RECOVERY_SHRINK_FRACTION * replica.subside.referenceGap) {
@@ -306,10 +292,6 @@ function evaluateReplica(
     replica.subside = null;
   }
 
-  if (LEVEL_RANK[replica.dispatchedLevel] > LEVEL_RANK[target]) {
-    target = replica.dispatchedLevel;
-    reason = replica.dispatchedReason;
-  }
   if (LEVEL_RANK[target] <= LEVEL_RANK[replica.level]) return null;
 
   const counted = Math.min(Math.max(streak, DIVERGENCE_CEILING_WINDOWS), windows.length);
@@ -364,7 +346,7 @@ function dropReplica(
   state: DivergenceConnectionState,
   replica: ReplicaDivergenceState,
 ): DivergenceRecovery[] {
-  if (activeLevel(replica) === 'none') {
+  if (replica.level === 'none') {
     state.replicas.delete(replica.addr);
     return [];
   }
@@ -428,9 +410,9 @@ function closeWindow(
   return outcomes;
 }
 
-function windowRate(state: DivergenceConnectionState, sample: ReplicationStreamSample): number | null {
+function windowRate(state: DivergenceConnectionState, rateEwma: number | null): number | null {
   const idle = state.windowPeakRate !== null && state.windowPeakRate < DIVERGENCE_IDLE_BYTES_PER_SEC;
-  return idle ? 0 : sample.bytesPerSecEwma;
+  return idle ? 0 : rateEwma;
 }
 
 export function observeDivergence(
@@ -444,6 +426,7 @@ export function observeDivergence(
     state.lastSampleAt = null;
     state.lastGapMs = 0;
     state.windowPeakRate = null;
+    state.lastRateEwma = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
     state.observed = new Set();
@@ -459,7 +442,7 @@ export function observeDivergence(
   state.lastSampleAt = sample.timestamp;
   state.lastObservedAt = sample.timestamp;
   state.lastGapMs = gapMs;
-  if (sample.bytesPerSec !== null) {
+  if (!outage && sample.bytesPerSec !== null) {
     state.windowPeakRate = Math.max(state.windowPeakRate ?? 0, sample.bytesPerSec);
   }
 
@@ -468,9 +451,11 @@ export function observeDivergence(
     windowEnd - state.windowStart >= windowMs &&
     state.windowSamples >= DIVERGENCE_MIN_SAMPLES
   ) {
-    outcomes.push(...closeWindow(state, state.windowStart, windowEnd, windowRate(state, sample)));
+    const sealingRate = outage ? state.lastRateEwma : sample.bytesPerSecEwma;
+    outcomes.push(...closeWindow(state, state.windowStart, windowEnd, windowRate(state, sealingRate)));
     state.windowStart = null;
   }
+  state.lastRateEwma = sample.bytesPerSecEwma;
   if (outage) {
     state.windowStart = null;
     for (const replica of state.replicas.values()) {
@@ -519,7 +504,7 @@ export function replicaObservedLevel(
   staleAfterMs: number,
 ): ReplicaObservedLevel {
   const replica = state?.replicas.get(addr);
-  const level = replica ? activeLevel(replica) : 'none';
+  const level = replica ? replica.level : 'none';
   if (level !== 'none') return level;
   if (!state?.observed.has(addr) || state.staleAcks.has(addr) || state.lastObservedAt === null) {
     return 'unobserved';
@@ -533,7 +518,7 @@ export function assessOrphanedReplica(
   sinceWindow: number,
 ): OrphanAssessment {
   const replica = state.replicas.get(addr);
-  if (replica && activeLevel(replica) !== 'none') return 'diverging';
+  if (replica && replica.level !== 'none') return 'diverging';
   if (!state.observed.has(addr)) {
     const notPrimary = state.windowStart === null;
     const absent = state.closedWindowCount - sinceWindow >= DIVERGENCE_RECOVERED_WINDOWS;
@@ -569,49 +554,12 @@ export function acknowledgeDivergence(
   replica.level = finding.level;
   replica.eventId = eventId;
   replica.spanStart = finding.spanStart;
-  replica.unsavedEventIds = replica.unsavedEventIds.filter((id) => id !== eventId);
-}
-
-export function claimDivergenceDispatch(state: DivergenceConnectionState, finding: DivergenceFinding): boolean {
-  const replica = state.replicas.get(finding.addr);
-  if (!replica || LEVEL_RANK[finding.level] <= LEVEL_RANK[replica.dispatchedLevel]) return false;
-  replica.dispatchedLevel = finding.level;
-  replica.dispatchedReason = finding.reason;
-  return true;
-}
-
-export function divergenceRetryId(
-  state: DivergenceConnectionState,
-  finding: DivergenceFinding,
-): string | null {
-  const replica = state.replicas.get(finding.addr);
-  if (!replica || LEVEL_RANK[finding.level] > LEVEL_RANK[replica.dispatchedLevel]) return null;
-  return replica.unsavedEventIds.at(-1) ?? null;
-}
-
-export function trackUnsavedDivergence(
-  state: DivergenceConnectionState,
-  addr: string,
-  eventId: string,
-): void {
-  const replica = state.replicas.get(addr);
-  if (!replica || replica.unsavedEventIds.includes(eventId)) return;
-  replica.unsavedEventIds = [...replica.unsavedEventIds, eventId].slice(-DIVERGENCE_PERSIST_BACKLOG);
-}
-
-export function takeUnsavedDivergence(state: DivergenceConnectionState, addr: string): string[] {
-  const replica = state.replicas.get(addr);
-  if (!replica) return [];
-  const taken = replica.unsavedEventIds;
-  replica.unsavedEventIds = [];
-  return taken;
 }
 
 export function acknowledgeRecovery(state: DivergenceConnectionState, addr: string): void {
   const replica = state.replicas.get(addr);
   if (!replica) return;
   replica.level = 'none';
-  replica.dispatchedLevel = 'none';
   replica.eventId = null;
   replica.spanStart = null;
   replica.baselineRate = null;
@@ -632,13 +580,6 @@ export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
   MetricType.CLUSTER_TOPOLOGY,
 ]);
 
-function formatBytes(bytes: number): string {
-  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KiB`;
-  return `${Math.round(bytes)} B`;
-}
-
 function describeReason(finding: DivergenceFinding): string {
   switch (finding.reason) {
     case 'growth':
@@ -657,10 +598,6 @@ function describeReason(finding: DivergenceFinding): string {
     case 'not_acking':
       return `the replica has not acknowledged the stream for over ${DIVERGENCE_STALE_ACK_SEC}s`;
   }
-}
-
-export function divergenceReplicaFromMessage(message: string): string | null {
-  return /Replica (\S+) is /.exec(message)?.[1] ?? null;
 }
 
 export function describeDivergence(finding: DivergenceFinding): string {

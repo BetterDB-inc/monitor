@@ -584,6 +584,30 @@ describe('Correlator', () => {
       expect(groups[0].diagnosis).toContain('alongside memory growth');
     });
 
+    it.each([
+      [MetricType.CLUSTER_STATE, AnomalyPattern.NODE_FAILOVER],
+      [MetricType.ACL_DENIED, AnomalyPattern.AUTH_ATTACK],
+      [MetricType.PERSISTENCE_CHILD, AnomalyPattern.PERSISTENCE_STALL],
+      [MetricType.SLOWLOG_LAST_ID, AnomalyPattern.SLOW_QUERIES],
+    ])('leaves a window with %s to %s', (metricType, pattern) => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType, timestamp: now + 100, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(pattern);
+    });
+
+    it('leaves memory growth with evictions to MEMORY_PRESSURE', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({ metricType: MetricType.MEMORY_USED, timestamp: now + 100, connectionId: 'c1' }),
+        makeAnomaly({ metricType: MetricType.EVICTED_KEYS, timestamp: now + 200, connectionId: 'c1' }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+    });
+
     it('names signals the detector stamped from outside the correlation window', () => {
       const [group] = correlator.correlate([
         divergence({

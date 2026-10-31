@@ -804,6 +804,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
 
+    const anomalyEventInfo = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
+      name: string;
+    }[];
+    if (!anomalyEventInfo.some((col) => col.name === 'replica_addr')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN replica_addr TEXT');
+    }
+
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
     // Pre-existing rows were all collected from the connected database, which
     // was db0 before dbIndex support — the DEFAULT 0 backfill is accurate.
@@ -1808,6 +1815,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         message TEXT NOT NULL,
         correlation_id TEXT,
         related_metrics TEXT,
+        replica_addr TEXT,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -2699,14 +2707,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
+        replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2726,6 +2735,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.message,
       event.correlationId || null,
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
+      event.replicaAddr ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
@@ -2745,14 +2755,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
+        replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2774,6 +2785,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.message,
           event.correlationId || null,
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
+          event.replicaAddr ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,

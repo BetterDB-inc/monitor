@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/table';
 import { PaymentRequiredError } from '@/api/client';
 import type { ReplicaDivergenceHistory, ReplicationDivergenceLevel } from '@/types/anomaly';
+import { formatBytes } from '@/lib/utils';
 import { formatRelative } from '@/utils/connectionType';
 
 const LEVEL_BADGE: Record<
@@ -22,13 +23,6 @@ const LEVEL_BADGE: Record<
   critical: { label: 'Critical', variant: 'destructive' },
   unobserved: { label: 'Not observed', variant: 'secondary' },
 };
-
-export function formatGap(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${Math.round(bytes)} B`;
-}
 
 function formatBehind(seconds: number | null): string {
   if (seconds === null) return '—';
@@ -82,7 +76,7 @@ export function ReplicationDivergencePanel({
                       <Badge variant={badge.variant}>{badge.label}</Badge>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {r.latest ? formatGap(r.latest.gapBytes) : '—'}
+                      {r.latest ? formatBytes(r.latest.gapBytes) : '—'}
                       {r.latest && (
                         <span className="block text-xs text-muted-foreground">
                           {formatRelative(r.latest.end)}

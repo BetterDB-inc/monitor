@@ -91,20 +91,6 @@ export class Correlator {
         ],
       },
       {
-        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
-        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
-        check: (anomalies) =>
-          anomalies.some((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE) &&
-          !anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE),
-        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
-        recommendations: [
-          'Compare the replica offset gap with the primary write rate over the next few minutes',
-          'Check replica host CPU, disk and network for a slow apply path',
-          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
-          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
-        ],
-      },
-      {
         pattern: AnomalyPattern.AUTH_ATTACK,
         requiredMetrics: [MetricType.ACL_DENIED],
         diagnosis: 'Potential authentication attack detected with high ACL denial rate',
@@ -292,6 +278,17 @@ export class Correlator {
           'Ensure sufficient capacity for peak loads',
           'Review client connection pooling settings',
           'Consider implementing auto-scaling if cloud-hosted',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
+        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
+        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
+        recommendations: [
+          'Compare the replica offset gap with the primary write rate over the next few minutes',
+          'Check replica host CPU, disk and network for a slow apply path',
+          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
+          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
         ],
       },
       // Single metric patterns - catch all individual anomalies
