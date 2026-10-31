@@ -151,6 +151,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   /** Keyed by `${connectionId}:${bucketStart}`. */
   private clientAnalyticsRollups: Map<string, ClientAnalyticsRollup> = new Map();
   private anomalyEvents: StoredAnomalyEvent[] = [];
+  private anomalyEventsById = new Map<string, StoredAnomalyEvent>();
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
@@ -661,21 +662,20 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private upsertAnomalyEvent(event: StoredAnomalyEvent): void {
-    const idx = this.anomalyEvents.findIndex((e) => e.id === event.id);
-    if (idx < 0) {
+    const existing = this.anomalyEventsById.get(event.id);
+    if (!existing) {
       this.anomalyEvents.push(event);
+      this.anomalyEventsById.set(event.id, event);
       return;
     }
-    const existing = this.anomalyEvents[idx];
-    this.anomalyEvents[idx] = {
-      ...existing,
+    Object.assign(existing, {
       correlationId: event.correlationId ?? existing.correlationId,
       relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
       replicaAddr: event.replicaAddr ?? existing.replicaAddr,
       resolved: existing.resolved || event.resolved,
       resolvedAt: existing.resolvedAt ?? event.resolvedAt,
       durationMs: existing.durationMs ?? event.durationMs,
-    };
+    });
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -766,7 +766,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async resolveAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find((e) => e.id === id);
+    const event = this.anomalyEventsById.get(id);
     if (!event) return false; // no such anomaly
     if (!event.resolved) {
       event.resolved = true;
@@ -778,7 +778,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find((e) => e.id === id);
+    const event = this.anomalyEventsById.get(id);
     if (!event || event.resolved) return false;
     event.resolved = true;
     event.resolvedAt = resolvedAt;
@@ -795,6 +795,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     } else {
       this.anomalyEvents = this.anomalyEvents.filter((e) => e.timestamp >= cutoffTimestamp);
     }
+    this.anomalyEventsById = new Map(this.anomalyEvents.map((e) => [e.id, e]));
     return before - this.anomalyEvents.length;
   }
 
