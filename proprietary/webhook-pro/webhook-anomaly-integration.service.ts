@@ -22,6 +22,7 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
   private readonly startedAt: number = Date.now();
   private readonly sentEvents = new Map<string, number>();
   private scanCursor = 0;
+  private pollInFlight = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -68,6 +69,8 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    * Check for new anomalies and dispatch webhooks
    */
   private async checkForNewAnomalies(): Promise<void> {
+    if (this.pollInFlight) return;
+    this.pollInFlight = true;
     try {
       const now = Date.now();
       const windowStart = Math.max(this.startedAt, now - LATE_SAVE_LOOKBACK_MS);
@@ -85,6 +88,8 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
       }
     } catch (error) {
       this.logger.error('Failed to check for new anomalies:', error);
+    } finally {
+      this.pollInFlight = false;
     }
   }
 
