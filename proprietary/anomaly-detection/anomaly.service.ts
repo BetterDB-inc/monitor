@@ -1086,7 +1086,7 @@ export class AnomalyService
             if (currentRole === 0) {
               // master → replica demotion (failover started)
               const failoverEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-failover-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.DROP,
@@ -1125,7 +1125,7 @@ export class AnomalyService
             } else if (currentRole === 1) {
               // replica → master promotion (failover completed)
               const promotionEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-promotion-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.SPIKE,
@@ -1312,7 +1312,7 @@ export class AnomalyService
               const isFailure = lastState === 'ok' && clusterState === 'fail';
               if (isRecovery || isFailure) {
                 const clusterEvent: AnomalyEvent = {
-                  id: `${ctx.connectionId}-cluster-state-${timestamp}`,
+                  id: randomUUID(),
                   timestamp,
                   metricType: MetricType.CLUSTER_STATE,
                   anomalyType: isFailure ? AnomalyType.DROP : AnomalyType.SPIKE,
@@ -2951,7 +2951,7 @@ export class AnomalyService
             `in-engine cluster-wide CONFIG SET exists.`;
 
         const event: AnomalyEvent = {
-          id: `config-drift-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CONFIG_DRIFT,
           anomalyType: AnomalyType.SPIKE,
@@ -4243,7 +4243,7 @@ export class AnomalyService
     }
 
     return {
-      id: `${ctx.connectionId}-persistence-${kind}-${reason}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.PERSISTENCE_CHILD,
       anomalyType: AnomalyType.SPIKE,
@@ -4287,7 +4287,7 @@ export class AnomalyService
             : `slots ${conflict.slotStart}-${conflict.slotEnd}`;
 
         const event: AnomalyEvent = {
-          id: `${ctx.connectionId}-dup-primary-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CLUSTER_TOPOLOGY,
           anomalyType: AnomalyType.SPIKE,
@@ -4356,7 +4356,7 @@ export class AnomalyService
               ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
               : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
           return {
-            id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.CLUSTER_TOPOLOGY,
             anomalyType: AnomalyType.SPIKE,
@@ -4559,7 +4559,7 @@ export class AnomalyService
             `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
             `on slots outside this node's ranges).`;
           return {
-            id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.ORPHANED_SLOT_KEYS,
             anomalyType: AnomalyType.SPIKE,
@@ -4636,7 +4636,7 @@ export class AnomalyService
                 `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
                 `investigate if it persists.`;
           return {
-            id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.HOSTNAME_STALENESS,
             anomalyType: AnomalyType.SPIKE,
@@ -4927,7 +4927,7 @@ export class AnomalyService
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
         buildEvent: (a, signature) => ({
-          id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
@@ -6329,8 +6329,8 @@ export class AnomalyService
    *   - `retry`:    a transient storage error, or a cache-present event storage
    *                 momentarily couldn't confirm. The outbox keeps retrying it.
    *   - `gone`:     the event exists in neither the cache nor storage, so it can
-   *                 never be resolved (e.g. a deterministic string id the Postgres
-   *                 UUID PK rejected, since evicted from recentAnomalies). Callers
+   *                 never be resolved (e.g. a save the outbox gave up on, since
+   *                 evicted from recentAnomalies). Callers
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
@@ -6340,8 +6340,7 @@ export class AnomalyService
       this.persistenceOutbox.unsavedAnomaly(anomalyId);
     const resolvedAt = this.persistenceOutbox.resolvedAt(anomalyId) ?? Date.now();
 
-    // Memory-only event (never durably stored — e.g. a deterministic string id
-    // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
+    // Memory-only event (never durably stored): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;

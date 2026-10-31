@@ -44,6 +44,14 @@ describe('AnomalyService', () => {
   const divergenceHistory = () =>
     service.getReplicationDivergenceHistory('conn-1', 0, Number.MAX_SAFE_INTEGER);
 
+  const STRING_EVENT_ID =
+    /-(failover|promotion|cluster-state|persistence|dup-primary|stuck-replica|orphaned-slots|hostname-staleness|replica-slot-state)-|^config-drift-/;
+
+  afterEach(() => {
+    const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id as string);
+    expect(ids.filter((id) => STRING_EVENT_ID.test(id))).toEqual([]);
+  });
+
   beforeEach(async () => {
     slowLogAnalytics = {
       getLastSeenId: jest.fn().mockReturnValue(null),
@@ -1355,13 +1363,10 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).not.toHaveBeenCalled();
     });
 
-    it('addAnomaly leaves an event memory-only when the store rejects its id, and it stays dismissable', async () => {
-      // Simulate Postgres rejecting the non-UUID id.
-      storage.saveAnomalyEvent.mockRejectedValueOnce(
-        new Error('invalid input syntax for type uuid'),
-      );
+    it('addAnomaly leaves an event memory-only when the store rejects it, and it stays dismissable', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
       const event = {
-        id: 'conn-persistence-error',
+        id: 'unsaved-event',
         metricType: 'persistence',
         anomalyType: 'state',
         severity: 'warning',
@@ -1374,7 +1379,7 @@ describe('AnomalyService', () => {
 
       // resolveAnomaly falls back to the in-memory flip.
       storage.resolveAnomaly.mockClear();
-      expect(await service.resolveAnomaly('conn-persistence-error')).toBe(true);
+      expect(await service.resolveAnomaly('unsaved-event')).toBe(true);
       expect(event.resolved).toBe(true);
       expect(storage.resolveAnomaly).not.toHaveBeenCalled();
     });
