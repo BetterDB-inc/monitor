@@ -1,4 +1,5 @@
 import type { NewClientConnectionGroup } from '@betterdb/shared';
+import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_SNAPSHOT_LIMIT = 50_000;
@@ -80,11 +81,7 @@ export function contributorKey(client: { name: string; user: string; addr: strin
   key: string;
   keyKind: ContributorKeyKind;
 } {
-  const host =
-    client.addr.lastIndexOf(':') > 0
-      ? client.addr.slice(0, client.addr.lastIndexOf(':'))
-      : client.addr;
-  return hostKey(client.name, client.user, host);
+  return hostKey(client.name, client.user, clientAddrIp(client.addr));
 }
 
 function parseTotalCommands(value: unknown): number | null {

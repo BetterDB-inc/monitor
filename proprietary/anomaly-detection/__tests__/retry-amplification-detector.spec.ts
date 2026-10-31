@@ -654,6 +654,36 @@ describe('retry amplification detector', () => {
     expect(d.findings).toHaveLength(2);
   });
 
+  it('ends an amplifying episode with its last hot window, not the cold windows after it', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(BASE);
+    const lastHot = d.state.hotRun[d.state.hotRun.length - 1];
+
+    d.windows(BASE, 2);
+
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'amplifying',
+      endedAt: lastHot.start + RETRY_AMP_WINDOW_MS,
+    });
+  });
+
+  it('ends a transient episode with its last hot window', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(2);
+    d.window(BASE);
+    const lastHot = d.state.hotRun[d.state.hotRun.length - 1];
+
+    d.windows(BASE, 2);
+
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'transient',
+      endedAt: lastHot.start + RETRY_AMP_WINDOW_MS,
+    });
+  });
+
   it('lowers the acknowledged level on de-escalation so critical can fire again', () => {
     const d = new Driver();
     d.baseline();

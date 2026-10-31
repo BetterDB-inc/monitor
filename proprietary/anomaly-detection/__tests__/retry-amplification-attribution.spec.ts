@@ -1,3 +1,4 @@
+import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 import {
   ClientListEntry,
   ClientSnapshotEntry,
@@ -39,6 +40,16 @@ describe('retry amplification attribution', () => {
       });
       expect(contributorKey({ name: '', user: '', addr: '[::1]:6379' })).toEqual({
         key: '[::1]',
+        keyKind: 'ip',
+      });
+    });
+  });
+
+  describe('contributorKey address parsing', () => {
+    it('groups an address the same way as the client analytics IP rule', () => {
+      const addr = 'worker-node:notaport';
+      expect(contributorKey({ name: '', user: '', addr })).toEqual({
+        key: clientAddrIp(addr),
         keyKind: 'ip',
       });
     });

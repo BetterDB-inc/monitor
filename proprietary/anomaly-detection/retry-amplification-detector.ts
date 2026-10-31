@@ -1,3 +1,4 @@
+import { median } from '../latency-regression/regression-detector';
 import { MetricType } from './types';
 
 export const RETRY_AMP_WINDOW_MS = 60_000;
@@ -222,12 +223,6 @@ function openWindow(start: number): OpenWindow {
 
 function isUsable(value: number | null): value is number {
   return value !== null && Number.isFinite(value) && value >= 0;
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
 function medianOrNull(values: Array<number | null>): number | null {
@@ -540,7 +535,8 @@ function evaluateWindow(
     state.coldStreak += 1;
     const amplifying = state.hotRun.length >= RETRY_AMP_MIN_WINDOWS;
     if (!amplifying || state.coldStreak >= RETRY_AMP_REARM_COLD_WINDOWS) {
-      closeEpisode(state, w.start + RETRY_AMP_WINDOW_MS, base);
+      const lastHot = state.hotRun[state.hotRun.length - 1];
+      closeEpisode(state, lastHot.start + RETRY_AMP_WINDOW_MS, base);
       pushCold(state, w);
     }
     return;
