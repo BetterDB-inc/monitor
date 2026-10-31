@@ -5,6 +5,7 @@ import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
   QUIT_TIMEOUT_MS,
+  TLS_MATERIAL_RECHECK_MS,
   WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
@@ -823,6 +824,37 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     expect(client.options.tls?.cert?.toString()).toBe(CERT_B);
     // SNI survives the refresh.
     expect(client.options.tls?.servername).toBe('db.example.com');
+  });
+
+  it('presents rotated files on every new socket, not only after a reconnect of the main client', () => {
+    jest.useFakeTimers();
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    const newSocket = () =>
+      (adapter as unknown as { createValkeyClient(name: string): { options: { tls?: { cert?: Buffer | string; servername?: string } } } })
+        .createValkeyClient('scratch');
+    expect(newSocket().options.tls?.cert?.toString()).toBe(CERT_A);
+
+    // Rotate on disk. A different size and a bumped mtime make the fingerprint change.
+    const rotated = CERT_B.replace('B', 'B-rotated');
+    fs.writeFileSync(path.join(certDir, 'client.crt'), rotated);
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(certDir, 'client.crt'), later, later);
+
+    // Within the recheck window nothing is stat-ed: scratch clients stay cheap.
+    expect(newSocket().options.tls?.cert?.toString()).toBe(CERT_A);
+
+    jest.advanceTimersByTime(TLS_MATERIAL_RECHECK_MS + 1);
+    // A scratch client (key analytics, CLI) built now carries the new material...
+    expect(newSocket().options.tls?.cert?.toString()).toBe(rotated);
+    // ...and so does the main client's option object that cluster discovery copies.
+    expect(adapter.getClient().options.tls?.cert?.toString()).toBe(rotated);
+    expect(adapter.getClient().options.tls?.servername).toBe('db.example.com');
   });
 
   it('keeps the previously loaded material when the rotated file is unreadable', () => {

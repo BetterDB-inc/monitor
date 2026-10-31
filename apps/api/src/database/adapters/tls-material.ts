@@ -45,11 +45,12 @@ export function assertAuthConfig(config: {
 }
 
 /**
- * Read a file for TLS material, enforcing the BETTERDB_TLS_CERT_DIR allowlist:
- * the path is resolved against that directory and must stay inside it, both
+ * Resolve a TLS material path against the BETTERDB_TLS_CERT_DIR allowlist: the
+ * path is resolved against that directory and must stay inside it, both
  * lexically and after following symlinks. Same policy as SSH key files.
+ * Returns the real on-disk path.
  */
-function readAllowlistedFile(filePath: string, label: string): Buffer {
+function resolveAllowlistedPath(filePath: string, label: string): string {
   const certDir = process.env[TLS_CERT_DIR_ENV];
   if (!certDir || certDir.trim() === '') {
     throw new Error(
@@ -89,6 +90,12 @@ function readAllowlistedFile(filePath: string, label: string): Buffer {
   if (!contains(realResolved)) {
     throw new Error(`${label} path '${filePath}' escapes ${TLS_CERT_DIR_ENV} via a symlink`);
   }
+  return realResolved;
+}
+
+/** Read a file for TLS material from inside the BETTERDB_TLS_CERT_DIR allowlist. */
+function readAllowlistedFile(filePath: string, label: string): Buffer {
+  const realResolved = resolveAllowlistedPath(filePath, label);
   try {
     return fs.readFileSync(realResolved);
   } catch {
@@ -135,6 +142,39 @@ export function resolveTlsMaterial(tlsConfig: TlsConfig | undefined): TlsMateria
   }
   if (tlsConfig.passphrase) out.passphrase = tlsConfig.passphrase;
   return out;
+}
+
+/**
+ * The on-disk files a file-sourced config reads, resolved the same way reading
+ * them is (so an allowlist violation throws the same error). Empty for inline
+ * material.
+ */
+function tlsMaterialPaths(tlsConfig: TlsConfig | undefined): string[] {
+  if (!tlsConfig || (tlsConfig.source ?? 'inline') !== 'file') return [];
+  const resolve = tlsConfig.trustedPaths ? (filePath: string): string => filePath : resolveAllowlistedPath;
+  const paths: string[] = [];
+  if (tlsConfig.caPath) paths.push(resolve(tlsConfig.caPath, 'CA bundle'));
+  if (tlsConfig.certPath) paths.push(resolve(tlsConfig.certPath, 'Client certificate'));
+  if (tlsConfig.keyPath) paths.push(resolve(tlsConfig.keyPath, 'Client private key'));
+  return paths;
+}
+
+/**
+ * Cheap change detector for file-sourced material: a stat-based fingerprint
+ * (inode, size, mtime) of every file the config reads, so callers can re-read
+ * only when something on disk actually changed. `undefined` for inline material,
+ * which never changes after construction. Throws when a file is missing or
+ * unreadable, so callers keep the material they already have.
+ */
+export function tlsMaterialFingerprint(tlsConfig: TlsConfig | undefined): string | undefined {
+  const paths = tlsMaterialPaths(tlsConfig);
+  if (paths.length === 0) return undefined;
+  return paths
+    .map((filePath) => {
+      const stat = fs.statSync(filePath);
+      return `${filePath}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    })
+    .join('|');
 }
 
 /**

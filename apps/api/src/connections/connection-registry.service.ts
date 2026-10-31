@@ -412,6 +412,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       return config;
     }
 
+    if (decryptFailed && !this.encryption) {
+      // The stored record is encrypted and the cipher is missing: persisting the
+      // rebuilt record would write the password and TLS passphrase in plaintext,
+      // and once ENCRYPTION_KEY returns they would compare equal to the
+      // environment and never be re-encrypted. Use the environment values in
+      // memory only and leave storage untouched.
+      this.logger.warn(
+        `${config.name}: credentials taken from the environment but not persisted ` +
+          '(ENCRYPTION_KEY is not set; the stored encrypted record is kept)',
+      );
+      return synced;
+    }
+
     await this.storage.saveConnection(this.encryptConfig(synced)).catch((err) => {
       this.logger.warn(`Failed to persist environment-synced settings for ${config.name}: ${err instanceof Error ? err.message : err}`);
     });

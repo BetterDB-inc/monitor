@@ -48,6 +48,19 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
             commandTimeout: 15_000,
             connectionName: 'BetterDB-Migration-Source',
           });
+          // iovalkey reads `options.tls` when it opens each socket: re-read
+          // file-sourced material before a reconnect so a certificate rotated
+          // mid-migration is presented (the monitor adapter does the same).
+          if (sourceConfig.tls && sourceConfig.tlsConfig?.source === 'file') {
+            client.on('reconnecting', () => {
+              try {
+                const { tls } = nodeClientAuthOptions(sourceConfig, host, hostname);
+                if (tls) client.options.tls = tls;
+              } catch (err) {
+                log(job, maxLogLines, `Keeping previously loaded TLS files for ${host}:${port}: ${err instanceof Error ? err.message : err}`);
+              }
+            });
+          }
           // Register before connecting: a client whose first dial fails keeps
           // reconnecting in the background unless the outer cleanup quits it.
           sourceClients.push(client);

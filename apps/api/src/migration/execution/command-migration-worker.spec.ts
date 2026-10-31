@@ -1,9 +1,14 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { ExecutionJob } from './execution-job';
 
 type MockClient = {
   host: string;
   port: number;
-  options: { tls?: { servername?: string } };
+  options: { tls?: { servername?: string; cert?: Buffer | string } };
+  handlers: Record<string, () => void>;
+  on: jest.Mock;
   connect: jest.Mock;
   disconnect: jest.Mock;
   quit: jest.Mock;
@@ -17,10 +22,15 @@ let failingHosts = new Set<string>();
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; tls?: { servername?: string } }) => {
+    const handlers: Record<string, () => void> = {};
     const client: MockClient = {
       host: opts.host,
       port: opts.port,
       options: opts,
+      handlers,
+      on: jest.fn().mockImplementation((event: string, handler: () => void) => {
+        handlers[event] = handler;
+      }),
       connect: jest.fn().mockImplementation(() =>
         failingHosts.has(opts.host) ? Promise.reject(new Error('Connection is closed.')) : Promise.resolve(),
       ),
@@ -119,6 +129,41 @@ describe('runCommandMigration source clients', () => {
     expect(failed?.quit).toHaveBeenCalled();
     // Every client the worker opened is quit by the outer cleanup, failed one included.
     expect(clients.filter((c) => c.host !== 'cache.internal').every((c) => c.quit.mock.calls.length > 0)).toBe(true);
+  });
+
+  it('re-reads file-sourced certificates before a source client reconnects', async () => {
+    const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-rotation-'));
+    try {
+      const certPath = path.join(certDir, 'client.crt');
+      const keyPath = path.join(certDir, 'client.key');
+      fs.writeFileSync(certPath, CERT);
+      fs.writeFileSync(keyPath, KEY);
+      const fileSource = { ...sourceConfig, tlsConfig: { source: 'file' as const, trustedPaths: true, certPath, keyPath } };
+      failingHosts = new Set(['10.0.0.2']); // stop before the SCAN phase
+      await runCommandMigration({ sourceConfig: fileSource, targetConfig, sourceIsCluster: true, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }).catch(() => undefined);
+
+      const nodeA = clients.find((c) => c.host === '10.0.0.1')!;
+      expect(nodeA.options.tls?.cert?.toString()).toBe(CERT);
+      const rotated = CERT.replace('c', 'rotated');
+      fs.writeFileSync(certPath, rotated);
+      nodeA.handlers['reconnecting']();
+      expect(nodeA.options.tls?.cert?.toString()).toBe(rotated);
+      expect(nodeA.options.tls?.servername).toBe('node-a.internal');
+
+      // An unreadable rotation keeps the loaded material instead of breaking the client.
+      fs.rmSync(certPath);
+      nodeA.handlers['reconnecting']();
+      expect(nodeA.options.tls?.cert?.toString()).toBe(rotated);
+    } finally {
+      fs.rmSync(certDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not install a reconnect refresh for inline material', async () => {
+    failingHosts = new Set(['10.0.0.2']);
+    await runCommandMigration({ sourceConfig, targetConfig, sourceIsCluster: true, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }).catch(() => undefined);
+    const nodeA = clients.find((c) => c.host === '10.0.0.1')!;
+    expect(nodeA.handlers['reconnecting']).toBeUndefined();
   });
 
   it('verifies a master dialled by IP against the hostname it announces', async () => {

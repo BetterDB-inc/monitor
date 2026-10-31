@@ -590,9 +590,14 @@ describe('MigrationService cluster analysis', () => {
     const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetProfile: 'elasticache_serverless' });
     await waitForTerminal(service, id);
 
-    const byHost = new Map(nodeClients.map(c => [c.host, c.options.tls as { servername?: string } | undefined]));
-    expect(byHost.get('10.0.0.1')?.servername).toBe('node-a.internal');
-    expect(byHost.get('10.0.0.2')?.servername).toBeUndefined();
+    const tlsOf = (host: string) => {
+      const client = nodeClients.find(c => c.host === host);
+      expect(client).toBeDefined();
+      return client!.options.tls as { servername?: string } | undefined;
+    };
+    expect(tlsOf('10.0.0.1')?.servername).toBe('node-a.internal');
+    expect(tlsOf('10.0.0.2')).toBeDefined();
+    expect(tlsOf('10.0.0.2')?.servername).toBeUndefined();
   });
 
   it('reports a master whose connect never settles as unreachable', async () => {

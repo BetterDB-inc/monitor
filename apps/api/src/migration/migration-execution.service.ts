@@ -382,7 +382,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         try {
           client = new Valkey({
             host, port,
-            ...nodeClientAuthOptions(targetConfig, host),
+            ...nodeClientAuthOptions(targetConfig, host, master.hostname),
             lazyConnect: true,
             retryStrategy: () => null,
             maxRetriesPerRequest: 1,

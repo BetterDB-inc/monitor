@@ -54,7 +54,7 @@ import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_S
 import type { SshTunnelConfig } from '@betterdb/shared';
 import { SshTunnelService } from '../ssh/ssh-tunnel.service';
 import { tlsIdentityOptions } from './tls-servername';
-import { assertAuthConfig, clientCredentials, resolveTlsMaterial, type TlsMaterialOptions } from './tls-material';
+import { assertAuthConfig, clientCredentials, resolveTlsMaterial, tlsMaterialFingerprint, type TlsMaterialOptions } from './tls-material';
 import { withTimeout } from '../../common/utils/with-timeout';
 import type { ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
@@ -88,6 +88,13 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
+
+/**
+ * How often, at most, file-sourced TLS material is stat-checked for changes when
+ * a new socket is opened. Keeps rotation pickup near-immediate without a file
+ * read per key-analytics scratch client.
+ */
+export const TLS_MATERIAL_RECHECK_MS = 5_000;
 
 // Minimum per-database share of the key-analytics sample budget (capped at the
 // database's own key count), so a small database next to a huge sibling still
@@ -161,10 +168,13 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // the current key-analytics collection. See probeGraphKey.
   private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
   private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
-  // Custom CA / client certificate resolved once at construction (file-sourced
-  // material is read here). A resolution failure is deferred to connect() so it
-  // surfaces as a connection error instead of a constructor throw.
+  // Custom CA / client certificate, read at construction and re-read from disk
+  // when the files change (see refreshTlsMaterial). A resolution failure is
+  // deferred to connect() so it surfaces as a connection error instead of a
+  // constructor throw.
   private tlsMaterial: TlsMaterialOptions = {};
+  private tlsMaterialFingerprint: string | undefined;
+  private tlsMaterialCheckedAt = 0;
   private tlsSetupError: Error | null = null;
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
@@ -199,24 +209,60 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
   }
 
-  /** The full `tls` option for a socket: SNI/identity plus the currently loaded material. */
+  /**
+   * The full `tls` option for a new socket: SNI/identity plus the current
+   * material, re-read from disk first when the files changed.
+   */
   private tlsOptions(): ConnectionOptions | undefined {
+    if (!this.config.tls) return undefined;
+    this.refreshTlsMaterial();
+    return this.composeTlsOptions();
+  }
+
+  private composeTlsOptions(): ConnectionOptions | undefined {
     if (!this.config.tls) return undefined;
     return { ...tlsIdentityOptions(this.config.host, this.config.tlsServername), ...this.tlsMaterial };
   }
 
-  /**
-   * Re-read file-sourced material from disk. Called only when iovalkey is about
-   * to reconnect (where a rotated certificate matters), not on every client
-   * creation: key-analytics opens a scratch client per database and must not pay
-   * for synchronous file reads each time. A read failure keeps the previously
-   * loaded material rather than breaking a working connection. Inline material
-   * never changes after construction.
-   */
-  private refreshTlsMaterial(): void {
-    if (!this.config.tls || this.config.tlsConfig?.source !== 'file') return;
+  /** Load (or reload) the material and remember what was on disk at that moment. */
+  private loadTlsMaterial(): void {
+    this.tlsMaterial = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
     try {
+      this.tlsMaterialFingerprint = this.config.tls ? tlsMaterialFingerprint(this.config.tlsConfig) : undefined;
+    } catch {
+      this.tlsMaterialFingerprint = undefined;
+    }
+    this.tlsMaterialCheckedAt = Date.now();
+  }
+
+  /**
+   * Re-read file-sourced material when the files changed on disk, so every new
+   * socket presents the current certificate even while the main socket stays
+   * up: the main client's reconnects, key-analytics scratch clients, the CLI
+   * client, a client rebuilt after a tunnel re-establish, and the per-node
+   * clients cluster discovery builds from this client's `options.tls`. The
+   * check is a stat-based fingerprint compared at most once per
+   * TLS_MATERIAL_RECHECK_MS, so the scratch client per database that key
+   * analytics opens does not pay for file reads. `force` (used when iovalkey is
+   * about to reconnect) skips the throttle and re-reads unconditionally. A read
+   * failure keeps the previously loaded material rather than breaking a working
+   * connection. Inline material never changes after construction.
+   */
+  private refreshTlsMaterial(force = false): void {
+    if (!this.config.tls || this.config.tlsConfig?.source !== 'file' || this.tlsSetupError) return;
+    const now = Date.now();
+    if (!force && now - this.tlsMaterialCheckedAt < TLS_MATERIAL_RECHECK_MS) return;
+    this.tlsMaterialCheckedAt = now;
+    try {
+      const fingerprint = tlsMaterialFingerprint(this.config.tlsConfig);
+      if (!force && fingerprint === this.tlsMaterialFingerprint) return;
+      const changed = fingerprint !== this.tlsMaterialFingerprint;
       this.tlsMaterial = resolveTlsMaterial(this.config.tlsConfig);
+      this.tlsMaterialFingerprint = fingerprint;
+      // Keep the main client's options current too: cluster discovery copies
+      // them onto per-node clients without going through createValkeyClient.
+      if (this._client) this._client.options.tls = this.composeTlsOptions();
+      if (changed) this.logger.log('TLS files changed on disk; new sockets present the updated material');
     } catch (error) {
       this.logger.warn(
         `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
@@ -234,9 +280,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private ensureTlsMaterial(): void {
     if (!this.tlsSetupError) return;
     assertAuthConfig(this.config);
-    this.tlsMaterial = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
+    this.loadTlsMaterial();
     this.tlsSetupError = null;
-    if (this._client) this._client.options.tls = this.tlsOptions();
+    if (this._client) this._client.options.tls = this.composeTlsOptions();
     this.logger.log('TLS material loaded on retry');
   }
 
@@ -268,8 +314,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     // here lets an automatic reconnect present a rotated certificate from disk.
     client.on('reconnecting', () => {
       if (this._client !== client) return;
-      this.refreshTlsMaterial();
-      const tls = this.tlsOptions();
+      this.refreshTlsMaterial(true);
+      const tls = this.composeTlsOptions();
       if (tls) client.options.tls = tls;
     });
 
@@ -306,9 +352,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
     try {
       assertAuthConfig(config);
-      if (config.tls) {
-        this.tlsMaterial = resolveTlsMaterial(config.tlsConfig);
-      }
+      this.loadTlsMaterial();
     } catch (error) {
       this.tlsSetupError = error instanceof Error ? error : new Error(String(error));
     }
@@ -1609,6 +1653,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   getClient(): Valkey {
+    // Callers copy `options.tls` onto per-node clients (cluster discovery), so
+    // make sure it reflects the certificate files currently on disk.
+    this.refreshTlsMaterial();
     // Throws a clear "connection not established" error (via the getter) rather
     // than handing back an undefined that blows up as a TypeError in the caller.
     return this.client;

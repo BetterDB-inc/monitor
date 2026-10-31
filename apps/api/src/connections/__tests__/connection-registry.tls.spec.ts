@@ -45,20 +45,13 @@ describe('ConnectionRegistry TLS material', () => {
     resetEncryptionService();
   });
 
-  beforeEach(async () => {
+  // Builds a registry against the current `storage` and `database` mocks with
+  // whatever ENCRYPTION_KEY is in the environment at that moment.
+  const buildRegistry = async (): Promise<ConnectionRegistry> => {
     resetEncryptionService();
-    storage = {
-      getConnections: jest.fn().mockResolvedValue([]),
-      saveConnection: jest.fn().mockResolvedValue(undefined),
-      updateConnection: jest.fn().mockResolvedValue(undefined),
-      getConnection: jest.fn().mockResolvedValue(null),
-      deleteConnection: jest.fn().mockResolvedValue(undefined),
-    };
-    database = { host: 'localhost', port: 6379, username: 'default', password: '' };
     const configService = {
       get: jest.fn().mockImplementation((key: string) => (key === 'database' ? database : undefined)),
     } as unknown as ConfigService;
-
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ConnectionRegistry,
@@ -69,7 +62,19 @@ describe('ConnectionRegistry TLS material', () => {
         { provide: ConfigService, useValue: configService },
       ],
     }).compile();
-    registry = module.get(ConnectionRegistry);
+    return module.get(ConnectionRegistry);
+  };
+
+  beforeEach(async () => {
+    storage = {
+      getConnections: jest.fn().mockResolvedValue([]),
+      saveConnection: jest.fn().mockResolvedValue(undefined),
+      updateConnection: jest.fn().mockResolvedValue(undefined),
+      getConnection: jest.fn().mockResolvedValue(null),
+      deleteConnection: jest.fn().mockResolvedValue(undefined),
+    };
+    database = { host: 'localhost', port: 6379, username: 'default', password: '' };
+    registry = await buildRegistry();
   });
 
   const saved = (overrides: Partial<DatabaseConnectionConfig>): DatabaseConnectionConfig => ({
@@ -322,6 +327,10 @@ describe('ConnectionRegistry TLS material', () => {
       await registry.onModuleInit();
 
       expect(registry.getConfig('auto-child')).toMatchObject({ username: 'monitor', password: 'rotated-password', host: '10.0.0.2' });
+      // The adapter opened at startup was built from the rotated credentials, not the stored copy.
+      const AdapterMock = jest.requireMock('../../database/adapters/unified.adapter').UnifiedDatabaseAdapter as jest.Mock;
+      const childAdapterOptions = AdapterMock.mock.calls.filter(([o]) => o.connectionId === 'auto-child').at(-1)?.[0];
+      expect(childAdapterOptions).toMatchObject({ username: 'monitor', password: 'rotated-password' });
       const persistedChild = storage.saveConnection.mock.calls.find(([c]) => c.id === 'auto-child')?.[0];
       expect(persistedChild).toBeDefined();
       expect(enc.decrypt(persistedChild!.password!)).toBe('rotated-password');
@@ -353,6 +362,37 @@ describe('ConnectionRegistry TLS material', () => {
       const persisted = storage.saveConnection.mock.calls.find(([c]) => c.id === 'child')?.[0];
       expect(persisted?.password).toBeTruthy();
       expect(enc.decrypt(persisted!.password!)).toBe('env-password');
+    });
+
+    it('uses env credentials in memory but persists nothing when ENCRYPTION_KEY is missing at boot', async () => {
+      storage.getConnections.mockResolvedValue([
+        envDefault({ password: enc.encrypt('stored-password'), passwordEncrypted: true, tlsConfig: encryptedTls() }),
+        saved({
+          id: 'child',
+          name: 'Default · 10.0.0.2:6379',
+          host: '10.0.0.2',
+          isDefault: false,
+          password: enc.encrypt('stored-password'),
+          passwordEncrypted: true,
+          membership: { seedId: ENV_DEFAULT_ID, nodeId: 'n2', origin: 'auto', source: 'cluster' },
+        }),
+      ]);
+      Object.assign(database, { password: 'env-password', tls: true, tlsConfig: { source: 'inline', cert: CERT, key: PRIVATE_KEY, passphrase: 'pw' } });
+      delete process.env.ENCRYPTION_KEY;
+      try {
+        registry = await buildRegistry();
+        await registry.onModuleInit();
+      } finally {
+        process.env.ENCRYPTION_KEY = KEY;
+        resetEncryptionService();
+      }
+
+      // In memory the environment wins, so the pod still connects...
+      expect(registry.getConfig(ENV_DEFAULT_ID)).toMatchObject({ password: 'env-password', credentialStatus: 'valid' });
+      expect(registry.getConfig('child')).toMatchObject({ password: 'env-password', credentialStatus: 'valid' });
+      // ...but nothing is written: a plaintext password or passphrase must never replace the encrypted record.
+      expect(storage.saveConnection).not.toHaveBeenCalled();
+      expect(storage.updateConnection).not.toHaveBeenCalled();
     });
 
     it('rebuilds the default after a failed decrypt even when DB_PASSWORD is empty', async () => {
