@@ -604,8 +604,9 @@ export function evaluateRetryAmplification(
     sample.totalCommands < last.totalCommands
   ) {
     endEpisodeAtPollGap(state, last.timestamp);
-    const { lastEpisode, pending, notifiedLevel } = state;
+    const { coldWindows, lastEpisode, pending, notifiedLevel } = state;
     Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
+      coldWindows,
       lastEpisode,
       pending,
       notifiedLevel,

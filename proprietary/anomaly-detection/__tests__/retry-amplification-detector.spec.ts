@@ -719,15 +719,28 @@ describe('retry amplification detector', () => {
     expect(d.state.coldWindows.map((w) => w.start)).toEqual(before);
   });
 
-  it('clears windows and the episode on a command counter reset', () => {
+  it('clears the episode and keeps the baseline on a command counter reset', () => {
     const d = new Driver();
     d.baseline();
     d.windows(hot(1.6), 2);
     d.t += 1000;
     d.poll(BASE, [], 10);
     expect(d.state.hotRun).toHaveLength(0);
-    expect(d.state.coldWindows).toHaveLength(0);
+    expect(d.state.coldWindows).toHaveLength(12);
     expect(d.state.pending).toBeNull();
+  });
+
+  it('flags a storm that starts right after a command counter reset', () => {
+    const d = new Driver();
+    d.baseline();
+    d.t += 1000;
+    d.commands = 10;
+    d.poll(BASE);
+    d.t += 1000;
+
+    d.ramp(4);
+
+    expect(d.findings).toHaveLength(1);
   });
 
   it('closes a storm cut off by a counter reset and keeps its unsaved finding', () => {
@@ -743,7 +756,7 @@ describe('retry amplification detector', () => {
 
     expect(finding).toMatchObject({ level: 'warning', windows: 4 });
     expect(d.state.hotRun).toHaveLength(0);
-    expect(d.state.coldWindows).toHaveLength(0);
+    expect(d.state.coldWindows).toHaveLength(12);
     expect(d.state.lastEpisode).toMatchObject({
       classification: 'amplifying',
       windows: 4,
