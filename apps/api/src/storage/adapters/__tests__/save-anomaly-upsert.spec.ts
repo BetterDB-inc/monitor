@@ -47,6 +47,24 @@ describe.each<[string, AdapterFactory]>(adapters)(
       await cleanup();
     });
 
+    it('stores the replica address', async () => {
+      await storage.saveAnomalyEvent(event({ replicaAddr: '10.0.0.2:6379' }), CONN);
+      await storage.saveAnomalyEvents([event({ id: randomUUID(), replicaAddr: '10.0.0.3:6379' })], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.replicaAddr).sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
+    });
+
+    it('keeps the replica address when a later save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ replicaAddr: '10.0.0.2:6379' }), CONN);
+      await storage.saveAnomalyEvent(correlated, CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.replicaAddr).toBe('10.0.0.2:6379');
+    });
+
     it('keeps one row when the same event is saved again with a correlation id', async () => {
       await storage.saveAnomalyEvent(event(), CONN);
       await storage.saveAnomalyEvent({ ...correlated, message: 'changed' }, CONN);

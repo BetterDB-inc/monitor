@@ -7106,7 +7106,8 @@ describe('AnomalyService', () => {
       id,
       metricType: MetricType.REPLICATION_DIVERGENCE,
       resolved: false,
-      message: `WARNING: Replica ${addr} is 8.0 MiB behind the primary; the gap grew.`,
+      message: 'WARNING: replica behind the primary.',
+      replicaAddr: addr,
     });
     const restartRecoveries = () =>
       (webhookEventsProService as any).dispatchReplicationRecovered.mock.calls

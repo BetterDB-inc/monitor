@@ -158,6 +158,7 @@ export interface StoredAnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: string[];
+  replicaAddr?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;

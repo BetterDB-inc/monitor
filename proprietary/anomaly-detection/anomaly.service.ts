@@ -169,7 +169,6 @@ import {
   acknowledgeRecovery,
   createDivergenceState,
   describeDivergence,
-  divergenceReplicaFromMessage,
   divergenceWindowMs,
   drainClosedWindows,
   replicaObservedLevel,
@@ -5393,6 +5392,7 @@ export class AnomalyService
       message: anomaly.message,
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
+      replicaAddr: anomaly.replicaAddr,
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs: anomaly.resolvedAt === undefined ? undefined : anomaly.resolvedAt - anomaly.timestamp,
@@ -5592,6 +5592,7 @@ export class AnomalyService
       message: s.message,
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
+      replicaAddr: s.replicaAddr,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,
@@ -5923,7 +5924,7 @@ export class AnomalyService
       for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
         if (seen.has(event.id)) continue;
         seen.add(event.id);
-        const replica = divergenceReplicaFromMessage(event.message) ?? 'unknown';
+        const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
           eventIds: new Set<string>(),
           sinceWindow: state.closedWindowCount,
@@ -6119,6 +6120,7 @@ export class AnomalyService
       resolvedAt: attempt?.resolvedAt,
       connectionId: ctx.connectionId,
       relatedMetrics,
+      replicaAddr: finding.addr,
       correlationId: attempt?.correlationId,
       persisted: attempt?.persisted,
     };
