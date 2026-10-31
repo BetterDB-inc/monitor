@@ -48,9 +48,10 @@ opens. Surface findings:
   hosted instances stay quiet.
 - **ACL banner** — when the connection user is missing `+monitor`, an
   `ACL SETUSER` snippet is rendered with a copy-to-clipboard button.
-- **Health gate** — memory pressure, recent OOM events, replication lag,
-  and active failover. The gate only blocks anomaly-triggered and
-  scheduled captures; manual sessions surface the report as a warning.
+- **Health gate** — memory pressure, recent OOM events, active failover,
+  an unhealthy replica link, and replication lag on replicas with an
+  overdue ack. The gate only blocks anomaly-triggered and scheduled
+  captures; manual sessions surface the report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested
   duration based on the live ops/sec.
 
