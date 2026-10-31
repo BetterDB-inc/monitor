@@ -10,6 +10,7 @@ export interface PendingSave {
   anomaly: AnomalyEvent;
   ctx?: ConnectionContext;
   enqueuedAt: number;
+  rewrite?: boolean;
 }
 
 export interface PendingResolve {
@@ -39,6 +40,10 @@ export class PersistenceOutbox {
     this.add({ kind: 'save', id: anomaly.id, anomaly, ctx, enqueuedAt: now });
   }
 
+  enqueueRewrite(anomaly: AnomalyEvent, now: number): void {
+    this.add({ kind: 'save', id: anomaly.id, anomaly, enqueuedAt: now, rewrite: true });
+  }
+
   enqueueResolve(id: string, resolvedAt: number, now: number): void {
     this.add({ kind: 'resolve', id, resolvedAt, enqueuedAt: now });
   }
@@ -59,6 +64,10 @@ export class PersistenceOutbox {
 
   settleSave(id: string): void {
     if (this.pending.get(id)?.kind === 'save') this.pending.delete(id);
+  }
+
+  settleResolve(id: string): void {
+    if (this.pending.get(id)?.kind === 'resolve') this.pending.delete(id);
   }
 
   due(now: number): OutboxEntry[] {

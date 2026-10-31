@@ -7907,6 +7907,38 @@ describe('AnomalyService', () => {
         expect((service as any).persistenceOutbox.size).toBe(0);
       });
 
+      it('resolves in storage while a stored member waits on its retry', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+        await (service as any).correlateAnomalies();
+        const correlationId = attempt.correlationId;
+
+        await service.resolveAnomaly(attempt.id);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.lastCall[0]).toMatchObject({ correlationId, resolved: true });
+      });
+
+      it('carries a failed resolve on a stored member\x27s pending retry', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+        await (service as any).correlateAnomalies();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await service.resolveAnomaly(attempt.id);
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].resolved).toBe(true);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
       it('closes a row resolved while correlation saves it', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         await feed([2, 4, 6, 8, 10], T0);
@@ -7944,7 +7976,7 @@ describe('AnomalyService', () => {
         await (service as any).correlateAnomalies();
         const [group] = (service as any).recentGroups;
         const [attempt] = divergenceCopies();
-        expect(attempt.persisted).toBeFalsy();
+        expect(attempt.persisted).toBeUndefined();
 
         storage.saveAnomalyEvent.mockResolvedValue(undefined);
         await feed([12, 14], t);
