@@ -76,6 +76,7 @@ export interface DivergenceConnectionState {
   lastSampleAt: number | null;
   lastObservedAt: number | null;
   windowPeakRate: number | null;
+  lastRateEwma: number | null;
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
@@ -136,6 +137,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     lastSampleAt: null,
     lastObservedAt: null,
     windowPeakRate: null,
+    lastRateEwma: null,
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
@@ -282,7 +284,7 @@ function evaluateReplica(
     reason = 'ceiling';
   }
 
-  if (activeLevel(replica) === 'none' && target !== 'none') {
+  if (replica.baselineRate === null && (activeLevel(replica) !== 'none' || target !== 'none')) {
     replica.baselineRate = baselineRate(rateHistory, streak);
   }
 
@@ -428,9 +430,9 @@ function closeWindow(
   return outcomes;
 }
 
-function windowRate(state: DivergenceConnectionState, sample: ReplicationStreamSample): number | null {
+function windowRate(state: DivergenceConnectionState, rateEwma: number | null): number | null {
   const idle = state.windowPeakRate !== null && state.windowPeakRate < DIVERGENCE_IDLE_BYTES_PER_SEC;
-  return idle ? 0 : sample.bytesPerSecEwma;
+  return idle ? 0 : rateEwma;
 }
 
 export function observeDivergence(
@@ -444,6 +446,7 @@ export function observeDivergence(
     state.lastSampleAt = null;
     state.lastGapMs = 0;
     state.windowPeakRate = null;
+    state.lastRateEwma = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
     state.observed = new Set();
@@ -459,7 +462,7 @@ export function observeDivergence(
   state.lastSampleAt = sample.timestamp;
   state.lastObservedAt = sample.timestamp;
   state.lastGapMs = gapMs;
-  if (sample.bytesPerSec !== null) {
+  if (!outage && sample.bytesPerSec !== null) {
     state.windowPeakRate = Math.max(state.windowPeakRate ?? 0, sample.bytesPerSec);
   }
 
@@ -468,9 +471,11 @@ export function observeDivergence(
     windowEnd - state.windowStart >= windowMs &&
     state.windowSamples >= DIVERGENCE_MIN_SAMPLES
   ) {
-    outcomes.push(...closeWindow(state, state.windowStart, windowEnd, windowRate(state, sample)));
+    const sealingRate = outage ? state.lastRateEwma : sample.bytesPerSecEwma;
+    outcomes.push(...closeWindow(state, state.windowStart, windowEnd, windowRate(state, sealingRate)));
     state.windowStart = null;
   }
+  state.lastRateEwma = sample.bytesPerSecEwma;
   if (outage) {
     state.windowStart = null;
     for (const replica of state.replicas.values()) {

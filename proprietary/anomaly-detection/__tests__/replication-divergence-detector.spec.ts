@@ -101,6 +101,36 @@ function divergences(outcomes: DivergenceOutcome[][]): DivergenceFinding[] {
   return outcomes.flat().filter((o): o is DivergenceFinding => o.kind === 'divergence');
 }
 
+describe('baseline and outage handling', () => {
+  it('escalates a replica first flagged by stale acks once writes return to baseline', () => {
+    const h = new Harness();
+    h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
+    h.windows([
+      { gap: 100 * MiB, rate: MiB, lagSec: 20 },
+      { gap: 100 * MiB, rate: MiB, lagSec: 20 },
+    ]);
+    const resumed = divergences(h.windows(Array.from({ length: 7 }, () => ({ gap: 100 * MiB, rate: MiB }))));
+    expect(resumed.at(-1)).toMatchObject({ level: 'critical', reason: 'not_catching_up' });
+  });
+
+  it('takes the idle check of a window sealed by an outage from before the outage', () => {
+    const h = new Harness();
+    for (let i = 0; i < 3; i++) h.poll({ gap: 8 * MiB, rate: 1000 }, 15_000);
+    h.skip(300_000);
+    h.poll({ gap: 8 * MiB, rate: 50 * MiB }, POLL_MS);
+    expect(h.state.rateHistory).toEqual([0]);
+    expect(h.state.replicas.get(ADDR)?.windows[0].bytesPerSec).toBe(0);
+  });
+
+  it('seals a window of writes at its own rate when an outage ends it', () => {
+    const h = new Harness();
+    for (let i = 0; i < 3; i++) h.poll({ gap: 8 * MiB, rate: 2 * MiB }, 15_000);
+    h.skip(300_000);
+    h.poll({ gap: 8 * MiB, rate: 50 * MiB }, POLL_MS);
+    expect(h.state.rateHistory).toEqual([2 * MiB]);
+  });
+});
+
 describe('divergenceWindowMs', () => {
   it('uses 30s or three poll intervals, whichever is longer', () => {
     expect(divergenceWindowMs(1000)).toBe(DIVERGENCE_MIN_WINDOW_MS);
