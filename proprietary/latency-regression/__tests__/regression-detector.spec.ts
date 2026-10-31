@@ -367,8 +367,36 @@ describe('RegressionDetector — sustained degradation', () => {
     for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
     expect(sim.detector.isDegraded()).toBe(true);
 
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBeNull();
+
     sim.tick(1000, '8.1.0');
     expect(sim.detector.isDegraded()).toBe(false);
+  });
+
+  it('restarts the recovery streak when the command degrades again', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    sim.tick(2500, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
+  it('counts physical samples toward recovery, not poll ticks', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    sim.tick(1000, '8.1.0');
+    sim.repoll();
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.evaluate();
+
+    expect(sim.detector.isDegraded()).toBeNull();
   });
 
   it('keeps no verdict while the flagged command has none, even if others are healthy', () => {
@@ -397,7 +425,11 @@ describe('RegressionDetector — sustained degradation', () => {
     seedBaseline(sim);
     for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
 
-    sim.addSample(2500, '8.1.0', sim.now + MINUTE, 'get');
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) {
+      sim.addSample(2500, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(1000, '8.1.0');
+    }
+    sim.addSample(1000, '8.1.0', sim.now + MINUTE, 'get');
     sim.tick(1000, '8.1.0');
 
     expect(sim.detector.isDegraded()).toBe(false);
@@ -416,7 +448,7 @@ describe('RegressionDetector — sustained degradation', () => {
     };
 
     for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(2500, 1000);
-    step(1000, 1000);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(1000, 1000);
     expect(sim.detector.isDegraded()).toBe(false);
 
     for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(1000, 2500);
@@ -442,8 +474,10 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(sim.detector.isDegraded()).toBe(true);
 
     sim.callsPerMin.set('hmget', 0);
-    sim.addSample(1000, '8.1.0', sim.now + MINUTE, 'get');
-    sim.tick(2500, '8.1.0');
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      sim.addSample(1000, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(2500, '8.1.0');
+    }
 
     expect(sim.detector.isDegraded()).toBe(false);
   });

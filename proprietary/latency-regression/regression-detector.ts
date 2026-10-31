@@ -127,11 +127,20 @@ interface SustainedState {
   degraded: boolean | null;
 }
 
+interface FlaggedCommand {
+  healthySamples: number;
+  lastHealthyAt: number;
+}
+
+function hasRecovered(flagged: FlaggedCommand): boolean {
+  return flagged.healthySamples >= CONSECUTIVE_REQUIRED;
+}
+
 export class RegressionDetector {
   private lastVersion?: string;
   private upgrade?: UpgradeWindowState;
   private sustained = new Map<string, SustainedState>();
-  private flaggedRecovered = new Map<string, boolean>();
+  private flagged = new Map<string, FlaggedCommand>();
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
@@ -161,35 +170,43 @@ export class RegressionDetector {
     // empty upgrade window can't silence sustained detection for up to 24h.
     findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
-    for (const command of this.flaggedRecovered.keys()) {
+    for (const [command, flagged] of this.flagged) {
       if (!eligible.has(command)) {
-        this.flaggedRecovered.delete(command);
+        this.flagged.delete(command);
         continue;
       }
       const degraded = this.sustained.get(command)?.degraded;
-      if (degraded !== null && degraded !== undefined) {
-        this.flaggedRecovered.set(command, !degraded);
+      if (degraded === true) {
+        flagged.healthySamples = 0;
+      } else if (degraded === false) {
+        const capturedAt = latestByCommand.get(command)!.capturedAt;
+        if (capturedAt > flagged.lastHealthyAt) {
+          flagged.healthySamples += 1;
+          flagged.lastHealthyAt = capturedAt;
+        }
       }
     }
     if (findings.length > 0) {
-      for (const [command, recovered] of this.flaggedRecovered) {
-        if (recovered) this.flaggedRecovered.delete(command);
+      for (const [command, flagged] of this.flagged) {
+        if (hasRecovered(flagged)) this.flagged.delete(command);
       }
     }
     for (const finding of findings) {
-      for (const { command } of finding.commands) this.flaggedRecovered.set(command, false);
+      for (const { command } of finding.commands) {
+        this.flagged.set(command, { healthySamples: 0, lastHealthyAt: -1 });
+      }
     }
 
     return findings;
   }
 
   isDegraded(): boolean | null {
-    const verdicts = [...this.flaggedRecovered.keys()].map(
+    const verdicts = [...this.flagged.keys()].map(
       (command) => this.sustained.get(command)?.degraded,
     );
     if (verdicts.includes(true)) return true;
-    const recovered = [...this.flaggedRecovered.values()];
-    return recovered.length > 0 && recovered.every(Boolean) ? false : null;
+    const flagged = [...this.flagged.values()];
+    return flagged.length > 0 && flagged.every(hasRecovered) ? false : null;
   }
 
   /**
