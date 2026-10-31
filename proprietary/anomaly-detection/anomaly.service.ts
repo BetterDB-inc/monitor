@@ -4707,7 +4707,7 @@ export class AnomalyService
       opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec) ?? 0,
       cpuUtilization,
       usedMemory: this.parseNumber(info.used_memory) ?? 0,
-      writeP99Us: null,
+      writeP99Us: previous?.writeP99Us ?? null,
       timestamp,
     };
     this.reshardSnapshot.set(ctx.connectionId, snapshot);

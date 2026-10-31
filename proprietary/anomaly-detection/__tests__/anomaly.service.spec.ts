@@ -1605,6 +1605,29 @@ describe('AnomalyService', () => {
       jest.restoreAllMocks();
     });
 
+    it('keeps the last write P99 of a shard while it reads a new one', async () => {
+      await pollCluster(6000, true);
+      (service as any).reshardSnapshot.get('conn-a').writeP99Us = 5000;
+      clock += 1000;
+      let finishRead!: (rows: unknown[]) => void;
+      const reading = new Promise<void>((started) => {
+        storage.getLatencyStatsHistory = jest.fn(() => {
+          started();
+          return new Promise((resolve) => {
+            finishRead = resolve;
+          });
+        });
+      });
+
+      const polling = poll(shardCtx('a', 6000, true));
+      await reading;
+
+      expect((service as any).reshardSnapshot.get('conn-a').writeP99Us).toBe(5000);
+
+      finishRead([]);
+      await polling;
+    });
+
     it('alerts once when a shard stays above the cluster median during a reshard', async () => {
       await pollCluster(18_000, true);
       await pollCluster(18_000, true);
