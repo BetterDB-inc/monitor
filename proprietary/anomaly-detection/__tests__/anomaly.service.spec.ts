@@ -8316,6 +8316,74 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('load saturation', () => {
+      const busy = (usec: number) => ({
+        stats: {
+          instantaneous_eventloop_duration_usec: String(usec),
+          instantaneous_eventloop_cycles_per_sec: '1000',
+        },
+      });
+      const events = () => eventsOf(MetricType.LOAD_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(busy(900), 4);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(900));
+
+        expectRaisedAgain(MetricType.LOAD_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        await pollWith(busy(100));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(busy(900), 3);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(busy(900), 3);
+        failSaves();
+        await pollWith(busy(990), 3);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(990));
+
+        const raised = events();
+        expect(raised.map((e) => e.severity)).toEqual([
+          AnomalySeverity.WARNING,
+          AnomalySeverity.CRITICAL,
+          AnomalySeverity.CRITICAL,
+        ]);
+      });
+    });
+
   });
 
   describe('persistence outbox', () => {

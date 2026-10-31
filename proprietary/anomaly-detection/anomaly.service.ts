@@ -191,6 +191,7 @@ import {
   LOAD_WARN_FRACTION,
   LoadSaturationState,
   acknowledgeLoadSaturationFinding,
+  loadSaturationRearm,
   createLoadSaturationState,
   evaluateLoadSaturation,
 } from './load-saturation-detector';
@@ -3138,10 +3139,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await the emit so a failure propagates to the poll error handler, and
-    // acknowledge only AFTER a successful emit — a failed escalation is then
-    // retried on the next poll rather than being swallowed by the hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, loadSaturationRearm(state, finding));
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
