@@ -60,7 +60,6 @@ describe('ReplicationStreamTracker', () => {
   it('returns null when the node reports no master_repl_offset', () => {
     const tracker = new ReplicationStreamTracker();
     expect(tracker.observe('c1', { role: 'master' }, T0)).toBeNull();
-    expect(tracker.latest('c1')).toBeNull();
   });
 
   it('computes the per-replica gap, clamped at zero', () => {
@@ -216,12 +215,12 @@ describe('ReplicationStreamTracker', () => {
   it('keeps connections apart and forgets them on request', () => {
     const tracker = new ReplicationStreamTracker();
     tracker.observe('c1', primaryInfo(), T0);
-    tracker.observe('c2', primaryInfo({ master_repl_offset: '99' }), T0);
-    expect(tracker.latest('c1')!.masterReplOffset).toBe(10000);
-    expect(tracker.latest('c2')!.masterReplOffset).toBe(99);
+    const other = tracker.observe('c2', primaryInfo({ master_repl_offset: '99' }), T0);
+    const kept = tracker.observe('c1', primaryInfo({ master_repl_offset: '10000' }), T0 + 1000)!;
+    expect(other!.masterReplOffset).toBe(99);
+    expect(kept.bytesPerSec).not.toBeNull();
 
     tracker.forget('c1');
-    expect(tracker.latest('c1')).toBeNull();
     const fresh = tracker.observe('c1', primaryInfo({ master_repl_offset: '20000' }), T0 + 1000)!;
     expect(fresh.bytesPerSec).toBeNull();
   });

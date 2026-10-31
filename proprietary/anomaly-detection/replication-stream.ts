@@ -71,7 +71,6 @@ export function parseReplicaLines(info: Record<string, string>): ReplicaOffsetLi
 
 export class ReplicationStreamTracker {
   private baselines = new Map<string, StreamBaseline>();
-  private samples = new Map<string, ReplicationStreamSample>();
 
   observe(
     connectionId: string,
@@ -111,7 +110,7 @@ export class ReplicationStreamTracker {
     this.baselines.set(connectionId, { replid, offset: masterReplOffset, ts: timestamp, ewma });
 
     const isReplica = info.role === 'slave' || info.role === 'replica';
-    const sample: ReplicationStreamSample = {
+    return {
       timestamp,
       role: isReplica ? 'replica' : 'primary',
       replid,
@@ -126,16 +125,9 @@ export class ReplicationStreamTracker {
             gapBytes: Math.max(0, masterReplOffset - line.offset),
           })),
     };
-    this.samples.set(connectionId, sample);
-    return sample;
-  }
-
-  latest(connectionId: string): ReplicationStreamSample | null {
-    return this.samples.get(connectionId) ?? null;
   }
 
   forget(connectionId: string): void {
     this.baselines.delete(connectionId);
-    this.samples.delete(connectionId);
   }
 }

@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
 import { OUTBOX_MAX_AGE_MS, OUTBOX_RETRY_BASE_MS } from '../anomaly-persistence-outbox';
+import type { ReplicationStreamSample } from '../replication-stream';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -8229,10 +8230,10 @@ describe('AnomalyService', () => {
         },
       });
 
-      expect((service as any).replicationStream.latest('conn-1')).toBeNull();
+      const observe = jest.spyOn((service as any).replicationStream, 'observe');
       await poll();
 
-      const sample = (service as any).replicationStream.latest('conn-1');
+      const sample = observe.mock.results.at(-1)!.value as ReplicationStreamSample;
       expect(sample).toMatchObject({
         role: 'primary',
         masterReplOffset: 5000,
@@ -8257,7 +8258,7 @@ describe('AnomalyService', () => {
       await poll();
       clock.mockRestore();
 
-      const next = (service as any).replicationStream.latest('conn-1');
+      const next = observe.mock.results.at(-1)!.value as ReplicationStreamSample;
       expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogHistlen: 6144 });
       expect(next!.bytesPerSec).not.toBeNull();
       expect(next!.replicas[0].gapBytes).toBe(500);
