@@ -241,34 +241,23 @@ describe('HealthGateService', () => {
     expect(result.allow).toBe(true);
   });
 
-  it('ignores an online replica that came online within the last ack interval', async () => {
+  it.each([
+    ['a SYNC consumer that never acks', '12'],
+    ['a new replica loading its RDB', '0'],
+  ])('leaves out %s reporting offset 0', async (_name, lag) => {
     const { service } = makeService({
       info: makeInfo({
         role: 'master',
         master_repl_offset: '100000000',
         replicas: {
-          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=0,lag=0',
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=100000000,lag=0',
+          slave1: `ip=10.0.0.3,port=6379,state=online,offset=0,lag=${lag}`,
         },
       }),
     });
     const result = await service.evaluate(CONNECTION_ID);
     expect(result.signals.replicationLagBytes).toBe(0);
     expect(result.allow).toBe(true);
-  });
-
-  it('counts an online replica that stopped acking while it loads an RDB', async () => {
-    const { service } = makeService({
-      info: makeInfo({
-        role: 'master',
-        master_repl_offset: '100000000',
-        replicas: {
-          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=0,lag=12',
-        },
-      }),
-    });
-    const result = await service.evaluate(CONNECTION_ID);
-    expect(result.signals.replicationLagBytes).toBe(100_000_000);
-    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
   it('reports no lag on a primary without replicas', async () => {

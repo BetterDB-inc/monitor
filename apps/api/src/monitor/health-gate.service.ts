@@ -156,7 +156,7 @@ function furthestReplicaGap(replication: Record<string, string>): number | null 
     }
     const fields = InfoParser.parseKvLine(value, ',');
     const offset = parseNumber(fields.offset);
-    if (offset === null || fields.state !== 'online' || !isAckOverdue(fields.lag)) {
+    if (!offset || fields.state !== 'online' || !isAckOverdue(fields.lag)) {
       continue;
     }
     gap = Math.max(gap, masterOffset - offset);
