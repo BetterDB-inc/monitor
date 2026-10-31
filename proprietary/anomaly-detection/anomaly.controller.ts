@@ -25,7 +25,7 @@ import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/de
 
 function parseTimeBound(name: string, value: string | undefined): number | undefined {
   if (!value) return undefined;
-  const parsed = Number(value);
+  const parsed = Math.floor(Number(value));
   if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed < 0) {
     throw new BadRequestException(`${name} must be a timestamp in milliseconds`);
   }
