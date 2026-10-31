@@ -323,6 +323,27 @@ describe('Correlator', () => {
       expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
     });
 
+    it('takes precedence over replication divergence in the same window', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: t,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          connectionId: 'a',
+        }),
+        makeAnomaly({
+          timestamp: t + 1000,
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          connectionId: 'a',
+        }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+      expect(groups[0].recommendations.join(' ')).toContain('backoff');
+    });
+
     it('falls back to the generic diagnosis when the message has no trigger', () => {
       const groups = correlator.correlate([
         makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message: 'retry amplification' }),

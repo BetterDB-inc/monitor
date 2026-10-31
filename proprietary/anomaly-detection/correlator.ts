@@ -30,6 +30,7 @@ const DIVERGENCE_YIELDS_TO: ReadonlySet<MetricType> = new Set([
   MetricType.ACL_DENIED,
   MetricType.REPLICATION_ROLE,
   MetricType.CLUSTER_STATE,
+  MetricType.RETRY_AMPLIFICATION,
 ]);
 
 function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent[]): string {
