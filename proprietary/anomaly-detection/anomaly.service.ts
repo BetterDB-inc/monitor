@@ -244,6 +244,8 @@ interface ConnectionPersistenceState {
 
 const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const CORRELATION_ID_CHUNK_SIZE = 500;
+const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 
 @Injectable()
 export class AnomalyService
@@ -5728,7 +5730,6 @@ export class AnomalyService
   ): Promise<StoredCorrelatedGroup[]> {
     if (siblings.length === 0) return [];
     const pageSize = 10_000;
-    const chunkSize = 500;
     const seen = new Set<string>();
     const found = new Map<string, StoredCorrelatedGroup>();
     const inWindow = (g: StoredCorrelatedGroup) =>
@@ -5754,17 +5755,18 @@ export class AnomalyService
         seen.add(e.correlationId);
         candidates.push(e.correlationId);
       }
-      for (let i = 0; i < candidates.length && found.size < limit; i += chunkSize) {
-        const chunk = candidates.slice(i, i + chunkSize);
-        for (const id of siblings) {
-          const groups = await this.storage.getCorrelatedGroups({
-            pattern: pattern as string,
-            correlationIds: chunk,
-            limit: chunk.length,
-            connectionId: id,
-          });
-          for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
-        }
+      for (
+        let i = 0;
+        i < candidates.length && found.size < limit;
+        i += CORRELATION_ID_CHUNK_SIZE
+      ) {
+        const chunk = candidates.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+        const groups = await this.storage.getCorrelatedGroups({
+          pattern: pattern as string,
+          correlationIds: chunk,
+          limit: chunk.length,
+        });
+        for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
       }
       if (page.length < pageSize) break;
     }
@@ -5789,47 +5791,45 @@ export class AnomalyService
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
     }
 
-    const connectionIds = connectionId ? this.scopeConnectionIds(connectionId) : [undefined];
-    const own = await Promise.all(
-      (connectionId ? [connectionId] : connectionIds).map((id) =>
-        this.storage.getCorrelatedGroups({
-          startTime,
-          endTime,
-          pattern: pattern as string,
-          limit,
-          connectionId: id,
-        }),
-      ),
-    );
+    const storedLimit = Math.min(limit, MAX_CORRELATED_GROUP_RESULTS);
+    const own = await this.storage.getCorrelatedGroups({
+      startTime,
+      endTime,
+      pattern: pattern as string,
+      limit: storedLimit,
+      connectionId,
+    });
     const found = connectionId
       ? await this.siblingGroupsInvolving(
           connectionId,
-          connectionIds.filter((id): id is string => !!id && id !== connectionId),
-          new Set(own.flat().map((s) => s.correlationId)),
+          this.scopeConnectionIds(connectionId).filter((id) => id !== connectionId),
+          new Set(own.map((s) => s.correlationId)),
           startTime,
           endTime,
           pattern,
-          limit,
+          storedLimit,
         )
       : [];
-    const stored = [...new Map([...own.flat(), ...found].map((s) => [s.correlationId, s])).values()]
+    const stored = [...new Map([...own, ...found].map((s) => [s.correlationId, s])).values()]
       .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
+      .slice(0, storedLimit);
 
-    if (stored.length === 0) return [];
-    const timestamps = stored.map((s) => s.timestamp);
-    const members = await this.storage.getAnomalyEvents({
-      startTime: Math.min(...timestamps) - this.correlationIntervalMs,
-      endTime: Math.max(...timestamps) + this.correlationIntervalMs,
-      correlationIds: stored.map((s) => s.correlationId),
-      limit: this.maxRecentEvents * stored.length,
-    });
     const membersByGroup = new Map<string, AnomalyEvent[]>();
-    for (const member of members) {
-      if (!member.correlationId) continue;
-      const anomalies = membersByGroup.get(member.correlationId) ?? [];
-      anomalies.push(this.storedToAnomalyEvent(member));
-      membersByGroup.set(member.correlationId, anomalies);
+    for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
+      const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+      const timestamps = chunk.map((s) => s.timestamp);
+      const members = await this.storage.getAnomalyEvents({
+        startTime: Math.min(...timestamps) - this.correlationIntervalMs,
+        endTime: Math.max(...timestamps) + this.correlationIntervalMs,
+        correlationIds: chunk.map((s) => s.correlationId),
+        limit: this.maxRecentEvents * chunk.length,
+      });
+      for (const member of members) {
+        if (!member.correlationId) continue;
+        const anomalies = membersByGroup.get(member.correlationId) ?? [];
+        anomalies.push(this.storedToAnomalyEvent(member));
+        membersByGroup.set(member.correlationId, anomalies);
+      }
     }
 
     return stored.map((s) => ({

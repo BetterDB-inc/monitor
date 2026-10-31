@@ -6207,7 +6207,7 @@ describe('AnomalyService', () => {
 
     it('skips groups from other members that do not involve the caller', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
+        connectionId === undefined
           ? [
               {
                 correlationId: 'grp-other',
@@ -6283,7 +6283,7 @@ describe('AnomalyService', () => {
           limit = 100,
           offset = 0,
         }: any) =>
-          connectionId !== 'node-1'
+          connectionId !== undefined
             ? []
             : sibling
                 .filter(
@@ -6333,7 +6333,7 @@ describe('AnomalyService', () => {
           limit = 100,
           offset = 0,
         }: any) =>
-          connectionId !== 'node-1'
+          connectionId !== undefined
             ? []
             : sibling
                 .filter(
@@ -6380,7 +6380,7 @@ describe('AnomalyService', () => {
         member('b', 'node-2'),
       ];
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
+        connectionId === undefined
           ? [
               {
                 correlationId: 'grp-1',
@@ -6436,7 +6436,7 @@ describe('AnomalyService', () => {
       ];
       storage.getCorrelatedGroups.mockImplementation(
         async ({ connectionId, correlationIds }: any) =>
-          connectionId === 'node-1' && correlationIds?.includes('grp-1')
+          connectionId === undefined && correlationIds?.includes('grp-1')
             ? [siblingGroup('grp-1', 1_000_000)]
             : [],
       );
@@ -6455,7 +6455,7 @@ describe('AnomalyService', () => {
 
     it('drops sibling groups that start outside the requested window', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1' ? [siblingGroup('grp-1', 1_000_000)] : [],
+        connectionId === undefined ? [siblingGroup('grp-1', 1_000_000)] : [],
       );
       storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
         connectionId === 'node-2'
@@ -6478,7 +6478,7 @@ describe('AnomalyService', () => {
 
     it('finds a stored group from any member of the topology', async () => {
       storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
+        connectionId === undefined
           ? [
               {
                 correlationId: 'grp-1',
@@ -6509,8 +6509,68 @@ describe('AnomalyService', () => {
         expect.objectContaining({ connectionId: 'node-2', limit: 50 }),
       );
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionId: 'node-1', correlationIds: ['grp-1'] }),
+        expect.objectContaining({ correlationIds: ['grp-1'] }),
       );
+    });
+
+    it('looks up shared groups once per chunk however many members the topology has', async () => {
+      (service as any).connectionRegistry.listMembers.mockReturnValue(
+        Array.from({ length: 6 }, (_, i) => ({ id: `node-${i + 1}` })),
+      );
+      const caller = Array.from({ length: 501 }, (_, i) => ({
+        ...member(`b-${i}`, 'node-2'),
+        correlationId: `grp-${i}`,
+      }));
+      storage.getCorrelatedGroups.mockResolvedValue([]);
+      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
+        connectionId === 'node-2' ? caller : [],
+      );
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      const lookups = (storage.getCorrelatedGroups as jest.Mock).mock.calls
+        .map(([options]: any[]) => options)
+        .filter((options) => options.correlationIds);
+      expect(lookups.map((options) => options.correlationIds.length)).toEqual([500, 1]);
+      expect(lookups.every((options) => options.connectionId === undefined)).toBe(true);
+    });
+
+    it('caps the groups read from storage', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 1_000_000, 'node-2');
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'node-2', limit: 1000 }),
+      );
+    });
+
+    it('reads the members of a long result in chunks', async () => {
+      const stored = Array.from({ length: 501 }, (_, i) => ({
+        ...siblingGroup(`grp-${i}`, 2_000_000 - i * 1_000),
+        connectionId: 'node-2',
+      }));
+      storage.getCorrelatedGroups.mockImplementation(async ({ correlationIds }: any) =>
+        correlationIds ? [] : stored,
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ correlationIds }: any) =>
+        (correlationIds ?? []).map((correlationId: string) => ({
+          ...member(`m-${correlationId}`, 'node-2'),
+          correlationId,
+        })),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 501, 'node-2');
+
+      const reads = (storage.getAnomalyEvents as jest.Mock).mock.calls
+        .map(([options]: any[]) => options)
+        .filter((options) => options.correlationIds);
+      expect(reads.map((options) => options.correlationIds.length)).toEqual([500, 1]);
+      expect(reads[1]).toMatchObject({
+        startTime: 1_500_000 - 5_000,
+        endTime: 1_500_000 + 5_000,
+      });
+      expect(groups.every((g) => g.anomalies.length === 1)).toBe(true);
     });
   });
 
