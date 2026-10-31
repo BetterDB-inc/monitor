@@ -17,6 +17,7 @@ describe('LicenseService', () => {
   let service: LicenseService;
   let mockFetch: jest.SpyInstance;
   let mockTelemetryClient: jest.Mocked<TelemetryPort>;
+  let testDataDir: string;
 
   const originalEnv = process.env;
 
@@ -42,6 +43,8 @@ describe('LicenseService', () => {
     process.env = { ...originalEnv };
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
+    testDataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
+    process.env.BETTERDB_DATA_DIR = testDataDir;
     mockTelemetryClient = createMockTelemetryClient();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -67,6 +70,7 @@ describe('LicenseService', () => {
   afterEach(() => {
     process.env = originalEnv;
     mockFetch.mockRestore();
+    rmSync(testDataDir, { recursive: true, force: true });
   });
 
   describe('keyless validation', () => {
