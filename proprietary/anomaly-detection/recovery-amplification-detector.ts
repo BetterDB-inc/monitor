@@ -20,6 +20,7 @@ export interface BacklogCoverageState {
   level: BacklogCoverageLevel;
   belowWarning: number;
   belowCritical: number;
+  noReplicasSince: number | null;
 }
 
 export interface BacklogCoverageStep {
@@ -28,7 +29,7 @@ export interface BacklogCoverageStep {
 }
 
 export function createBacklogCoverageState(): BacklogCoverageState {
-  return { level: 'none', belowWarning: 0, belowCritical: 0 };
+  return { level: 'none', belowWarning: 0, belowCritical: 0, noReplicasSince: null };
 }
 
 export function backlogCoverageSec(sample: ReplicationStreamSample): number | null {
@@ -38,6 +39,20 @@ export function backlogCoverageSec(sample: ReplicationStreamSample): number | nu
   if (replBacklogSize === null || bytesPerSec === null || bytesPerSecEwma === null) return null;
   if (bytesPerSecEwma <= BACKLOG_COVERAGE_MIN_BYTES_PER_SEC) return Number.POSITIVE_INFINITY;
   return replBacklogSize / Math.max(bytesPerSec, bytesPerSecEwma);
+}
+
+export function observeBacklogCoverage(
+  state: BacklogCoverageState,
+  sample: ReplicationStreamSample,
+): number | null {
+  if (sample.role !== 'primary' || sample.replicas.length > 0) {
+    state.noReplicasSince = null;
+    return backlogCoverageSec(sample);
+  }
+  state.noReplicasSince ??= sample.timestamp;
+  return sample.timestamp - state.noReplicasSince > RESYNC_ESCALATION_WINDOW_MS
+    ? Number.POSITIVE_INFINITY
+    : null;
 }
 
 export function backlogCoverageRecovered(coverageSec: number | null): boolean {

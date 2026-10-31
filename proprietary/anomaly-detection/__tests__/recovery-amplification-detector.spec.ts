@@ -7,6 +7,7 @@ import {
   backlogCoverageSec,
   createBacklogCoverageState,
   createResyncEscalationState,
+  observeBacklogCoverage,
   observeResyncEscalation,
   resyncEventReplica,
   resyncSettled,
@@ -61,6 +62,38 @@ describe('backlogCoverageSec', () => {
   it('carries no risk on an idle primary or a replica', () => {
     expect(backlogCoverageSec(sample({ bytesPerSecEwma: 10 }))).toBe(Number.POSITIVE_INFINITY);
     expect(backlogCoverageSec(sample({ role: 'replica' }))).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('observeBacklogCoverage', () => {
+  const noReplicas = (timestamp: number) => sample({ timestamp, replicas: [] });
+
+  it('holds while a disconnected replica could still return', () => {
+    const state = createBacklogCoverageState();
+
+    expect(observeBacklogCoverage(state, noReplicas(T0))).toBeNull();
+    expect(observeBacklogCoverage(state, noReplicas(T0 + RESYNC_ESCALATION_WINDOW_MS))).toBeNull();
+  });
+
+  it('reads as covered once the last replica has been gone past the resync window', () => {
+    const state = createBacklogCoverageState();
+    observeBacklogCoverage(state, noReplicas(T0));
+
+    expect(observeBacklogCoverage(state, noReplicas(T0 + RESYNC_ESCALATION_WINDOW_MS + 1))).toBe(
+      Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it('restarts the wait when a replica comes back', () => {
+    const state = createBacklogCoverageState();
+    observeBacklogCoverage(state, noReplicas(T0));
+    expect(observeBacklogCoverage(state, sample({ timestamp: T0 + 1000 }))).toBe(100);
+
+    observeBacklogCoverage(state, noReplicas(T0 + 2000));
+
+    expect(
+      observeBacklogCoverage(state, noReplicas(T0 + 2000 + RESYNC_ESCALATION_WINDOW_MS)),
+    ).toBeNull();
   });
 });
 

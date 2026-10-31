@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
+import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder, incidentIdFor } from '../incident-timeline';
 import { MetricBuffer } from '../metric-buffer';
@@ -8919,6 +8920,20 @@ describe('AnomalyService', () => {
 
         expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
       });
+    });
+
+    it('resolves the risk once the last replica has been gone past the resync window', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(risk.resolved).toBe(false);
+
+      await pollPrimary({ bytes: 30_000, replica: false });
+      expect(risk.resolved).toBe(false);
+
+      clock += RESYNC_ESCALATION_WINDOW_MS;
+      await pollPrimary({ bytes: 30_000, replica: false });
+
+      expect(risk.resolved).toBe(true);
     });
 
     it('keeps a superseded event whose resolve failed until coverage recovers', async () => {

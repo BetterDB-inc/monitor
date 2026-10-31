@@ -68,7 +68,7 @@ import {
   ResyncEscalation,
   ResyncEscalationState,
   backlogCoverageRecovered,
-  backlogCoverageSec,
+  observeBacklogCoverage,
   resyncEventReplica,
   resyncSettled,
   createBacklogCoverageState,
@@ -6836,9 +6836,9 @@ export class AnomalyService
     info: Record<string, string>,
     ctx: ConnectionContext,
   ): Promise<void> {
-    const coverageSec = backlogCoverageSec(sample);
     const coverage = this.backlogCoverage.get(ctx.connectionId) ?? createBacklogCoverageState();
     this.backlogCoverage.set(ctx.connectionId, coverage);
+    const coverageSec = observeBacklogCoverage(coverage, sample);
     const levelBefore = coverage.level;
     const step = stepBacklogCoverage(coverage, coverageSec);
     if (step.escalatedTo) {
