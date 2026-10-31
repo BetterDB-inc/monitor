@@ -66,6 +66,8 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'anomaly.detected': 'Anomaly Detected',
   'slowlog.threshold': 'Slowlog Threshold',
   'replication.lag': 'Replication Lag',
+  'replication.divergence': 'Replication Divergence',
+  'replication.recovered': 'Replication Recovered',
   'cluster.failover': 'Cluster Failover',
   'cluster.bus.corruption': 'Cluster Bus Corruption',
   'cluster.demoted.writes': 'Writes to Demoted Master',

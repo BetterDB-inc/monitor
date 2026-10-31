@@ -66,6 +66,8 @@ import {
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -777,6 +779,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (!hotKeyColumns.has(col.name)) {
         this.db.exec(`ALTER TABLE hot_key_stats ADD COLUMN ${col.name} ${col.type}`);
       }
+    }
+
+    const anomalyEventInfo = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
+      name: string;
+    }[];
+    if (!anomalyEventInfo.some((col) => col.name === 'replica_addr')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN replica_addr TEXT');
     }
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
@@ -1803,6 +1812,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         message TEXT NOT NULL,
         correlation_id TEXT,
         related_metrics TEXT,
+        replica_addr TEXT,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -2144,6 +2154,24 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON latency_stats_samples(connection_id, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
         ON latency_stats_samples(captured_at);
+
+      CREATE TABLE IF NOT EXISTS replication_divergence_windows (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start INTEGER NOT NULL,
+        window_end INTEGER NOT NULL,
+        gap_bytes REAL NOT NULL,
+        bytes_per_sec REAL,
+        seconds_behind REAL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
+        ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
+      CREATE INDEX IF NOT EXISTS idx_repl_div_end
+        ON replication_divergence_windows(window_end);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id TEXT PRIMARY KEY,
@@ -2666,16 +2694,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
-        resolved = excluded.resolved,
-        resolved_at = excluded.resolved_at,
-        duration_ms = excluded.duration_ms
+        replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        resolved = MAX(anomaly_events.resolved, excluded.resolved),
+        resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
     `);
 
     stmt.run(
@@ -2692,6 +2721,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.message,
       event.correlationId || null,
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
+      event.replicaAddr ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
@@ -2710,16 +2740,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
-        resolved = excluded.resolved,
-        resolved_at = excluded.resolved_at,
-        duration_ms = excluded.duration_ms
+        replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        resolved = MAX(anomaly_events.resolved, excluded.resolved),
+        resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
     `);
 
     const insertMany = this.db.transaction((events: StoredAnomalyEvent[], connId: string) => {
@@ -2738,6 +2769,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.message,
           event.correlationId || null,
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
+          event.replicaAddr ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,
@@ -2781,6 +2813,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined) {
       conditions.push('resolved = ?');
       params.push(options.resolved ? 1 : 0);
+    }
+    if (options.correlationIds) {
+      conditions.push(
+        options.correlationIds.length > 0
+          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
+          : '1 = 0',
+      );
+      params.push(...options.correlationIds);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -2883,6 +2923,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = this.db.prepare('SELECT 1 FROM anomaly_events WHERE id = ?').get(id);
     return existing !== undefined;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const result = this.db
+      .prepare(
+        `UPDATE anomaly_events
+         SET resolved = 1, resolved_at = ?, duration_ms = ? - timestamp
+         WHERE id = ? AND resolved = 0`,
+      )
+      .run(resolvedAt, resolvedAt, id);
+    return result.changes > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
@@ -4886,6 +4939,89 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedSqliteDelete(this.db, 'latency_stats_samples', 'captured_at < ?', [
       cutoffTimestamp,
     ]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO replication_divergence_windows
+        (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    let count = 0;
+    const transaction = this.db.transaction((connId: string) => {
+      for (const w of windows) {
+        count += stmt.run(
+          randomUUID(),
+          connId,
+          w.replicaAddr,
+          w.windowStart,
+          w.windowEnd,
+          w.gapBytes,
+          w.bytesPerSec,
+          w.secondsBehind,
+        ).changes;
+      }
+    });
+    transaction(connectionId);
+    return count;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const replicaFilter = options.replicaAddr ? 'AND replica_addr = ?' : '';
+    const params: (string | number)[] = [options.connectionId];
+    if (options.replicaAddr) params.push(options.replicaAddr);
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+         FROM (
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
+           FROM replication_divergence_windows
+           WHERE connection_id = ? ${replicaFilter} AND window_end >= ? AND window_end <= ?
+         )
+         WHERE rn <= ?
+         ORDER BY window_end ASC`,
+      )
+      .all(...params) as any[];
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      replicaAddr: row.replica_addr,
+      windowStart: Number(row.window_start),
+      windowEnd: Number(row.window_end),
+      gapBytes: Number(row.gap_bytes),
+      bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
+      secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+    }));
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedSqliteDelete(this.db, 'replication_divergence_windows', 'window_end < ? AND connection_id = ?', [
+        cutoffTimestamp,
+        connectionId,
+      ]);
+    }
+
+    return chunkedSqliteDelete(this.db, 'replication_divergence_windows', 'window_end < ?', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods

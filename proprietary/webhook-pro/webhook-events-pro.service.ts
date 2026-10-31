@@ -7,6 +7,8 @@ import {
   type KvCacheEvictionRiskData,
   type KvCacheHitRateLowData,
   type LatencyRegressionDetectedData,
+  type ReplicationDivergenceData,
+  type ReplicationRecoveredData,
   type MetricKind,
   type RetryAmplificationDetectedData,
   type ScalingReadinessLowData,
@@ -398,6 +400,34 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         instance: data.instance,
       },
       data.connectionId,
+    );
+  }
+
+  async dispatchReplicationDivergence(data: ReplicationDivergenceData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Replication divergence event skipped - requires PRO license');
+      return;
+    }
+
+    const { connectionId, ...payload } = data;
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      payload,
+      connectionId,
+    );
+  }
+
+  async dispatchReplicationRecovered(data: ReplicationRecoveredData): Promise<void> {
+    if (!this.isEnabled()) {
+      this.logger.debug('Replication recovered event skipped - requires PRO license');
+      return;
+    }
+
+    const { connectionId, ...payload } = data;
+    await this.webhookDispatcher.dispatchEvent(
+      WebhookEventType.REPLICATION_RECOVERED,
+      payload,
+      connectionId,
     );
   }
 

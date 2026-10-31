@@ -55,6 +55,8 @@ import {
   StoredCommandLogEntry,
   StoredCommandStatsSample,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -1655,6 +1657,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_metric ON anomaly_events(metric_type, timestamp DESC);
@@ -2164,6 +2168,24 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         ON latency_stats_samples(connection_id, captured_at);
       CREATE INDEX IF NOT EXISTS idx_latstat_captured_at_global
         ON latency_stats_samples(captured_at);
+
+      CREATE TABLE IF NOT EXISTS replication_divergence_windows (
+        id UUID PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start BIGINT NOT NULL,
+        window_end BIGINT NOT NULL,
+        gap_bytes DOUBLE PRECISION NOT NULL,
+        bytes_per_sec DOUBLE PRECISION,
+        seconds_behind DOUBLE PRECISION
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
+        ON replication_divergence_windows(connection_id, replica_addr, window_end);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_repl_div_window
+        ON replication_divergence_windows(connection_id, replica_addr, window_start, window_end);
+      CREATE INDEX IF NOT EXISTS idx_repl_div_end
+        ON replication_divergence_windows(window_end);
 
       CREATE TABLE IF NOT EXISTS ai_cache_samples (
         id UUID PRIMARY KEY,
@@ -2745,16 +2767,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       [
         event.id,
         event.timestamp,
@@ -2769,6 +2792,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.message,
         event.correlationId || null,
         event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2793,7 +2817,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2809,6 +2833,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.message,
         event.correlationId || null,
         event.relatedMetrics ?? null,
+        event.replicaAddr ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2822,16 +2847,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
-        resolved = EXCLUDED.resolved,
-        resolved_at = EXCLUDED.resolved_at,
-        duration_ms = EXCLUDED.duration_ms`,
+        replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        resolved = anomaly_events.resolved OR EXCLUDED.resolved,
+        resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
+        duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
       values,
     );
 
@@ -2869,6 +2895,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
+    if (options.correlationIds) {
+      conditions.push(`correlation_id = ANY($${paramIndex++})`);
+      params.push(options.correlationIds);
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 100;
@@ -2878,7 +2908,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id
       FROM anomaly_events
@@ -2981,6 +3011,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const existing = await this.pool.query('SELECT 1 FROM anomaly_events WHERE id = $1', [id]);
     return (existing.rowCount ?? 0) > 0;
   }
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const result = await this.pool.query(
+      `UPDATE anomaly_events
+       SET resolved = true, resolved_at = $2, duration_ms = $2 - timestamp
+       WHERE id = $1 AND resolved = false`,
+      [id, resolvedAt],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
@@ -5026,6 +5068,97 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return chunkedPostgresDelete(this.pool, 'latency_stats_samples', 'captured_at < $1', [
       cutoffTimestamp,
     ]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (windows.length === 0) return 0;
+
+    const values: unknown[] = [];
+    const placeholders: string[] = [];
+    for (const w of windows) {
+      const base = values.length;
+      placeholders.push(`(${Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      values.push(
+        randomUUID(),
+        connectionId,
+        w.replicaAddr,
+        w.windowStart,
+        w.windowEnd,
+        w.gapBytes,
+        w.bytesPerSec,
+        w.secondsBehind,
+      );
+    }
+
+    const result = await this.pool.query(
+      `INSERT INTO replication_divergence_windows
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+       VALUES ${placeholders.join(', ')}
+       ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
+      values,
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    const params: (string | number)[] = [options.connectionId];
+    let replicaFilter = '';
+    if (options.replicaAddr) {
+      params.push(options.replicaAddr);
+      replicaFilter = `AND replica_addr = $${params.length}`;
+    }
+    params.push(options.startTime, options.endTime, options.limit ?? 10_000);
+    const startIdx = params.length - 2;
+
+    const result = await this.pool.query(
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+       FROM (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
+         FROM replication_divergence_windows
+         WHERE connection_id = $1 ${replicaFilter} AND window_end >= $${startIdx} AND window_end <= $${startIdx + 1}
+       ) ranked
+       WHERE rn <= $${startIdx + 2}
+       ORDER BY window_end ASC`,
+      params,
+    );
+    const rows = result.rows;
+
+    return rows.map((row: any) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      replicaAddr: row.replica_addr,
+      windowStart: Number(row.window_start),
+      windowEnd: Number(row.window_end),
+      gapBytes: Number(row.gap_bytes),
+      bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
+      secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+    }));
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId) {
+      return chunkedPostgresDelete(
+        this.pool,
+        'replication_divergence_windows',
+        'window_end < $1 AND connection_id = $2',
+        [cutoffTimestamp, connectionId],
+      );
+    }
+
+    return chunkedPostgresDelete(this.pool, 'replication_divergence_windows', 'window_end < $1', [cutoffTimestamp]);
   }
 
   // AI Cache/Memory Sample Methods

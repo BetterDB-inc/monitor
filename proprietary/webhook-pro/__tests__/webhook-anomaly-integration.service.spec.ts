@@ -322,6 +322,35 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
+  describe('replication_divergence', () => {
+    it('does not dispatch the generic anomaly.detected (replication.divergence owns it)', async () => {
+      const anomalies: StoredAnomalyEvent[] = [
+        {
+          id: 'rd-1',
+          timestamp: Date.now(),
+          metricType: 'replication_divergence',
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 8 * 1024 * 1024,
+          baseline: 0,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 0,
+          message: 'Replica 10.0.0.2:6379 is diverging',
+          resolved: false,
+          sourceHost: 'localhost',
+          sourcePort: 6379,
+        },
+      ];
+
+      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
+
+      await (service as any).checkForNewAnomalies();
+
+      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
+    });
+  });
+
   describe('error handling', () => {
     it('should handle storage errors gracefully', async () => {
       storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));

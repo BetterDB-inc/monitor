@@ -47,6 +47,8 @@ import {
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -669,9 +671,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       ...existing,
       correlationId: event.correlationId ?? existing.correlationId,
       relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
-      resolved: event.resolved,
-      resolvedAt: event.resolvedAt,
-      durationMs: event.durationMs,
+      replicaAddr: event.replicaAddr ?? existing.replicaAddr,
+      resolved: existing.resolved || event.resolved,
+      resolvedAt: existing.resolvedAt ?? event.resolvedAt,
+      durationMs: existing.durationMs ?? event.durationMs,
     };
   }
 
@@ -725,6 +728,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
+    if (options.correlationIds) {
+      const ids = new Set(options.correlationIds);
+      filtered = filtered.filter((e) => e.correlationId !== undefined && ids.has(e.correlationId));
+    }
 
     return filtered
       .sort((a, b) => b.timestamp - a.timestamp)
@@ -767,6 +774,15 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.durationMs = resolvedAt - event.timestamp;
     }
     // Idempotent: report success whether we just resolved it or it was already resolved.
+    return true;
+  }
+
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    const event = this.anomalyEvents.find((e) => e.id === id);
+    if (!event || event.resolved) return false;
+    event.resolved = true;
+    event.resolvedAt = resolvedAt;
+    event.durationMs = resolvedAt - event.timestamp;
     return true;
   }
 
@@ -1608,6 +1624,72 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
     }
     return before - this.latencyStatsSamples.length;
+  }
+
+  private replicationDivergenceWindows: StoredReplicationDivergenceWindow[] = [];
+  private replicationDivergenceWindowKeys = new Set<string>();
+
+  private replicationDivergenceWindowKey(
+    connectionId: string,
+    w: Pick<StoredReplicationDivergenceWindow, 'replicaAddr' | 'windowStart' | 'windowEnd'>,
+  ): string {
+    return JSON.stringify([connectionId, w.replicaAddr, w.windowStart, w.windowEnd]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    let saved = 0;
+    for (const w of windows) {
+      const key = this.replicationDivergenceWindowKey(connectionId, w);
+      if (this.replicationDivergenceWindowKeys.has(key)) continue;
+      this.replicationDivergenceWindowKeys.add(key);
+      this.replicationDivergenceWindows.push({ id: randomUUID(), connectionId, ...w });
+      saved++;
+    }
+    return saved;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    const limit = options.limit ?? 10_000;
+    if (limit <= 0) return [];
+    const byReplica = new Map<string, StoredReplicationDivergenceWindow[]>();
+    for (const w of this.replicationDivergenceWindows) {
+      if (
+        w.connectionId !== options.connectionId ||
+        (options.replicaAddr && w.replicaAddr !== options.replicaAddr) ||
+        w.windowEnd < options.startTime ||
+        w.windowEnd > options.endTime
+      ) {
+        continue;
+      }
+      const arr = byReplica.get(w.replicaAddr) ?? [];
+      arr.push(w);
+      byReplica.set(w.replicaAddr, arr);
+    }
+    const kept: StoredReplicationDivergenceWindow[] = [];
+    for (const arr of byReplica.values()) {
+      arr.sort((a, b) => a.windowEnd - b.windowEnd);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.windowEnd - b.windowEnd);
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.replicationDivergenceWindows.length;
+    this.replicationDivergenceWindows = this.replicationDivergenceWindows.filter(
+      (w) => w.windowEnd >= cutoffTimestamp || (connectionId !== undefined && w.connectionId !== connectionId),
+    );
+    this.replicationDivergenceWindowKeys = new Set(
+      this.replicationDivergenceWindows.map((w) => this.replicationDivergenceWindowKey(w.connectionId, w)),
+    );
+    return before - this.replicationDivergenceWindows.length;
   }
 
   // AI Cache/Memory Sample Methods

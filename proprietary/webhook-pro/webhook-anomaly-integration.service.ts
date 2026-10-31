@@ -3,6 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 
+const DEDICATED_EVENT_METRICS = new Set([
+  'command_p99',
+  'retry_amplification',
+  'replication_divergence',
+]);
+
 /**
  * Webhook Anomaly Integration Service
  *
@@ -93,10 +99,11 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    */
   private async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
-      // command_p99 regressions and retry amplification each have a dedicated event
-      // (latency.regression.detected, retry_amplification.detected); skip the generic
-      // anomaly.detected here so one incident doesn't produce two Pro webhook deliveries.
-      if (anomaly.metricType === 'command_p99' || anomaly.metricType === 'retry_amplification') {
+      // command_p99 regressions, retry amplification and replication divergence each have
+      // a dedicated event (latency.regression.detected, retry_amplification.detected,
+      // replication.divergence); skip the generic anomaly.detected here so one incident
+      // doesn't produce two Pro webhook deliveries.
+      if (DEDICATED_EVENT_METRICS.has(anomaly.metricType)) {
         return;
       }
 

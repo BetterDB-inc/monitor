@@ -60,6 +60,10 @@ export async function runRetentionSweep(
     { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(sampleCutoff) },
     { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(sampleCutoff) },
     {
+      name: 'replication_divergence_windows',
+      fn: () => storage.pruneOldReplicationDivergenceWindows(sampleCutoff),
+    },
+    {
       name: 'vector_index_snapshots',
       fn: () => storage.pruneOldVectorIndexSnapshots(sampleCutoff),
     },

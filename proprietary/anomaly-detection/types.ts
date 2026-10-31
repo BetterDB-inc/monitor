@@ -68,6 +68,7 @@ export enum MetricType {
   CONNECTION_CHURN = 'connection_churn',
   RETRY_AMPLIFICATION = 'retry_amplification',
   ERROR_REPLIES = 'error_replies',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
 }
 
 /**
@@ -111,6 +112,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.CONNECTION_CHURN,
   MetricType.RETRY_AMPLIFICATION,
   MetricType.ERROR_REPLIES,
+  MetricType.REPLICATION_DIVERGENCE,
 ]);
 
 export enum AnomalySeverity {
@@ -137,6 +139,7 @@ export enum AnomalyPattern {
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
   RETRY_AMPLIFICATION = 'retry_amplification',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
   UNKNOWN = 'unknown',
 }
 
@@ -154,6 +157,7 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
   resolved: boolean;
   resolvedAt?: number;
   connectionId?: string;
