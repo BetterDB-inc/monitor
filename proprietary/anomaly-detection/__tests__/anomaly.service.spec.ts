@@ -2237,6 +2237,41 @@ describe('AnomalyService', () => {
       expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
+    it('raises a conflict again when its drop lands while a later conflict saves', async () => {
+      const secondConflict = ['nodeXXXXXXXX', 'nodeYYYYYYYY'].map((id, i) => ({
+        ...splitBrainNodes[0],
+        id,
+        address: `10.0.0.${i + 8}:6379@16379`,
+        flags: ['master'],
+        slots: [[5461, 10922]],
+      }));
+      const raisedFor = (id: string) =>
+        service
+          .getRecentEvents()
+          .filter(
+            (e) =>
+              e.metricType === MetricType.CLUSTER_TOPOLOGY && e.message.includes(id.slice(0, 8)),
+          );
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue([
+        ...splitBrainNodes,
+        ...secondConflict,
+      ]);
+      storage.saveAnomalyEvent.mockImplementationOnce(() => {
+        (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        return Promise.reject(new Error('storage down'));
+      });
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      expect(raisedFor('nodeAAAAAAAA')).toHaveLength(2);
+      expect(raisedFor('nodeXXXXXXXX')).toHaveLength(1);
+    });
+
     it('stays quiet when an older conflict is dropped after a newer one was saved', async () => {
       const conflicts = () =>
         service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
@@ -8862,6 +8897,16 @@ describe('AnomalyService', () => {
       });
       const persistenceEvents = () => eventsOf(MetricType.PERSISTENCE_CHILD);
 
+      const expireOutboxDuringNextSave = (skip = 0) => {
+        const save = storage.saveAnomalyEvent;
+        const fail = () => Promise.reject(new Error('storage down'));
+        for (let i = 0; i < skip; i += 1) save.mockImplementationOnce(fail);
+        save.mockImplementationOnce(() => {
+          (service as any).persistenceOutbox.due(now + OUTBOX_MAX_AGE_MS + 1);
+          return fail();
+        });
+      };
+
       const expectOlderUnsaved = (events: AnomalyEvent[]) => {
         expect(events).toHaveLength(2);
         expect(events[0].persisted).not.toBe(true);
@@ -8982,6 +9027,79 @@ describe('AnomalyService', () => {
         await run(['finding']);
 
         expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps a large-reply drop that lands while a later offender saves', async () => {
+        const offending = (commands: string[]) =>
+          commands.flatMap((command, c) =>
+            Array.from({ length: 5 }, (_, i) => ({
+              id: c * 10 + i + 1,
+              timestamp: 1000,
+              duration: 20000,
+              command: [command, `k${i}`],
+              clientAddress: '127.0.0.1:1234',
+              clientName: '',
+              type: 'large-reply' as const,
+            })),
+          );
+        const raisedFor = (command: string) =>
+          eventsOf(MetricType.LARGE_REPLY_PRESSURE).filter((e) =>
+            e.message.startsWith(`WARNING: ${command} `),
+          );
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET']));
+        failSaves();
+        await pollWith({});
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET', 'LRANGE']));
+        expireOutboxDuringNextSave();
+        await pollWith({});
+        healSaves();
+        await pollWith({});
+
+        expect(raisedFor('GET')).toHaveLength(2);
+        expect(raisedFor('LRANGE')).toHaveLength(1);
+      });
+
+      it('keeps a gate drop that lands while a later finding saves', async () => {
+        let built = 0;
+        const buildEvent = jest.fn((finding: string) => ({
+          id: `${finding}-${(built += 1)}`,
+          timestamp: now,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message: finding,
+          resolved: false,
+          connectionId: 'conn-1',
+        }));
+        const gate = {
+          ctx: mockCtx,
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+          timestamp: now,
+        };
+        const run = (findings: string[]) =>
+          (service as any).applyTopologyPersistenceGate({ ...gate, findings });
+        const raisedFor = (finding: string) =>
+          buildEvent.mock.calls.filter((call) => call[0] === finding);
+
+        failSaves();
+        expireOutboxDuringNextSave(1);
+        await run(['first', 'second']);
+        healSaves();
+        await run(['first', 'second']);
+
+        expect(raisedFor('first')).toHaveLength(2);
+        expect(raisedFor('second')).toHaveLength(1);
       });
 
       it('holds no latch once every event is saved or dropped', async () => {

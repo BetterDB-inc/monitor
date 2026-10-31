@@ -3256,12 +3256,17 @@ export class AnomalyService
 
       const offenders = detectLargeReplyPressure(entries, thresholdBytes);
 
-      const active = this.activeLargeReplyOffenders.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeLargeReplyOffenders,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(offenders.map(largeReplyPressureSignature));
 
       for (const offender of offenders) {
         const signature = largeReplyPressureSignature(offender);
         if (active.has(signature)) continue; // already alerted for this command
+        active.add(signature);
 
         const event: AnomalyEvent = {
           id: randomUUID(),
@@ -3286,7 +3291,9 @@ export class AnomalyService
 
       // Keep only signatures still offending so a resolved-then-recurring
       // command alerts again (mirrors activeTopologyConflicts).
-      this.activeLargeReplyOffenders.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (err) {
       this.logger.debug(
         `Failed to check large-reply commandlog pressure for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -4314,12 +4321,17 @@ export class AnomalyService
     try {
       const conflicts = detectDuplicatePrimaries(nodes);
 
-      const active = this.activeTopologyConflicts.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeTopologyConflicts,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
         if (active.has(signature)) continue; // already alerted for this conflict
+        active.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -4356,7 +4368,9 @@ export class AnomalyService
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (topologyErr) {
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
@@ -5170,8 +5184,10 @@ export class AnomalyService
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
     const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
-    const active = activeByConn.get(connId) ?? new Set<string>();
-    const eventIds = eventIdsByConn?.get(connId) ?? new Map<string, string>();
+    const active = this.connectionClaims(activeByConn, connId, () => new Set<string>());
+    const eventIds = eventIdsByConn
+      ? this.connectionClaims(eventIdsByConn, connId, () => new Map<string, string>())
+      : new Map<string, string>();
     const currentSignatures = new Set(findings.map(signatureOf));
 
     // Forget recovered signatures so their grace window restarts if they recur.
@@ -5223,13 +5239,13 @@ export class AnomalyService
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      active.add(signature);
+      if (eventIdsByConn) eventIds.set(signature, event.id);
       await this.addLatchedAnomaly(event, ctx, `${connId}:${signature}`, () => {
         activeByConn.get(connId)?.delete(signature);
         const tracked = eventIdsByConn?.get(connId);
         if (tracked?.get(signature) === event.id) tracked.delete(signature);
       });
-      active.add(signature);
-      if (eventIdsByConn) eventIds.set(signature, event.id);
     }
 
     // Auto-resolve (when wired): a recovered signature (has an emitted event id
@@ -5254,16 +5270,14 @@ export class AnomalyService
         }
         if (outcome !== 'retry') eventIds.delete(sig);
       }
-      eventIdsByConn.set(connId, eventIds);
     }
 
     firstSeenByConn.set(connId, firstSeen);
-    activeByConn.set(
-      connId,
-      // Keep signatures active this poll AND preserved ones (unreachable nodes),
-      // so a transient connectivity gap doesn't drop a still-open finding.
-      new Set([...active].filter((sig) => currentSignatures.has(sig) || isPreserved(sig))),
-    );
+    // Keep signatures active this poll AND preserved ones (unreachable nodes),
+    // so a transient connectivity gap doesn't drop a still-open finding.
+    for (const sig of active) {
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
+    }
   }
 
   /**
@@ -5471,6 +5485,14 @@ export class AnomalyService
     if (latch === undefined || this.latchHolders.get(latch) !== anomaly.id) return false;
     this.latchHolders.delete(latch);
     return true;
+  }
+
+  private connectionClaims<T>(byConn: Map<string, T>, connectionId: string, create: () => T): T {
+    const existing = byConn.get(connectionId);
+    if (existing !== undefined) return existing;
+    const claims = create();
+    byConn.set(connectionId, claims);
+    return claims;
   }
 
   private async persistAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
