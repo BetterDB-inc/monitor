@@ -2996,7 +2996,9 @@ export class AnomalyService
         // this scan, so we must not pass the polling ctx. Falls back to the
         // event's connectionId (storage-only) if the node isn't resolvable.
         const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
-        await this.addAnomaly(event, attributedCtx);
+        await this.addAnomaly(event, attributedCtx, () => {
+          this.activeConfigDriftSignatures.delete(signature);
+        });
       }
     } catch (err) {
       this.logger.debug(
@@ -3264,7 +3266,9 @@ export class AnomalyService
           connectionId: ctx.connectionId,
         };
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addAnomaly(event, ctx, () => {
+          this.activeLargeReplyOffenders.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still offending so a resolved-then-recurring
@@ -4328,7 +4332,9 @@ export class AnomalyService
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addAnomaly(event, ctx, () => {
+          this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
@@ -5201,7 +5207,11 @@ export class AnomalyService
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(event, ctx, () => {
+        activeByConn.get(connId)?.delete(signature);
+        const tracked = eventIdsByConn?.get(connId);
+        if (tracked?.get(signature) === event.id) tracked.delete(signature);
+      });
       active.add(signature);
       if (eventIdsByConn) eventIds.set(signature, event.id);
     }

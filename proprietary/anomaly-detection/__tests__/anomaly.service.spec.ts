@@ -2216,6 +2216,27 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('raises the conflict again when the outbox drops its unsaved event', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      await poll();
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      const [first] = conflicts();
+      expect(conflicts()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = conflicts();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
     it('dedupes a persistent conflict to a single alert across polls', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
       await poll();
@@ -3591,6 +3612,27 @@ describe('AnomalyService', () => {
       // Attributed to a real member of the drifting group, not whichever
       // connection's poll happened to run the scan.
       expect(['conn-a', 'conn-b']).toContain(events[0].connectionId);
+    });
+
+    it('raises the drift again when the outbox drops its unsaved event', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll(ctxA);
+      await poll(ctxB);
+      await poll(ctxA);
+      const [first] = driftEvents();
+      expect(driftEvents()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll(ctxA);
+
+      const raised = driftEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
     it('does not alert when only one node of a group is monitored', async () => {
@@ -8633,6 +8675,97 @@ describe('AnomalyService', () => {
         await pollWith(running(140, 3000));
 
         expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+    });
+
+    describe('large-reply pressure', () => {
+      it('raises the offender again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(
+          Array.from({ length: 5 }, (_, i) => ({
+            id: i + 1,
+            timestamp: 1000,
+            duration: 20000,
+            command: ['GET', `k${i}`],
+            clientAddress: '127.0.0.1:1234',
+            clientName: '',
+            type: 'large-reply' as const,
+          })),
+        );
+        failSaves();
+        await pollWith({}, 2);
+        const [first] = eventsOf(MetricType.LARGE_REPLY_PRESSURE);
+        expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith({});
+
+        expectRaisedAgain(MetricType.LARGE_REPLY_PRESSURE, first);
+      });
+    });
+
+    describe('tracked topology gate', () => {
+      let built = 0;
+      const topologyEvent = () => ({
+        id: `finding-${(built += 1)}`,
+        timestamp: now,
+        metricType: MetricType.CLUSTER_TOPOLOGY,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'finding',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+
+      it('raises a finding again on a gate that tracks no event ids', async () => {
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(buildEvent).toHaveBeenCalledTimes(1);
+
+        await expireOutbox();
+        healSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('forgets the tracked id of a dropped event so it is not resolved later', async () => {
+        const eventIdsByConn = new Map<string, Map<string, string>>();
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn,
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(1);
+
+        await expireOutbox();
+
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(0);
       });
     });
 
