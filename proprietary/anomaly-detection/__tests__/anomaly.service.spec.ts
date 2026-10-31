@@ -5240,6 +5240,22 @@ describe('AnomalyService', () => {
       expect(event.persisted).toBe(true);
     });
 
+    it('raises the advisory again when the outbox drops its unsaved event', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+      const [first] = lockoutEvents();
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      const raised = lockoutEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
     it('describes a refusal-only WARNING as refusals, not as sustained saturation', async () => {
       await pollWith({ connected_clients: '100', rejected_connections: '10' });
       await pollWith({ connected_clients: '120', rejected_connections: '25' });
@@ -5504,26 +5520,6 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('4355');
     });
 
-    it('re-alerts the drift on the next poll when the emit fails', async () => {
-      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
-      const addAnomaly = jest
-        .spyOn(service as any, 'addAnomaly')
-        .mockRejectedValueOnce(new Error('storage down'));
-
-      await expect(poll()).resolves.not.toThrow();
-      expect(addAnomaly).toHaveBeenCalledTimes(1);
-      expect(driftEvents()).toEqual([]);
-
-      // The failed emit must NOT leave the signature marked active, or this
-      // security alert stays suppressed until the drift clears and recurs.
-      addAnomaly.mockRestore();
-      await poll();
-
-      const events = driftEvents();
-      expect(events).toHaveLength(1);
-      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
-    });
-
     it('saves the same drift from the outbox when the storage write fails', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
       storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
@@ -5539,23 +5535,22 @@ describe('AnomalyService', () => {
       expect(event.persisted).toBe(true);
     });
 
-    it('still emits the rest of the batch when one drift emit fails', async () => {
-      // Two groups drift in the same poll. The first emit throws; the second must
-      // still be delivered, and the failed one must re-alert on the next poll.
+    it('raises the drift again when the outbox drops its unsaved event', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
-      seedPeer('conn-other-a', [DEFAULT_LINE], 'second-replid');
-      seedPeer('conn-other-b', [DEFAULT_LINE, APP_LINE_WIDER], 'second-replid');
-
-      const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
-      addAnomaly.mockRejectedValueOnce(new Error('storage down'));
-
-      await expect(poll()).resolves.not.toThrow();
-      expect(addAnomaly).toHaveBeenCalledTimes(2);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      await poll();
+      const [first] = driftEvents();
       expect(driftEvents()).toHaveLength(1);
 
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
       await poll();
-      expect(driftEvents()).toHaveLength(2);
-      addAnomaly.mockRestore();
+
+      const raised = driftEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
     });
 
     it('never puts rule material into the event', async () => {

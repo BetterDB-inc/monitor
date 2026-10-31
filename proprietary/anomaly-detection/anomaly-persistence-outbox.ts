@@ -11,6 +11,7 @@ export interface PendingSave {
   ctx?: ConnectionContext;
   enqueuedAt: number;
   rewrite?: boolean;
+  onDrop?: () => void;
 }
 
 export interface PendingResolve {
@@ -36,8 +37,13 @@ export class PersistenceOutbox {
     return this.pending.has(id);
   }
 
-  enqueueSave(anomaly: AnomalyEvent, ctx: ConnectionContext | undefined, now: number): void {
-    this.add({ kind: 'save', id: anomaly.id, anomaly, ctx, enqueuedAt: now });
+  enqueueSave(
+    anomaly: AnomalyEvent,
+    ctx: ConnectionContext | undefined,
+    now: number,
+    onDrop?: () => void,
+  ): void {
+    this.add({ kind: 'save', id: anomaly.id, anomaly, ctx, enqueuedAt: now, onDrop });
   }
 
   enqueueRewrite(anomaly: AnomalyEvent, now: number): void {

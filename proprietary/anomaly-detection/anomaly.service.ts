@@ -62,6 +62,7 @@ import {
   ClientLockoutState,
   LOCKOUT_MIN_STREAK,
   LOCKOUT_UTILIZATION_PCT,
+  clientLockoutRearm,
   commitClientLockoutLevel,
   createClientLockoutState,
   evaluateClientLockout,
@@ -397,6 +398,7 @@ export class AnomalyService
   private removedDivergenceSweeps = new Set<string>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
+    if (entry.kind === 'save') entry.onDrop?.();
   });
   private correlationTicking = false;
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
@@ -1719,7 +1721,7 @@ export class AnomalyService
 
     const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, clientLockoutRearm(state, finding.level));
     commitClientLockoutLevel(state, finding.level);
   }
 
@@ -2508,7 +2510,6 @@ export class AnomalyService
     return fresh;
   }
 
-  // Emits each drift; a failed emit releases its claim for retry.
   private async emitAclDrifts<T extends { nodes: Array<{ connectionId: string }> }>(
     drifts: T[],
     buildEvent: (drift: T) => AnomalyEvent,
@@ -2520,16 +2521,7 @@ export class AnomalyService
       this.logger.warn(`Anomaly detected: ${event.message}`);
       // Attributed to the first node of the group, frequently NOT this poll's connection.
       const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-      let emitFailure: string | null = null;
-      try {
-        await this.addAnomaly(event, attributedCtx);
-      } catch (emitErr) {
-        emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
-      }
-      if (emitFailure !== null) {
-        active.delete(signature(drift));
-        this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
-      }
+      await this.addAnomaly(event, attributedCtx, () => active.delete(signature(drift)));
     }
   }
 
@@ -5384,7 +5376,11 @@ export class AnomalyService
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    onDrop?: () => void,
+  ): Promise<void> {
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
@@ -5397,7 +5393,7 @@ export class AnomalyService
       await this.persistAnomaly(anomaly, ctx);
     } catch (err) {
       this.logger.error('Failed to persist anomaly event:', err);
-      this.persistenceOutbox.enqueueSave(anomaly, ctx, Date.now());
+      this.persistenceOutbox.enqueueSave(anomaly, ctx, Date.now(), onDrop);
     }
   }
 
