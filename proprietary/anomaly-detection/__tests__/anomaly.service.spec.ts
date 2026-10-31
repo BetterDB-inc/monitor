@@ -8472,6 +8472,126 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('fork memory risk', () => {
+      const GB = 1024 * 1024 * 1024;
+      const risky = {
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      const events = () => eventsOf(MetricType.FORK_MEMORY_RISK);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(risky, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(risky);
+
+        expectRaisedAgain(MetricType.FORK_MEMORY_RISK, first);
+      });
+    });
+
+    describe('COB pressure', () => {
+      const HARD = 256 * 1024 * 1024;
+      const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+      const replicated = {
+        memory: { mem_clients_slaves: '0' },
+        replication: { connected_slaves: '1', sync_full: '1' },
+      };
+      const events = () => eventsOf(MetricType.REPL_BUFFER_PRESSURE);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue(LIMIT_RAW);
+        dbClient.getClients = jest
+          .fn()
+          .mockResolvedValue([{ addr: '10.0.0.5:6380', omem: HARD * 0.7 }]);
+        failSaves();
+        await pollWith(replicated, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(replicated);
+
+        expectRaisedAgain(MetricType.REPL_BUFFER_PRESSURE, first);
+      });
+    });
+
+    describe('replica resync loop', () => {
+      const looping = (syncing: string) => ({
+        replication: {
+          role: 'slave',
+          master_link_status: 'down',
+          master_sync_in_progress: syncing,
+        },
+        server: { role: 'slave' },
+      });
+      const events = () => eventsOf(MetricType.RESYNC_LOOP);
+
+      const loop = async () => {
+        for (const syncing of ['1', '0', '1', '0', '1', '0']) {
+          await pollWith(looping(syncing));
+          now += 60_000;
+        }
+      };
+
+      it('raises the loop again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await loop();
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(looping('1'));
+
+        expectRaisedAgain(MetricType.RESYNC_LOOP, first);
+      });
+    });
+
+    describe('control-plane saturation', () => {
+      const events = () =>
+        eventsOf(MetricType.CPU_UTILIZATION).filter(
+          (e) => e.severity === AnomalySeverity.CRITICAL && e.zScore === 0,
+        );
+
+      it('raises the episode again on fresh evidence after the outbox drops it', async () => {
+        let counter = 100;
+        const pollSaturated = async (slaves: string) => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...infoWith({ replication: { connected_slaves: slaves } }),
+            cpu: { used_cpu_sys: String(counter / 2), used_cpu_user: String(counter / 2) },
+          });
+          await poll();
+          counter += 9.5;
+          now += 10_000;
+        };
+
+        failSaves();
+        for (let i = 0; i < 6; i += 1) await pollSaturated('3');
+        await pollSaturated('1');
+        await pollSaturated('1');
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollSaturated('3');
+        await pollSaturated('1');
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+      });
+    });
   });
 
   describe('persistence outbox', () => {

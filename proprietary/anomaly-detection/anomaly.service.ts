@@ -45,6 +45,7 @@ import {
   RESYNC_LOOP_MIN_CYCLES,
   ResyncLoopState,
   acknowledgeResyncLoopFinding,
+  resyncLoopRearm,
   createResyncLoopState,
   detectStuckReplicas,
   evaluateResyncLoop,
@@ -133,6 +134,7 @@ import {
   ReplicaObservation,
   SlaveOutputBufferLimit,
   acknowledgeCobFinding,
+  cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
@@ -149,6 +151,7 @@ import {
   FORK_OOM_CRIT_FRACTION,
   ForkMemoryState,
   acknowledgeForkMemoryFinding,
+  forkMemoryRearm,
   createForkMemoryState,
   evaluateForkMemoryRisk,
 } from './fork-memory-risk-detector';
@@ -182,6 +185,7 @@ import {
   ControlPlaneState,
   SATURATION_CORROBORATION_WINDOW_MS,
   acknowledgeSaturationFinding,
+  controlPlaneSaturationRearm,
   createControlPlaneSaturationEvent,
   createControlPlaneState,
   evaluateControlPlaneSaturation,
@@ -3283,8 +3287,8 @@ export class AnomalyService
    * pressure makes the next save imminent.
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation /
-   * detectCobPressure): the finding is emitted on escalation, the stored level is
-   * advanced ONLY after a successful emit, and it re-arms as the risk recedes.
+   * detectCobPressure): the finding is emitted on escalation and it re-arms as
+   * the risk recedes.
    */
   private async detectForkMemoryRisk(
     info: Record<string, string>,
@@ -3349,10 +3353,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await so a failed emit propagates to the poll error handler; the
-    // acknowledged level is advanced only AFTER a successful emit, so a failed
-    // escalation is retried on the next poll rather than swallowed by hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, forkMemoryRearm(state, finding));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -3546,7 +3547,7 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(event, ctx, cobPressureRearm(state, finding));
       acknowledgeCobFinding(state, finding);
     }
   }
@@ -3713,7 +3714,7 @@ export class AnomalyService
       ctx.connectionId,
     );
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, controlPlaneSaturationRearm(state, timestamp));
     acknowledgeSaturationFinding(state, timestamp);
   }
 
@@ -4398,8 +4399,7 @@ export class AnomalyService
    * master link held down through repeated full-sync attempts that never
    * complete. The pure evaluator owns the window/cycle discipline (so a normal
    * first sync of a large dataset stays silent) and the emit-retry contract:
-   * the finding is re-produced until acknowledged, and acknowledged only AFTER
-   * a successful emit so a failed emit retries next poll.
+   * the finding is re-produced until acknowledged.
    */
   private async detectResyncLoop(
     info: Record<string, string>,
@@ -4434,7 +4434,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, resyncLoopRearm(state));
     acknowledgeResyncLoopFinding(state);
   }
 
