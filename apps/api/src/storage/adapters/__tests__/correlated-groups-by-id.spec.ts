@@ -159,6 +159,16 @@ describe.each<[string, AdapterFactory]>(adapters)(
         expect(rows.map((e) => e.id)).toEqual([b, a, c]);
       });
 
+      it('returns the replica address of a member', async () => {
+        const shared = randomUUID();
+        const id = randomUUID();
+        await save({ ...event(id, CONN, shared, 200), replicaAddr: '10.0.0.2:6379' });
+
+        const [member] = await storage.getCorrelatedGroupMembers([shared], [], 100);
+
+        expect(member.replicaAddr).toBe('10.0.0.2:6379');
+      });
+
       it('returns no members for empty lists and ignores ids storage cannot hold', async () => {
         expect(await storage.getCorrelatedGroupMembers([], [], 100)).toEqual([]);
         expect(await storage.getCorrelatedGroupMembers([], ['failover:conn-a:1'], 100)).toEqual([]);

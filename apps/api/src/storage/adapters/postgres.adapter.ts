@@ -3156,7 +3156,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics,
+        message, correlation_id, related_metrics, replica_addr,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM (
