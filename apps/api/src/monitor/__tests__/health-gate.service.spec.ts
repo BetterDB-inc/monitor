@@ -414,6 +414,7 @@ describe('HealthGateService', () => {
         master_repl_offset: '100000000',
         slave_repl_offset: '50000000',
         master_link_status: 'up',
+        master_sync_in_progress: '0',
         master_last_io_seconds_ago: '1',
       }),
     });
@@ -474,6 +475,7 @@ describe('HealthGateService', () => {
       info: makeInfo({
         role: 'slave',
         master_link_status: 'up',
+        master_sync_in_progress: '0',
         master_last_io_seconds_ago: '45',
       }),
       config: { MONITOR_REPLICA_IO_STALE_SEC: 60 },
@@ -481,6 +483,85 @@ describe('HealthGateService', () => {
     const result = await evaluateSettled(service);
     expect(result.signals.replicaLinkDown).toBe(false);
     expect(result.allow).toBe(true);
+  });
+
+  it.each([
+    ['master_link_status', { master_sync_in_progress: '0', master_last_io_seconds_ago: '1' }],
+    ['master_sync_in_progress', { master_link_status: 'up', master_last_io_seconds_ago: '1' }],
+    ['master_last_io_seconds_ago', { master_link_status: 'up', master_sync_in_progress: '0' }],
+  ])('reports the link as unknown when %s is missing', async (_field, link) => {
+    const { service } = makeService({ info: makeInfo({ role: 'slave', ...link }) });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicaLinkDown).toBeNull();
+    expect(result.allow).toBe(true);
+  });
+
+  it('reports the link as unknown when master_last_io_seconds_ago is unreadable', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'slave',
+        master_link_status: 'up',
+        master_sync_in_progress: '0',
+        master_last_io_seconds_ago: 'soon',
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicaLinkDown).toBeNull();
+  });
+
+  describe('KeyDB multi-master links', () => {
+    const FIRST_MASTER = {
+      master_link_status: 'up',
+      master_sync_in_progress: '0',
+      master_last_io_seconds_ago: '1',
+    };
+
+    it.each([
+      [{ master_1_link_status: 'down' }],
+      [{ master_1_link_status: 'up', master_1_sync_in_progress: '1' }],
+      [
+        {
+          master_1_link_status: 'up',
+          master_1_sync_in_progress: '0',
+          master_1_last_io_seconds_ago: '31',
+        },
+      ],
+    ])('skips when a later master is unhealthy: %j', async (secondMaster) => {
+      const { service } = makeService({
+        info: makeInfo({ role: 'active-replica', ...FIRST_MASTER, replicas: secondMaster }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(true);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+    });
+
+    it('reports the link as healthy when every master is healthy', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'active-replica',
+          ...FIRST_MASTER,
+          replicas: {
+            master_1_link_status: 'up',
+            master_1_sync_in_progress: '0',
+            master_1_last_io_seconds_ago: '2',
+          },
+        }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(false);
+    });
+
+    it('reports the link as unknown when a later master has missing fields', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'active-replica',
+          ...FIRST_MASTER,
+          replicas: { master_1_link_status: 'up' },
+        }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBeNull();
+    });
   });
 
   it('does not assess a master link on a primary', async () => {

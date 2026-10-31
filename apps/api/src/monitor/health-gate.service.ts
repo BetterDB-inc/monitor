@@ -13,6 +13,7 @@ import {
 
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
+const NUMBERED_MASTER_LINK_KEY = /^(master_\d+)_link_status$/;
 const REPLICA_ACK_SAMPLE_GAP_MS = 1100;
 
 @Injectable()
@@ -143,22 +144,51 @@ function readReplication(
   return {
     replicationLagBytes: furthestReplicaGap(readReplicationSection(baseline), replication),
     replicaLinkDown: REPLICA_ROLES.has(replication.role)
-      ? isMasterLinkDown(replication, replicaIoStaleSeconds)
+      ? readReplicaLinkDown(replication, replicaIoStaleSeconds)
       : null,
     infoFailoverInProgress,
   };
 }
 
-function isMasterLinkDown(
+function readReplicaLinkDown(
   replication: Record<string, string>,
   replicaIoStaleSeconds: number,
-): boolean {
-  const linkStatus = replication.master_link_status;
-  return (
-    (linkStatus !== undefined && linkStatus !== 'up') ||
-    replication.master_sync_in_progress === '1' ||
-    toNumber(replication.master_last_io_seconds_ago) > replicaIoStaleSeconds
+): boolean | null {
+  const links = readMasterPrefixes(replication).map((prefix) =>
+    isMasterLinkDown(replication, prefix, replicaIoStaleSeconds),
   );
+  if (links.includes(true)) {
+    return true;
+  }
+  return links.includes(null) ? null : false;
+}
+
+function readMasterPrefixes(replication: Record<string, string>): string[] {
+  const numbered = Object.keys(replication).flatMap((key) => {
+    const match = NUMBERED_MASTER_LINK_KEY.exec(key);
+    return match === null ? [] : [match[1]];
+  });
+  return ['master', ...numbered];
+}
+
+function isMasterLinkDown(
+  replication: Record<string, string>,
+  prefix: string,
+  replicaIoStaleSeconds: number,
+): boolean | null {
+  const linkStatus = replication[`${prefix}_link_status`];
+  const syncInProgress = replication[`${prefix}_sync_in_progress`];
+  const lastIoSeconds = parseNumber(replication[`${prefix}_last_io_seconds_ago`]);
+  if (
+    (linkStatus !== undefined && linkStatus !== 'up') ||
+    syncInProgress === '1' ||
+    (lastIoSeconds !== null && lastIoSeconds > replicaIoStaleSeconds)
+  ) {
+    return true;
+  }
+  return linkStatus === undefined || syncInProgress === undefined || lastIoSeconds === null
+    ? null
+    : false;
 }
 
 function furthestReplicaGap(
