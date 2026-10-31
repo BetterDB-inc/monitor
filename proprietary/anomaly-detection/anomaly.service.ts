@@ -5945,7 +5945,7 @@ export class AnomalyService
       }
       return;
     }
-    if (entry.anomaly.persisted) {
+    if (entry.anomaly.persisted && !entry.rewrite) {
       this.persistenceOutbox.settle(entry.id);
       return;
     }
@@ -6487,8 +6487,7 @@ export class AnomalyService
             await this.persistAnomaly(anomaly);
           } catch (err) {
             this.logger.error('Failed to persist correlated group member:', err);
-            anomaly.persisted = false;
-            this.persistenceOutbox.enqueueSave(anomaly, undefined, Date.now());
+            this.persistenceOutbox.enqueueRewrite(anomaly, Date.now());
           }
         }
       }
@@ -7435,7 +7434,7 @@ export class AnomalyService
       persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
-      this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
+      this.queueResolve(anomalyId, resolvedAt);
       return 'retry';
     }
 
@@ -7445,7 +7444,7 @@ export class AnomalyService
       // caller drops it. A cache-present event may just be a momentary storage
       // miss, so keep retrying that one.
       if (anomaly) {
-        this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
+        this.queueResolve(anomalyId, resolvedAt);
         return 'retry';
       }
       if (evicted) {
@@ -7455,7 +7454,7 @@ export class AnomalyService
       return 'gone';
     }
 
-    this.persistenceOutbox.settle(anomalyId);
+    this.persistenceOutbox.settleResolve(anomalyId);
 
     // Keep the cached copy in sync with the durable store.
     const cached = anomaly ?? evicted;
@@ -7465,6 +7464,16 @@ export class AnomalyService
     }
 
     return 'resolved';
+  }
+
+  private queueResolve(anomalyId: string, resolvedAt: number): void {
+    const pendingSave = this.persistenceOutbox.unsavedAnomaly(anomalyId);
+    if (pendingSave) {
+      pendingSave.resolved = true;
+      pendingSave.resolvedAt = resolvedAt;
+      return;
+    }
+    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {

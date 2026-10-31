@@ -53,6 +53,24 @@ describe('PersistenceOutbox', () => {
     expect(outbox.resolvedAt('b')).toBe(100);
   });
 
+  it('marks a rewrite of a stored event', () => {
+    outbox.enqueueRewrite(event('a'), 0);
+    outbox.enqueueSave(event('b'), undefined, 0);
+
+    expect(outbox.due(0).map((entry) => entry.kind === 'save' && entry.rewrite)).toEqual([true, undefined]);
+  });
+
+  it('settles a resolve but leaves a pending save', () => {
+    outbox.enqueueSave(event('a'), undefined, 0);
+    outbox.enqueueResolve('b', 100, 0);
+
+    outbox.settleResolve('a');
+    outbox.settleResolve('b');
+
+    expect(outbox.has('a')).toBe(true);
+    expect(outbox.has('b')).toBe(false);
+  });
+
   it('drops the oldest entry when full', () => {
     for (let i = 0; i <= OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`id-${i}`, 1, 0);
 
