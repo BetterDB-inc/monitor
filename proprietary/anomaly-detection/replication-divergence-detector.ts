@@ -28,7 +28,7 @@ export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
 export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
-export type ReplicaObservedLevel = DivergenceLevel | 'unobserved';
+export type ReplicaObservedLevel = DivergenceLevel | 'behind' | 'unobserved';
 export type OrphanAssessment = 'pending' | 'diverging' | 'caught_up' | 'unobserved';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
 
@@ -200,6 +200,12 @@ function growthStreak(windows: DivergenceWindow[]): number {
   return streak;
 }
 
+function behindRun(windows: DivergenceWindow[]): number {
+  let run = 0;
+  for (let i = windows.length - 1; i >= 0 && isBehind(windows[i]); i--) run++;
+  return run;
+}
+
 function drainsWithinHorizon(recent: DivergenceWindow[]): boolean {
   const last = recent[recent.length - 1].gapBytes;
   const drainedPerWindow = (recent[0].gapBytes - last) / (recent.length - 1);
@@ -269,7 +275,7 @@ function evaluateReplica(
   }
 
   if (replica.baselineRate === null && (replica.level !== 'none' || target !== 'none')) {
-    replica.baselineRate = baselineRate(rateHistory, streak);
+    replica.baselineRate = baselineRate(rateHistory, Math.max(streak, behindRun(windows)));
   }
 
   const stopped = writesStopped(last);
@@ -509,7 +515,9 @@ export function replicaObservedLevel(
   if (!state?.observed.has(addr) || state.staleAcks.has(addr) || state.lastObservedAt === null) {
     return 'unobserved';
   }
-  return now - state.lastObservedAt > staleAfterMs ? 'unobserved' : 'none';
+  if (now - state.lastObservedAt > staleAfterMs) return 'unobserved';
+  const last = replica?.windows[replica.windows.length - 1];
+  return last && isBehind(last) ? 'behind' : 'none';
 }
 
 export function assessOrphanedReplica(
@@ -570,14 +578,15 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.clearing = false;
 }
 
-export const DIVERGENCE_CORRELATED_METRICS: ReadonlySet<MetricType> = new Set([
-  MetricType.MEMORY_USED,
-  MetricType.MEMORY_OVERHEAD,
-  MetricType.REPL_BUFFER_PRESSURE,
-  MetricType.FORK_MEMORY_RISK,
-  MetricType.INPUT_KBPS,
-  MetricType.OPS_PER_SEC,
-  MetricType.CLUSTER_TOPOLOGY,
+export const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new Map([
+  [MetricType.MEMORY_USED, 'memory growth'],
+  [MetricType.MEMORY_OVERHEAD, 'memory overhead'],
+  [MetricType.REPL_BUFFER_PRESSURE, 'replica output-buffer pressure'],
+  [MetricType.FORK_MEMORY_RISK, 'fork copy-on-write pressure'],
+  [MetricType.INPUT_KBPS, 'write-rate spike'],
+  [MetricType.OPS_PER_SEC, 'write-rate spike'],
+  [MetricType.CLUSTER_TOPOLOGY, 'slot migration'],
+  [MetricType.CPU_UTILIZATION, 'CPU saturation'],
 ]);
 
 function describeReason(finding: DivergenceFinding): string {

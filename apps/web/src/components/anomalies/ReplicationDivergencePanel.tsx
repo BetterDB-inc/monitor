@@ -19,6 +19,7 @@ const LEVEL_BADGE: Record<
   { label: string; variant: 'success' | 'warning' | 'destructive' | 'secondary' }
 > = {
   none: { label: 'In sync', variant: 'success' },
+  behind: { label: 'Lagging', variant: 'secondary' },
   warning: { label: 'Diverging', variant: 'warning' },
   critical: { label: 'Critical', variant: 'destructive' },
   unobserved: { label: 'Not observed', variant: 'secondary' },

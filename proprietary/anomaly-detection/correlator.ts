@@ -8,6 +8,7 @@ import {
   AnomalyType,
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
+import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
 
 interface PatternRule {
   pattern: AnomalyPattern;
@@ -20,14 +21,10 @@ interface PatternRule {
 
 export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
 
-const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new Map([
-  [MetricType.MEMORY_USED, 'memory growth'],
-  [MetricType.MEMORY_OVERHEAD, 'memory overhead'],
-  [MetricType.REPL_BUFFER_PRESSURE, 'replica output-buffer pressure'],
-  [MetricType.FORK_MEMORY_RISK, 'fork copy-on-write pressure'],
-  [MetricType.INPUT_KBPS, 'write-rate spike'],
-  [MetricType.OPS_PER_SEC, 'write-rate spike'],
-  [MetricType.CLUSTER_TOPOLOGY, 'slot migration'],
+const DIVERGENCE_YIELDS_TO: ReadonlySet<MetricType> = new Set([
+  MetricType.ACL_DENIED,
+  MetricType.REPLICATION_ROLE,
+  MetricType.CLUSTER_STATE,
 ]);
 
 function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent[]): string {
@@ -70,8 +67,20 @@ export class Correlator {
 
   private initializePatternRules(): PatternRule[] {
     return [
-      // First so a window holding the saturation marker plus its side effects
-      // (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
+      {
+        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
+        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
+        check: (anomalies) => !anomalies.some((a) => DIVERGENCE_YIELDS_TO.has(a.metricType)),
+        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
+        recommendations: [
+          'Compare the replica offset gap with the primary write rate over the next few minutes',
+          'Check replica host CPU, disk and network for a slow apply path',
+          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
+          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
+        ],
+      },
+      // Before failover so a window holding the saturation marker plus its side
+      // effects (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
       {
         pattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
         requiredMetrics: [MetricType.CPU_UTILIZATION],
@@ -278,17 +287,6 @@ export class Correlator {
           'Ensure sufficient capacity for peak loads',
           'Review client connection pooling settings',
           'Consider implementing auto-scaling if cloud-hosted',
-        ],
-      },
-      {
-        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
-        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
-        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
-        recommendations: [
-          'Compare the replica offset gap with the primary write rate over the next few minutes',
-          'Check replica host CPU, disk and network for a slow apply path',
-          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
-          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
         ],
       },
       // Single metric patterns - catch all individual anomalies

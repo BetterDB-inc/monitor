@@ -192,17 +192,3 @@ function sortedUnique(nums: number[]): number[] {
 export function replicaSlotSignature(a: ReplicaSlotAnomaly): string {
   return `${a.replicaId}|${a.reason}|${a.affectedSlots.join(',')}`;
 }
-
-export function replicaSlotEventId(
-  connectionId: string,
-  signature: string,
-  timestamp: number,
-): string {
-  return `${connectionId}-replica-slot-state-${signature}-${timestamp}`;
-}
-
-export function replicaSlotEventSignature(id: string, connectionId: string): string | null {
-  const prefix = `${connectionId}-replica-slot-state-`;
-  const end = id.lastIndexOf('-');
-  return id.startsWith(prefix) && end > prefix.length ? id.slice(prefix.length, end) : null;
-}

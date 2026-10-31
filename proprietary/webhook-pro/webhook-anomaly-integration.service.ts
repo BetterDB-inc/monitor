@@ -2,6 +2,11 @@ import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
+import { OUTBOX_MAX_AGE_MS } from '../anomaly-detection/anomaly-persistence-outbox';
+
+const LATE_SAVE_LOOKBACK_MS = OUTBOX_MAX_AGE_MS + 60_000;
+const EVENT_PAGE_SIZE = 1000;
+const MAX_LOOKBACK_EVENTS = 10_000;
 
 /**
  * Webhook Anomaly Integration Service
@@ -14,7 +19,8 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
   private readonly logger = new Logger(WebhookAnomalyIntegrationService.name);
   private pollInterval: NodeJS.Timeout | null = null;
   private readonly POLL_INTERVAL_MS = 5000; // Check every 5 seconds
-  private lastCheckedTimestamp: number = Date.now();
+  private readonly startedAt: number = Date.now();
+  private readonly sentEvents = new Map<string, number>();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -62,27 +68,29 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    */
   private async checkForNewAnomalies(): Promise<void> {
     try {
-      const currentTime = Date.now();
+      const now = Date.now();
+      const windowStart = Math.max(this.startedAt, now - LATE_SAVE_LOOKBACK_MS);
 
-      // Get anomalies since last check
-      const anomalies = await this.storage.getAnomalyEvents({
-        startTime: this.lastCheckedTimestamp,
-        endTime: currentTime,
-        limit: 1000,
-      });
+      for (let offset = 0; offset < MAX_LOOKBACK_EVENTS; offset += EVENT_PAGE_SIZE) {
+        const page = await this.storage.getAnomalyEvents({
+          startTime: windowStart,
+          endTime: now,
+          limit: EVENT_PAGE_SIZE,
+          offset,
+        });
 
-      if (anomalies.length > 0) {
-        this.logger.debug(`Found ${anomalies.length} new anomalies to process`);
-
-        // Dispatch webhooks for each anomaly
-        for (const anomaly of anomalies) {
+        for (const anomaly of page) {
+          if (this.sentEvents.has(anomaly.id)) continue;
+          this.sentEvents.set(anomaly.id, anomaly.timestamp);
           await this.dispatchAnomalyWebhook(anomaly);
         }
+
+        if (page.length < EVENT_PAGE_SIZE) break;
       }
 
-      // Update last checked timestamp
-      this.lastCheckedTimestamp = currentTime;
-
+      for (const [id, timestamp] of this.sentEvents) {
+        if (timestamp < windowStart) this.sentEvents.delete(id);
+      }
     } catch (error) {
       this.logger.error('Failed to check for new anomalies:', error);
     }

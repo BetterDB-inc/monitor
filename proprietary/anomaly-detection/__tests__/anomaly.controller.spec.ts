@@ -50,6 +50,16 @@ describe('AnomalyController time bounds', () => {
     it('accepts missing bounds', async () => {
       await expect(call()).resolves.toBeDefined();
     });
+
+    it('accepts fractional timestamps', async () => {
+      await expect(call('1000.5', '2000.9')).resolves.toBeDefined();
+    });
+  });
+
+  it('truncates fractional timestamps', async () => {
+    await controller.getEvents(undefined, undefined, undefined, '1000.5', '2000.9');
+
+    expect(service.getRecentAnomalies.mock.calls[0].slice(0, 2)).toEqual([1000, 2000]);
   });
 
   it('honours an explicit start of 0 on the events route', async () => {

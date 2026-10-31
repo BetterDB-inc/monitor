@@ -99,6 +99,24 @@ function divergences(outcomes: DivergenceOutcome[][]): DivergenceFinding[] {
 }
 
 describe('baseline and outage handling', () => {
+  it('keeps a ceiling alert below critical while the burst behind it continues', () => {
+    const h = new Harness();
+    h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
+    h.windows(Array.from({ length: 8 }, () => ({ gap: 100 * MiB, rate: 10 * MiB })));
+    const burst = divergences(h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB }))));
+
+    expect(burst.map((f) => f.reason)).toEqual(['ceiling']);
+    expect(burst[0].level).toBe('warning');
+  });
+
+  it('holds no baseline when monitoring starts inside a burst', () => {
+    const h = new Harness();
+    const burst = divergences(h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB }))));
+
+    expect(burst.map((f) => f.reason)).toEqual(['ceiling']);
+    expect(h.state.replicas.get(ADDR)?.baselineRate).toBeNull();
+  });
+
   it('escalates a replica first flagged by stale acks once writes return to baseline', () => {
     const h = new Harness();
     h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
@@ -735,6 +753,18 @@ describe('observeDivergence', () => {
       h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
       return { h, last: h.state.lastObservedAt as number };
     };
+
+    it('reports a replica behind under the alert thresholds as behind', () => {
+      const h = new Harness();
+      h.windows([{ gap: 8 * MiB, rate: MiB }, { gap: 8 * MiB, rate: MiB }]);
+      const last = h.state.lastObservedAt as number;
+
+      expect(h.state.replicas.get(ADDR)?.level).toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR, last, 30_000)).toBe('behind');
+
+      h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
+      expect(replicaObservedLevel(h.state, ADDR, h.state.lastObservedAt as number, 30_000)).toBe('none');
+    });
 
     it('stays in sync while samples are within the limit', () => {
       const { h, last } = quiet();

@@ -56,7 +56,7 @@ export interface AnomalyBufferStats {
   isReady: boolean;
 }
 
-export type ReplicationDivergenceLevel = 'none' | 'warning' | 'critical' | 'unobserved';
+export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
 
 export interface ReplicationDivergenceWindow {
   start: number;
