@@ -214,10 +214,6 @@ export function commitClientLockoutLevel(state: ClientLockoutState, level: Locko
   state.pendingRejected = null;
 }
 
-/**
- * Captures the state an escalation is about to replace. The returned function
- * restores it, so an event that never reaches storage is raised again.
- */
 export function clientLockoutRearm(state: ClientLockoutState, level: LockoutLevel): () => void {
   const { level: previousLevel, lastRejected } = state;
   return () => {
