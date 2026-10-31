@@ -103,6 +103,7 @@ interface PendingDisconnect {
 
 export interface ResyncEscalationState {
   online: Set<string>;
+  syncing: Set<string>;
   pending: Map<string, PendingDisconnect>;
   counters: SyncCounters | null;
   coverageSec: number | null;
@@ -121,6 +122,7 @@ export interface ResyncEscalation {
 export function createResyncEscalationState(): ResyncEscalationState {
   return {
     online: new Set(),
+    syncing: new Set(),
     pending: new Map(),
     counters: null,
     coverageSec: null,
@@ -155,12 +157,15 @@ export function observeResyncEscalation(
     });
   }
 
+  const syncing = new Set<string>();
   const escalations: ResyncEscalation[] = [];
   for (const { addr, state: syncState } of sample.replicas) {
+    if (!FULL_SYNC_REPLICA_STATES.has(syncState)) continue;
+    syncing.add(addr);
+    if (!state.syncing.has(addr)) state.attributedFullSyncs += 1;
     const disconnect = state.pending.get(addr);
-    if (!disconnect || !FULL_SYNC_REPLICA_STATES.has(syncState)) continue;
+    if (!disconnect) continue;
     state.pending.delete(addr);
-    state.attributedFullSyncs += 1;
     escalations.push({
       addr,
       disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
@@ -169,6 +174,12 @@ export function observeResyncEscalation(
       partialSyncErrors: 0,
       syncState,
     });
+  }
+
+  for (const addr of online) {
+    if (!state.online.has(addr) && !state.pending.has(addr) && !state.syncing.has(addr)) {
+      state.attributedFullSyncs += 1;
+    }
   }
 
   for (const [addr, disconnect] of state.pending) {
@@ -183,6 +194,7 @@ export function observeResyncEscalation(
     const fullSyncs = moved.full - attributed;
     const partialSyncErrors = moved.partialErr - attributed;
     if (fullSyncs > 0 || partialSyncErrors > 0) {
+      state.attributedFullSyncs += Math.max(0, fullSyncs);
       escalations.push({
         addr,
         disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
@@ -195,6 +207,7 @@ export function observeResyncEscalation(
   }
 
   state.online = online;
+  state.syncing = syncing;
   state.counters = counters;
   if (coverageSec !== null) state.coverageSec = coverageSec;
   return escalations;

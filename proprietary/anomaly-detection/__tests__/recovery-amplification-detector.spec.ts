@@ -300,6 +300,92 @@ describe('observeResyncEscalation', () => {
       expect(a).toEqual([]);
     });
 
+    it('does not blame a reconnect on the initial sync of a new replica', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, at(T0, line(REPLICA_A, 'online')), counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+      observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_B, 'wait_bgsave')),
+        counters(1),
+        null,
+      );
+      observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_B, 'send_bulk')),
+        counters(1),
+        null,
+      );
+
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 4000, line(REPLICA_A, 'online'), line(REPLICA_B, 'send_bulk')),
+        counters(1, 1),
+        null,
+      );
+
+      expect(a).toEqual([]);
+    });
+
+    it('does not blame a reconnect on a new replica that finished syncing between polls', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, at(T0, line(REPLICA_A, 'online')), counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+      observeResyncEscalation(state, at(T0 + 2000, line(REPLICA_B, 'online')), counters(1), null);
+
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_A, 'online'), line(REPLICA_B, 'online')),
+        counters(1, 1),
+        null,
+      );
+
+      expect(a).toEqual([]);
+    });
+
+    it('does not blame two reconnects on one full sync', () => {
+      const state = createResyncEscalationState();
+      const both = at(T0, line(REPLICA_A, 'online'), line(REPLICA_B, 'online'));
+      observeResyncEscalation(state, both, counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+
+      const back = observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_A, 'online'), line(REPLICA_B, 'online')),
+        counters(1, 1),
+        null,
+      );
+
+      expect(back).toHaveLength(1);
+    });
+
+    it('counts a resync seen across several polls once', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, at(T0, line(REPLICA_A, 'online')), counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+      observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_B, 'wait_bgsave')),
+        counters(1),
+        null,
+      );
+      observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_B, 'send_bulk')),
+        counters(1),
+        null,
+      );
+
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 4000, line(REPLICA_A, 'online'), line(REPLICA_B, 'send_bulk')),
+        counters(2),
+        null,
+      );
+
+      expect(a).toMatchObject([{ addr: REPLICA_A, fullSyncs: 1 }]);
+    });
+
     it('still blames a replica whose own failure moved the counters past that', () => {
       const state = createResyncEscalationState();
       const online = at(T0, line(REPLICA_A, 'online'), line(REPLICA_B, 'online'));
