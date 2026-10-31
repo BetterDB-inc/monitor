@@ -105,6 +105,10 @@ function describeCommands(commands: CommandRegression[]): string {
     .join('; ');
 }
 
+export function regressedCommands(message: string): string[] {
+  return [...message.matchAll(/(\S+) p99 /g)].map(([, command]) => command).sort();
+}
+
 const TOPOLOGY_NOTE =
   ' Spikes correlate with cluster topology refresh (cluster|slots/cluster|shards bursts) — check the client topology refresh interval.';
 

@@ -7630,6 +7630,41 @@ describe('AnomalyService', () => {
       );
     });
 
+    describe('P99 alerts on more than one command', () => {
+      const p99 = (timestamp: number, command: string) =>
+        anomaly({
+          timestamp,
+          metricType: MetricType.COMMAND_P99,
+          message: `Sustained P99 latency degradation: ${command} p99 5.0ms (baseline 1.0ms, 5.0x).`,
+        });
+
+      it('does not hold an incident open on a later alert for another command', async () => {
+        const now = Date.now();
+        (service as any).buffers.set('conn-1', new Map());
+        (service as any).recentAnomalies.push(
+          p99(now - 40 * MIN, 'GET'),
+          p99(now - 36 * MIN, 'SET'),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery.status).toBe('recovered');
+      });
+
+      it('keeps an incident open while the same command alerts again', async () => {
+        const now = Date.now();
+        (service as any).buffers.set('conn-1', new Map());
+        (service as any).recentAnomalies.push(
+          p99(now - 40 * MIN, 'GET'),
+          p99(now - 36 * MIN, 'GET'),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery.status).toBe('degraded');
+      });
+    });
+
     it('reports a quiet regression as unknown once its connection is gone', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(

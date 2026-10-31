@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
 import { SequenceRule } from './sequence-rules';
-import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
+import { SUSTAINED_COOLDOWN_MS, regressedCommands } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
 
@@ -170,7 +170,10 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
 }
 
 function signalKey(event: AnomalyEvent): string {
-  return `${event.connectionId ?? ''}\u0000${event.metricType}`;
+  const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
+  return POINT_IN_TIME_METRICS.has(event.metricType)
+    ? `${signal}\u0000${regressedCommands(event.message).join(',')}`
+    : signal;
 }
 
 interface IncidentCluster {
