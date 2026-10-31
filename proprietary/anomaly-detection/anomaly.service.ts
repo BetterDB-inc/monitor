@@ -246,6 +246,7 @@ const MAX_INVOLVED_GROUP_IDS = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 100_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
+const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
 
 @Injectable()
 export class AnomalyService
@@ -5781,10 +5782,13 @@ export class AnomalyService
     startTime?: number,
     endTime?: number,
     pattern?: AnomalyPattern,
-    limit = 50,
+    limit = DEFAULT_CORRELATED_GROUP_RESULTS,
     connectionId?: string,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(Math.trunc(limit), MAX_CORRELATED_GROUP_RESULTS))
+      : DEFAULT_CORRELATED_GROUP_RESULTS;
 
     if (!startTime || startTime >= cacheThreshold) {
       let groups = [...this.recentGroups];
@@ -5792,15 +5796,14 @@ export class AnomalyService
         groups = groups.filter((g) => g.anomalies.some((a) => a.connectionId === connectionId));
       if (pattern) groups = groups.filter((g) => g.pattern === pattern);
       if (endTime) groups = groups.filter((g) => g.timestamp <= endTime);
-      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, boundedLimit);
     }
 
-    const storedLimit = Math.min(limit, MAX_CORRELATED_GROUP_RESULTS);
     const own = await this.storage.getCorrelatedGroups({
       startTime,
       endTime,
       pattern: pattern as string,
-      limit: storedLimit,
+      limit: boundedLimit,
       connectionId,
     });
     const found = connectionId
@@ -5811,12 +5814,12 @@ export class AnomalyService
           startTime,
           endTime,
           pattern,
-          storedLimit,
+          boundedLimit,
         )
       : [];
     const stored = [...new Map([...own, ...found].map((s) => [s.correlationId, s])).values()]
       .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, storedLimit);
+      .slice(0, boundedLimit);
 
     const membersByGroup = new Map<string, AnomalyEvent[]>();
     for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {

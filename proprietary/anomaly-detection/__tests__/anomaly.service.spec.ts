@@ -6569,6 +6569,35 @@ describe('AnomalyService', () => {
       );
     });
 
+    it.each([
+      ['a negative limit', -1, 1],
+      ['a zero limit', 0, 1],
+      ['a fractional limit', 2.9, 2],
+      ['a NaN limit', NaN, 50],
+      ['an infinite limit', Infinity, 50],
+    ])('reads a bounded number of groups for %s', async (_case, limit, expected) => {
+      storage.getCorrelatedGroups.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, limit, 'node-2');
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'node-2', limit: expected }),
+      );
+    });
+
+    it('applies the same limit bounds to cached groups', async () => {
+      (service as any).recentGroups.push({ ...siblingGroup('grp-1', 1_000_000), anomalies: [] });
+
+      const groups = await service.getRecentCorrelatedGroups(
+        undefined,
+        undefined,
+        undefined,
+        NaN,
+      );
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
     it('reads the members of a long result in chunks', async () => {
       const stored = Array.from({ length: 501 }, (_, i) => ({
         ...siblingGroup(`grp-${i}`, 2_000_000 - i * 1_000),
