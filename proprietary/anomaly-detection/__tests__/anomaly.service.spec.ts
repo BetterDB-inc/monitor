@@ -9100,6 +9100,20 @@ describe('AnomalyService', () => {
       expect((service as any).backlogCoverageEventIds.get('conn-1')).not.toBe(first.id);
     });
 
+    it('stays quiet when an older risk is dropped after a newer one was saved', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(clock + OUTBOX_MAX_AGE_MS + 1);
+      await pollPrimary({ bytes: 30_000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+    });
+
     it('emits one escalation when a replica returns through a full resync', async () => {
       await pollPrimary({ bytes: 2000 });
       await pollPrimary({ bytes: 2000, replica: false });

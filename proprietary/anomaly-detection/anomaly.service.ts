@@ -7054,14 +7054,14 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
-    await this.addAnomaly(event, ctx, () => {
+    this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, () => {
       const coverage = this.backlogCoverage.get(ctx.connectionId);
       if (coverage?.level === level) coverage.level = levelBefore;
       if (this.backlogCoverageEventIds.get(ctx.connectionId) === event.id) {
         this.backlogCoverageEventIds.delete(ctx.connectionId);
       }
     });
-    this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
     if (previous && (await this.resolveAnomalyOutcome(previous)) === 'retry') {
       this.staleBacklogEventIds.set(ctx.connectionId, [
         ...(this.staleBacklogEventIds.get(ctx.connectionId) ?? []),
