@@ -6,7 +6,7 @@ import { OUTBOX_MAX_AGE_MS } from '../anomaly-detection/anomaly-persistence-outb
 
 const LATE_SAVE_LOOKBACK_MS = OUTBOX_MAX_AGE_MS + 60_000;
 const EVENT_PAGE_SIZE = 1000;
-const MAX_LOOKBACK_EVENTS = 10_000;
+const MAX_PAGES_PER_POLL = 10;
 
 /**
  * Webhook Anomaly Integration Service
@@ -21,6 +21,7 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
   private readonly POLL_INTERVAL_MS = 5000; // Check every 5 seconds
   private readonly startedAt: number = Date.now();
   private readonly sentEvents = new Map<string, number>();
+  private scanCursor = 0;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -71,22 +72,13 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
       const now = Date.now();
       const windowStart = Math.max(this.startedAt, now - LATE_SAVE_LOOKBACK_MS);
 
-      for (let offset = 0; offset < MAX_LOOKBACK_EVENTS; offset += EVENT_PAGE_SIZE) {
-        const page = await this.storage.getAnomalyEvents({
-          startTime: windowStart,
-          endTime: now,
-          limit: EVENT_PAGE_SIZE,
-          offset,
-        });
-
-        for (const anomaly of page) {
-          if (this.sentEvents.has(anomaly.id)) continue;
-          this.sentEvents.set(anomaly.id, anomaly.timestamp);
-          await this.dispatchAnomalyWebhook(anomaly);
-        }
-
-        if (page.length < EVENT_PAGE_SIZE) break;
+      let cursor = Math.max(this.scanCursor, EVENT_PAGE_SIZE);
+      let more = (await this.dispatchPage(windowStart, now, 0)) === EVENT_PAGE_SIZE;
+      for (let pages = 1; more && pages < MAX_PAGES_PER_POLL; pages++) {
+        more = (await this.dispatchPage(windowStart, now, cursor)) === EVENT_PAGE_SIZE;
+        if (more) cursor += EVENT_PAGE_SIZE;
       }
+      this.scanCursor = more ? cursor : 0;
 
       for (const [id, timestamp] of this.sentEvents) {
         if (timestamp < windowStart) this.sentEvents.delete(id);
@@ -94,6 +86,23 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
     } catch (error) {
       this.logger.error('Failed to check for new anomalies:', error);
     }
+  }
+
+  private async dispatchPage(startTime: number, endTime: number, offset: number): Promise<number> {
+    const page = await this.storage.getAnomalyEvents({
+      startTime,
+      endTime,
+      limit: EVENT_PAGE_SIZE,
+      offset,
+    });
+
+    for (const anomaly of page) {
+      if (this.sentEvents.has(anomaly.id)) continue;
+      this.sentEvents.set(anomaly.id, anomaly.timestamp);
+      await this.dispatchAnomalyWebhook(anomaly);
+    }
+
+    return page.length;
   }
 
   /**
