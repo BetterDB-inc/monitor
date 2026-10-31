@@ -6488,12 +6488,8 @@ export class AnomalyService
         if (!connectionId) continue;
         try {
           for (const anomaly of group.anomalies) {
-            await this.storage.saveAnomalyEvent(
-              this.toStoredAnomalyEvent(anomaly),
-              anomaly.connectionId ?? connectionId,
-            );
-            anomaly.persisted = true;
-            this.persistenceOutbox.settleSave(anomaly.id);
+            anomaly.connectionId ??= connectionId;
+            await this.persistAnomaly(anomaly);
           }
         } catch (err) {
           this.logger.error('Failed to persist correlated group members:', err);

@@ -10169,6 +10169,23 @@ describe('AnomalyService', () => {
         expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
       });
 
+      it('closes a row resolved while correlation saves it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockImplementationOnce(async () => {
+          attempt.resolved = true;
+          attempt.resolvedAt = T0;
+        });
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+
+        await (service as any).correlateAnomalies();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, T0);
+      });
+
       it('keeps a retried event in its correlated group', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         const t = await feed([2, 4, 6, 8, 10], T0);
