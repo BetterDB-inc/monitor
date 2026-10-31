@@ -354,7 +354,7 @@ Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and clos
 - Review `client-output-buffer-limit replica` and `repl-backlog-size` against the write rate
 - If bulk writes or resharding are driving it, throttle them until the replica catches up
 
-**Example scenario**: A bulk import writes faster than a replica can apply. The gap grows for four windows while `lag` stays at 0, and a WARNING fires. The import ends and the write rate returns to baseline, but the gap does not close, so the alert escalates to CRITICAL.
+**Example scenario**: A bulk import writes faster than a replica can apply. The gap grows for four windows while `lag` stays at 0, and a WARNING fires. The import ends and the write rate returns to baseline. Four windows later the gap has not halved and would take more than eight further windows to clear, so the alert escalates to CRITICAL.
 
 ---
 
