@@ -9102,6 +9102,40 @@ describe('AnomalyService', () => {
         expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
       });
 
+      it('holds the outbox until a pending group save settles', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        let failGroup: (err: Error) => void = () => undefined;
+        storage.saveCorrelatedGroup.mockImplementationOnce(
+          () => new Promise((_, reject) => (failGroup = reject)),
+        );
+
+        const tick = (service as any).correlationTick();
+        await new Promise((resolve) => setImmediate(resolve));
+        failGroup(new Error('storage down'));
+        await tick;
+
+        const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.correlationId);
+        expect(ids).toEqual([undefined]);
+      });
+
+      it('retries a grouped member whose correlation save fails', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        expect(attempt.persisted).toBe(true);
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+        await (service as any).correlateAnomalies();
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].correlationId).toBe(attempt.correlationId);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
       it('closes a row resolved while correlation saves it', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         await feed([2, 4, 6, 8, 10], T0);
@@ -9139,7 +9173,7 @@ describe('AnomalyService', () => {
         await (service as any).correlateAnomalies();
         const [group] = (service as any).recentGroups;
         const [attempt] = divergenceCopies();
-        expect(attempt.persisted).toBeUndefined();
+        expect(attempt.persisted).toBeFalsy();
 
         storage.saveAnomalyEvent.mockResolvedValue(undefined);
         await feed([12, 14], t);
@@ -9343,7 +9377,7 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, 7_000);
     });
 
-    it('does not overlap drains', async () => {
+    it('does not overlap correlation ticks', async () => {
       const event = buildEvent();
       await addUnsaved(event);
       let release: () => void = () => undefined;
@@ -9351,9 +9385,9 @@ describe('AnomalyService', () => {
         () => new Promise<void>((resolve) => (release = resolve)),
       );
 
-      const first = drain();
+      const first = (service as any).correlationTick();
       await flush();
-      await drain();
+      await (service as any).correlationTick();
       release();
       await first;
 
@@ -9416,7 +9450,7 @@ describe('AnomalyService', () => {
       jest.useFakeTimers();
       try {
         await service.onModuleInit();
-        jest.advanceTimersByTime((service as any).correlationIntervalMs);
+        await jest.advanceTimersByTimeAsync((service as any).correlationIntervalMs);
 
         expect(spy).toHaveBeenCalledTimes(1);
         await service.onModuleDestroy();
