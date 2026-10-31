@@ -62,6 +62,12 @@ describe('AnomalyController time bounds', () => {
     expect(service.getRecentAnomalies.mock.calls[0].slice(0, 2)).toEqual([1000, 2000]);
   });
 
+  it('truncates a fractional start on the single incident route', async () => {
+    await controller.getIncident('incident-1', 'c1', '1000.5');
+
+    expect(service.getIncidentTimeline).toHaveBeenCalledWith('incident-1', 'c1', 1000);
+  });
+
   it('honours an explicit start of 0 on the events route', async () => {
     await controller.getEvents(undefined, undefined, undefined, '0', '1000');
 
