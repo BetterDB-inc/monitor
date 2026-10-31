@@ -342,8 +342,8 @@ Each condition fires once per episode and the tracking state clears when the chi
 **Detection method**: This is a *window-based* detector, not a z-score spike. It compares each replica's offset with the primary's over windows of 30s or three poll intervals, whichever is longer, and emits:
 - **WARNING** when the gap grows across 4 consecutive windows
 - **WARNING** when the replica stays at least 30s behind for 2 windows, and **CRITICAL** at 120s
-- **CRITICAL** when the write rate is back to baseline but the gap has not closed
-- **CRITICAL** when writes have stopped but the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
+- **CRITICAL** when the write rate is back within 20% of its baseline, but the gap has not halved over 4 windows and at its pace so far would take more than 8 windows to clear. Halving the gap restarts the count
+- **CRITICAL** when writes have stopped and the same check on the gap fails, so the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
 - **WARNING** after 2 windows without acknowledgements, and **CRITICAL** after 4. With writes stopped this needs a gap of at least 1 MiB
 
 Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.

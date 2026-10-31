@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/table';
 import { PaymentRequiredError } from '@/api/client';
 import type { ReplicaDivergenceHistory, ReplicationDivergenceLevel } from '@/types/anomaly';
+import { formatRelative } from '@/utils/connectionType';
 
 const LEVEL_BADGE: Record<
   ReplicationDivergenceLevel,
@@ -82,6 +83,11 @@ export function ReplicationDivergencePanel({
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {r.latest ? formatGap(r.latest.gapBytes) : '—'}
+                      {r.latest && (
+                        <span className="block text-xs text-muted-foreground">
+                          {formatRelative(r.latest.end)}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {formatBehind(r.latest?.secondsBehind ?? null)}
