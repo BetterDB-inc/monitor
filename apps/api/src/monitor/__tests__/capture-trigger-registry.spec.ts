@@ -366,6 +366,22 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('scans past more rows in one millisecond than a tick can read', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger(anyTrigger);
+      const timestamp = trigger.createdAt + 10_000;
+      for (let i = 0; i < 5_300; i++) {
+        await storage.saveAnomalyEvent(makeAnomaly({ metricType: 'memory_used', timestamp }), CONNECTION_ID);
+      }
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: timestamp + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
     it('does not act twice on an event inside the lookback', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
