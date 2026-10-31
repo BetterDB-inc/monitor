@@ -42,6 +42,17 @@ describe('PersistenceOutbox', () => {
     expect(outbox.has('a')).toBe(false);
   });
 
+  it('settles a save but leaves a pending resolve', () => {
+    outbox.enqueueSave(event('a'), undefined, 0);
+    outbox.enqueueResolve('b', 100, 0);
+
+    outbox.settleSave('a');
+    outbox.settleSave('b');
+
+    expect(outbox.has('a')).toBe(false);
+    expect(outbox.resolvedAt('b')).toBe(100);
+  });
+
   it('drops the oldest entry when full', () => {
     for (let i = 0; i <= OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`id-${i}`, 1, 0);
 

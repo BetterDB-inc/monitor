@@ -5410,7 +5410,7 @@ export class AnomalyService
     const wasResolved = anomaly.resolved;
     await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
     anomaly.persisted = true;
-    this.persistenceOutbox.settle(anomaly.id);
+    this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
       this.persistenceOutbox.enqueueResolve(anomaly.id, anomaly.resolvedAt ?? now, now);
@@ -5562,7 +5562,7 @@ export class AnomalyService
                 anomaly.connectionId ?? connectionId,
               );
               anomaly.persisted = true;
-              this.persistenceOutbox.settle(anomaly.id);
+              this.persistenceOutbox.settleSave(anomaly.id);
             }
           }
         } catch (err) {

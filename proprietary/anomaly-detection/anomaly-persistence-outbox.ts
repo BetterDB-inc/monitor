@@ -57,6 +57,10 @@ export class PersistenceOutbox {
     this.pending.delete(id);
   }
 
+  settleSave(id: string): void {
+    if (this.pending.get(id)?.kind === 'save') this.pending.delete(id);
+  }
+
   due(now: number): OutboxEntry[] {
     for (const entry of this.pending.values()) {
       if (now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) continue;

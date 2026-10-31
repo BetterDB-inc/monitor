@@ -7833,6 +7833,23 @@ describe('AnomalyService', () => {
         expect((service as any).persistenceOutbox.size).toBe(0);
       });
 
+      it('keeps a failed resolve pending when correlation saves the event', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+
+        await (service as any).correlateAnomalies();
+        expect(attempt.correlationId).toBeDefined();
+        expect((service as any).persistenceOutbox.has(attempt.id)).toBe(true);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(attempt.resolved).toBe(true);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
       it('keeps a retried event in its correlated group', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         const t = await feed([2, 4, 6, 8, 10], T0);
