@@ -8384,6 +8384,94 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('memory overhead', () => {
+      const overhead = {
+        memory: {
+          maxmemory: '1000',
+          maxmemory_policy: 'noeviction',
+          used_memory: '800',
+          used_memory_overhead: '700',
+          used_memory_startup: '100',
+          used_memory_dataset: '100',
+        },
+      };
+      const quiet = {
+        memory: { ...overhead.memory, used_memory_overhead: '150' },
+      };
+      const inconsistent = {
+        memory: { ...overhead.memory, used_memory_overhead: '900' },
+      };
+      const events = () => eventsOf(MetricType.MEMORY_OVERHEAD);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(overhead, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(overhead);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(overhead);
+        await pollWith(quiet);
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(overhead);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('raises the inconsistency note again when the outbox drops it', async () => {
+        failSaves();
+        await pollWith(inconsistent, 11);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.INFO);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(inconsistent);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('leaves the level armed when only the note is dropped', async () => {
+        await pollWith(overhead);
+        failSaves();
+        await pollWith(inconsistent, 10);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+      });
+    });
+
   });
 
   describe('persistence outbox', () => {

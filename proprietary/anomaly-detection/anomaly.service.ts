@@ -140,6 +140,7 @@ import {
 import {
   MemoryOverheadState,
   acknowledgeMemoryOverheadFinding,
+  memoryOverheadRearm,
   createMemoryOverheadState,
   evaluateMemoryOverhead,
 } from './memory-overhead-detector';
@@ -3559,8 +3560,7 @@ export class AnomalyService
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation
    * and detectCobPressure): the finding is emitted only when the level escalates
-   * above the acknowledged level, and the ackedLevel is advanced only AFTER a
-   * successful emit so a failed emit retries on the next poll.
+   * above the acknowledged level.
    */
   private async detectMemoryOverhead(
     info: Record<string, string>,
@@ -3648,9 +3648,7 @@ export class AnomalyService
     } else {
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     }
-    // Await the emit so a failure propagates; advance ackedLevel only AFTER a
-    // successful emit so a failed escalation is retried next poll.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, memoryOverheadRearm(state, finding));
     acknowledgeMemoryOverheadFinding(state, finding);
   }
 
