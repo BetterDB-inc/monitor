@@ -398,7 +398,7 @@ export class AnomalyService
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
   });
-  private drainingPersistenceOutbox = false;
+  private correlationTicking = false;
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -600,11 +600,8 @@ export class AnomalyService
 
     // Start correlation loop
     this.correlationInterval = setInterval(() => {
-      this.correlateAnomalies().catch((err) => {
-        this.logger.error('Failed to correlate anomalies:', err);
-      });
-      this.drainPersistenceOutbox().catch((err) => {
-        this.logger.error('Failed to drain anomaly persistence outbox:', err);
+      this.correlationTick().catch((err) => {
+        this.logger.error('Failed to run anomaly correlation tick:', err);
       });
     }, this.correlationIntervalMs);
 
@@ -5417,16 +5414,21 @@ export class AnomalyService
     }
   }
 
-  private async drainPersistenceOutbox(): Promise<void> {
-    if (this.drainingPersistenceOutbox) return;
-    this.drainingPersistenceOutbox = true;
+  private async correlationTick(): Promise<void> {
+    if (this.correlationTicking) return;
+    this.correlationTicking = true;
     try {
-      await this.sweepRemovedConnections();
-      for (const entry of this.persistenceOutbox.due(Date.now())) {
-        await this.retryPersistence(entry);
-      }
+      await this.correlateAnomalies();
+      await this.drainPersistenceOutbox();
     } finally {
-      this.drainingPersistenceOutbox = false;
+      this.correlationTicking = false;
+    }
+  }
+
+  private async drainPersistenceOutbox(): Promise<void> {
+    await this.sweepRemovedConnections();
+    for (const entry of this.persistenceOutbox.due(Date.now())) {
+      await this.retryPersistence(entry);
     }
   }
 
@@ -5557,13 +5559,15 @@ export class AnomalyService
         savedGroups.push(group);
 
         if (!connectionId) continue;
-        try {
-          for (const anomaly of group.anomalies) {
-            anomaly.connectionId ??= connectionId;
+        for (const anomaly of group.anomalies) {
+          anomaly.connectionId ??= connectionId;
+          try {
             await this.persistAnomaly(anomaly);
+          } catch (err) {
+            this.logger.error('Failed to persist correlated group member:', err);
+            anomaly.persisted = false;
+            this.persistenceOutbox.enqueueSave(anomaly, undefined, Date.now());
           }
-        } catch (err) {
-          this.logger.error('Failed to persist correlated group members:', err);
         }
       }
 
