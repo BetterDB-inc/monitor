@@ -207,31 +207,23 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (timestamp < startTime) this.seenAnomalies.delete(id);
     }
     const pageSize = 200;
-    // Drain pagination by walking offset until storage returns fewer rows
-    // than requested. Cap total work per tick so a runaway backlog can't
-    // starve other tick steps.
     const maxPerTick = 5000;
-    const collected: StoredAnomalyEvent[] = [];
-    for (let offset = 0; offset < maxPerTick; offset += pageSize) {
+    const sorted: StoredAnomalyEvent[] = [];
+    for (let offset = 0; sorted.length < maxPerTick; offset += pageSize) {
       const page = await this.storage.getAnomalyEvents({
         startTime,
+        order: 'asc',
         limit: pageSize,
         offset,
       });
-      if (page.length === 0) {
-        break;
-      }
-      collected.push(...page);
+      sorted.push(...page.filter((evt) => !this.seenAnomalies.has(evt.id)));
       if (page.length < pageSize) {
         break;
       }
     }
-    if (collected.length === 0) {
+    if (sorted.length === 0) {
       return;
     }
-    // Storage returns DESC by timestamp; iterate oldest-first so a partial
-    // drain still leaves a coherent watermark.
-    const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
     let maxTs = this.lastAnomalyAt;
     for (const evt of sorted) {
       if (evt.timestamp > maxTs) {

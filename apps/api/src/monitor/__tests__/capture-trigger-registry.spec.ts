@@ -319,6 +319,28 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('fires for a late event in a lookback busier than one tick can read', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger(anyTrigger);
+      for (let i = 0; i < 5_300; i++) {
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 + i }),
+          CONNECTION_ID,
+        );
+      }
+      await registry.tick();
+      await registry.tick();
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
     it('does not act twice on an event inside the lookback', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));

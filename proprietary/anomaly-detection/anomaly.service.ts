@@ -6146,12 +6146,7 @@ export class AnomalyService
       now - windowMs,
     ));
     const fingerprintOf = () =>
-      [
-        live.length,
-        live.filter((a) => a.resolved).length,
-        live.at(-1)?.id,
-        this.liveBoundaries.length,
-      ].join(':');
+      [...live.map((a) => `${a.id}:${a.resolved}`), this.liveBoundaries.length].join(',');
     if (
       fingerprintOf() !== this.incidentFingerprint ||
       now - this.incidentsBuiltAt >= INCIDENT_REBUILD_INTERVAL_MS

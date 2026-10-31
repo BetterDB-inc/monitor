@@ -7705,6 +7705,20 @@ describe('AnomalyService', () => {
       expect(build).toHaveBeenCalledTimes(2);
     });
 
+    it('rebuilds when an event replaces another on one connection', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      const incidentEvents = (service as any).incidentEvents;
+      incidentEvents.set('conn-1', [anomaly({ id: 'a', timestamp: now - MIN })]);
+      incidentEvents.set('conn-2', [anomaly({ id: 'b', timestamp: now - MIN })]);
+      await (service as any).tickIncidentTimelines(now);
+
+      incidentEvents.set('conn-1', [anomaly({ id: 'c', timestamp: now })]);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
     it('rebuilds as soon as an event resolves', async () => {
       const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
       const now = Date.now();
