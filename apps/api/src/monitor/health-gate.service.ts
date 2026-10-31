@@ -145,7 +145,7 @@ function isMasterLinkDown(
 }
 
 function furthestReplicaGap(replication: Record<string, string>): number | null {
-  const masterOffset = parseOffset(replication.master_repl_offset);
+  const masterOffset = parseNumber(replication.master_repl_offset);
   if (masterOffset === null) {
     return null;
   }
@@ -155,7 +155,7 @@ function furthestReplicaGap(replication: Record<string, string>): number | null 
       continue;
     }
     const fields = InfoParser.parseKvLine(value, ',');
-    const offset = parseOffset(fields.offset);
+    const offset = parseNumber(fields.offset);
     if (offset === null || fields.state !== 'online' || !isAckOverdue(fields.lag)) {
       continue;
     }
@@ -164,22 +164,15 @@ function furthestReplicaGap(replication: Record<string, string>): number | null 
   return gap;
 }
 
-function parseOffset(raw: string | undefined): number | null {
-  const offset = parseInt(raw ?? '', 10);
-  return isNaN(offset) ? null : offset;
-}
-
 function isAckOverdue(lagSeconds: string | undefined): boolean {
   return lagSeconds === undefined || toNumber(lagSeconds) > REPLICA_ACK_INTERVAL_SECONDS;
 }
 
+function parseNumber(raw: string | undefined): number | null {
+  const n = parseInt(raw ?? '', 10);
+  return isNaN(n) ? null : n;
+}
+
 function toNumber(raw: string | undefined): number {
-  if (raw === undefined) {
-    return 0;
-  }
-  const n = parseInt(raw, 10);
-  if (isNaN(n)) {
-    return 0;
-  }
-  return n;
+  return parseNumber(raw) ?? 0;
 }
