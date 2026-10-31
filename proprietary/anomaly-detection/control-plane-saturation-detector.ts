@@ -247,6 +247,15 @@ export function acknowledgeSaturationFinding(state: ControlPlaneState, timestamp
   state.evidenceFloorAt = timestamp;
 }
 
+export function controlPlaneSaturationRearm(
+  state: ControlPlaneState,
+  timestamp: number,
+): () => void {
+  return () => {
+    if (state.evidenceFloorAt === timestamp) state.episodeActive = false;
+  };
+}
+
 /**
  * The single constructor for the synthetic saturation event. Every emit goes
  * through here so the explicit `syntheticPattern` marker can never drift from

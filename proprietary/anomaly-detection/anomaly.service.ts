@@ -90,6 +90,7 @@ import {
   RESYNC_LOOP_MIN_CYCLES,
   ResyncLoopState,
   acknowledgeResyncLoopFinding,
+  resyncLoopRearm,
   createResyncLoopState,
   detectStuckReplicas,
   evaluateResyncLoop,
@@ -180,6 +181,7 @@ import {
   ReplicaObservation,
   SlaveOutputBufferLimit,
   acknowledgeCobFinding,
+  cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
@@ -187,6 +189,7 @@ import {
 import {
   MemoryOverheadState,
   acknowledgeMemoryOverheadFinding,
+  memoryOverheadRearm,
   createMemoryOverheadState,
   evaluateMemoryOverhead,
 } from './memory-overhead-detector';
@@ -195,6 +198,7 @@ import {
   FORK_OOM_CRIT_FRACTION,
   ForkMemoryState,
   acknowledgeForkMemoryFinding,
+  forkMemoryRearm,
   createForkMemoryState,
   evaluateForkMemoryRisk,
 } from './fork-memory-risk-detector';
@@ -228,6 +232,7 @@ import {
   ControlPlaneState,
   SATURATION_CORROBORATION_WINDOW_MS,
   acknowledgeSaturationFinding,
+  controlPlaneSaturationRearm,
   createControlPlaneSaturationEvent,
   createControlPlaneState,
   evaluateControlPlaneSaturation,
@@ -238,6 +243,7 @@ import {
   LOAD_WARN_FRACTION,
   LoadSaturationState,
   acknowledgeLoadSaturationFinding,
+  loadSaturationRearm,
   createLoadSaturationState,
   evaluateLoadSaturation,
 } from './load-saturation-detector';
@@ -523,6 +529,7 @@ export class AnomalyService
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
   private clientSaturationEventIds = new Map<string, string[]>();
+  private clientSaturationRaisedBy = new Map<string, string>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -841,6 +848,7 @@ export class AnomalyService
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
     this.clientSaturationEventIds.delete(connectionId);
+    this.clientSaturationRaisedBy.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftFlappingEventIds.delete(connectionId);
@@ -1799,19 +1807,19 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      // Await the emit so a failure propagates to the poll error handler. The
-      // stored level is advanced only AFTER a successful emit (below), so a failed
-      // escalation is retried on the next poll rather than being silently swallowed
-      // by the hysteresis.
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(
+        event,
+        ctx,
+        this.clientSaturationRearm(ctx.connectionId, event.id, prev),
+      );
+      this.clientSaturationRaisedBy.set(ctx.connectionId, event.id);
       this.clientSaturationEventIds.set(ctx.connectionId, [
         ...(this.clientSaturationEventIds.get(ctx.connectionId) ?? []),
         event.id,
       ]);
     }
 
-    // Advance the level last: on escalation only after addAnomaly resolved; on
-    // steady/de-escalation immediately (the latter re-arms alerting on recovery).
+    // Advance the level last: on steady/de-escalation this re-arms alerting on recovery.
     this.clientSaturationLevel.set(ctx.connectionId, level);
     if (level === 'none') await this.settleEvents(this.clientSaturationEventIds, ctx.connectionId);
   }
@@ -1969,6 +1977,21 @@ export class AnomalyService
       }
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
+  }
+
+  private clientSaturationRearm(
+    connectionId: string,
+    eventId: string,
+    previous: 'none' | 'warning' | 'critical',
+  ): () => void {
+    return () => {
+      if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
+      this.clientSaturationRaisedBy.delete(connectionId);
+      const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
+      if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
+        this.clientSaturationLevel.set(connectionId, previous);
+      }
+    };
   }
 
   /**
@@ -3250,7 +3273,9 @@ export class AnomalyService
         // this scan, so we must not pass the polling ctx. Falls back to the
         // event's connectionId (storage-only) if the node isn't resolvable.
         const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
-        await this.addAnomaly(event, attributedCtx);
+        await this.addAnomaly(event, attributedCtx, () => {
+          this.activeConfigDriftSignatures.delete(signature);
+        });
       }
     } catch (err) {
       this.logger.debug(
@@ -3405,10 +3430,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await the emit so a failure propagates to the poll error handler, and
-    // acknowledge only AFTER a successful emit — a failed escalation is then
-    // retried on the next poll rather than being swallowed by the hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, loadSaturationRearm(state, finding));
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
@@ -3528,7 +3550,9 @@ export class AnomalyService
           connectionId: ctx.connectionId,
         };
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addAnomaly(event, ctx, () => {
+          this.activeLargeReplyOffenders.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still offending so a resolved-then-recurring
@@ -3551,8 +3575,8 @@ export class AnomalyService
    * pressure makes the next save imminent.
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation /
-   * detectCobPressure): the finding is emitted on escalation, the stored level is
-   * advanced ONLY after a successful emit, and it re-arms as the risk recedes.
+   * detectCobPressure): the finding is emitted on escalation and it re-arms as
+   * the risk recedes.
    */
   private async detectForkMemoryRisk(
     info: Record<string, string>,
@@ -3617,10 +3641,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await so a failed emit propagates to the poll error handler; the
-    // acknowledged level is advanced only AFTER a successful emit, so a failed
-    // escalation is retried on the next poll rather than swallowed by hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, forkMemoryRearm(state, finding));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -3814,7 +3835,7 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(event, ctx, cobPressureRearm(state, finding));
       acknowledgeCobFinding(state, finding);
     }
   }
@@ -3828,8 +3849,7 @@ export class AnomalyService
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation
    * and detectCobPressure): the finding is emitted only when the level escalates
-   * above the acknowledged level, and the ackedLevel is advanced only AFTER a
-   * successful emit so a failed emit retries on the next poll.
+   * above the acknowledged level.
    */
   private async detectMemoryOverhead(
     info: Record<string, string>,
@@ -3917,9 +3937,7 @@ export class AnomalyService
     } else {
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     }
-    // Await the emit so a failure propagates; advance ackedLevel only AFTER a
-    // successful emit so a failed escalation is retried next poll.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, memoryOverheadRearm(state, finding));
     acknowledgeMemoryOverheadFinding(state, finding);
   }
 
@@ -3984,7 +4002,7 @@ export class AnomalyService
       ctx.connectionId,
     );
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, controlPlaneSaturationRearm(state, timestamp));
     acknowledgeSaturationFinding(state, timestamp);
   }
 
@@ -4395,6 +4413,10 @@ export class AnomalyService
           await this.addAnomaly(
             this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx),
             ctx,
+            () => {
+              if (kind === 'rdb') state.rdbErrorReported = false;
+              else state.aofErrorReported = false;
+            },
           );
           if (kind === 'rdb') state.rdbErrorReported = true;
           else state.aofErrorReported = true;
@@ -4490,6 +4512,9 @@ export class AnomalyService
       await this.addAnomaly(
         this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx),
         ctx,
+        () => {
+          track.reportedStall = false;
+        },
       );
       return;
     }
@@ -4499,6 +4524,9 @@ export class AnomalyService
       await this.addAnomaly(
         this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx),
         ctx,
+        () => {
+          track.warnedLong = false;
+        },
       );
     }
   }
@@ -4609,7 +4637,9 @@ export class AnomalyService
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addAnomaly(event, ctx, () => {
+          this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
@@ -4866,8 +4896,7 @@ export class AnomalyService
    * master link held down through repeated full-sync attempts that never
    * complete. The pure evaluator owns the window/cycle discipline (so a normal
    * first sync of a large dataset stays silent) and the emit-retry contract:
-   * the finding is re-produced until acknowledged, and acknowledged only AFTER
-   * a successful emit so a failed emit retries next poll.
+   * the finding is re-produced until acknowledged.
    */
   private async detectResyncLoop(
     info: Record<string, string>,
@@ -4902,7 +4931,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, resyncLoopRearm(state));
     acknowledgeResyncLoopFinding(state);
   }
 
