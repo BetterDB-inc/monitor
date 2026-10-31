@@ -402,6 +402,7 @@ export class AnomalyService
   });
   private correlationTicking = false;
   private outboxDraining = false;
+  private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -5389,6 +5390,7 @@ export class AnomalyService
     }
 
     this.countAnomaly(anomaly, ctx);
+    if (ctx) this.anomalyContexts.set(anomaly, ctx);
 
     try {
       await this.persistAnomaly(anomaly, ctx);
@@ -5399,10 +5401,11 @@ export class AnomalyService
   }
 
   private async persistAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
-    const connectionId = ctx?.connectionId || anomaly.connectionId;
+    const context = ctx ?? this.anomalyContexts.get(anomaly);
+    const connectionId = context?.connectionId || anomaly.connectionId;
     if (!connectionId) return;
     const wasResolved = anomaly.resolved;
-    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
+    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
     anomaly.persisted = true;
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {

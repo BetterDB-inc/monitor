@@ -8225,6 +8225,33 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, 7_000);
     });
 
+    it('stores the source of a save that lands during correlation', async () => {
+      const event = buildEvent();
+      const ctx = { ...mockCtx, host: 'replica-host', port: 7000 };
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(event, ctx);
+
+      await (service as any).correlateAnomalies();
+
+      expect(event.persisted).toBe(true);
+      expect(stored(event.id).at(-1)).toMatchObject({ sourceHost: 'replica-host', sourcePort: 7000 });
+    });
+
+    it('stores the source of a save retried after correlation', async () => {
+      const event = buildEvent();
+      const ctx = { ...mockCtx, host: 'replica-host', port: 7000 };
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(event, ctx);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).correlateAnomalies();
+      outbox().settle(event.id);
+      outbox().enqueueRewrite(event, Date.now());
+
+      await drain();
+
+      expect(stored(event.id).at(-1)).toMatchObject({ sourceHost: 'replica-host', sourcePort: 7000 });
+    });
+
     it('does not overlap outbox drains', async () => {
       const event = buildEvent({ correlationId: 'group-1' });
       await addUnsaved(event);
