@@ -28,7 +28,7 @@ export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
 export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
-export type ReplicaObservedLevel = DivergenceLevel | 'unobserved';
+export type ReplicaObservedLevel = DivergenceLevel | 'behind' | 'unobserved';
 export type OrphanAssessment = 'pending' | 'diverging' | 'caught_up' | 'unobserved';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
 
@@ -515,7 +515,9 @@ export function replicaObservedLevel(
   if (!state?.observed.has(addr) || state.staleAcks.has(addr) || state.lastObservedAt === null) {
     return 'unobserved';
   }
-  return now - state.lastObservedAt > staleAfterMs ? 'unobserved' : 'none';
+  if (now - state.lastObservedAt > staleAfterMs) return 'unobserved';
+  const last = replica?.windows[replica.windows.length - 1];
+  return last && isBehind(last) ? 'behind' : 'none';
 }
 
 export function assessOrphanedReplica(

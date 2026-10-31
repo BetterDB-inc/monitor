@@ -7148,6 +7148,18 @@ describe('AnomalyService', () => {
       expect(restartRecoveries()).toHaveLength(1);
     });
 
+    it('shows a replica with an event left open by a restart as behind until it is assessed', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      const t = await feed([0, 0], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(t);
+      expect((await divergenceHistory())[0].level).toBe('behind');
+
+      const later = await feed([0, 0, 0], t);
+      jest.spyOn(Date, 'now').mockReturnValue(later);
+      expect((await divergenceHistory())[0].level).toBe('none');
+    });
+
     it('closes an orphaned event without a recovery when the replica alerts again', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
 

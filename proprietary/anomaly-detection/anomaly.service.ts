@@ -5873,10 +5873,12 @@ export class AnomalyService
     }
     const now = Date.now();
     const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
+    const orphans = this.divergenceOrphans.get(connectionId);
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
-        const level = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const observed = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const level = observed === 'none' && orphans?.has(replica) ? 'behind' : observed;
         return {
           replica,
           level,

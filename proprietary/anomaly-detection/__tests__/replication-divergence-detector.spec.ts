@@ -754,6 +754,18 @@ describe('observeDivergence', () => {
       return { h, last: h.state.lastObservedAt as number };
     };
 
+    it('reports a replica behind under the alert thresholds as behind', () => {
+      const h = new Harness();
+      h.windows([{ gap: 8 * MiB, rate: MiB }, { gap: 8 * MiB, rate: MiB }]);
+      const last = h.state.lastObservedAt as number;
+
+      expect(h.state.replicas.get(ADDR)?.level).toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR, last, 30_000)).toBe('behind');
+
+      h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
+      expect(replicaObservedLevel(h.state, ADDR, h.state.lastObservedAt as number, 30_000)).toBe('none');
+    });
+
     it('stays in sync while samples are within the limit', () => {
       const { h, last } = quiet();
 
