@@ -200,6 +200,12 @@ function growthStreak(windows: DivergenceWindow[]): number {
   return streak;
 }
 
+function behindRun(windows: DivergenceWindow[]): number {
+  let run = 0;
+  for (let i = windows.length - 1; i >= 0 && isBehind(windows[i]); i--) run++;
+  return run;
+}
+
 function drainsWithinHorizon(recent: DivergenceWindow[]): boolean {
   const last = recent[recent.length - 1].gapBytes;
   const drainedPerWindow = (recent[0].gapBytes - last) / (recent.length - 1);
@@ -269,7 +275,7 @@ function evaluateReplica(
   }
 
   if (replica.baselineRate === null && (replica.level !== 'none' || target !== 'none')) {
-    replica.baselineRate = baselineRate(rateHistory, streak);
+    replica.baselineRate = baselineRate(rateHistory, Math.max(streak, behindRun(windows)));
   }
 
   const stopped = writesStopped(last);

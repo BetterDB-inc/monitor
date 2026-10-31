@@ -99,6 +99,24 @@ function divergences(outcomes: DivergenceOutcome[][]): DivergenceFinding[] {
 }
 
 describe('baseline and outage handling', () => {
+  it('keeps a ceiling alert below critical while the burst behind it continues', () => {
+    const h = new Harness();
+    h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
+    h.windows(Array.from({ length: 8 }, () => ({ gap: 100 * MiB, rate: 10 * MiB })));
+    const burst = divergences(h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB }))));
+
+    expect(burst.map((f) => f.reason)).toEqual(['ceiling']);
+    expect(burst[0].level).toBe('warning');
+  });
+
+  it('holds no baseline when monitoring starts inside a burst', () => {
+    const h = new Harness();
+    const burst = divergences(h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB }))));
+
+    expect(burst.map((f) => f.reason)).toEqual(['ceiling']);
+    expect(h.state.replicas.get(ADDR)?.baselineRate).toBeNull();
+  });
+
   it('escalates a replica first flagged by stale acks once writes return to baseline', () => {
     const h = new Harness();
     h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
