@@ -2893,10 +2893,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
       params.push(options.scope.id, options.scope.connectionIds);
     }
-    if (options.correlationIds) {
-      conditions.push(`correlation_id = ANY($${paramIndex++})`);
-      params.push(options.correlationIds);
-    }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
       const past = direction === 'ASC' ? '>' : '<';
@@ -3109,10 +3105,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.pattern) {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
-    }
-    if (options.correlationIds) {
-      conditions.push(`correlation_id = ANY($${paramIndex++})`);
-      params.push(options.correlationIds);
     }
     if (options.scope) {
       conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);

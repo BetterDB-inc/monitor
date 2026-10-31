@@ -1,4 +1,4 @@
-import { IncidentTimelineEntry, matchSequence } from '../incident-timeline';
+import { IncidentTimelineEntry, matchSequence, matchSequences } from '../incident-timeline';
 import { ReplicationStreamSample } from '../replication-stream';
 import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
@@ -25,7 +25,7 @@ function sample(over: Partial<ReplicationStreamSample> = {}): ReplicationStreamS
     masterReplOffset: 1000,
     bytesPerSec: 10_000,
     bytesPerSecEwma: 10_000,
-    replBacklogHistlen: 1_000_000,
+    replBacklogSize: 1_000_000,
     replicas: [
       { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 1, lagSec: 0, gapBytes: 0 },
     ],
@@ -51,13 +51,16 @@ describe('backlogCoverageSec', () => {
   it('holds when a rate or the backlog is unknown', () => {
     expect(backlogCoverageSec(sample({ bytesPerSec: null }))).toBeNull();
     expect(backlogCoverageSec(sample({ bytesPerSecEwma: null }))).toBeNull();
-    expect(backlogCoverageSec(sample({ replBacklogHistlen: null }))).toBeNull();
+    expect(backlogCoverageSec(sample({ replBacklogSize: null }))).toBeNull();
   });
 
-  it('carries no risk on an idle primary, a replica, or with no replicas', () => {
+  it('holds on a primary with no replicas, so a disconnect cannot read as recovery', () => {
+    expect(backlogCoverageSec(sample({ replicas: [] }))).toBeNull();
+  });
+
+  it('carries no risk on an idle primary or a replica', () => {
     expect(backlogCoverageSec(sample({ bytesPerSecEwma: 10 }))).toBe(Number.POSITIVE_INFINITY);
     expect(backlogCoverageSec(sample({ role: 'replica' }))).toBe(Number.POSITIVE_INFINITY);
-    expect(backlogCoverageSec(sample({ replicas: [] }))).toBe(Number.POSITIVE_INFINITY);
   });
 });
 
@@ -367,6 +370,20 @@ describe('recovery amplification rule', () => {
     ];
 
     expect(matchSequence(entries, rule())).toHaveLength(2);
+  });
+
+  it('records every repeat of the pattern in one incident', () => {
+    const entries = [
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 60_000),
+      entry(MetricType.RESYNC_ESCALATION, T0 + 120_000),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 180_000),
+    ];
+
+    expect(matchSequences(entries, rule()).map((m) => m.map((e) => e.timestamp))).toEqual([
+      [T0, T0 + 60_000],
+      [T0 + 120_000, T0 + 180_000],
+    ]);
   });
 
   it('ignores a cost on another connection', () => {

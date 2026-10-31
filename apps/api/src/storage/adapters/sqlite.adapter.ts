@@ -2835,14 +2835,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(this.scopeCondition(options.scope));
       params.push(options.scope.id, ...options.scope.connectionIds);
     }
-    if (options.correlationIds) {
-      conditions.push(
-        options.correlationIds.length > 0
-          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
-          : '1 = 0',
-      );
-      params.push(...options.correlationIds);
-    }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
       const past = direction === 'ASC' ? '>' : '<';
@@ -3040,14 +3032,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.pattern) {
       conditions.push('pattern = ?');
       params.push(options.pattern);
-    }
-    if (options.correlationIds) {
-      conditions.push(
-        options.correlationIds.length > 0
-          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
-          : '1 = 0',
-      );
-      params.push(...options.correlationIds);
     }
     if (options.scope) {
       conditions.push(this.scopeCondition(options.scope));

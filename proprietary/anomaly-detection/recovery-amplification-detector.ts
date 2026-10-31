@@ -32,11 +32,12 @@ export function createBacklogCoverageState(): BacklogCoverageState {
 }
 
 export function backlogCoverageSec(sample: ReplicationStreamSample): number | null {
-  if (sample.role !== 'primary' || sample.replicas.length === 0) return Number.POSITIVE_INFINITY;
-  const { replBacklogHistlen, bytesPerSec, bytesPerSecEwma } = sample;
-  if (replBacklogHistlen === null || bytesPerSec === null || bytesPerSecEwma === null) return null;
+  if (sample.role !== 'primary') return Number.POSITIVE_INFINITY;
+  if (sample.replicas.length === 0) return null;
+  const { replBacklogSize, bytesPerSec, bytesPerSecEwma } = sample;
+  if (replBacklogSize === null || bytesPerSec === null || bytesPerSecEwma === null) return null;
   if (bytesPerSecEwma <= BACKLOG_COVERAGE_MIN_BYTES_PER_SEC) return Number.POSITIVE_INFINITY;
-  return replBacklogHistlen / Math.max(bytesPerSec, bytesPerSecEwma);
+  return replBacklogSize / Math.max(bytesPerSec, bytesPerSecEwma);
 }
 
 export function backlogCoverageRecovered(coverageSec: number | null): boolean {

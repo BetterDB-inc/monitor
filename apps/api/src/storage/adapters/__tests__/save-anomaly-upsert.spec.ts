@@ -153,27 +153,5 @@ describe.each<[string, AdapterFactory]>(adapters)(
         expect.objectContaining({ resolved: true, resolvedAt: 1_700_000_060_000 }),
       );
     });
-
-    it('filters by correlation id before the page limit', async () => {
-      const other = randomUUID();
-      await storage.saveAnomalyEvents(
-        Array.from({ length: 120 }, (_, i) =>
-          event({
-            id: randomUUID(),
-            timestamp: 1_700_000_000_000 + i,
-            correlationId: i < 2 ? CORRELATION_ID : other,
-          }),
-        ),
-        CONN,
-      );
-
-      const rows = await storage.getAnomalyEvents({
-        connectionId: CONN,
-        correlationIds: [CORRELATION_ID],
-      });
-
-      expect(rows).toHaveLength(2);
-      expect(await storage.getAnomalyEvents({ connectionId: CONN, correlationIds: [] })).toEqual([]);
-    });
   },
 );

@@ -248,7 +248,6 @@ export interface AnomalyQueryOptions {
   connectionId?: string;
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
-  correlationIds?: string[];
   scope?: AnomalyScopeFilter;
 }
 

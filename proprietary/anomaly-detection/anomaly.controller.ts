@@ -25,15 +25,6 @@ import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 
-export function parseIncidentTime(name: string, value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new BadRequestException(`${name} must be a positive epoch time in milliseconds`);
-  }
-  return parsed;
-}
-
 function parseTimeBound(name: string, value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
@@ -53,6 +44,15 @@ function parseTimeRange(
     throw new BadRequestException('startTime must not be after endTime');
   }
   return { parsedStartTime, parsedEndTime };
+}
+
+function parseLimit(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new BadRequestException('limit must be a positive integer');
+  }
+  return parsed;
 }
 
 @Controller('anomaly')
@@ -199,11 +199,12 @@ export class AnomalyController {
     @Query('startTime') startTime?: string,
     @Query('endTime') endTime?: string,
   ): Promise<IncidentTimeline[]> {
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
     return this.anomalyService.getIncidentTimelines(
       connectionId,
-      parseIncidentTime('startTime', startTime),
-      parseIncidentTime('endTime', endTime),
-      limit ? parseInt(limit, 10) : 50,
+      parsedStartTime,
+      parsedEndTime,
+      parseLimit(limit, 50),
     );
   }
 
@@ -219,7 +220,7 @@ export class AnomalyController {
     const incident = await this.anomalyService.getIncidentTimeline(
       incidentId,
       connectionId,
-      parseIncidentTime('startTime', startTime),
+      parseTimeBound('startTime', startTime),
     );
     if (!incident) throw new NotFoundException(`Incident ${incidentId} not found`);
     return incident;

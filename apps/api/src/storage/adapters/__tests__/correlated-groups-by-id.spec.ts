@@ -7,7 +7,7 @@ import type {
 } from '../../../common/interfaces/storage-port.interface';
 
 describe.each<[string, AdapterFactory]>(adapters)(
-  'getCorrelatedGroups by correlation id (%s)',
+  'getCorrelatedGroups filters (%s)',
   (_name, makeAdapter) => {
     let storage: StoragePort;
     let cleanup: () => Promise<void>;
@@ -34,33 +34,6 @@ describe.each<[string, AdapterFactory]>(adapters)(
 
     afterEach(async () => {
       await cleanup();
-    });
-
-    it('returns only the requested groups', async () => {
-      const rows = await storage.getCorrelatedGroups({
-        connectionId: CONN,
-        correlationIds: [ID1, ID3],
-      });
-
-      expect(rows.map((g) => g.correlationId)).toEqual([ID3, ID1]);
-    });
-
-    it('returns nothing for an empty id list', async () => {
-      const rows = await storage.getCorrelatedGroups({ connectionId: CONN, correlationIds: [] });
-
-      expect(rows).toEqual([]);
-    });
-
-    it('leaves out a requested group stored under another connection', async () => {
-      const foreign = randomUUID();
-      await storage.saveCorrelatedGroup(group(foreign, 1500), 'conn-other');
-
-      const rows = await storage.getCorrelatedGroups({
-        connectionId: CONN,
-        correlationIds: [ID1, foreign],
-      });
-
-      expect(rows.map((g) => g.correlationId)).toEqual([ID1]);
     });
 
     it('filters by several connections and patterns', async () => {
@@ -95,10 +68,7 @@ describe.each<[string, AdapterFactory]>(adapters)(
       const withIds = randomUUID();
       await storage.saveCorrelatedGroup({ ...group(withIds, 4000), anomalyIds: ids }, CONN);
 
-      const rows = await storage.getCorrelatedGroups({
-        connectionId: CONN,
-        correlationIds: [withIds, ID1],
-      });
+      const rows = await storage.getCorrelatedGroups({ connectionId: CONN, limit: 2 });
 
       expect(rows.map((g) => g.anomalyIds)).toEqual([ids, undefined]);
     });

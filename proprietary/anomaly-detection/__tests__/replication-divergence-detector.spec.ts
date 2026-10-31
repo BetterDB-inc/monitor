@@ -58,7 +58,7 @@ class Harness {
       masterReplOffset: 0,
       bytesPerSec: spec.rate,
       bytesPerSecEwma: spec.rate,
-      replBacklogHistlen: null,
+      replBacklogSize: null,
       replicas,
     };
   }
@@ -388,7 +388,7 @@ describe('observeDivergence', () => {
       masterReplOffset: 0,
       bytesPerSec: 1,
       bytesPerSecEwma: 1,
-      replBacklogHistlen: null,
+      replBacklogSize: null,
       replicas: [],
     };
     expect(observeDivergence(state, sample, WINDOW_MS)).toEqual([]);
@@ -867,7 +867,7 @@ describe('observeDivergence', () => {
       masterReplOffset: 0,
       bytesPerSec: MiB,
       bytesPerSecEwma: MiB,
-      replBacklogHistlen: null,
+      replBacklogSize: null,
       replicas: [],
     });
     expect(observeDivergence(h.state, demoted(), WINDOW_MS)).toEqual([

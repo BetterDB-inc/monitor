@@ -301,6 +301,61 @@ describe('CaptureTriggerRegistry', () => {
     });
   });
 
+  describe('tick - events saved late', () => {
+    const anyTrigger = { connectionId: CONNECTION_ID, metricType: METRIC, anomalyType: ANOMALY };
+
+    it('fires for an event saved behind the watermark', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger(anyTrigger);
+      const unrelated = { metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 };
+      await storage.saveAnomalyEvent(makeAnomaly(unrelated), CONNECTION_ID);
+      await registry.tick();
+
+      const late = makeAnomaly({ timestamp: trigger.createdAt + 1_000 });
+      await storage.saveAnomalyEvent(late, CONNECTION_ID);
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not act twice on an event inside the lookback', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const seen = makeAnomaly({ timestamp: Date.now() + 1_000 });
+      await storage.saveAnomalyEvent(seen, CONNECTION_ID);
+      await registry.tick();
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ metricType: 'memory_used', timestamp: seen.timestamp + 1 }),
+        CONNECTION_ID,
+      );
+
+      await registry.createTrigger(anyTrigger);
+      await registry.tick();
+
+      expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+
+    it('does not replay history after a restart', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage, dispatcher } = makeRegistry(captureService, healthGate);
+      const trigger = await registry.createTrigger(anyTrigger);
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: trigger.createdAt }), CONNECTION_ID);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const restarted = new CaptureTriggerRegistry(
+        storage,
+        captureService as unknown as MonitorCaptureService,
+        healthGate as unknown as HealthGateService,
+        dispatcher as unknown as WebhookDispatcherService,
+      );
+      await restarted.tick();
+
+      expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+  });
+
   describe('tick - health gate skip', () => {
     it('marks the trigger as skipped when the health gate blocks the fire', async () => {
       const captureService = makeCaptureService();

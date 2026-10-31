@@ -291,6 +291,8 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
+const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
+
 const ADOPTED_METRICS: MetricType[] = [
   MetricType.CLIENT_SATURATION,
   MetricType.BACKLOG_COVERAGE_RISK,
@@ -335,6 +337,9 @@ export class AnomalyService
   private sequenceDedupeSeed: Promise<boolean> | null = null;
   private incidentBoundarySeed: Promise<boolean> | null = null;
   private liveBoundaries: StoredIncidentBoundary[] = [];
+  private tickingIncidentTimelines = false;
+  private incidentFingerprint: string | null = null;
+  private incidentsBuiltAt = 0;
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
@@ -1015,6 +1020,7 @@ export class AnomalyService
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
+      await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
@@ -1677,13 +1683,6 @@ export class AnomalyService
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
 
-  // Minimum replication-offset gap (bytes) for a lagging-promotion alert
-  // (valkey#2587). Sibling-replica offsets are compared same-cycle from the last
-  // poll snapshot; healthy co-replicas sit at near-identical offsets, so any real
-  // gap is meaningful. Kept as a single tunable knob so poll-skew noise (should
-  // it appear under heavy write load) can be dialed up without touching logic.
-  private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
-
   private async detectConnectionChurn(
     ctx: ConnectionContext,
     info: Record<string, string>,
@@ -1759,8 +1758,6 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
-    await this.adoptOpenEvents(ctx, timestamp);
-
     const connected = this.parseNumber(info.connected_clients);
     const maxClients = this.parseNumber(info.maxclients);
     if (connected === null || maxClients === null || maxClients <= 0) return;
@@ -1858,6 +1855,8 @@ export class AnomalyService
       if (untracked.length > 0) {
         this.clientSaturationEventIds.set(connectionId, [...tracked, ...untracked]);
       }
+      this.seedClientSaturationLevel(connectionId, rows(MetricType.CLIENT_SATURATION));
+      this.seedBacklogCoverageLevel(connectionId, rows(MetricType.BACKLOG_COVERAGE_RISK));
 
       const current = this.backlogCoverageEventIds.get(connectionId);
       const stale = rows(MetricType.BACKLOG_COVERAGE_RISK)
@@ -1880,6 +1879,29 @@ export class AnomalyService
         }`,
       );
     }
+  }
+
+  private openEventLevel(open: StoredAnomalyEvent[]): 'none' | 'warning' | 'critical' {
+    if (open.length === 0) return 'none';
+    return open.some((e) => e.severity === AnomalySeverity.CRITICAL) ? 'critical' : 'warning';
+  }
+
+  private seedClientSaturationLevel(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const level = this.openEventLevel(open);
+    const current = this.clientSaturationLevel.get(connectionId) ?? 'none';
+    if (AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[current]) {
+      this.clientSaturationLevel.set(connectionId, level);
+    }
+  }
+
+  private seedBacklogCoverageLevel(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const level = this.openEventLevel(open);
+    if (level === 'none') return;
+    const coverage = this.backlogCoverage.get(connectionId) ?? createBacklogCoverageState();
+    if (AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[coverage.level]) {
+      coverage.level = level;
+    }
+    this.backlogCoverage.set(connectionId, coverage);
   }
 
   private adoptResyncEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
@@ -1909,7 +1931,10 @@ export class AnomalyService
   }
 
   private adoptReshardEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
-    const [newest, ...older] = [...open].sort((a, b) => b.timestamp - a.timestamp);
+    const tracked = new Set(this.reshardSkewEventIds.get(connectionId)?.values());
+    const [newest, ...older] = open
+      .filter((e) => !tracked.has(e.id))
+      .sort((a, b) => b.timestamp - a.timestamp);
     if (newest) this.adoptedReshardEventIds.set(connectionId, newest.id);
     for (const event of older) this.closeLater(event.id);
   }
@@ -1932,10 +1957,12 @@ export class AnomalyService
 
   private adoptReplicaSlotEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
     const eventIds = this.replicaSlotEventIds.get(connectionId) ?? new Map<string, string>();
+    const tracked = new Set(eventIds.values());
     for (const event of [...open].sort((a, b) => a.timestamp - b.timestamp)) {
+      if (tracked.has(event.id)) continue;
       const signature = replicaSlotEventSignature(event.id, connectionId);
       const previous = signature === null ? undefined : eventIds.get(signature);
-      if (signature === null) this.closeLater(event.id);
+      if (signature === null || (previous && tracked.has(previous))) this.closeLater(event.id);
       else if (previous !== event.id) {
         if (previous) this.closeLater(previous);
         eventIds.set(signature, event.id);
@@ -3267,6 +3294,13 @@ export class AnomalyService
       port: info.port,
     };
   }
+
+  // Minimum replication-offset gap (bytes) for a lagging-promotion alert
+  // (valkey#2587). Sibling-replica offsets are compared same-cycle from the last
+  // poll snapshot; healthy co-replicas sit at near-identical offsets, so any real
+  // gap is meaningful. Kept as a single tunable knob so poll-skew noise (should
+  // it appear under heavy write load) can be dialed up without touching logic.
+  private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
 
   /**
    * Emits a data-loss WARNING when a standalone node was just promoted to primary
@@ -4607,13 +4641,6 @@ export class AnomalyService
    */
   private static readonly STUCK_REPLICA_MIN_PERSIST_MS = 30_000;
 
-  /**
-   * Detects a replica orphaned by a lost/replaced primary that never re-attaches
-   * (valkey-io/valkey#2090) from this connection's `CLUSTER NODES` view. Emits a
-   * WARNING once the orphaned pair has persisted past the failover grace window,
-   * dedupes per (replica, primary) pair, and clears state on recovery so a
-   * resolved-then-recurring stuck replica alerts again.
-   */
   private async detectReshardPressure(
     info: Record<string, string>,
     ctx: ConnectionContext,
@@ -4790,6 +4817,13 @@ export class AnomalyService
     };
   }
 
+  /**
+   * Detects a replica orphaned by a lost/replaced primary that never re-attaches
+   * (valkey-io/valkey#2090) from this connection's `CLUSTER NODES` view. Emits a
+   * WARNING once the orphaned pair has persisted past the failover grace window,
+   * dedupes per (replica, primary) pair, and clears state on recovery so a
+   * resolved-then-recurring stuck replica alerts again.
+   */
   private async detectStuckReplicas(
     ctx: ConnectionContext,
     timestamp: number,
@@ -6092,6 +6126,16 @@ export class AnomalyService
   }
 
   private async tickIncidentTimelines(now = Date.now()): Promise<void> {
+    if (this.tickingIncidentTimelines) return;
+    this.tickingIncidentTimelines = true;
+    try {
+      await this.refreshIncidentTimelines(now);
+    } finally {
+      this.tickingIncidentTimelines = false;
+    }
+  }
+
+  private async refreshIncidentTimelines(now: number): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
     const known = new Map(
@@ -6101,14 +6145,28 @@ export class AnomalyService
     const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
       now - windowMs,
     ));
-    this.liveIncidents = this.incidentTimelineBuilder.build(
-      live,
-      now,
-      this.incidentRecoveryProbe,
-      this.liveBoundaries,
-    );
+    const fingerprintOf = () =>
+      [
+        live.length,
+        live.filter((a) => a.resolved).length,
+        live.at(-1)?.id,
+        this.liveBoundaries.length,
+      ].join(':');
+    if (
+      fingerprintOf() !== this.incidentFingerprint ||
+      now - this.incidentsBuiltAt >= INCIDENT_REBUILD_INTERVAL_MS
+    ) {
+      this.liveIncidents = this.incidentTimelineBuilder.build(
+        live,
+        now,
+        this.incidentRecoveryProbe,
+        this.liveBoundaries,
+      );
+      this.incidentsBuiltAt = now;
+    }
     if (boundariesSeeded) await this.storeIncidentBoundaries(now - windowMs);
     else this.incidentBoundarySeed = null;
+    this.incidentFingerprint = fingerprintOf();
     if (!seeded) {
       this.sequenceDedupeSeedFailedAt ??= now;
       if (now - this.sequenceDedupeSeedFailedAt < windowMs) {
@@ -6193,10 +6251,6 @@ export class AnomalyService
       this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
     }
     return true;
-  }
-
-  getLiveIncidentTimelines(): IncidentTimeline[] {
-    return this.liveIncidents;
   }
 
   async getIncidentTimelines(
@@ -6644,38 +6698,49 @@ export class AnomalyService
     const stored = [
       ...new Map([...direct, ...sequence].map((s) => [s.correlationId, s])).values(),
     ].sort((a, b) => b.timestamp - a.timestamp);
-    const members = (
-      await this.storage.getCorrelatedGroupMembers(
-        stored.map((s) => s.correlationId),
-        stored.flatMap((s) => s.anomalyIds ?? []),
-        this.maxRecentEvents,
-      )
-    )
-      .map((a) => this.storedToAnomalyEvent(a))
-      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
-
     const groups: CorrelatedAnomalyGroup[] = [];
-    for (const s of stored) {
-      if (groups.length >= limit) break;
-      const ids = new Set(s.anomalyIds);
-      const anomalies = members.filter((a) => a.correlationId === s.correlationId || ids.has(a.id));
-      if (
-        connectionId &&
-        s.connectionId !== connectionId &&
-        !anomalies.some((a) => a.connectionId === connectionId)
-      ) {
-        continue;
-      }
+    let start = 0;
+    for (
+      let pageSize = limit;
+      start < stored.length && groups.length < limit;
+      pageSize *= 2
+    ) {
+      const page = stored.slice(start, start + pageSize);
+      start += page.length;
+      const members = (
+        await this.storage.getCorrelatedGroupMembers(
+          page.map((s) => s.correlationId),
+          page.flatMap((s) => s.anomalyIds ?? []),
+          this.maxRecentEvents,
+        )
+      )
+        .map((a) => this.storedToAnomalyEvent(a))
+        .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
 
-      groups.push({
-        correlationId: s.correlationId,
-        timestamp: s.timestamp,
-        pattern: s.pattern as AnomalyPattern,
-        severity: s.severity as AnomalySeverity,
-        diagnosis: s.diagnosis,
-        recommendations: s.recommendations,
-        anomalies,
-      });
+      for (const s of page) {
+        if (groups.length >= limit) break;
+        const ids = new Set(s.anomalyIds);
+        const anomalies = members.filter(
+          (a) => a.correlationId === s.correlationId || ids.has(a.id),
+        );
+        if (
+          connectionId &&
+          s.connectionId !== connectionId &&
+          !anomalies.some((a) => a.connectionId === connectionId)
+        ) {
+          continue;
+        }
+
+        groups.push({
+          correlationId: s.correlationId,
+          timestamp: s.timestamp,
+          pattern: s.pattern as AnomalyPattern,
+          severity: s.severity as AnomalySeverity,
+          diagnosis: s.diagnosis,
+          recommendations: s.recommendations,
+          anomalies,
+        });
+      }
     }
 
     return groups;
@@ -6845,9 +6910,9 @@ export class AnomalyService
 
   private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
     const id = this.backlogCoverageEventIds.get(connectionId);
-    if (id && (await this.resolveAnomalyOutcome(id)) !== 'retry') {
-      this.backlogCoverageEventIds.delete(connectionId);
-    }
+    if (!id) return;
+    this.backlogCoverageEventIds.delete(connectionId);
+    await this.resolveAnomalyOutcome(id);
   }
 
   private buildResyncEscalationEvent(

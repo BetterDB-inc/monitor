@@ -143,6 +143,20 @@ export function matchSequence(
   return null;
 }
 
+export function matchSequences(
+  entries: IncidentTimelineEntry[],
+  rule: SequenceRule,
+): IncidentTimelineEntry[][] {
+  const matches: IncidentTimelineEntry[][] = [];
+  let remaining = entries;
+  for (let matched = matchSequence(remaining, rule); matched; matched = matchSequence(remaining, rule)) {
+    matches.push(matched);
+    const used = matched;
+    remaining = remaining.filter((e) => !used.includes(e));
+  }
+  return matches;
+}
+
 export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
   return {
     anomalyId: event.id,
@@ -328,15 +342,15 @@ export class IncidentTimelineBuilder {
 
     const sequenceMatches: IncidentSequenceMatch[] = [];
     for (const rule of this.rules()) {
-      const matched = matchSequence(entries, rule);
-      if (!matched) continue;
-      sequenceMatches.push({
-        pattern: rule.pattern,
-        anomalyIds: matched.map((e) => e.anomalyId),
-        diagnosis: rule.diagnosis,
-        recommendations: rule.recommendations,
-        severity: maxSeverity(matched.map((e) => e.severity)),
-      });
+      for (const matched of matchSequences(entries, rule)) {
+        sequenceMatches.push({
+          pattern: rule.pattern,
+          anomalyIds: matched.map((e) => e.anomalyId),
+          diagnosis: rule.diagnosis,
+          recommendations: rule.recommendations,
+          severity: maxSeverity(matched.map((e) => e.severity)),
+        });
+      }
     }
 
     const openSignals: MetricType[] = [];

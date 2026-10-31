@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { AnomalyController, parseIncidentTime } from '../anomaly.controller';
+import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 
 jest.mock('@proprietary/licenses', () => ({
@@ -14,6 +14,8 @@ describe('AnomalyController time bounds', () => {
     getRecentCorrelatedGroups: jest.fn().mockResolvedValue([]),
     getSummary: jest.fn().mockResolvedValue({}),
     getReplicationDivergenceHistory: jest.fn().mockResolvedValue([]),
+    getIncidentTimelines: jest.fn().mockResolvedValue([]),
+    getIncidentTimeline: jest.fn().mockResolvedValue({}),
   };
   const controller = new AnomalyController(service as unknown as AnomalyService);
 
@@ -22,6 +24,7 @@ describe('AnomalyController time bounds', () => {
     ['groups', async (s, e) => controller.getGroups(undefined, undefined, undefined, s, e)],
     ['summary', async (s, e) => controller.getSummary(undefined, s, e)],
     ['replication-divergence', async (s, e) => controller.getReplicationDivergence('c1', s, e)],
+    ['incidents', async (s, e) => controller.getIncidents(undefined, undefined, s, e)],
   ];
 
   beforeEach(() => jest.clearAllMocks());
@@ -57,19 +60,23 @@ describe('AnomalyController time bounds', () => {
 
 });
 
-describe('parseIncidentTime', () => {
-  it('passes through a missing value', () => {
-    expect(parseIncidentTime('startTime', undefined)).toBeUndefined();
+describe('AnomalyController incident limit', () => {
+  const service = { getIncidentTimelines: jest.fn().mockResolvedValue([]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it.each(['abc', '-1', '0', '1.5', '10abc', '   '])('rejects %j', async (limit) => {
+    await expect(controller.getIncidents(undefined, limit)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(service.getIncidentTimelines).not.toHaveBeenCalled();
   });
 
-  it('parses an epoch time', () => {
-    expect(parseIncidentTime('startTime', '1700000000000')).toBe(1_700_000_000_000);
-  });
+  it('passes a valid limit and defaults to 50', async () => {
+    await controller.getIncidents('c1', '10');
+    await controller.getIncidents('c1');
 
-  it.each(['', 'abc', '12abc', 'NaN', 'Infinity', '0', '-1', '1.5', '99999999999999999999'])(
-    'rejects %j',
-    (value) => {
-      expect(() => parseIncidentTime('startTime', value)).toThrow(BadRequestException);
-    },
-  );
+    expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([10, 50]);
+  });
 });

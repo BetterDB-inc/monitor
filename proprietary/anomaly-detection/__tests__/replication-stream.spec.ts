@@ -15,7 +15,8 @@ function primaryInfo(over: Record<string, string> = {}): Record<string, string> 
     master_replid: REPLID_A,
     master_replid2: '0'.repeat(40),
     master_repl_offset: '10000',
-    repl_backlog_histlen: '8000',
+    repl_backlog_size: '8000',
+    repl_backlog_histlen: '100',
     slave0: 'ip=10.0.0.2,port=6379,state=online,offset=9000,lag=0',
     slave1: 'ip=10.0.0.3,port=6380,state=online,offset=10000,lag=1',
     ...over,
@@ -203,14 +204,14 @@ describe('ReplicationStreamTracker', () => {
     expect(sample.replicas).toEqual([]);
   });
 
-  it('reads repl_backlog_histlen from the same INFO reply', () => {
+  it('reads the backlog capacity, not how full it is', () => {
     const tracker = new ReplicationStreamTracker();
-    expect(tracker.observe('c1', primaryInfo(), T0)!.replBacklogHistlen).toBe(8000);
+    expect(tracker.observe('c1', primaryInfo(), T0)!.replBacklogSize).toBe(8000);
     expect(
-      tracker.observe('c2', primaryInfo({ repl_backlog_histlen: 'n/a' }), T0)!.replBacklogHistlen,
+      tracker.observe('c2', primaryInfo({ repl_backlog_size: 'n/a' }), T0)!.replBacklogSize,
     ).toBeNull();
-    const { repl_backlog_histlen: _omit, ...withoutHistlen } = primaryInfo();
-    expect(tracker.observe('c3', withoutHistlen, T0)!.replBacklogHistlen).toBeNull();
+    const { repl_backlog_size: _omit, ...withoutSize } = primaryInfo();
+    expect(tracker.observe('c3', withoutSize, T0)!.replBacklogSize).toBeNull();
   });
 
   it('keeps connections apart and forgets them on request', () => {
