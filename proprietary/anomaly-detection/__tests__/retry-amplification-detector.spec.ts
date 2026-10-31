@@ -1,0 +1,877 @@
+import {
+  createRetryAmplificationState,
+  describeRetryAmplificationState,
+  observePushCadence,
+  retryAmplificationEpisodeStart,
+  retryAmplificationMaxPollGap,
+  retryAmplificationRearm,
+  evaluateRetryAmplification,
+  readRetryAmplificationTrigger,
+  RetryAmplificationFinding,
+  RetryAmplificationState,
+  RETRY_AMP_ARM_WINDOWS,
+  RETRY_AMP_WINDOW_MS,
+} from '../retry-amplification-detector';
+import { MetricType } from '../types';
+
+interface WindowSpec {
+  ops: number;
+  clients: number;
+  cmdsPerClient: number;
+  errorsPerSec?: number;
+  churn?: number | null;
+  p99?: boolean;
+  lateP99?: boolean;
+  saturation?: MetricType;
+  stressActive?: boolean;
+  activeSaturation?: MetricType[];
+}
+
+const BASE: WindowSpec = {
+  ops: 1000,
+  clients: 100,
+  cmdsPerClient: 10,
+  errorsPerSec: 0.1,
+  churn: 0.2,
+};
+
+function hot(multiplier: number, extra: Partial<WindowSpec> = {}): WindowSpec {
+  return {
+    ops: BASE.ops * multiplier,
+    clients: BASE.clients,
+    cmdsPerClient: BASE.cmdsPerClient * multiplier,
+    errorsPerSec: BASE.errorsPerSec,
+    churn: BASE.churn,
+    p99: true,
+    ...extra,
+  };
+}
+
+class Driver {
+  state: RetryAmplificationState = createRetryAmplificationState();
+  t = 0;
+  commands = 1_000_000;
+  errors = 0;
+  findings: RetryAmplificationFinding[] = [];
+  carried: Array<{ metricType: MetricType; timestamp: number }> = [];
+  pollMs = 1000;
+
+  window(spec: WindowSpec): void {
+    const start = this.t;
+    const events = this.carried;
+    this.carried = [];
+    if (spec.lateP99) {
+      this.carried.push({ metricType: MetricType.COMMAND_P99, timestamp: start + 59_500 });
+    } else if (spec.p99) {
+      events.push({ metricType: MetricType.COMMAND_P99, timestamp: start + 5_000 });
+    }
+    if (spec.saturation) events.push({ metricType: spec.saturation, timestamp: start + 10_000 });
+    const seconds = this.pollMs / 1000;
+    for (let i = 0; i < RETRY_AMP_WINDOW_MS / this.pollMs; i++) {
+      this.commands += spec.cmdsPerClient * spec.clients * seconds;
+      this.errors += (spec.errorsPerSec ?? 0) * seconds;
+      this.poll(spec, events);
+      this.t += this.pollMs;
+    }
+  }
+
+  windows(spec: WindowSpec, count: number): void {
+    for (let i = 0; i < count; i++) this.window(spec);
+  }
+
+  baseline(count = 12): void {
+    this.windows(BASE, count);
+  }
+
+  ramp(count: number, extra: Partial<WindowSpec> = {}, from = 1.5): void {
+    for (let i = 0; i < count; i++) this.window(hot(from + i * 0.15, extra));
+  }
+
+  poll(
+    spec: WindowSpec,
+    events: Array<{ metricType: MetricType; timestamp: number }> = [],
+    commands: number = this.commands,
+  ): RetryAmplificationFinding | null {
+    const finding = evaluateRetryAmplification(this.state, {
+      timestamp: this.t,
+      opsPerSec: spec.ops,
+      connectedClients: spec.clients,
+      totalCommands: commands,
+      totalErrorReplies: spec.errorsPerSec === undefined ? null : Math.round(this.errors),
+      connectsPerSec: spec.churn === undefined ? null : spec.churn,
+      recentEvents: events,
+      stressActive: spec.stressActive,
+      activeSaturation: spec.activeSaturation,
+    });
+    if (finding !== null) this.findings.push(finding);
+    return finding;
+  }
+}
+
+describe('retry amplification detector', () => {
+  describe('pushed samples', () => {
+    const push = (d: Driver, count: number, everyMs = 15_000) => {
+      const gaps: number[] = [];
+      for (let i = 0; i < count; i++) {
+        gaps.push(observePushCadence(d.state, d.t, 1000));
+        d.state.maxPollGapMs = gaps[gaps.length - 1];
+        d.commands += 1000 * (everyMs / 1000);
+        d.poll(BASE);
+        d.t += everyMs;
+      }
+      return gaps;
+    };
+
+    it('widens the gap to three times the push interval once it has three gaps', () => {
+      const d = new Driver();
+
+      expect(push(d, 6)).toEqual([10_000, 10_000, 10_000, 45_000, 45_000, 45_000]);
+    });
+
+    it('keeps the cadence through a single outage', () => {
+      const d = new Driver();
+      push(d, 8);
+      d.t += 600_000;
+
+      const [gap] = push(d, 1);
+
+      expect(gap).toBe(45_000);
+      expect(d.state.window?.coveredMs).toBe(0);
+    });
+
+    it('never drops below the poll gap for a fast pusher', () => {
+      const d = new Driver();
+
+      expect(push(d, 6, 1000)).toEqual(new Array(6).fill(10_000));
+    });
+
+    it('arms from samples 15 seconds apart', () => {
+      const d = new Driver();
+      push(d, 60);
+
+      expect(describeRetryAmplificationState(d.state).armed).toBe(true);
+    });
+  });
+
+  it('stays quiet while the baseline is still arming', () => {
+    const d = new Driver();
+    d.windows(BASE, 5);
+    d.windows(hot(2), 5);
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('classifies a short latency spike that recovers as transient', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), 2);
+    d.windows(BASE, 2);
+    expect(d.findings).toHaveLength(0);
+    expect(d.state.lastEpisode?.classification).toBe('transient');
+    expect(d.state.lastEpisode?.windows).toBe(2);
+  });
+
+  it('raises a warning for sustained co-rising load and P99 with flat clients', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5));
+    d.window(hot(1.7));
+    d.window(hot(1.9));
+    d.window(hot(2.0));
+    expect(d.findings).toHaveLength(1);
+    const f = d.findings[0];
+    expect(f.level).toBe('warning');
+    expect(f.trigger).toBe('latency');
+    expect(f.windows).toBe(3);
+    expect(f.loadRatio).toBeCloseTo(1.9, 1);
+    expect(f.pattern).toBe('rising');
+    expect(f.correlation).toBeGreaterThanOrEqual(0.5);
+    expect(f.relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    expect(f.message).toContain('Retry amplification');
+    expect(readRetryAmplificationTrigger(f.message)).toBe('a latency regression (COMMAND_P99)');
+  });
+
+  it('escalates to critical when a saturation event lands in the episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5));
+    d.window(hot(1.7));
+    d.window(hot(1.9, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.0));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].level).toBe('critical');
+    expect(d.findings[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
+  });
+
+  it('escalates warning to critical within one episode and emits once per level', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(hot(2.1, { saturation: MetricType.CPU_UTILIZATION }));
+    d.ramp(3, {}, 2.2);
+    expect(d.findings.map((f) => f.level)).toEqual(['warning', 'critical']);
+  });
+
+  it('drops back to warning once saturation clears and re-emits critical when it returns', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5));
+    d.window(hot(1.65));
+    d.window(hot(1.8, { saturation: MetricType.LOAD_SATURATION }));
+    d.ramp(2, {}, 1.95);
+    d.window(hot(2.25, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.4));
+    expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
+  });
+
+  it('keeps following the latest window once the load shape fades', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(hot(1.6, { saturation: MetricType.LOAD_SATURATION }));
+    d.windows(hot(1.6), 2);
+    expect(d.findings.map((f) => f.level)).toEqual(['warning', 'critical']);
+    expect(d.state.ackedLevel).toBe('warning');
+  });
+
+  it('counts a P99 event that lands after the window has already rolled over', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { lateP99: true }));
+    d.window(hot(1.7, { lateP99: true }));
+    d.window(hot(1.9, { lateP99: true }));
+    d.window(hot(2.0, { lateP99: true }));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('latency');
+    expect(d.findings[0].relatedMetrics).toContain(MetricType.COMMAND_P99);
+  });
+
+  it('does not flag flat elevated load under a latency regression', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), 6);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('flags load that steps up under retry errors and holds there', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(2.2, { errorsPerSec: 5 }));
+    d.window(hot(2.1, { errorsPerSec: 5 }));
+    d.window(hot(2.15, { errorsPerSec: 5 }));
+    d.window(hot(2.2, { errorsPerSec: 5 }));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].level).toBe('warning');
+    expect(d.findings[0].pattern).toBe('step');
+    expect(d.findings[0].correlation).toBeNull();
+    expect(d.findings[0].message).toContain('stepped up under stress');
+    expect(d.findings[0].message).not.toContain('r=');
+  });
+
+  it('flags a storm that overshoots and then settles on a plateau', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(3.0, { errorsPerSec: 5 }));
+    d.windows(hot(2.5, { errorsPerSec: 5 }), 4);
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].pattern).toBe('step');
+  });
+
+  it('does not treat a latency-only step as retries', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(2.2), 5);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('does not flag a step that is already falling back', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(3.0, { errorsPerSec: 5 }));
+    d.window(hot(2.6, { errorsPerSec: 5 }));
+    d.window(hot(2.2, { errorsPerSec: 5 }));
+    d.window(hot(1.8, { errorsPerSec: 5 }));
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('needs a real load rise before trusting a three-window correlation', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, stressActive: true }));
+    d.window(hot(1.6, { p99: false, stressActive: true }));
+    d.window(hot(1.55, { p99: false, stressActive: true }));
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('does not flag rising load next to a flat error rate without latency stress', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(5, { p99: false, errorsPerSec: 20 });
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('treats an ongoing P99 regression as stress in every window it covers', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4, { p99: false, stressActive: true });
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('latency');
+    expect(d.findings[0].message).toContain('sustained latency regression');
+  });
+
+  it('reports critical when saturation started before the episode and is still active', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4, { activeSaturation: [MetricType.LOAD_SATURATION] });
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].level).toBe('critical');
+  });
+
+  describe('poll gaps', () => {
+    const storm = (d: Driver) => {
+      d.baseline();
+      d.ramp(4, { p99: true });
+      d.window(hot(2.1, { p99: true }));
+      expect(d.findings).toHaveLength(1);
+    };
+    const skip = (d: Driver, ms: number) => {
+      d.commands += 100_000;
+      d.t += ms;
+    };
+
+    it('ends the episode when no sample arrives for two windows', () => {
+      const d = new Driver();
+      storm(d);
+      const end = d.t - d.pollMs;
+      const startedAt = d.state.hotRun[0].start;
+
+      skip(d, 2 * RETRY_AMP_WINDOW_MS + d.pollMs + 1);
+      d.window(hot(2.2, { p99: true }));
+
+      const status = describeRetryAmplificationState(d.state);
+      expect(status.lastEpisode).toMatchObject({
+        classification: 'amplifying',
+        startedAt,
+        endedAt: end,
+      });
+      expect(status.classification).toBe('none');
+      expect(status.windows).toBe(0);
+    });
+
+    it('raises a new finding when the storm is still running after the gap', () => {
+      const d = new Driver();
+      storm(d);
+      skip(d, 5 * RETRY_AMP_WINDOW_MS);
+      d.ramp(5, { p99: true });
+      expect(d.findings).toHaveLength(2);
+      expect(d.findings[1].windows).toBe(3);
+    });
+
+    const skipGap = (d: Driver) => skip(d, 2 * RETRY_AMP_WINDOW_MS + d.pollMs + 1);
+    const hotSpec = hot(1.8, { p99: true });
+
+    it('emits the finding from a closing window at the gap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(hotSpec);
+      expect(d.findings).toHaveLength(0);
+      expect(d.state.closing).not.toBeNull();
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.lastEpisode).toMatchObject({ classification: 'amplifying', windows: 3 });
+    });
+
+    it('counts a covered open window at the gap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      expect(d.findings).toHaveLength(0);
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(1);
+    });
+
+    it('does not count an open window without enough coverage', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(2, { p99: true });
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(hotSpec);
+
+      skipGap(d);
+      d.poll(hotSpec);
+
+      expect(d.findings).toHaveLength(0);
+      expect(d.state.lastEpisode).toMatchObject({ classification: 'transient', windows: 2 });
+    });
+
+    it('emits the gap finding once', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      skipGap(d);
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      d.poll(BASE);
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.pending).toBeNull();
+    });
+
+    it('keeps a critical from before the gap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(2, { p99: true });
+      d.window(hot(2.0, { p99: true, activeSaturation: [MetricType.LOAD_SATURATION] }));
+      skipGap(d);
+
+      expect(d.poll(hotSpec)?.level).toBe('critical');
+    });
+
+    it('raises the next episode after acknowledging a gap finding', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      skipGap(d);
+      d.poll(hotSpec);
+      d.t += d.pollMs;
+      expect(d.state.ackedLevel).toBe('none');
+
+      d.ramp(5, { p99: true });
+
+      expect(d.findings).toHaveLength(2);
+    });
+
+    it('reports the closed episode start alongside its finding', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(3, { p99: true });
+      const startedAt = d.state.hotRun[0].start;
+      skipGap(d);
+      const finding = d.poll(hotSpec);
+
+      expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
+      expect(retryAmplificationEpisodeStart(d.state, null)).toBeNull();
+    });
+
+    it('keeps the episode through a blip shorter than two windows', () => {
+      const d = new Driver();
+      storm(d);
+      const startedAt = d.state.hotRun[0].start;
+      skip(d, 90_000);
+      d.window(hot(2.2, { p99: true }));
+      d.window(hot(2.3, { p99: true }));
+
+      expect(d.findings).toHaveLength(1);
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+      expect(d.state.lastEpisode).toBeNull();
+    });
+
+    it('does not treat a long poll interval as a gap', () => {
+      const d = new Driver();
+      d.pollMs = 30_000;
+      d.state = createRetryAmplificationState(retryAmplificationMaxPollGap(180_000));
+      storm(d);
+      const startedAt = d.state.hotRun[0].start;
+      skip(d, 180_000);
+      d.window(hot(2.2, { p99: true }));
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+    });
+  });
+
+  it('keeps working when the poll interval is longer than the default gap', () => {
+    const slow = new Driver();
+    slow.pollMs = 20_000;
+    slow.state = createRetryAmplificationState(retryAmplificationMaxPollGap(20_000));
+    slow.baseline();
+    slow.ramp(4);
+    expect(slow.findings).toHaveLength(1);
+
+    const fixed = new Driver();
+    fixed.pollMs = 20_000;
+    fixed.baseline();
+    fixed.ramp(4);
+    expect(fixed.findings).toHaveLength(0);
+  });
+
+  it('ignores traffic growth that comes from new clients', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(2, { clients: 200, cmdsPerClient: 20 }), 5);
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+    expect(d.state.lastEpisode).toBeNull();
+  });
+
+  it('ignores an error burst without load growth', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows({ ...BASE, errorsPerSec: 50, p99: true }, 5);
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('ignores load growth without any stress signal', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(2, { p99: false }), 5);
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('does not flag load that decays after three hot windows', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(2.4));
+    d.window(hot(2.0));
+    d.window(hot(1.6));
+    d.window(hot(1.4));
+    d.window(BASE);
+    expect(d.findings).toHaveLength(0);
+    d.windows(BASE, 2);
+    expect(d.state.lastEpisode?.classification).toBe('unconfirmed');
+  });
+
+  it('classifies from error bursts when P99 events are absent', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, errorsPerSec: 5 }));
+    d.window(hot(1.7, { p99: false, errorsPerSec: 10 }));
+    d.window(hot(1.9, { p99: false, errorsPerSec: 20 }));
+    d.window(hot(2.0, { p99: false, errorsPerSec: 30 }));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('errors');
+  });
+
+  it('classifies from churn and names it as the trigger', () => {
+    const d = new Driver();
+    d.baseline();
+    for (let i = 0; i < 4; i++) d.window(hot(1.5 + i * 0.15, { p99: false, churn: 3 + i * 2 }));
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('churn');
+    expect(d.findings[0].relatedMetrics).toEqual([MetricType.CONNECTION_CHURN]);
+  });
+
+  it('links the error replies when errors trigger the episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, errorsPerSec: 5 }));
+    d.window(hot(1.7, { p99: false, errorsPerSec: 10 }));
+    d.window(hot(1.9, { p99: false, errorsPerSec: 20 }));
+    d.window(hot(2.0, { p99: false, errorsPerSec: 30 }));
+    expect(d.findings[0].trigger).toBe('errors');
+    expect(d.findings[0].relatedMetrics).toEqual([MetricType.ERROR_REPLIES]);
+  });
+
+  it('links the error replies when they join a latency episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4, { errorsPerSec: 5 });
+    d.window(hot(2.1, { errorsPerSec: 5 }));
+    expect(d.findings[0].trigger).toBe('latency');
+    expect(d.findings[0].relatedMetrics).toEqual([
+      MetricType.COMMAND_P99,
+      MetricType.ERROR_REPLIES,
+    ]);
+  });
+
+  it('still classifies from stress alone when the churn input is absent', () => {
+    const d = new Driver();
+    const noChurn = { ...BASE, churn: undefined };
+    d.windows(noChurn, 12);
+    d.ramp(4, { churn: undefined });
+    expect(d.findings).toHaveLength(1);
+    expect(d.findings[0].trigger).toBe('latency');
+  });
+
+  it('names the earliest stress leg as the trigger', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { p99: false, errorsPerSec: 5 }));
+    d.window(hot(1.7));
+    d.window(hot(1.9));
+    d.window(hot(2.0));
+    expect(d.findings[0].trigger).toBe('errors');
+  });
+
+  it('returns a finding once per level', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6);
+    expect(d.findings).toHaveLength(1);
+    expect(d.state.pending).toBeNull();
+  });
+
+  describe('retryAmplificationRearm', () => {
+    it('raises the level again when its event is dropped during the episode', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+
+      rearm();
+      d.window(hot(2.0));
+      d.window(hot(2.1));
+
+      expect(d.findings.map((f) => f.level)).toEqual(['warning', 'warning']);
+    });
+
+    it('leaves a level that has moved on alone', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+      d.windows(hot(2.0, { saturation: MetricType.LOAD_SATURATION }), 2);
+
+      rearm();
+
+      expect(d.state.ackedLevel).toBe('critical');
+    });
+
+    it('leaves a later episode alone', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      const rearm = retryAmplificationRearm(d.state, d.findings[0]);
+      d.windows(BASE, 2);
+      d.ramp(4);
+
+      rearm();
+
+      expect(d.state.ackedLevel).toBe('warning');
+    });
+  });
+
+  it('re-arms after two cold windows and fires again on a new episode', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(BASE);
+    d.ramp(2, {}, 2.1);
+    expect(d.findings).toHaveLength(1);
+    d.windows(BASE, 3);
+    expect(d.state.lastEpisode?.classification).toBe('amplifying');
+    d.ramp(4);
+    expect(d.findings).toHaveLength(2);
+  });
+
+  it('ends an amplifying episode with its last hot window, not the cold windows after it', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4);
+    d.window(BASE);
+    const lastHot = d.state.hotRun[d.state.hotRun.length - 1];
+
+    d.windows(BASE, 2);
+
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'amplifying',
+      endedAt: lastHot.start + RETRY_AMP_WINDOW_MS,
+    });
+  });
+
+  it('ends a transient episode with its last hot window', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(2);
+    d.window(BASE);
+    const lastHot = d.state.hotRun[d.state.hotRun.length - 1];
+
+    d.windows(BASE, 2);
+
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'transient',
+      endedAt: lastHot.start + RETRY_AMP_WINDOW_MS,
+    });
+  });
+
+  it('lowers the acknowledged level on de-escalation so critical can fire again', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(4, { saturation: MetricType.LOAD_SATURATION });
+    d.window(hot(2.1));
+    expect(d.state.ackedLevel).toBe('critical');
+    d.window(hot(2.2));
+    expect(d.state.ackedLevel).toBe('warning');
+    d.window(hot(2.3, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(hot(2.4));
+    expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
+  });
+
+  it('freezes the baseline while an episode is open', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.6));
+    const before = d.state.coldWindows.map((w) => w.start);
+    d.windows(hot(1.6), 6);
+    expect(d.state.coldWindows.map((w) => w.start)).toEqual(before);
+  });
+
+  it('clears the episode and keeps the baseline on a command counter reset', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), 2);
+    d.t += 1000;
+    d.poll(BASE, [], 10);
+    expect(d.state.hotRun).toHaveLength(0);
+    expect(d.state.coldWindows).toHaveLength(12);
+    expect(d.state.pending).toBeNull();
+  });
+
+  it('flags a storm that starts right after a command counter reset', () => {
+    const d = new Driver();
+    d.baseline();
+    d.t += 1000;
+    d.commands = 10;
+    d.poll(BASE);
+    d.t += 1000;
+
+    d.ramp(4);
+
+    expect(d.findings).toHaveLength(1);
+  });
+
+  it('closes a storm cut off by a counter reset and returns the finding of its last window', () => {
+    const d = new Driver();
+    d.baseline();
+    const startedAt = d.t;
+    d.ramp(3);
+    for (let i = 0; i < 59; i++) {
+      d.commands += 2000;
+      d.poll(hot(2.0), [
+        { metricType: MetricType.COMMAND_P99, timestamp: d.t },
+        { metricType: MetricType.LOAD_SATURATION, timestamp: d.t },
+      ]);
+      d.t += d.pollMs;
+    }
+
+    d.t += 1000;
+    const finding = d.poll(BASE, [], 10);
+
+    expect(finding).toMatchObject({ level: 'critical', windows: 4 });
+    expect(d.state.hotRun).toHaveLength(0);
+    expect(d.state.coldWindows).toHaveLength(12);
+    expect(d.state.lastEpisode).toMatchObject({
+      classification: 'amplifying',
+      windows: 4,
+      startedAt,
+    });
+    expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
+  });
+
+  describe('hot run that never goes cold twice', () => {
+    const alternate = (d: Driver, rounds: number) => {
+      for (let i = 0; i < rounds; i++) {
+        d.window(hot(2.5));
+        d.window(BASE);
+      }
+    };
+
+    it('caps the retained windows and still counts all of them', () => {
+      const d = new Driver();
+      d.baseline();
+      const startedAt = d.t;
+      d.ramp(4);
+      alternate(d, 200);
+
+      expect(d.state.hotRun.length).toBeLessThanOrEqual(120);
+      expect(d.state.hotRun[0].start).toBe(startedAt);
+      expect(describeRetryAmplificationState(d.state)).toMatchObject({
+        classification: 'amplifying',
+        windows: 204,
+      });
+
+      d.windows(BASE, 2);
+      expect(d.state.lastEpisode).toMatchObject({
+        classification: 'amplifying',
+        trigger: 'latency',
+        windows: 204,
+        startedAt,
+      });
+    });
+
+    it('reports the full run length on a finding past the cap', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+      alternate(d, 200);
+      d.windows(hot(2.5, { activeSaturation: [MetricType.LOAD_SATURATION] }), 2);
+
+      const critical = d.findings[d.findings.length - 1];
+      expect(critical).toMatchObject({ level: 'critical', trigger: 'latency', windows: 205 });
+      expect(critical.message).toContain('for 205 min');
+    });
+  });
+
+  it('skips windows with too little coverage', () => {
+    const d = new Driver();
+    for (let i = 0; i < 12; i++) {
+      d.poll(BASE);
+      d.t += RETRY_AMP_WINDOW_MS;
+    }
+    expect(d.state.coldWindows).toHaveLength(0);
+  });
+
+  describe('describeRetryAmplificationState', () => {
+    it('reports an unknown connection as unarmed with no episode', () => {
+      expect(describeRetryAmplificationState(undefined)).toEqual({
+        armed: false,
+        classification: 'none',
+        level: 'none',
+        windows: 0,
+        baseline: null,
+        lastEpisode: null,
+      });
+    });
+
+    it('reports the baseline once armed', () => {
+      const state = createRetryAmplificationState();
+      state.coldWindows = Array.from({ length: RETRY_AMP_ARM_WINDOWS }, (_, i) => ({
+        start: i * RETRY_AMP_WINDOW_MS,
+        opsPerSec: 1000,
+        connectedClients: 50,
+        cmdsPerClient: 20,
+        errorRate: null,
+        churnPerSec: null,
+        latencyEvent: false,
+        saturationMetrics: [],
+      }));
+
+      expect(describeRetryAmplificationState(state)).toEqual(
+        expect.objectContaining({
+          armed: true,
+          baseline: expect.objectContaining({ opsPerSec: 1000, cmdsPerClient: 20 }),
+        }),
+      );
+    });
+
+    it('reports the current level after the episode falls back from critical', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4, { saturation: MetricType.LOAD_SATURATION });
+      d.window(hot(2.1));
+      d.window(hot(2.2));
+
+      expect(describeRetryAmplificationState(d.state)).toMatchObject({
+        classification: 'amplifying',
+        level: 'warning',
+      });
+    });
+
+    it('reports a fresh state as unarmed', () => {
+      expect(describeRetryAmplificationState(createRetryAmplificationState())).toEqual(
+        expect.objectContaining({ armed: false, classification: 'none', baseline: null }),
+      );
+    });
+  });
+});

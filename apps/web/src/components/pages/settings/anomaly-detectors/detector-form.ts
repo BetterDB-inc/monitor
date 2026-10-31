@@ -14,6 +14,7 @@ export const METRIC_UNITS: Record<AnomalyDetectorMetric, string> = {
   blocked_clients: 'clients',
   keyspace_misses: 'misses',
   fragmentation_ratio: 'ratio',
+  error_replies: 'error replies/s',
 };
 
 export const LIFETIME_COUNTER_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set<AnomalyDetectorMetric>([

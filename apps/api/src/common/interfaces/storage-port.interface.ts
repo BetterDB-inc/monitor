@@ -2,6 +2,7 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -94,6 +95,7 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -158,6 +160,7 @@ export interface StoredAnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: string[];
+  replicaAddr?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;
@@ -220,6 +223,7 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  correlationIds?: string[];
 }
 
 export interface AnomalyStats {
@@ -372,6 +376,25 @@ export interface LatencyStatsHistoryQueryOptions {
   limit?: number;
 }
 
+export interface StoredReplicationDivergenceWindow {
+  id: string;
+  connectionId: string;
+  replicaAddr: string;
+  windowStart: number;
+  windowEnd: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+}
+
+export interface ReplicationDivergenceWindowQueryOptions {
+  connectionId: string;
+  replicaAddr?: string;
+  startTime: number;
+  endTime: number;
+  limit?: number;
+}
+
 // Memory Snapshot Types
 export interface StoredMemorySnapshot {
   id: string; // UUID
@@ -504,6 +527,11 @@ export interface StoragePort {
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
+  getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,
@@ -590,6 +618,11 @@ export interface StoragePort {
    * false only when no anomaly with that id exists.
    */
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
+  /**
+   * Resolve an anomaly only if it is still open. Returns true only when this
+   * call resolved it, so a caller can tell it apart from one already resolved.
+   */
+  resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
@@ -747,6 +780,15 @@ export interface StoragePort {
   ): Promise<number>;
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]>;
+  pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(

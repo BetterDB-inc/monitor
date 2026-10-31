@@ -2,6 +2,17 @@ import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
+import { OUTBOX_MAX_AGE_MS } from '../anomaly-detection/anomaly-persistence-outbox';
+
+const LATE_SAVE_LOOKBACK_MS = OUTBOX_MAX_AGE_MS + 60_000;
+const EVENT_PAGE_SIZE = 1000;
+const MAX_PAGES_PER_POLL = 10;
+
+const DEDICATED_EVENT_METRICS = new Set([
+  'command_p99',
+  'retry_amplification',
+  'replication_divergence',
+]);
 
 /**
  * Webhook Anomaly Integration Service
@@ -14,7 +25,10 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
   private readonly logger = new Logger(WebhookAnomalyIntegrationService.name);
   private pollInterval: NodeJS.Timeout | null = null;
   private readonly POLL_INTERVAL_MS = 5000; // Check every 5 seconds
-  private lastCheckedTimestamp: number = Date.now();
+  private readonly startedAt: number = Date.now();
+  private readonly sentEvents = new Map<string, number>();
+  private scanCursor = 0;
+  private pollInFlight = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -61,31 +75,45 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    * Check for new anomalies and dispatch webhooks
    */
   private async checkForNewAnomalies(): Promise<void> {
+    if (this.pollInFlight) return;
+    this.pollInFlight = true;
     try {
-      const currentTime = Date.now();
+      const now = Date.now();
+      const windowStart = Math.max(this.startedAt, now - LATE_SAVE_LOOKBACK_MS);
 
-      // Get anomalies since last check
-      const anomalies = await this.storage.getAnomalyEvents({
-        startTime: this.lastCheckedTimestamp,
-        endTime: currentTime,
-        limit: 1000,
-      });
-
-      if (anomalies.length > 0) {
-        this.logger.debug(`Found ${anomalies.length} new anomalies to process`);
-
-        // Dispatch webhooks for each anomaly
-        for (const anomaly of anomalies) {
-          await this.dispatchAnomalyWebhook(anomaly);
-        }
+      let cursor = Math.max(this.scanCursor, EVENT_PAGE_SIZE);
+      let more = (await this.dispatchPage(windowStart, now, 0)) === EVENT_PAGE_SIZE;
+      for (let pages = 1; more && pages < MAX_PAGES_PER_POLL; pages++) {
+        more = (await this.dispatchPage(windowStart, now, cursor)) === EVENT_PAGE_SIZE;
+        if (more) cursor += EVENT_PAGE_SIZE;
       }
+      this.scanCursor = more ? cursor : 0;
 
-      // Update last checked timestamp
-      this.lastCheckedTimestamp = currentTime;
-
+      for (const [id, timestamp] of this.sentEvents) {
+        if (timestamp < windowStart) this.sentEvents.delete(id);
+      }
     } catch (error) {
       this.logger.error('Failed to check for new anomalies:', error);
+    } finally {
+      this.pollInFlight = false;
     }
+  }
+
+  private async dispatchPage(startTime: number, endTime: number, offset: number): Promise<number> {
+    const page = await this.storage.getAnomalyEvents({
+      startTime,
+      endTime,
+      limit: EVENT_PAGE_SIZE,
+      offset,
+    });
+
+    for (const anomaly of page) {
+      if (this.sentEvents.has(anomaly.id)) continue;
+      this.sentEvents.set(anomaly.id, anomaly.timestamp);
+      await this.dispatchAnomalyWebhook(anomaly);
+    }
+
+    return page.length;
   }
 
   /**
@@ -93,10 +121,11 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
    */
   private async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
-      // command_p99 regressions are delivered by LatencyRegressionService via the dedicated
-      // latency.regression.detected event; skip the generic anomaly.detected here so one
-      // regression doesn't produce two Pro webhook deliveries for the same incident.
-      if (anomaly.metricType === 'command_p99') {
+      // command_p99 regressions, retry amplification and replication divergence each have
+      // a dedicated event (latency.regression.detected, retry_amplification.detected,
+      // replication.divergence); skip the generic anomaly.detected here so one incident
+      // doesn't produce two Pro webhook deliveries.
+      if (DEDICATED_EVENT_METRICS.has(anomaly.metricType)) {
         return;
       }
 

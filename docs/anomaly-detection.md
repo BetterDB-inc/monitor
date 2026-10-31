@@ -330,6 +330,76 @@ Each condition fires once per episode and the tracking state clears when the chi
 
 ---
 
+### RETRY_AMPLIFICATION
+
+**Triggers**: Commands per client keep climbing while connected clients stay flat and the server is under stress (a P99 latency regression, an error-reply burst or connection churn)
+
+**What it means**: Clients are retrying failed or slow calls, and the retries add load that makes the server slower, which causes more retries. Unlike a transient retry burst, this loop does not settle on its own.
+
+**Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. It raises no findings until it has collected 10 windows (10 minutes). A window is hot when:
+- Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
+- Connected clients stay within ±15% of baseline
+- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped once the latency guard sees the command healthy for 5 samples in a row; until then the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+
+A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
+- **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, between commands per client and the window index. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
+- **Step**: the last 3 windows are all at least 2× baseline, the latest is within 10% of their peak, and at least one of them shows retry evidence (an error-reply or reconnect burst). This catches a storm that jumps up, or overshoots and settles, then holds. Latency alone is not enough for a step, because a legitimate batch job through pooled clients looks the same.
+
+Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
+
+Runs that end before reaching 3 windows are recorded as transient. A run keeps at most 120 windows: its first and its latest 119. Past that, the correlation and related metrics come from those windows, and the reported length still counts the whole run.
+
+An episode ends after 2 cold windows, or when the monitor misses samples for longer than 2 windows or 3 poll intervals, whichever is longer. Anything shorter counts as the same episode, so a brief blip does not re-alert on the same storm. After a longer gap, a storm that is still running opens a new episode, and its finding fires again after 3 hot windows. If the windows in hand at a gap qualify, the finding is still raised, dated at the end of the episode and attributed to the episode's own span from stored snapshots, without a new `CLIENT LIST`.
+
+- **WARNING** when the run qualifies
+- **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.
+
+If storage is unavailable, the finding stays as one event in memory and the shared persistence outbox retries it with the same ID, timestamp and related metrics. A level change while a save is pending raises a separate event. The `retry_amplification.detected` webhook still goes out for each level the run reaches.
+
+**OTLP-pushed instances**: Coverage follows the exporter's own push interval, taken from the median of the last 5 gaps between pushes, so a gap longer than 3 push intervals still counts as missed samples. Pushed metrics carry command, ops, client and connection counters but no error replies, and latency regressions are not tracked for pushed instances, so connection churn is the only stress signal there. Client attribution needs `CLIENT LIST` or stored client snapshots, and neither exists for a pushed instance, so `topContributors` is `null` there.
+
+**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
+
+**Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
+- Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting clients at 1.3× or more of their lifetime rate
+- Reconnect counts from the stored client snapshots, across the whole episode
+
+`CLIENT LIST` is read once when a run reaches two hot windows, then once per finding. A failed first read is retried on later polls, up to three attempts in total. Each read is capped by `ANOMALY_INFO_TIMEOUT_MS`. Reconnects come from snapshots taken on the client-analytics interval (60s by default). A client that connects, retries and disconnects between two captures does not appear, so short-lived retry connections can be undercounted. The reconnect rate in the trigger still includes them.
+
+**Recommended actions**:
+- Add exponential backoff with jitter and a retry budget
+- Put a circuit breaker in front of the instance
+- Set client timeouts above the observed P99
+- Throttle the clients whose command rate grew the most, then shed load until latency recovers
+
+### REPLICATION_DIVERGENCE
+
+**Triggers**: A connected replica's byte gap to the primary keeps growing, stays far behind, or stops draining
+
+**What it means**: The replica is falling behind even if `lag` still looks healthy, because `lag` measures how recently it acknowledged the stream, not how much it has applied:
+- Slow apply path on the replica (CPU, disk or network)
+- Bulk writes or resharding outrunning the replica
+- Replica that stopped applying or acknowledging the stream
+
+**Detection method**: This is a *window-based* detector, not a z-score spike. It compares each replica's offset with the primary's over windows of 30s or three poll intervals, whichever is longer, and emits:
+- **WARNING** when the gap grows across 4 consecutive windows
+- **WARNING** when the replica stays at least 30s behind for 2 windows, and **CRITICAL** at 120s
+- **CRITICAL** when the write rate is back within 20% of its baseline, but the gap has not halved over 4 windows and at its pace so far would take more than 8 windows to clear. Halving the gap restarts the count
+- **CRITICAL** when writes have stopped and the same check on the gap fails, so the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
+- **WARNING** after 2 windows without acknowledgements, and **CRITICAL** after 4. With writes stopped this needs a gap of at least 1 MiB
+
+Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
+
+**Recommended actions**:
+- Compare the replica offset gap with the primary write rate over the next few minutes
+- Check replica host CPU, disk and network for a slow apply path
+- Review `client-output-buffer-limit replica` and `repl-backlog-size` against the write rate
+- If bulk writes or resharding are driving it, throttle them until the replica catches up
+
+**Example scenario**: A bulk import writes faster than a replica can apply. The gap grows for four windows while `lag` stays at 0, and a WARNING fires. The import ends and the write rate returns to baseline. Four windows later the gap has not halved and would take more than eight further windows to clear, so the alert escalates to CRITICAL.
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern
@@ -403,6 +473,7 @@ Some metrics have custom thresholds beyond Z-score:
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
+| `error_replies` | 200/s | 2000/s | 2 | 60s |
 
 ## Monitored Metrics
 
@@ -492,6 +563,20 @@ Some metrics have custom thresholds beyond Z-score:
 **Typical baseline**: Idle (no save in progress) most of the time
 **Source**: `INFO persistence` (`rdb_bgsave_in_progress`, `current_save_keys_processed`/`current_save_keys_total`, `rdb_current_bgsave_time_sec`, `rdb_last_bgsave_status`, `aof_rewrite_in_progress`, `aof_current_rewrite_time_sec`, `aof_last_bgrewrite_status`)
 **Detection method**: State-based detector (not z-score based). Emits CRITICAL on frozen key progress, an elapsed-time ceiling, or an `ok` to `err` status transition, and WARNING on a long-running-but-advancing child. See the [PERSISTENCE_STALL pattern](#persistence_stall) for thresholds.
+
+### replication_divergence
+**What it measures**: Bytes each connected replica is behind the primary, and how many seconds that is at the current write rate
+**Why anomalies matter**: A replica can fall behind while `lag` stays low, which risks data loss on failover and full resyncs
+**Typical baseline**: Near zero
+**Source**: `INFO replication` (`master_repl_offset`, `slaveN` offset, state and lag)
+**Detection method**: Window-based detector (not z-score based). See the [REPLICATION_DIVERGENCE pattern](#replication_divergence) for thresholds. The anomaly page shows each replica's status. Divergence sends `replication.divergence` instead of `anomaly.detected`.
+
+### connection_churn
+**What it measures**: New connections per second
+**Why anomalies matter**: Clients reconnecting instead of reusing connections waste CPU on connection setup and TLS handshakes, and the client count doesn't show it
+**Typical baseline**: Low on pooled workloads
+**Source**: `INFO stats.total_connections_received` and `INFO clients.connected_clients`
+**Detection method**: Z-score spike detector (warning 3.0, critical 5.0, 2 consecutive samples, 60s cooldown). Only fires at 10 or more new connections per second while `connected_clients` stays flat, with under 10% of the new connections retained.
 
 ## Configuration
 

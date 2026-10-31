@@ -8,6 +8,11 @@ import {
   SpikeDetectorConfig,
 } from './types';
 
+export interface SpikeDetectorOptions {
+  minValue?: number;
+  thresholdOverridesBelowMean?: boolean;
+}
+
 interface ConsecutiveCounter {
   count: number;
   lastValue: number;
@@ -18,11 +23,17 @@ export class SpikeDetector {
   private config: Required<SpikeDetectorConfig>;
   private consecutiveCounts = new Map<MetricType, ConsecutiveCounter>();
   private lastAlertTime = new Map<MetricType, number>();
+  private readonly options: Required<SpikeDetectorOptions>;
 
   constructor(
     private readonly metricType: MetricType,
     config: SpikeDetectorConfig = {},
+    options: SpikeDetectorOptions = {},
   ) {
+    this.options = {
+      minValue: options.minValue ?? Number.NEGATIVE_INFINITY,
+      thresholdOverridesBelowMean: options.thresholdOverridesBelowMean ?? false,
+    };
     // Set defaults
     this.config = {
       warningZScore: config.warningZScore ?? 2.0,
@@ -51,15 +62,27 @@ export class SpikeDetector {
     const zScore = buffer.getZScore(currentValue);
 
     // Determine if this is a spike or drop
-    const isSpike = zScore > 0;
     const isDrop = zScore < 0;
 
+    const exceedsAbsolute =
+      this.options.thresholdOverridesBelowMean &&
+      currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
+
+    if (currentValue < this.options.minValue && !exceedsAbsolute) {
+      this.consecutiveCounts.delete(this.metricType);
+      return null;
+    }
+    const countsAsDrop = isDrop && this.config.detectDrops;
+
     // Skip drops if not configured to detect them
-    if (isDrop && !this.config.detectDrops) {
+    if (isDrop && !countsAsDrop && !exceedsAbsolute) {
+      if (this.options.thresholdOverridesBelowMean) {
+        this.consecutiveCounts.delete(this.metricType);
+      }
       return null;
     }
 
-    const absZScore = Math.abs(zScore);
+    const absZScore = isDrop && !countsAsDrop ? 0 : Math.abs(zScore);
 
     // Check Z-score thresholds
     let severity: AnomalySeverity | null = null;
@@ -111,7 +134,7 @@ export class SpikeDetector {
     this.lastAlertTime.set(this.metricType, timestamp);
     this.consecutiveCounts.delete(this.metricType); // Reset after alert
 
-    const anomalyType = isSpike ? AnomalyType.SPIKE : AnomalyType.DROP;
+    const anomalyType = countsAsDrop && !exceedsAbsolute ? AnomalyType.DROP : AnomalyType.SPIKE;
     const message = this.generateMessage(anomalyType, severity, currentValue, mean, zScore);
 
     return {
@@ -130,6 +153,10 @@ export class SpikeDetector {
     };
   }
 
+  resetRun(): void {
+    this.consecutiveCounts.delete(this.metricType);
+  }
+
   private generateMessage(
     type: AnomalyType,
     severity: AnomalySeverity,
@@ -138,12 +165,14 @@ export class SpikeDetector {
     zScore: number,
   ): string {
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
-    const change = ((value - baseline) / baseline * 100).toFixed(1);
-    const direction = type === AnomalyType.SPIKE ? 'above' : 'below';
+    const change = Math.abs(((value - baseline) / baseline) * 100).toFixed(1);
+    const direction = value < baseline ? 'below' : 'above';
 
-    return `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
-           `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
-           `(${change}% ${direction} normal, Z-score: ${zScore.toFixed(2)})`;
+    return (
+      `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
+      `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
+      `(${change}% ${direction} normal, Z-score: ${zScore.toFixed(2)})`
+    );
   }
 
   private formatValue(value: number): string {

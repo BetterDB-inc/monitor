@@ -7,7 +7,13 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { WEBHOOK_EVENTS_PRO_SERVICE, IWebhookEventsProService } from '@betterdb/shared';
-import { MetricType, AnomalyType } from '../anomaly-detection/types';
+import {
+  MetricType,
+  AnomalyType,
+  AnomalySeverity,
+  AnomalyEventSink,
+  ANOMALY_EVENT_SINK,
+} from '../anomaly-detection/types';
 import { RegressionDetector, parseMajorVersion, STALE_SAMPLE_MS } from './regression-detector';
 import { ClusterRefreshPoint, DetectorInput, RegressionFinding } from './types';
 
@@ -38,6 +44,9 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     @Optional()
     @Inject(WEBHOOK_EVENTS_PRO_SERVICE)
     private readonly webhookEventsProService?: IWebhookEventsProService,
+    @Optional()
+    @Inject(ANOMALY_EVENT_SINK)
+    private readonly anomalyEventSink?: AnomalyEventSink,
   ) {
     super(connectionRegistry);
   }
@@ -117,6 +126,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
     const input: DetectorInput = { nowMs, samples, callsPerMin, clusterRefreshDeltas };
     const findings = detector.evaluate(input);
+    this.anomalyEventSink?.reportLatencyDegraded?.(ctx.connectionId, detector.isDegraded());
 
     for (const finding of findings) {
       await this.handleFinding(finding, ctx, detector);
@@ -134,32 +144,32 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
     const runbook = this.buildRunbook(finding, prefetchBatchMaxSize);
     const worst = finding.commands[0];
 
+    const event = {
+      // Storage adapters (postgres) require UUID event ids
+      id: randomUUID(),
+      timestamp: finding.timestamp,
+      metricType: MetricType.COMMAND_P99,
+      anomalyType: AnomalyType.SPIKE,
+      severity:
+        finding.severity === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: worst.currentP99Us,
+      baseline: worst.baselineP99Us,
+      zScore: 0,
+      stdDev: 0,
+      threshold: worst.degradationFactor,
+      message: finding.message,
+      // Instance metadata, consistent with other anomaly producers.
+      sourceHost: ctx.host,
+      sourcePort: ctx.port,
+      relatedMetrics: finding.topologyRefreshCorrelated
+        ? [MetricType.CLUSTER_STATE, MetricType.COMMAND_P99]
+        : undefined,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+
     try {
-      await this.storage.saveAnomalyEvent(
-        {
-          // Storage adapters (postgres) require UUID event ids
-          id: randomUUID(),
-          timestamp: finding.timestamp,
-          metricType: MetricType.COMMAND_P99,
-          anomalyType: AnomalyType.SPIKE,
-          severity: finding.severity,
-          value: worst.currentP99Us,
-          baseline: worst.baselineP99Us,
-          zScore: 0,
-          stdDev: 0,
-          threshold: worst.degradationFactor,
-          message: finding.message,
-          // Instance metadata, consistent with other anomaly producers.
-          sourceHost: ctx.host,
-          sourcePort: ctx.port,
-          relatedMetrics: finding.topologyRefreshCorrelated
-            ? [MetricType.CLUSTER_STATE, MetricType.COMMAND_P99]
-            : undefined,
-          resolved: false,
-          connectionId: ctx.connectionId,
-        },
-        ctx.connectionId,
-      );
+      await this.storage.saveAnomalyEvent(event, ctx.connectionId);
     } catch (err) {
       // The detector already latched its one-shot/cooldown when it returned this finding. Since
       // no durable record was written, re-arm it so the regression re-emits on the next poll, and
@@ -169,6 +179,14 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       );
       detector.revert(finding);
       return;
+    }
+
+    try {
+      this.anomalyEventSink?.ingestExternalAnomaly(event);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to hand latency regression event to the anomaly sink: ${err instanceof Error ? err.message : err}`,
+      );
     }
 
     if (this.webhookEventsProService) {

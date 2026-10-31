@@ -14,6 +14,8 @@ export enum WebhookEventType {
   ACL_MODIFIED = 'acl.modified',
   CONFIG_CHANGED = 'config.changed',
   REPLICATION_LAG = 'replication.lag',
+  REPLICATION_DIVERGENCE = 'replication.divergence',
+  REPLICATION_RECOVERED = 'replication.recovered',
   CLUSTER_FAILOVER = 'cluster.failover',
   CLUSTER_BUS_CORRUPTION = 'cluster.bus.corruption',
   CLUSTER_DEMOTED_WRITES = 'cluster.demoted.writes',
@@ -35,6 +37,7 @@ export enum WebhookEventType {
   MONITOR_SESSION_TRUNCATED = 'monitor.session.truncated',
   MONITOR_SESSION_SKIPPED = 'monitor.session.skipped',
   MONITOR_TRIGGER_CREATED = 'monitor.trigger.created',
+  RETRY_AMPLIFICATION_DETECTED = 'retry_amplification.detected',
 }
 
 // Injection tokens for proprietary webhook services
@@ -60,6 +63,8 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.ANOMALY_DETECTED,
   WebhookEventType.SLOWLOG_THRESHOLD,
   WebhookEventType.REPLICATION_LAG,
+  WebhookEventType.REPLICATION_DIVERGENCE,
+  WebhookEventType.REPLICATION_RECOVERED,
   WebhookEventType.CLUSTER_FAILOVER,
   WebhookEventType.CLUSTER_BUS_CORRUPTION,
   WebhookEventType.CLUSTER_DEMOTED_WRITES,
@@ -76,6 +81,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
   WebhookEventType.CVE_CRITICAL_DETECTED,
+  WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -120,6 +126,8 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.ANOMALY_DETECTED]: Tier.pro,
   [WebhookEventType.SLOWLOG_THRESHOLD]: Tier.pro,
   [WebhookEventType.REPLICATION_LAG]: Tier.pro,
+  [WebhookEventType.REPLICATION_DIVERGENCE]: Tier.pro,
+  [WebhookEventType.REPLICATION_RECOVERED]: Tier.pro,
   [WebhookEventType.CLUSTER_FAILOVER]: Tier.pro,
   [WebhookEventType.CLUSTER_BUS_CORRUPTION]: Tier.pro,
   [WebhookEventType.CLUSTER_DEMOTED_WRITES]: Tier.pro,
@@ -133,6 +141,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
   [WebhookEventType.LATENCY_REGRESSION_DETECTED]: Tier.pro,
+  [WebhookEventType.RETRY_AMPLIFICATION_DETECTED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
   [WebhookEventType.CVE_CRITICAL_DETECTED]: Tier.pro,
@@ -341,6 +350,32 @@ export interface LatencyRegressionCommand {
   callsPerMin: number;
 }
 
+export interface ReplicationDivergenceData {
+  replica: string;
+  level: 'warning' | 'critical';
+  reason: 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
+  gapBytes: number;
+  secondsBehind: number | null;
+  bytesPerSec: number | null;
+  slopeBytesPerWindow: number;
+  windowCount: number;
+  correlatedSignals: string[];
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
+export interface ReplicationRecoveredData {
+  replica: string;
+  reason: 'caught_up' | 'replica_gone' | 'resolved_after_restart';
+  gapBytes: number | null;
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
 /**
  * Payload for latency.regression.detected (see valkey/valkey#3527).
  */
@@ -353,6 +388,28 @@ export interface LatencyRegressionDetectedData {
   /** Current value of prefetch-batch-max-size on Valkey 9+, null if unreadable. */
   prefetchBatchMaxSize?: number | null;
   runbook: string[];
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
+export interface RetryAmplificationContributorData {
+  key: string;
+  keyKind: 'name' | 'user' | 'ip';
+  commandRateGrowth: number | null;
+  newConnections: number;
+  connections: number;
+}
+
+export interface RetryAmplificationDetectedData {
+  level: 'warning' | 'critical';
+  trigger: 'latency' | 'errors' | 'churn';
+  windows: number;
+  loadRatio: number;
+  pattern: 'rising' | 'step';
+  correlation: number | null;
+  topContributors: RetryAmplificationContributorData[] | null;
   message: string;
   timestamp: number;
   instance: WebhookInstanceInfo;
@@ -479,6 +536,12 @@ export interface IWebhookEventsProService {
   }): Promise<void>;
 
   dispatchLatencyRegressionDetected(data: LatencyRegressionDetectedData): Promise<void>;
+
+  dispatchRetryAmplificationDetected(data: RetryAmplificationDetectedData): Promise<void>;
+
+  dispatchReplicationDivergence(data: ReplicationDivergenceData): Promise<void>;
+
+  dispatchReplicationRecovered(data: ReplicationRecoveredData): Promise<void>;
 
   dispatchAnomalyDetected(data: {
     anomalyId: string;

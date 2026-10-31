@@ -19,12 +19,20 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
+  ClientSnapshotGroupRow,
+  ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
+import {
+  computeConnectionChurn,
+  isChurnWithFlatPopulation,
+  ConnectionChurnReading,
+  ConnectionChurnSample,
+} from './connection-churn';
 import { detectDuplicatePrimaries, conflictSignature } from './duplicate-primary-detector';
 import {
   DEFAULT_CONFIG_DRIFT_KEYS,
@@ -39,6 +47,7 @@ import {
   RESYNC_LOOP_MIN_CYCLES,
   ResyncLoopState,
   acknowledgeResyncLoopFinding,
+  resyncLoopRearm,
   createResyncLoopState,
   detectStuckReplicas,
   evaluateResyncLoop,
@@ -56,6 +65,7 @@ import {
   ClientLockoutState,
   LOCKOUT_MIN_STREAK,
   LOCKOUT_UTILIZATION_PCT,
+  clientLockoutRearm,
   commitClientLockoutLevel,
   createClientLockoutState,
   evaluateClientLockout,
@@ -113,7 +123,15 @@ import {
   ClusterShard,
   SlotStats,
   SentinelNodeInfo,
+  ErrorStatsInfo,
 } from '@app/common/types/metrics.types';
+import {
+  errorRepliesPerSecond,
+  ERROR_REPLIES_MIN_PER_SEC,
+  describeErrorstatDeltas,
+  readErrorstatCounts,
+  topErrorstatDeltas,
+} from './error-replies';
 import {
   FAILOVER_CHURN_MIN_CHANGES,
   FailoverChurnStateMap,
@@ -126,6 +144,7 @@ import {
   ReplicaObservation,
   SlaveOutputBufferLimit,
   acknowledgeCobFinding,
+  cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
@@ -133,6 +152,7 @@ import {
 import {
   MemoryOverheadState,
   acknowledgeMemoryOverheadFinding,
+  memoryOverheadRearm,
   createMemoryOverheadState,
   evaluateMemoryOverhead,
 } from './memory-overhead-detector';
@@ -141,14 +161,41 @@ import {
   FORK_OOM_CRIT_FRACTION,
   ForkMemoryState,
   acknowledgeForkMemoryFinding,
+  forkMemoryRearm,
   createForkMemoryState,
   evaluateForkMemoryRisk,
 } from './fork-memory-risk-detector';
+import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
+import { OutboxEntry, PersistenceOutbox } from './anomaly-persistence-outbox';
+import {
+  DIVERGENCE_COMPOUND_SIGNALS,
+  DIVERGENCE_FLOOR_BYTES,
+  DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_ORPHAN_PAGE_SIZE,
+  DivergenceConnectionState,
+  DivergenceFinding,
+  DivergenceRecovery,
+  DivergenceWindow,
+  OrphanedDivergence,
+  ReplicaDivergenceHistory,
+  acknowledgeDivergence,
+  assessOrphanedReplica,
+  acknowledgeRecovery,
+  createDivergenceState,
+  describeDivergence,
+  divergenceWindowMs,
+  drainClosedWindows,
+  replicaObservedLevel,
+  staleAckWindow,
+  requeueClosedWindows,
+  observeDivergence,
+} from './replication-divergence-detector';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
   SATURATION_CORROBORATION_WINDOW_MS,
   acknowledgeSaturationFinding,
+  controlPlaneSaturationRearm,
   createControlPlaneSaturationEvent,
   createControlPlaneState,
   evaluateControlPlaneSaturation,
@@ -159,9 +206,37 @@ import {
   LOAD_WARN_FRACTION,
   LoadSaturationState,
   acknowledgeLoadSaturationFinding,
+  loadSaturationRearm,
   createLoadSaturationState,
   evaluateLoadSaturation,
 } from './load-saturation-detector';
+import {
+  RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+  RETRY_AMP_SATURATION_HOLD_MS,
+  RETRY_AMP_HELD_SATURATION_METRICS,
+  RETRY_AMP_STRESS_HOLD_MS,
+  RETRY_AMP_STRESS_METRICS,
+  RETRY_AMP_WINDOW_MS,
+  RetryAmplificationFinding,
+  RetryAmplificationState,
+  createRetryAmplificationState,
+  evaluateRetryAmplification,
+  RetryAmplificationStatus,
+  describeRetryAmplificationState,
+  retryAmplificationEpisodeStart,
+  retryAmplificationRearm,
+  observePushCadence,
+  retryAmplificationMaxPollGap,
+} from './retry-amplification-detector';
+import {
+  ClientCommandSnapshot,
+  RETRY_AMP_ATTRIBUTION_MIN_WINDOWS,
+  RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
+  RetryAmplificationContributor,
+  describeRetryAmplificationContributors,
+  rankRetryAmplificationContributors,
+  readClientCommandCounts,
+} from './retry-amplification-attribution';
 import {
   LargeReplyEntry,
   detectLargeReplyPressure,
@@ -186,6 +261,7 @@ import {
   BufferStats,
   AnomalySummary,
   SpikeDetectorConfig,
+  AnomalyEventSink,
 } from './types';
 
 interface MetricExtractor {
@@ -209,8 +285,17 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
+const MAX_INVOLVED_GROUP_IDS = 5_000;
+const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const CORRELATION_ID_CHUNK_SIZE = 500;
+const MAX_CORRELATED_GROUP_RESULTS = 1_000;
+const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
+
 @Injectable()
-export class AnomalyService extends MultiConnectionPoller implements OnModuleInit {
+export class AnomalyService
+  extends MultiConnectionPoller
+  implements OnModuleInit, AnomalyEventSink
+{
   protected readonly logger = new Logger(AnomalyService.name);
 
   // Per-connection state: connectionId -> metricType -> buffer/detector
@@ -228,11 +313,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
   // counter — otherwise a single historical maxclients hit would alert forever.
   private lastRejectedConnections = new Map<string, number>();
+  // Last total_connections_received reading and the derived churn sample per
+  // connection; the sample is exposed for other detectors to read.
+  private lastChurnReading = new Map<string, ConnectionChurnReading>();
+  private connectionChurnSamples = new Map<string, ConnectionChurnSample>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
   // config value (fetched once) so the alert can say whether eviction is even
   // enabled and contextualise justified-vs-over-aggressive (valkey#4151).
   private lastEvictedClients = new Map<string, number>();
+  private lastErrorReplies = new Map<string, { value: number; timestamp: number }>();
+  private lastErrorstatCounts = new Map<string, { counts: Map<string, number>; timestamp: number }>();
   private clientEvictionLimit = new Map<string, string>();
   // Last-logged count of unreachable replicas in the slot-state fan-out, per
   // connection — so the degraded-detection warning is emitted only on a change,
@@ -349,6 +440,20 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // cumulative counter (which never resets on AOF-only deployments).
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
+  private replicationStream = new ReplicationStreamTracker();
+  private divergenceState = new Map<string, DivergenceConnectionState>();
+  private divergenceOrphansSwept = new Set<string>();
+  private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
+  private removedDivergenceSweeps = new Set<string>();
+  private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
+    this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
+    if (entry.kind === 'save') entry.onDrop?.();
+  });
+  private correlationTicking = false;
+  private outboxDraining = false;
+  private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
+  private readonly latchHolders = new Map<string, string>();
+  private readonly anomalyLatches = new WeakMap<AnomalyEvent, string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
@@ -364,10 +469,21 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // tracking the acknowledged level and the consecutive-poll counter that keeps
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
+  private retryAmplificationState = new Map<string, RetryAmplificationState>();
+  private retryAmplificationFirstClients = new Map<
+    string,
+    { episodeStart: number; snapshot: ClientCommandSnapshot | null | undefined; attempts: number }
+  >();
+  private retryAmplificationContributors = new Map<
+    string,
+    { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
+  >();
+  private latencyDegraded = new Map<string, boolean>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
+  private clientSaturationRaisedBy = new Map<string, string>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -478,7 +594,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     private readonly clusterDiscovery?: ClusterDiscoveryService,
   ) {
     super(connectionRegistry);
-    this.correlator = new Correlator(this.correlationIntervalMs);
+    this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
+      this.correlationScopeOf(anomaly.connectionId),
+    );
     this.metricExtractors = this.initializeMetricExtractors();
 
     // Validated and defaulted by the Zod env schema (env.schema.ts), so a typo
@@ -548,8 +666,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     // Start correlation loop
     this.correlationInterval = setInterval(() => {
-      this.correlateAnomalies().catch((err) => {
-        this.logger.error('Failed to correlate anomalies:', err);
+      this.correlationTick().catch((err) => {
+        this.logger.error('Failed to run anomaly correlation tick:', err);
       });
     }, this.correlationIntervalMs);
 
@@ -668,7 +786,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
+    this.lastChurnReading.delete(connectionId);
+    this.connectionChurnSamples.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
+    this.lastErrorReplies.delete(connectionId);
+    this.lastErrorstatCounts.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
     this.lastReplicationRole.delete(connectionId);
@@ -676,6 +798,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
+    this.clientSaturationRaisedBy.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
@@ -737,6 +860,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     this.controlPlaneState.delete(connectionId);
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
+    this.retryAmplificationState.delete(connectionId);
+    this.retryAmplificationFirstClients.delete(connectionId);
+    this.retryAmplificationContributors.delete(connectionId);
+    this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
     this.activeLargeReplyOffenders.delete(connectionId);
@@ -748,6 +875,11 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // detectConfigDrift call, which rebuilds its node list from what remains.
     this.configSnapshot.delete(connectionId);
     this.configDriftRecheck.delete(connectionId);
+    this.replicationStream.forget(connectionId);
+    this.closeDivergenceEventsOnRemoval(connectionId);
+    this.divergenceState.delete(connectionId);
+    this.divergenceOrphansSwept.delete(connectionId);
+    this.divergenceOrphans.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -814,6 +946,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    let replicationSample: ReplicationStreamSample | null = null;
     try {
       const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
@@ -835,6 +968,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
+      replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -969,6 +1103,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         }
       }
 
+      await this.detectConnectionChurn(ctx, info, buffers, detectors, timestamp);
+      await this.detectErrorReplies(
+        info,
+        infoResponse.errorstats,
+        ctx,
+        buffers,
+        detectors,
+        timestamp,
+      );
+
       // Client-eviction storm (maxmemory-clients). evicted_clients is a lifetime
       // counter, so we feed the per-poll delta — the count of clients disconnected
       // by client-buffer eviction since the last poll — not the raw counter. Any
@@ -1024,7 +1168,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             if (currentRole === 0) {
               // master → replica demotion (failover started)
               const failoverEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-failover-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.DROP,
@@ -1063,7 +1207,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             } else if (currentRole === 1) {
               // replica → master promotion (failover completed)
               const promotionEvent: AnomalyEvent = {
-                id: `${ctx.connectionId}-promotion-${timestamp}`,
+                id: randomUUID(),
                 timestamp,
                 metricType: MetricType.REPLICATION_ROLE,
                 anomalyType: AnomalyType.SPIKE,
@@ -1250,7 +1394,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               const isFailure = lastState === 'ok' && clusterState === 'fail';
               if (isRecovery || isFailure) {
                 const clusterEvent: AnomalyEvent = {
-                  id: `${ctx.connectionId}-cluster-state-${timestamp}`,
+                  id: randomUUID(),
                   timestamp,
                   metricType: MetricType.CLUSTER_STATE,
                   anomalyType: isFailure ? AnomalyType.DROP : AnomalyType.SPIKE,
@@ -1465,6 +1609,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // understates the load. State-based with hysteresis.
       await this.detectLoadSaturation(info, ctx, timestamp, cpuUtilizationSample);
 
+      await this.detectRetryAmplification(info, ctx, timestamp);
+
       // Large-reply commandlog throughput pressure (valkey-io/valkey#2926): hot
       // commands repeatedly crossing commandlog-reply-larger-than pay the
       // large-reply logging/copy path's cost on every call — a regression
@@ -1477,6 +1623,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
+    } finally {
+      if (replicationSample) {
+        await this.detectReplicationDivergence(replicationSample, ctx).catch((err) => {
+          this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
+        });
+      }
     }
   }
 
@@ -1490,6 +1642,68 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
   // gap is meaningful. Kept as a single tunable knob so poll-skew noise (should
   // it appear under heavy write load) can be dialed up without touching logic.
   private static readonly LAGGING_PROMOTION_MIN_GAP_BYTES = 1;
+
+  private async detectConnectionChurn(
+    ctx: ConnectionContext,
+    info: Record<string, string>,
+    buffers: Map<MetricType, MetricBuffer>,
+    detectors: Map<MetricType, SpikeDetector>,
+    timestamp: number,
+  ): Promise<void> {
+    const totalReceived = this.parseNumber(info.total_connections_received);
+    const connectedClients = this.parseNumber(info.connected_clients);
+    if (totalReceived === null || connectedClients === null) {
+      this.lastChurnReading.delete(ctx.connectionId);
+      this.connectionChurnSamples.delete(ctx.connectionId);
+      return;
+    }
+
+    const reading = { totalReceived, connectedClients, timestamp };
+    const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
+    this.lastChurnReading.set(ctx.connectionId, reading);
+    this.connectionChurnSamples.set(ctx.connectionId, sample);
+    if (sample.connectsPerSec === null) {
+      detectors.get(MetricType.CONNECTION_CHURN)?.resetRun();
+      return;
+    }
+
+    if (!buffers.has(MetricType.CONNECTION_CHURN)) {
+      buffers.set(MetricType.CONNECTION_CHURN, new MetricBuffer(MetricType.CONNECTION_CHURN));
+      detectors.set(
+        MetricType.CONNECTION_CHURN,
+        new SpikeDetector(MetricType.CONNECTION_CHURN, {
+          warningZScore: 3,
+          criticalZScore: 5,
+          consecutiveRequired: 2,
+          cooldownMs: 60000,
+        }),
+      );
+    }
+
+    const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
+    const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
+    buffer.addSample(sample.connectsPerSec, timestamp);
+    const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
+    if (!elevated || !isChurnWithFlatPopulation(sample)) {
+      detector.resetRun();
+      return;
+    }
+
+    const anomaly = detector.detect(buffer, sample.connectsPerSec, timestamp);
+    if (!anomaly) return;
+
+    anomaly.connectionId = ctx.connectionId;
+    anomaly.message =
+      `Connection churn: ${sample.connectsPerSec.toFixed(1)} new connections/s ` +
+      `(baseline ${anomaly.baseline.toFixed(1)}/s) while connected_clients stays flat at ` +
+      `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+    await this.addAnomaly(anomaly, ctx);
+  }
+
+  getConnectionChurnSample(connectionId: string): ConnectionChurnSample | undefined {
+    return this.connectionChurnSamples.get(connectionId);
+  }
 
   /**
    * Detect connected_clients approaching maxclients (valkey-io/valkey#3918).
@@ -1548,16 +1762,31 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      // Await the emit so a failure propagates to the poll error handler. The
-      // stored level is advanced only AFTER a successful emit (below), so a failed
-      // escalation is retried on the next poll rather than being silently swallowed
-      // by the hysteresis.
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(
+        event,
+        ctx,
+        this.clientSaturationRearm(ctx.connectionId, event.id, prev),
+      );
+      this.clientSaturationRaisedBy.set(ctx.connectionId, event.id);
     }
 
-    // Advance the level last: on escalation only after addAnomaly resolved; on
-    // steady/de-escalation immediately (the latter re-arms alerting on recovery).
+    // Advance the level last: on steady/de-escalation this re-arms alerting on recovery.
     this.clientSaturationLevel.set(ctx.connectionId, level);
+  }
+
+  private clientSaturationRearm(
+    connectionId: string,
+    eventId: string,
+    previous: 'none' | 'warning' | 'critical',
+  ): () => void {
+    return () => {
+      if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
+      this.clientSaturationRaisedBy.delete(connectionId);
+      const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
+      if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
+        this.clientSaturationLevel.set(connectionId, previous);
+      }
+    };
   }
 
   /**
@@ -1592,19 +1821,12 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
     const event = this.buildClientLockoutEvent(ctx, timestamp, finding);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await the emit, then record the escalation. A failed emit leaves the
-    // hysteresis armed so the next poll retries instead of going quiet.
-    await this.addAnomaly(event, ctx);
-    // addAnomaly swallows a storage failure — it must not let one detector's write
-    // error abort the rest of the poll — so a rejected save returns normally with
-    // `persisted` unset. Committing on that path advanced the hysteresis for an
-    // advisory that only ever reached the in-memory ring, losing it on eviction or
-    // restart. `ctx.connectionId` is always set here, so a save was definitely
-    // attempted and `persisted !== true` means it failed: leave the level uncommitted
-    // and let the next poll try again.
-    if (event.persisted !== true) {
-      return;
-    }
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      ctx.connectionId,
+      clientLockoutRearm(state, finding.level),
+    );
     commitClientLockoutLevel(state, finding.level);
   }
 
@@ -1859,7 +2081,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     'Loop starvation like this is most often blocking hostname resolution on the ' +
     'Sentinel main loop (resolve-hostnames yes against FQDN targets), but a clock ' +
     'step (NTP), VM pause or live migration, CPU throttling or host overload stall ' +
-    'the loop the same way, and the INFO round-trip also includes this monitor\'s own ' +
+    "the loop the same way, and the INFO round-trip also includes this monitor's own " +
     'event-loop and network latency. If it is DNS, address monitored/announced targets ' +
     'by IP or serve those names from a local cache (peers resolving announced FQDNs are ' +
     'the ones that stall); otherwise check the host clock, scheduling and CPU.';
@@ -2071,7 +2293,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     if (looksDown) {
       return false;
     }
-    return message.includes('timeout') || message.includes('timed out') || message.includes('etimedout');
+    return (
+      message.includes('timeout') || message.includes('timed out') || message.includes('etimedout')
+    );
   }
 
   private buildSentinelLoopStallEvent(
@@ -2347,6 +2571,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         (drift) => this.buildAclDriftEvent(timestamp, drift),
         aclDriftSignature,
         this.activeAclDriftSignatures,
+        'replication',
       );
 
       const newClusterDrifts = this.claimAclDrifts(
@@ -2359,6 +2584,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         (drift) => this.buildAclClusterDriftEvent(timestamp, drift),
         aclClusterDriftSignature,
         this.activeAclClusterDriftSignatures,
+        'cluster',
       );
     } catch (err) {
       this.logger.debug(
@@ -2391,32 +2617,22 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return fresh;
   }
 
-  // Emits each drift; a failed emit releases its claim for retry. Release keys
-  // off `persisted` because addAnomaly catches storage errors instead of throwing.
   private async emitAclDrifts<T extends { nodes: Array<{ connectionId: string }> }>(
     drifts: T[],
     buildEvent: (drift: T) => AnomalyEvent,
     signature: (drift: T) => string,
     active: Set<string>,
+    scope: string,
   ): Promise<void> {
     for (const drift of drifts) {
       const event = buildEvent(drift);
       this.logger.warn(`Anomaly detected: ${event.message}`);
       // Attributed to the first node of the group, frequently NOT this poll's connection.
       const attributedCtx = this.buildConnectionContext(drift.nodes[0].connectionId);
-      let emitFailure: string | null = null;
-      try {
-        await this.addAnomaly(event, attributedCtx);
-        if (event.persisted !== true) {
-          emitFailure = 'anomaly was not persisted';
-        }
-      } catch (emitErr) {
-        emitFailure = emitErr instanceof Error ? emitErr.message : String(emitErr);
-      }
-      if (emitFailure !== null) {
-        active.delete(signature(drift));
-        this.logger.debug(`ACL drift emit failed, released for retry: ${emitFailure}`);
-      }
+      const sig = signature(drift);
+      await this.addLatchedAnomaly(event, attributedCtx, `${scope}:${sig}`, () =>
+        active.delete(sig),
+      );
     }
   }
 
@@ -2838,7 +3054,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             `in-engine cluster-wide CONFIG SET exists.`;
 
         const event: AnomalyEvent = {
-          id: `config-drift-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CONFIG_DRIFT,
           anomalyType: AnomalyType.SPIKE,
@@ -2863,7 +3079,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         // this scan, so we must not pass the polling ctx. Falls back to the
         // event's connectionId (storage-only) if the node isn't resolvable.
         const attributedCtx = this.buildConnectionContext(drift.values[0].connectionId);
-        await this.addAnomaly(event, attributedCtx);
+        await this.addLatchedAnomaly(event, attributedCtx, signature, () => {
+          this.activeConfigDriftSignatures.delete(signature);
+        });
       }
     } catch (err) {
       this.logger.debug(
@@ -2971,6 +3189,72 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * busyness escalates and re-arms on a drop; the passed cpuUtilization lets the
    * message point out when CPU% understates the load.
    */
+  private async detectErrorReplies(
+    info: Record<string, string>,
+    errorstats: ErrorStatsInfo | undefined,
+    ctx: ConnectionContext,
+    buffers: Map<MetricType, MetricBuffer>,
+    detectors: Map<MetricType, SpikeDetector>,
+    timestamp: number,
+  ): Promise<void> {
+    const currentErrors = this.parseNumber(info.total_error_replies);
+    if (currentErrors === null) {
+      this.lastErrorReplies.delete(ctx.connectionId);
+      this.lastErrorstatCounts.delete(ctx.connectionId);
+      return;
+    }
+    const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
+    const errorsPerSec =
+      lastErrors === undefined
+        ? 0
+        : errorRepliesPerSecond(
+            Math.max(0, currentErrors - lastErrors.value),
+            timestamp - lastErrors.timestamp,
+            this.getIntervalMs(),
+          );
+    this.lastErrorReplies.set(ctx.connectionId, { value: currentErrors, timestamp });
+
+    const currentCounts = readErrorstatCounts(errorstats);
+    const previousCounts = this.lastErrorstatCounts.get(ctx.connectionId);
+    if (errorstats !== undefined) {
+      this.lastErrorstatCounts.set(ctx.connectionId, { counts: currentCounts, timestamp });
+    }
+
+    if (buffers.has(MetricType.ERROR_REPLIES) === false) {
+      buffers.set(MetricType.ERROR_REPLIES, new MetricBuffer(MetricType.ERROR_REPLIES));
+      detectors.set(
+        MetricType.ERROR_REPLIES,
+        new SpikeDetector(
+          MetricType.ERROR_REPLIES,
+          this.resolveSpikeConfig(MetricType.ERROR_REPLIES),
+          { minValue: ERROR_REPLIES_MIN_PER_SEC, thresholdOverridesBelowMean: true },
+        ),
+      );
+    }
+
+    const errorsBuffer = buffers.get(MetricType.ERROR_REPLIES)!;
+    const errorsDetector = detectors.get(MetricType.ERROR_REPLIES)!;
+    errorsBuffer.addSample(errorsPerSec, timestamp);
+    const anomaly = errorsDetector.detect(errorsBuffer, errorsPerSec, timestamp);
+    if (anomaly === null) {
+      return;
+    }
+    anomaly.connectionId = ctx.connectionId;
+    const polls =
+      previousCounts === undefined
+        ? 1
+        : Math.round((timestamp - previousCounts.timestamp) / this.getIntervalMs());
+    const breakdown = describeErrorstatDeltas(
+      topErrorstatDeltas(previousCounts?.counts, currentCounts),
+      polls,
+    );
+    if (breakdown !== null) {
+      anomaly.message = `${anomaly.message} — ${breakdown}`;
+    }
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
+    await this.addAnomaly(anomaly, ctx);
+  }
+
   private async detectLoadSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
@@ -3011,11 +3295,243 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await the emit so a failure propagates to the poll error handler, and
-    // acknowledge only AFTER a successful emit — a failed escalation is then
-    // retried on the next poll rather than being swallowed by the hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, loadSaturationRearm(state, finding));
     acknowledgeLoadSaturationFinding(state, finding);
+  }
+
+  private async detectRetryAmplification(
+    info: Record<string, string>,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    let state = this.retryAmplificationState.get(ctx.connectionId);
+    if (state === undefined) {
+      state = createRetryAmplificationState();
+      this.retryAmplificationState.set(ctx.connectionId, state);
+    }
+    state.maxPollGapMs =
+      ctx.connectionType === 'external'
+        ? observePushCadence(state, timestamp, this.getIntervalMs())
+        : retryAmplificationMaxPollGap(this.getIntervalMs());
+
+    const connectionEvents = this.recentAnomalies.filter((a) => {
+      const relativeCpuMove =
+        a.metricType === MetricType.CPU_UTILIZATION && !isControlPlaneSaturationEvent(a);
+      return a.connectionId === ctx.connectionId && a.timestamp <= timestamp && !relativeCpuMove;
+    });
+    const recentEvents = connectionEvents
+      .filter((a) => {
+        return timestamp - a.timestamp <= RETRY_AMP_WINDOW_MS;
+      })
+      .map((a) => {
+        return { metricType: a.metricType, timestamp: a.timestamp };
+      });
+    const degraded = this.latencyDegraded.get(ctx.connectionId);
+    const stressActive =
+      degraded === true ||
+      (degraded === undefined &&
+        connectionEvents.some((a) => {
+          return (
+            !a.resolved &&
+            RETRY_AMP_STRESS_METRICS.includes(a.metricType) &&
+            timestamp - a.timestamp <= RETRY_AMP_STRESS_HOLD_MS
+          );
+        }));
+    const activeSaturation = new Set<MetricType>();
+    for (const a of connectionEvents) {
+      if (
+        !a.resolved &&
+        RETRY_AMP_HELD_SATURATION_METRICS.includes(a.metricType) &&
+        timestamp - a.timestamp <= RETRY_AMP_SATURATION_HOLD_MS
+      ) {
+        activeSaturation.add(a.metricType);
+      }
+    }
+    const loadLevel = this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
+    if (loadLevel !== undefined && loadLevel !== 'none') {
+      activeSaturation.add(MetricType.LOAD_SATURATION);
+    }
+    const clientLevel = this.clientSaturationLevel.get(ctx.connectionId);
+    if (clientLevel !== undefined && clientLevel !== 'none') {
+      activeSaturation.add(MetricType.CLIENT_SATURATION);
+    }
+
+    const finding = evaluateRetryAmplification(state, {
+      timestamp,
+      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
+      connectedClients: this.parseNumber(info.connected_clients),
+      totalCommands: this.parseNumber(info.total_commands_processed),
+      totalErrorReplies: this.parseNumber(info.total_error_replies),
+      connectsPerSec: this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null,
+      recentEvents,
+      stressActive,
+      activeSaturation: [...activeSaturation],
+    });
+
+    const episodeStart = retryAmplificationEpisodeStart(state, finding);
+    if (episodeStart === null) {
+      this.retryAmplificationFirstClients.delete(ctx.connectionId);
+    } else if (state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS) {
+      const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
+      const attempts = first?.episodeStart === episodeStart ? first.attempts : 0;
+      const needed = first?.episodeStart !== episodeStart || first.snapshot === undefined;
+      if (needed && attempts < RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS) {
+        this.retryAmplificationFirstClients.set(ctx.connectionId, {
+          episodeStart,
+          snapshot: await this.readClientCommandCounts(ctx, timestamp),
+          attempts: attempts + 1,
+        });
+      }
+    }
+    if (finding === null) return;
+
+    const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
+    const closedAt = state.hotRun.length === 0 ? state.lastEpisode?.endedAt : undefined;
+    const contributors = await this.attributeRetryAmplification(
+      ctx,
+      timestamp,
+      attributionStart,
+      closedAt,
+    );
+    this.retryAmplificationContributors.set(ctx.connectionId, {
+      episodeStart: attributionStart,
+      contributors,
+    });
+
+    const severity =
+      finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp: closedAt ?? timestamp,
+      metricType: MetricType.RETRY_AMPLIFICATION,
+      anomalyType: AnomalyType.SPIKE,
+      severity,
+      value: finding.loadRatio,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+      message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
+      relatedMetrics: finding.relatedMetrics,
+      resolved: false,
+      connectionId: ctx.connectionId,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      ctx.connectionId,
+      retryAmplificationRearm(state, finding),
+    );
+
+    if (this.webhookEventsProService) {
+      this.webhookEventsProService
+        .dispatchRetryAmplificationDetected({
+          level: finding.level,
+          trigger: finding.trigger,
+          windows: finding.windows,
+          loadRatio: finding.loadRatio,
+          pattern: finding.pattern,
+          correlation: finding.correlation,
+          topContributors: contributors,
+          message: event.message,
+          timestamp: event.timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
+        });
+    }
+  }
+
+  private async readClientCommandCounts(
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<ClientCommandSnapshot | null | undefined> {
+    if (ctx.connectionType === 'external') return undefined;
+    try {
+      const clients = await this.raceWithTimeout(
+        ctx.client.getClients({ type: 'normal' }),
+        this.infoTimeoutMs,
+        `CLIENT LIST timed out after ${this.infoTimeoutMs}ms`,
+      );
+      return readClientCommandCounts(clients, timestamp);
+    } catch (error) {
+      this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
+      return undefined;
+    }
+  }
+
+  private async attributeRetryAmplification(
+    ctx: ConnectionContext,
+    timestamp: number,
+    episodeStart: number,
+    closedAt?: number,
+  ): Promise<RetryAmplificationContributor[] | null> {
+    const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
+    const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
+    const latest =
+      closedAt === undefined && firstSnapshot !== null
+        ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null)
+        : null;
+    const until = closedAt ?? timestamp;
+    let capture: ClientSnapshotGroupRow[] = [];
+    let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
+    let snapshotsLoaded = true;
+    try {
+      [capture, newConnections] = await Promise.all([
+        this.latestClientCapture(ctx.connectionId, episodeStart, until),
+        this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
+      ]);
+    } catch (error) {
+      snapshotsLoaded = false;
+      this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
+    }
+    const reconnectsKnown = snapshotsLoaded && capture.length > 0;
+    if (!reconnectsKnown && (firstSnapshot === null || latest === null)) return null;
+    return rankRetryAmplificationContributors({
+      first: firstSnapshot,
+      latest,
+      capture,
+      newConnections,
+    });
+  }
+
+  private async latestClientCapture(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<ClientSnapshotGroupRow[]> {
+    const [newest] = await this.storage.getClientSnapshots({
+      connectionId,
+      startTime,
+      endTime,
+      limit: 1,
+    });
+    if (newest === undefined) return [];
+    return this.storage.getClientSnapshotGroups(
+      connectionId,
+      newest.capturedAt - 1,
+      newest.capturedAt,
+    );
+  }
+
+  getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
+    const state = this.retryAmplificationState.get(connectionId);
+    const cached = this.retryAmplificationContributors.get(connectionId);
+    if (state === undefined || cached === undefined) return null;
+    const episodeStart = retryAmplificationEpisodeStart(state, null) ?? state.lastEpisode?.startedAt;
+    return episodeStart === cached.episodeStart ? cached.contributors : null;
+  }
+
+  getRetryAmplificationStatus(
+    connectionId: string,
+  ): RetryAmplificationStatus & { topContributors: RetryAmplificationContributor[] | null } {
+    return {
+      ...describeRetryAmplificationState(this.retryAmplificationState.get(connectionId)),
+      topContributors: this.getRetryAmplificationContributors(connectionId),
+    };
   }
 
   /**
@@ -3111,12 +3627,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       const offenders = detectLargeReplyPressure(entries, thresholdBytes);
 
-      const active = this.activeLargeReplyOffenders.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeLargeReplyOffenders,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(offenders.map(largeReplyPressureSignature));
 
       for (const offender of offenders) {
         const signature = largeReplyPressureSignature(offender);
         if (active.has(signature)) continue; // already alerted for this command
+        active.add(signature);
 
         const event: AnomalyEvent = {
           id: randomUUID(),
@@ -3134,12 +3655,16 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           connectionId: ctx.connectionId,
         };
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
+          this.activeLargeReplyOffenders.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still offending so a resolved-then-recurring
       // command alerts again (mirrors activeTopologyConflicts).
-      this.activeLargeReplyOffenders.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (err) {
       this.logger.debug(
         `Failed to check large-reply commandlog pressure for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -3157,8 +3682,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * pressure makes the next save imminent.
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation /
-   * detectCobPressure): the finding is emitted on escalation, the stored level is
-   * advanced ONLY after a successful emit, and it re-arms as the risk recedes.
+   * detectCobPressure): the finding is emitted on escalation and it re-arms as
+   * the risk recedes.
    */
   private async detectForkMemoryRisk(
     info: Record<string, string>,
@@ -3223,10 +3748,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    // Await so a failed emit propagates to the poll error handler; the
-    // acknowledged level is advanced only AFTER a successful emit, so a failed
-    // escalation is retried on the next poll rather than swallowed by hysteresis.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, forkMemoryRearm(state, finding));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -3420,7 +3942,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
+      await this.addAnomaly(event, ctx, cobPressureRearm(state, finding));
       acknowledgeCobFinding(state, finding);
     }
   }
@@ -3434,8 +3956,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    *
    * State-based with escalation-only hysteresis (mirrors detectClientSaturation
    * and detectCobPressure): the finding is emitted only when the level escalates
-   * above the acknowledged level, and the ackedLevel is advanced only AFTER a
-   * successful emit so a failed emit retries on the next poll.
+   * above the acknowledged level.
    */
   private async detectMemoryOverhead(
     info: Record<string, string>,
@@ -3523,9 +4044,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } else {
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     }
-    // Await the emit so a failure propagates; advance ackedLevel only AFTER a
-    // successful emit so a failed escalation is retried next poll.
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, memoryOverheadRearm(state, finding));
     acknowledgeMemoryOverheadFinding(state, finding);
   }
 
@@ -3590,7 +4109,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       ctx.connectionId,
     );
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, controlPlaneSaturationRearm(state, timestamp));
     acknowledgeSaturationFinding(state, timestamp);
   }
 
@@ -3977,9 +4496,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const errorReported = kind === 'rdb' ? state.rdbErrorReported : state.aofErrorReported;
       if (status === 'err') {
         if (!errorReported) {
-          await this.addAnomaly(
+          await this.addLatchedAnomaly(
             this.buildPersistenceEvent(kind, 'error', 0, signals, timestamp, ctx),
             ctx,
+            `${ctx.connectionId}:${kind}:error`,
+            () => {
+              if (kind === 'rdb') state.rdbErrorReported = false;
+              else state.aofErrorReported = false;
+            },
           );
           if (kind === 'rdb') state.rdbErrorReported = true;
           else state.aofErrorReported = true;
@@ -4072,18 +4596,26 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // with different thresholds and messages. Prefer the frozen-progress
       // reason when both trip (a stuck child is the more actionable signal).
       const reason = frozenStall ? 'stall' : 'exceeded';
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         this.buildPersistenceEvent(kind, reason, elapsedSec, signals, timestamp, ctx),
         ctx,
+        `${ctx.connectionId}:${kind}:stall`,
+        () => {
+          track.reportedStall = false;
+        },
       );
       return;
     }
 
     if (!track.reportedStall && !track.warnedLong && elapsedSec >= this.persistenceWarnSec) {
       track.warnedLong = true;
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         this.buildPersistenceEvent(kind, 'long', elapsedSec, signals, timestamp, ctx),
         ctx,
+        `${ctx.connectionId}:${kind}:long`,
+        () => {
+          track.warnedLong = false;
+        },
       );
     }
   }
@@ -4130,7 +4662,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     }
 
     return {
-      id: `${ctx.connectionId}-persistence-${kind}-${reason}-${timestamp}`,
+      id: randomUUID(),
       timestamp,
       metricType: MetricType.PERSISTENCE_CHILD,
       anomalyType: AnomalyType.SPIKE,
@@ -4160,12 +4692,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     try {
       const conflicts = detectDuplicatePrimaries(nodes);
 
-      const active = this.activeTopologyConflicts.get(ctx.connectionId) ?? new Set<string>();
+      const active = this.connectionClaims(
+        this.activeTopologyConflicts,
+        ctx.connectionId,
+        () => new Set<string>(),
+      );
       const currentSignatures = new Set(conflicts.map((c) => conflictSignature(c)));
 
       for (const conflict of conflicts) {
         const signature = conflictSignature(conflict);
         if (active.has(signature)) continue; // already alerted for this conflict
+        active.add(signature);
 
         const [authoritative, phantom] = conflict.masters;
         const slotLabel =
@@ -4174,7 +4711,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             : `slots ${conflict.slotStart}-${conflict.slotEnd}`;
 
         const event: AnomalyEvent = {
-          id: `${ctx.connectionId}-dup-primary-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.CLUSTER_TOPOLOGY,
           anomalyType: AnomalyType.SPIKE,
@@ -4194,13 +4731,17 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         };
 
         this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-        await this.addAnomaly(event, ctx);
+        await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${signature}`, () => {
+          this.activeTopologyConflicts.get(ctx.connectionId)?.delete(signature);
+        });
       }
 
       // Keep only signatures still in conflict so a resolved-then-recurring
       // conflict alerts again. (A CLUSTER NODES observation gap is handled at the
       // poll level, which clears this set so a missed heal re-alerts.)
-      this.activeTopologyConflicts.set(ctx.connectionId, currentSignatures);
+      for (const signature of active) {
+        if (!currentSignatures.has(signature)) active.delete(signature);
+      }
     } catch (topologyErr) {
       this.logger.debug(
         `Failed to check cluster topology for ${ctx.connectionName}: ${topologyErr instanceof Error ? topologyErr.message : topologyErr}`,
@@ -4243,7 +4784,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
               ? `unknown primary ${s.primaryId.substring(0, 8)} (absent from the cluster view)`
               : `failed primary ${s.primaryId.substring(0, 8)} at ${s.primaryAddress}`;
           return {
-            id: `${ctx.connectionId}-stuck-replica-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.CLUSTER_TOPOLOGY,
             anomalyType: AnomalyType.SPIKE,
@@ -4275,8 +4816,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * master link held down through repeated full-sync attempts that never
    * complete. The pure evaluator owns the window/cycle discipline (so a normal
    * first sync of a large dataset stays silent) and the emit-retry contract:
-   * the finding is re-produced until acknowledged, and acknowledged only AFTER
-   * a successful emit so a failed emit retries next poll.
+   * the finding is re-produced until acknowledged.
    */
   private async detectResyncLoop(
     info: Record<string, string>,
@@ -4311,7 +4851,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx);
+    await this.addAnomaly(event, ctx, resyncLoopRearm(state));
     acknowledgeResyncLoopFinding(state);
   }
 
@@ -4446,7 +4986,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
             `so leaked slots are invisible to it — locate them with CLUSTER COUNTKEYSINSLOT ` +
             `on slots outside this node's ranges).`;
           return {
-            id: `${ctx.connectionId}-orphaned-slots-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.ORPHANED_SLOT_KEYS,
             anomalyType: AnomalyType.SPIKE,
@@ -4523,7 +5063,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
                 `routing may hit the wrong endpoint until this converges. This usually self-heals; ` +
                 `investigate if it persists.`;
           return {
-            id: `${ctx.connectionId}-hostname-staleness-${signature}-${timestamp}`,
+            id: randomUUID(),
             timestamp,
             metricType: MetricType.HOSTNAME_STALENESS,
             anomalyType: AnomalyType.SPIKE,
@@ -4814,7 +5354,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         metricType: MetricType.REPLICA_SLOT_STATE,
         preserveSignature,
         buildEvent: (a, signature) => ({
-          id: `${ctx.connectionId}-replica-slot-state-${signature}-${timestamp}`,
+          id: randomUUID(),
           timestamp,
           metricType: MetricType.REPLICA_SLOT_STATE,
           anomalyType: AnomalyType.SPIKE,
@@ -5015,8 +5555,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
 
     const firstSeen = firstSeenByConn.get(connId) ?? new Map<string, number>();
-    const active = activeByConn.get(connId) ?? new Set<string>();
-    const eventIds = eventIdsByConn?.get(connId) ?? new Map<string, string>();
+    const active = this.connectionClaims(activeByConn, connId, () => new Set<string>());
+    const eventIds = eventIdsByConn
+      ? this.connectionClaims(eventIdsByConn, connId, () => new Map<string, string>())
+      : new Map<string, string>();
     const currentSignatures = new Set(findings.map(signatureOf));
 
     // Forget recovered signatures so their grace window restarts if they recur.
@@ -5068,9 +5610,13 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
 
       const event = buildEvent(finding, signature);
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx);
       active.add(signature);
       if (eventIdsByConn) eventIds.set(signature, event.id);
+      await this.addLatchedAnomaly(event, ctx, `${connId}:${signature}`, () => {
+        activeByConn.get(connId)?.delete(signature);
+        const tracked = eventIdsByConn?.get(connId);
+        if (tracked?.get(signature) === event.id) tracked.delete(signature);
+      });
     }
 
     // Auto-resolve (when wired): a recovered signature (has an emitted event id
@@ -5095,16 +5641,14 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         }
         if (outcome !== 'retry') eventIds.delete(sig);
       }
-      eventIdsByConn.set(connId, eventIds);
     }
 
     firstSeenByConn.set(connId, firstSeen);
-    activeByConn.set(
-      connId,
-      // Keep signatures active this poll AND preserved ones (unreachable nodes),
-      // so a transient connectivity gap doesn't drop a still-open finding.
-      new Set([...active].filter((sig) => currentSignatures.has(sig) || isPreserved(sig))),
-    );
+    // Keep signatures active this poll AND preserved ones (unreachable nodes),
+    // so a transient connectivity gap doesn't drop a still-open finding.
+    for (const sig of active) {
+      if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
+    }
   }
 
   /**
@@ -5261,22 +5805,138 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       message: anomaly.message,
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
+      replicaAddr: anomaly.replicaAddr,
       resolved: anomaly.resolved || false,
-      resolvedAt: undefined,
-      durationMs: undefined,
+      resolvedAt: anomaly.resolvedAt,
+      durationMs:
+        anomaly.resolvedAt === undefined
+          ? undefined
+          : Math.max(0, anomaly.resolvedAt - anomaly.timestamp),
       sourceHost: ctx?.host || this.configService.get('database.host'),
       sourcePort: ctx?.port || this.configService.get('database.port'),
       connectionId: ctx?.connectionId || anomaly.connectionId,
     };
   }
 
-  private async addAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+  private async addAnomaly(
+    anomaly: AnomalyEvent,
+    ctx?: ConnectionContext,
+    onDrop?: () => void,
+  ): Promise<void> {
     this.recentAnomalies.push(anomaly);
 
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
+    this.countAnomaly(anomaly, ctx);
+    if (ctx) this.anomalyContexts.set(anomaly, ctx);
+
+    try {
+      await this.persistAnomaly(anomaly, ctx);
+    } catch (err) {
+      this.logger.error('Failed to persist anomaly event:', err);
+      this.persistenceOutbox.enqueueSave(anomaly, ctx, Date.now(), onDrop);
+    }
+  }
+
+  private async addLatchedAnomaly(
+    anomaly: AnomalyEvent,
+    ctx: ConnectionContext | undefined,
+    scope: string,
+    rearm: () => void,
+  ): Promise<void> {
+    const latch = `${anomaly.metricType}:${scope}`;
+    this.latchHolders.set(latch, anomaly.id);
+    this.anomalyLatches.set(anomaly, latch);
+    await this.addAnomaly(anomaly, ctx, () => {
+      if (this.releaseLatch(anomaly)) rearm();
+    });
+  }
+
+  private releaseLatch(anomaly: AnomalyEvent): boolean {
+    const latch = this.anomalyLatches.get(anomaly);
+    if (latch === undefined || this.latchHolders.get(latch) !== anomaly.id) return false;
+    this.latchHolders.delete(latch);
+    return true;
+  }
+
+  private connectionClaims<T>(byConn: Map<string, T>, connectionId: string, create: () => T): T {
+    const existing = byConn.get(connectionId);
+    if (existing !== undefined) return existing;
+    const claims = create();
+    byConn.set(connectionId, claims);
+    return claims;
+  }
+
+  private async persistAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): Promise<void> {
+    const context = ctx ?? this.anomalyContexts.get(anomaly);
+    const connectionId = context?.connectionId || anomaly.connectionId;
+    if (!connectionId) return;
+    const wasResolved = anomaly.resolved;
+    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
+    anomaly.persisted = true;
+    this.releaseLatch(anomaly);
+    this.persistenceOutbox.settleSave(anomaly.id);
+    if (anomaly.resolved && !wasResolved) {
+      const now = Date.now();
+      this.persistenceOutbox.enqueueResolve(anomaly.id, anomaly.resolvedAt ?? now, now);
+    }
+  }
+
+  private async correlationTick(): Promise<void> {
+    if (!this.correlationTicking) {
+      this.correlationTicking = true;
+      try {
+        await this.correlateAnomalies();
+      } finally {
+        this.correlationTicking = false;
+      }
+    }
+    await this.outboxTick();
+  }
+
+  private async outboxTick(): Promise<void> {
+    if (this.outboxDraining) return;
+    this.outboxDraining = true;
+    try {
+      await this.drainPersistenceOutbox();
+    } finally {
+      this.outboxDraining = false;
+    }
+  }
+
+  private async drainPersistenceOutbox(): Promise<void> {
+    await this.sweepRemovedConnections();
+    for (const entry of this.persistenceOutbox.due(Date.now())) {
+      await this.retryPersistence(entry);
+    }
+  }
+
+  private async retryPersistence(entry: OutboxEntry): Promise<void> {
+    if (entry.kind === 'resolve') {
+      if ((await this.resolveAnomalyOutcome(entry.id)) === 'retry') {
+        this.persistenceOutbox.defer(entry.id, Date.now());
+      } else {
+        this.persistenceOutbox.settle(entry.id);
+      }
+      return;
+    }
+    if (entry.anomaly.persisted && !entry.rewrite) {
+      this.persistenceOutbox.settle(entry.id);
+      return;
+    }
+    try {
+      await this.persistAnomaly(entry.anomaly, entry.ctx);
+    } catch (err) {
+      this.logger.debug(
+        `Retry of anomaly ${entry.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.persistenceOutbox.defer(entry.id, Date.now());
+    }
+  }
+
+  private countAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): void {
     // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
     // or the OTLP dispatch must never abort recording/persisting the anomaly, and
     // must never propagate out of addAnomaly (that would let one detector's emit
@@ -5312,18 +5972,39 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     } catch (err) {
       this.logger.error('Failed to dispatch anomaly OTLP event:', err);
     }
+  }
 
-    try {
-      const connectionId = ctx?.connectionId || anomaly.connectionId;
-      if (connectionId) {
-        await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, ctx), connectionId);
-        // Mark durable so resolution goes storage-first; a save failure (e.g. a
-        // string id rejected by the Postgres UUID PK) leaves it memory-only.
-        anomaly.persisted = true;
-      }
-    } catch (err) {
-      this.logger.error('Failed to persist anomaly event:', err);
+  reportLatencyDegraded(connectionId: string, degraded: boolean | null): void {
+    if (degraded === null) {
+      this.latencyDegraded.delete(connectionId);
+    } else {
+      this.latencyDegraded.set(connectionId, degraded);
     }
+  }
+
+  ingestExternalAnomaly(event: AnomalyEvent): void {
+    if (this.recentAnomalies.some((a) => a.id === event.id)) return;
+    this.recentAnomalies.push({ ...event, persisted: true });
+    if (this.recentAnomalies.length > this.maxRecentEvents) {
+      this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
+    }
+  }
+
+  private correlationScopeOf(connectionId: string | undefined): string {
+    if (!connectionId) return '';
+    return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId ?? connectionId;
+  }
+
+  private scopeConnectionIds(connectionId: string): string[] {
+    const scope = this.correlationScopeOf(connectionId);
+    const members = this.connectionRegistry.listMembers(scope);
+    return [
+      ...new Set([
+        connectionId,
+        ...(this.connectionRegistry.getConfig(scope) ? [scope] : []),
+        ...members.map((m) => m.id),
+      ]),
+    ];
   }
 
   private async correlateAnomalies(): Promise<void> {
@@ -5331,6 +6012,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
       if (uncorrelated.length === 0) return;
 
+      const priorRelatedMetrics = new Map(uncorrelated.map((a) => [a.id, a.relatedMetrics]));
       const newGroups = this.correlator.correlate(uncorrelated);
       if (newGroups.length === 0) return;
 
@@ -5338,19 +6020,8 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
       );
 
+      const savedGroups: typeof newGroups = [];
       for (const group of newGroups) {
-        this.logger.warn(
-          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
-        );
-
-        // Get connectionId from first anomaly in group (all should have same connectionId)
-        const groupConnectionId = group.anomalies[0]?.connectionId;
-        this.prometheusService.incrementCorrelatedGroup(
-          group.pattern,
-          group.severity,
-          groupConnectionId,
-        );
-
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
           timestamp: group.timestamp,
@@ -5364,23 +6035,40 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
           sourcePort: this.configService.get('database.port'),
         };
 
+        // Get connectionId from first anomaly in group (all should have same connectionId)
+        const connectionId = group.anomalies[0]?.connectionId;
         try {
-          // Get connectionId from first anomaly in group (all should have same connectionId)
-          const connectionId = group.anomalies[0]?.connectionId;
-          if (connectionId) {
-            await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
-            for (const anomaly of group.anomalies) {
-              await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly), connectionId);
-            }
-          }
+          if (connectionId) await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
         } catch (err) {
           this.logger.error('Failed to persist correlated group:', err);
+          for (const anomaly of group.anomalies) {
+            anomaly.correlationId = undefined;
+            anomaly.relatedMetrics = priorRelatedMetrics.get(anomaly.id);
+          }
+          continue;
+        }
+
+        this.logger.warn(
+          `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
+        );
+        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+        savedGroups.push(group);
+
+        if (!connectionId) continue;
+        for (const anomaly of group.anomalies) {
+          anomaly.connectionId ??= connectionId;
+          try {
+            await this.persistAnomaly(anomaly);
+          } catch (err) {
+            this.logger.error('Failed to persist correlated group member:', err);
+            this.persistenceOutbox.enqueueRewrite(anomaly, Date.now());
+          }
         }
       }
 
-      this.recentGroups.push(...newGroups);
+      this.recentGroups.push(...savedGroups);
       this.lastHourGroups.push(
-        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
+        ...savedGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
       );
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
@@ -5417,7 +6105,9 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       message: s.message,
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
+      replicaAddr: s.replicaAddr,
       resolved: s.resolved,
+      resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,
     };
   }
@@ -5509,14 +6199,71 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     return groups.slice(0, limit);
   }
 
+  private async siblingGroupsInvolving(
+    connectionId: string,
+    siblings: string[],
+    known: Set<string>,
+    startTime: number,
+    endTime: number | undefined,
+    pattern: AnomalyPattern | undefined,
+    limit: number,
+  ): Promise<StoredCorrelatedGroup[]> {
+    if (siblings.length === 0) return [];
+    const pageSize = 10_000;
+    const seen = new Set<string>();
+    const found = new Map<string, StoredCorrelatedGroup>();
+    const inWindow = (g: StoredCorrelatedGroup) =>
+      g.timestamp >= startTime && (endTime === undefined || g.timestamp <= endTime);
+    for (
+      let offset = 0;
+      found.size < limit &&
+      seen.size < MAX_INVOLVED_GROUP_IDS &&
+      offset < MAX_SCANNED_CALLER_EVENTS;
+      offset += pageSize
+    ) {
+      const page = await this.storage.getAnomalyEvents({
+        startTime: startTime - this.correlationIntervalMs,
+        endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+        connectionId,
+        limit: pageSize,
+        offset,
+      });
+      const candidates: string[] = [];
+      for (const e of page) {
+        if (seen.size >= MAX_INVOLVED_GROUP_IDS) break;
+        if (!e.correlationId || known.has(e.correlationId) || seen.has(e.correlationId)) continue;
+        seen.add(e.correlationId);
+        candidates.push(e.correlationId);
+      }
+      for (
+        let i = 0;
+        i < candidates.length && found.size < limit;
+        i += CORRELATION_ID_CHUNK_SIZE
+      ) {
+        const chunk = candidates.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+        const groups = await this.storage.getCorrelatedGroups({
+          pattern: pattern as string,
+          correlationIds: chunk,
+          limit: chunk.length,
+        });
+        for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
+      }
+      if (page.length < pageSize) break;
+    }
+    return [...found.values()];
+  }
+
   async getRecentCorrelatedGroups(
     startTime?: number,
     endTime?: number,
     pattern?: AnomalyPattern,
-    limit = 50,
+    limit = DEFAULT_CORRELATED_GROUP_RESULTS,
     connectionId?: string,
   ): Promise<CorrelatedAnomalyGroup[]> {
     const cacheThreshold = Date.now() - this.cacheTtlMs;
+    const boundedLimit = Number.isFinite(limit)
+      ? Math.max(1, Math.min(Math.trunc(limit), MAX_CORRELATED_GROUP_RESULTS))
+      : DEFAULT_CORRELATED_GROUP_RESULTS;
 
     if (!startTime || startTime >= cacheThreshold) {
       let groups = [...this.recentGroups];
@@ -5524,40 +6271,405 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
         groups = groups.filter((g) => g.anomalies.some((a) => a.connectionId === connectionId));
       if (pattern) groups = groups.filter((g) => g.pattern === pattern);
       if (endTime) groups = groups.filter((g) => g.timestamp <= endTime);
-      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+      return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, boundedLimit);
     }
 
-    const stored = await this.storage.getCorrelatedGroups({
+    const own = await this.storage.getCorrelatedGroups({
       startTime,
       endTime,
       pattern: pattern as string,
-      limit,
+      limit: boundedLimit,
       connectionId,
     });
+    const found = connectionId
+      ? await this.siblingGroupsInvolving(
+          connectionId,
+          this.scopeConnectionIds(connectionId).filter((id) => id !== connectionId),
+          new Set(own.map((s) => s.correlationId)),
+          startTime,
+          endTime,
+          pattern,
+          boundedLimit,
+        )
+      : [];
+    const stored = [...new Map([...own, ...found].map((s) => [s.correlationId, s])).values()]
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, boundedLimit);
 
-    const groups: CorrelatedAnomalyGroup[] = [];
-    for (const s of stored) {
-      const storedAnomalies = await this.storage.getAnomalyEvents({
-        startTime: s.timestamp - this.correlationIntervalMs,
-        endTime: s.timestamp + this.correlationIntervalMs,
-        connectionId,
+    const membersByGroup = new Map<string, AnomalyEvent[]>();
+    for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
+      const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
+      const timestamps = chunk.map((s) => s.timestamp);
+      const members = await this.storage.getAnomalyEvents({
+        startTime: Math.min(...timestamps) - this.correlationIntervalMs,
+        endTime: Math.max(...timestamps) + this.correlationIntervalMs,
+        correlationIds: chunk.map((s) => s.correlationId),
+        limit: this.maxRecentEvents * chunk.length,
       });
-      const anomalies = storedAnomalies
-        .filter((a) => a.correlationId === s.correlationId)
-        .map((a) => this.storedToAnomalyEvent(a));
-
-      groups.push({
-        correlationId: s.correlationId,
-        timestamp: s.timestamp,
-        pattern: s.pattern as AnomalyPattern,
-        severity: s.severity as AnomalySeverity,
-        diagnosis: s.diagnosis,
-        recommendations: s.recommendations,
-        anomalies,
-      });
+      for (const member of members) {
+        if (!member.correlationId) continue;
+        const anomalies = membersByGroup.get(member.correlationId) ?? [];
+        anomalies.push(this.storedToAnomalyEvent(member));
+        membersByGroup.set(member.correlationId, anomalies);
+      }
     }
 
-    return groups;
+    return stored.map((s) => ({
+      correlationId: s.correlationId,
+      timestamp: s.timestamp,
+      pattern: s.pattern as AnomalyPattern,
+      severity: s.severity as AnomalySeverity,
+      diagnosis: s.diagnosis,
+      recommendations: s.recommendations,
+      anomalies: (membersByGroup.get(s.correlationId) ?? []).sort(
+        (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
+      ),
+    }));
+  }
+
+  async getReplicationDivergenceHistory(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<ReplicaDivergenceHistory[]> {
+    const state = this.divergenceState.get(connectionId);
+    const series = new Map<string, DivergenceWindow[]>();
+    try {
+      const stored = await this.storage.getReplicationDivergenceWindows({
+        connectionId,
+        startTime,
+        endTime,
+        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
+      });
+      for (const row of stored) {
+        const windows = series.get(row.replicaAddr) ?? [];
+        windows.push({
+          start: row.windowStart,
+          end: row.windowEnd,
+          gapBytes: row.gapBytes,
+          bytesPerSec: row.bytesPerSec,
+          secondsBehind: row.secondsBehind,
+        });
+        series.set(row.replicaAddr, windows);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read replication divergence windows, using in-memory history: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    for (const replica of state?.replicas.values() ?? []) {
+      const windows = series.get(replica.addr) ?? [];
+      const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
+      windows.push(
+        ...replica.windows.filter((w) => w.end > storedEnd && w.end >= startTime && w.end <= endTime),
+      );
+      series.set(replica.addr, windows);
+    }
+    const now = Date.now();
+    const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
+    const orphans = this.divergenceOrphans.get(connectionId);
+    return [...series.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([replica, windows]) => {
+        const observed = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const level = observed === 'none' && orphans?.has(replica) ? 'behind' : observed;
+        return {
+          replica,
+          level,
+          latest:
+            level === 'unobserved'
+              ? null
+              : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null),
+          windows,
+        };
+      });
+  }
+
+  private async detectReplicationDivergence(
+    sample: ReplicationStreamSample,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    this.removedDivergenceSweeps.delete(ctx.connectionId);
+    const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
+    this.divergenceState.set(ctx.connectionId, state);
+    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
+      await this.collectOrphanedDivergenceEvents(state, ctx);
+    }
+
+    for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+      if (outcome.kind === 'divergence') {
+        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      } else {
+        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
+      }
+    }
+    await this.settleOrphanedDivergenceEvents(state, ctx);
+    await this.persistDivergenceWindows(state, ctx);
+  }
+
+  private async readOpenDivergenceEvents(connectionId: string): Promise<StoredAnomalyEvent[]> {
+    const events: StoredAnomalyEvent[] = [];
+    for (let offset = 0; ; offset += DIVERGENCE_ORPHAN_PAGE_SIZE) {
+      const open = await this.storage.getAnomalyEvents({
+        connectionId,
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+        limit: DIVERGENCE_ORPHAN_PAGE_SIZE,
+        offset,
+      });
+      events.push(...open);
+      if (open.length < DIVERGENCE_ORPHAN_PAGE_SIZE) return events;
+    }
+  }
+
+  private async collectOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    try {
+      const seen = new Set([...state.replicas.values()].map((r) => r.eventId));
+      const orphans = new Map<string, OrphanedDivergence>();
+      for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
+        if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
+        seen.add(event.id);
+        const replica = event.replicaAddr ?? 'unknown';
+        const orphan = orphans.get(replica) ?? {
+          eventIds: new Set<string>(),
+          sinceWindow: state.closedWindowCount,
+          claimed: false,
+        };
+        orphan.eventIds.add(event.id);
+        orphans.set(replica, orphan);
+      }
+      if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
+      this.divergenceOrphansSwept.add(ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async settleOrphanedDivergenceEvents(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const orphans = this.divergenceOrphans.get(ctx.connectionId);
+    if (!orphans) return;
+    for (const [replica, orphan] of orphans) {
+      const assessment = assessOrphanedReplica(state, replica, orphan.sinceWindow);
+      if (assessment === 'pending') continue;
+      try {
+        for (const id of orphan.eventIds) {
+          const resolvedAt = Date.now();
+          orphan.claimed = (await this.storage.resolveOpenAnomaly(id, resolvedAt)) || orphan.claimed;
+          orphan.eventIds.delete(id);
+          const cached = this.recentAnomalies.find((a) => a.id === id);
+          if (cached) {
+            cached.resolved = true;
+            cached.resolvedAt = resolvedAt;
+          }
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Failed to resolve orphaned replication divergence events for ${ctx.connectionName}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        continue;
+      }
+      orphans.delete(replica);
+      if (orphan.claimed && assessment !== 'diverging') this.dispatchOrphanRecovered(replica, ctx);
+    }
+    if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
+  }
+
+  private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
+    this.dispatchReplicationRecovered(ctx, {
+      replica,
+      reason: 'resolved_after_restart',
+      gapBytes: null,
+      message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
+      timestamp: Date.now(),
+    });
+  }
+
+  private async persistDivergenceWindows(
+    state: DivergenceConnectionState,
+    ctx: ConnectionContext,
+  ): Promise<void> {
+    const closed = drainClosedWindows(state);
+    if (closed.length === 0) return;
+    try {
+      await this.storage.saveReplicationDivergenceWindows(
+        closed.map((w) => ({
+          replicaAddr: w.addr,
+          windowStart: w.start,
+          windowEnd: w.end,
+          gapBytes: w.gapBytes,
+          bytesPerSec: w.bytesPerSec,
+          secondsBehind: w.secondsBehind,
+        })),
+        ctx.connectionId,
+      );
+    } catch (err) {
+      requeueClosedWindows(state, closed);
+      this.logger.warn(
+        `Failed to persist replication divergence windows for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async sweepRemovedConnections(): Promise<void> {
+    for (const connectionId of this.removedDivergenceSweeps) {
+      try {
+        const open = await this.readOpenDivergenceEvents(connectionId);
+        if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
+        for (const event of open) await this.resolveAnomalyOutcome(event.id);
+      } catch (err) {
+        this.logger.warn(
+          `Failed to read open divergence events of removed connection ${connectionId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+  }
+
+  private async closeRemovedDivergenceEvents(ids: string[]): Promise<void> {
+    for (const id of ids) await this.resolveAnomalyOutcome(id);
+    await this.sweepRemovedConnections();
+  }
+
+  private closeDivergenceEventsOnRemoval(connectionId: string): void {
+    const replicas = this.divergenceState.get(connectionId)?.replicas.values() ?? [];
+    const orphans = this.divergenceOrphans.get(connectionId)?.values() ?? [];
+    const ids = [
+      ...[...replicas].flatMap((replica) => (replica.eventId ? [replica.eventId] : [])),
+      ...[...orphans].flatMap((orphan) => [...orphan.eventIds]),
+    ];
+    if (!this.divergenceOrphansSwept.has(connectionId)) {
+      this.removedDivergenceSweeps.add(connectionId);
+    }
+    this.closeRemovedDivergenceEvents(ids).catch((err) => {
+      this.logger.error('Failed to resolve divergence events of a removed connection', err);
+    });
+  }
+
+  private async emitReplicationDivergence(
+    state: DivergenceConnectionState,
+    finding: DivergenceFinding,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    const relatedMetrics = [
+      ...new Set(
+        this.recentAnomalies
+          .filter(
+            (a) =>
+              a.connectionId === ctx.connectionId &&
+              a.timestamp >= finding.spanStart &&
+              DIVERGENCE_COMPOUND_SIGNALS.has(a.metricType),
+          )
+          .map((a) => a.metricType),
+      ),
+    ];
+    const isCritical = finding.level === 'critical';
+    const message = describeDivergence(finding);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity: isCritical ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING,
+      value: finding.gapBytes,
+      baseline: DIVERGENCE_FLOOR_BYTES,
+      zScore: 0,
+      stdDev: 0,
+      threshold: DIVERGENCE_FLOOR_BYTES,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+      relatedMetrics,
+      replicaAddr: finding.addr,
+    };
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
+    const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
+    await this.addAnomaly(event, ctx);
+    acknowledgeDivergence(state, finding, event.id);
+
+    this.webhookEventsProService
+      ?.dispatchReplicationDivergence({
+        replica: finding.addr,
+        level: finding.level,
+        reason: finding.reason,
+        gapBytes: finding.gapBytes,
+        secondsBehind: finding.secondsBehind,
+        bytesPerSec: finding.bytesPerSec,
+        slopeBytesPerWindow: finding.slopeBytesPerWindow,
+        windowCount: finding.windowCount,
+        correlatedSignals: relatedMetrics,
+        message,
+        timestamp,
+        instance: { host: ctx.host, port: ctx.port },
+        connectionId: ctx.connectionId,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch replication.divergence webhook', err);
+      });
+
+    if (previousEventId) await this.resolveAnomalyOutcome(previousEventId);
+  }
+
+  private async resolveReplicationDivergence(
+    state: DivergenceConnectionState,
+    recovery: DivergenceRecovery,
+    ctx: ConnectionContext,
+    timestamp: number,
+  ): Promise<void> {
+    if (recovery.eventId) await this.resolveAnomalyOutcome(recovery.eventId);
+    acknowledgeRecovery(state, recovery.addr);
+
+    if (recovery.kind === 'cleared') {
+      this.dispatchReplicationRecovered(ctx, {
+        replica: recovery.addr,
+        reason: 'replica_gone',
+        gapBytes: null,
+        message: `Replica ${recovery.addr} is no longer tracked by this node, so its divergence was closed.`,
+        timestamp,
+      });
+      return;
+    }
+
+    this.dispatchReplicationRecovered(ctx, {
+      replica: recovery.addr,
+      reason: 'caught_up',
+      gapBytes: recovery.gapBytes ?? 0,
+      message: `Replica ${recovery.addr} is back under the alert thresholds.`,
+      timestamp,
+    });
+  }
+
+  private dispatchReplicationRecovered(
+    ctx: ConnectionContext,
+    data: Omit<ReplicationRecoveredData, 'instance' | 'connectionId'>,
+  ): void {
+    this.logger.log(`Replication recovered for ${ctx.connectionName}: ${data.message}`);
+    this.webhookEventsProService
+      ?.dispatchReplicationRecovered({
+        ...data,
+        instance: { host: ctx.host, port: ctx.port },
+        connectionId: ctx.connectionId,
+      })
+      .catch((err) => {
+        this.logger.error('Failed to dispatch replication.recovered webhook', err);
+      });
   }
 
   getBufferStats(connectionId?: string): BufferStats[] {
@@ -5711,21 +6823,24 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
    * decide whether to retry:
    *   - `resolved`: the event was dismissed (cache flip or durable storage write).
    *   - `retry`:    a transient storage error, or a cache-present event storage
-   *                 momentarily couldn't confirm — try again next poll.
+   *                 momentarily couldn't confirm. The outbox keeps retrying it.
    *   - `gone`:     the event exists in neither the cache nor storage, so it can
-   *                 never be resolved (e.g. a deterministic string id the Postgres
-   *                 UUID PK rejected, since evicted from recentAnomalies). Callers
+   *                 never be resolved (e.g. a save the outbox gave up on, since
+   *                 evicted from recentAnomalies). Callers
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
   private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
-    const anomaly = this.recentAnomalies.find((a) => a.id === anomalyId);
+    const anomaly =
+      this.recentAnomalies.find((a) => a.id === anomalyId) ??
+      this.persistenceOutbox.unsavedAnomaly(anomalyId);
+    const resolvedAt = this.persistenceOutbox.resolvedAt(anomalyId) ?? Date.now();
 
-    // Memory-only event (never durably stored — e.g. a deterministic string id
-    // rejected by the Postgres UUID PK): a storage-backed poll can't resurface a
+    // Memory-only event (never durably stored): a storage-backed poll can't resurface a
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
       return 'resolved';
     }
 
@@ -5735,9 +6850,10 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
     // dismiss a banner that subsequent polls still return as unresolved.
     let persisted = false;
     try {
-      persisted = await this.storage.resolveAnomaly(anomalyId, Date.now());
+      persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+      this.queueResolve(anomalyId, resolvedAt);
       return 'retry';
     }
 
@@ -5746,15 +6862,30 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // longer exists anywhere and can never be resolved — report `gone` so the
       // caller drops it. A cache-present event may just be a momentary storage
       // miss, so keep retrying that one.
-      return anomaly ? 'retry' : 'gone';
+      if (!anomaly) return 'gone';
+      this.queueResolve(anomalyId, resolvedAt);
+      return 'retry';
     }
+
+    this.persistenceOutbox.settleResolve(anomalyId);
 
     // Keep the cached copy in sync with the durable store.
     if (anomaly) {
       anomaly.resolved = true;
+      anomaly.resolvedAt = resolvedAt;
     }
 
     return 'resolved';
+  }
+
+  private queueResolve(anomalyId: string, resolvedAt: number): void {
+    const pendingSave = this.persistenceOutbox.unsavedAnomaly(anomalyId);
+    if (pendingSave) {
+      pendingSave.resolved = true;
+      pendingSave.resolvedAt = resolvedAt;
+      return;
+    }
+    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {
@@ -5771,6 +6902,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
         continue;
       }
       let persisted = false;
@@ -5781,6 +6913,7 @@ export class AnomalyService extends MultiConnectionPoller implements OnModuleIni
       }
       if (persisted) {
         anomaly.resolved = true;
+        anomaly.resolvedAt = resolvedAt;
       } else {
         allResolved = false;
       }

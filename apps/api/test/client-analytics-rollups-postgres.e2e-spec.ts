@@ -507,4 +507,32 @@ describePostgres('client analytics rollups — postgres', () => {
       }
     });
   });
+
+  describe('getNewClientConnections', () => {
+    const since = T0 + BATCH_MS;
+    const until = T0 + 5 * BATCH_MS;
+    const sortGroups = (groups: Array<{ name: string; user: string; ip: string; count: number }>) =>
+      [...groups].sort((a, b) =>
+        `${a.name}|${a.user}|${a.ip}` < `${b.name}|${b.user}|${b.ip}` ? -1 : 1,
+      );
+
+    it.each(CONNECTIONS)('matches the memory adapter for %s', async (connectionId) => {
+      const groups = await pg.getNewClientConnections(connectionId, since, until);
+      expect(groups.length).toBeGreaterThan(0);
+      expect(sortGroups(groups)).toEqual(
+        sortGroups(await memory.getNewClientConnections(connectionId, since, until)),
+      );
+    });
+
+    it('handles clients connected for longer than 32-bit milliseconds allow', async () => {
+      const connectionId = 'conn-old-client';
+      const [template] = rows;
+      await pg.saveClientSnapshot(
+        [{ ...template, id: 0, clientId: 'old', age: 3_000_000, capturedAt: since, connectionId }],
+        connectionId,
+      );
+
+      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+    });
+  });
 });

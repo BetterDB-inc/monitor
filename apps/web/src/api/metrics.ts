@@ -47,6 +47,7 @@ import type {
   CorrelatedAnomalyGroup,
   AnomalySummary,
   AnomalyBufferStats,
+  ReplicaDivergenceHistory,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -438,6 +439,16 @@ export const metricsApi = {
   },
 
   getAnomalyBuffers: () => fetchApi<AnomalyBufferStats[]>('/anomaly/buffers'),
+
+  getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<ReplicaDivergenceHistory[]>(
+      `/anomaly/replication-divergence${queryString ? `?${queryString}` : ''}`,
+    );
+  },
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {

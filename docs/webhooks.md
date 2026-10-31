@@ -72,14 +72,17 @@ Advanced monitoring events for anomaly detection and performance tracking:
 |-------|-------------|-------------------|
 | `slowlog.threshold` | Slow query detected | Slowlog count exceeds configured threshold |
 | `replication.lag` | Replication lag detected | Replica lag exceeds acceptable threshold |
+| `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
+| `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds or went away, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
-| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns |
+| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
 | `scaling_readiness.low` | Scaling readiness low | Scaling readiness score dropped to or below the connection's alert threshold |
 | `kv_cache.hit_rate_low` | KV cache hit rate low | An LMCache engine's token hit rate over the last 15 minutes dropped to or below the connection's threshold |
 | `kv_cache.eviction_risk` | KV cache eviction risk | LMCache keys cannot be evicted under a `volatile-*` policy, or Valkey is evicting while LMCache holds most of its memory |
+| `retry_amplification.detected` | Retry amplification detected | Load per client keeps rising, or steps up and holds, together with latency, errors or connection churn while the client count stays flat |
 
 ### Enterprise Tier
 
@@ -99,7 +102,8 @@ Compliance and audit events for regulated environments:
 Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
 `generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
 blocks and `discord` sends an embed with the same fields (instance, metric,
-value/baseline, link back to `/anomalies` or `/dashboard`).
+value/baseline, link back to `/anomalies` or `/dashboard`). A `message` too
+long for the title is shown in full below it.
 HMAC headers are still sent for all formats; Slack/Discord ignore them.
 
 Getting the webhook URL: Slack — create an app and enable an **Incoming
@@ -355,6 +359,46 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 }
 ```
 
+#### replication.divergence (Pro)
+
+Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
+
+Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "level": "critical",
+  "reason": "ceiling",
+  "gapBytes": 629145600,
+  "secondsBehind": 600,
+  "bytesPerSec": 1048576,
+  "slopeBytesPerWindow": -1048576,
+  "windowCount": 2,
+  "correlatedSignals": ["memory_used"],
+  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600 MB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows.",
+  "timestamp": 1706457600000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
+}
+```
+
+#### replication.recovered (Pro)
+
+`reason` is `caught_up` when the replica stays under the alert thresholds for two windows: its gap is below 1 MiB, or less than 5 seconds behind at the current write rate. `gapBytes` can therefore be above zero, and above 1 MiB on a fast primary. It is `replica_gone` when an alerted replica goes offline or drops out of the primary's replica list, or the node stops being a primary; `gapBytes` is then `null` because the gap can no longer be read. It says the alert closed, not that the replica caught up. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open; `gapBytes` is then `null`. After a restart the event stays open until the replica has been assessed: it closes with this reason once the replica has stayed under the alert thresholds for two windows, or is no longer connected. A replica that is still behind but below the alert thresholds keeps its event open. If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere. Removing a connection closes its divergence events without sending `replication.recovered`.
+
+```json
+{
+  "replica": "10.0.0.2:6379",
+  "reason": "caught_up",
+  "gapBytes": 0,
+  "message": "Replica 10.0.0.2:6379 is back under the alert thresholds.",
+  "timestamp": 1706457660000,
+  "instance": { "host": "10.0.0.1", "port": 6379 },
+  "connectionId": "conn-1"
+}
+```
+
 #### cluster.failover (Pro)
 
 ```json
@@ -479,6 +523,38 @@ Fires once per connection and reason when a footprint collection finds LMCache a
   "noTtlRatio": 1,
   "evictedKeysDelta": null,
   "message": "LMCache keys have no TTL under volatile-lru; Valkey cannot evict them",
+  "timestamp": 1735689600000,
+  "instance": { "host": "valkey.example.com", "port": 6379 }
+}
+```
+
+#### retry_amplification.detected (Pro)
+
+Fires when the anomaly detector sees a self-sustaining retry loop rather than a transient blip. Polls are grouped into 60-second windows and compared with the median of the last 30 normal windows (detection starts after 10). A window is hot when commands per client are at least 1.3× baseline, ops/s at least 1.2× baseline and the client count within ±15% of baseline, while a P99 latency regression, an error-reply burst or connection churn is present. A burst shorter than 3 hot windows is treated as transient and never alerts. After 3 hot windows the event fires in one of two shapes, given in `pattern`:
+- `rising`: load rises at least 10% and moves with stress inside the run (`correlation` ≥ 0.5).
+- `step`: the last 3 windows hold at 2× baseline or more with an error-reply or reconnect burst. `correlation` is `null` for this shape.
+
+`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires when a run first reaches a level and each time it rises to `critical` again after falling back to `warning`. A fall to `warning` does not fire. It re-arms after 2 normal windows.
+
+This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
+
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+
+```json
+{
+  "metricType": "retry_amplification",
+  "value": 1.9,
+  "baseline": 1,
+  "level": "warning",
+  "trigger": "latency",
+  "windows": 3,
+  "loadRatio": 1.9,
+  "pattern": "rising",
+  "correlation": 0.97,
+  "topContributors": [
+    { "key": "checkout", "keyKind": "name", "commandRateGrowth": 4.8, "newConnections": 12, "connections": 40 }
+  ],
+  "message": "WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while connected clients stay flat at ~120; load is rising with stress (r=0.97). Trigger: a latency regression (COMMAND_P99). Without client backoff the loop keeps feeding itself. Top clients: name checkout (cmds 4.8×, 12 reconnects).",
   "timestamp": 1735689600000,
   "instance": { "host": "valkey.example.com", "port": 6379 }
 }
@@ -965,7 +1041,7 @@ These events fire immediately without hysteresis:
 
 - `instance.down` / `instance.up` (state change events)
 - `client.blocked` (each occurrence)
-- `anomaly.detected` (each detection)
+- `anomaly.detected` (each detection, except `command_p99`, `retry_amplification` and `replication_divergence`, which have their own events)
 - `acl.violation` (each violation)
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)
