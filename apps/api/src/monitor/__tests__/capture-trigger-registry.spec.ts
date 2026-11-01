@@ -341,6 +341,24 @@ describe('CaptureTriggerRegistry', () => {
       expect(updated?.status).toBe('queued');
     });
 
+    it('queues without running the health gate while a session is active', async () => {
+      const captureService = makeCaptureService({ active: true });
+      const healthGate = makeHealthGate(false, 'memory_above_threshold');
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly(), CONNECTION_ID);
+      await registry.tick();
+
+      expect(healthGate.evaluate).not.toHaveBeenCalled();
+      const updated = await storage.getCaptureTrigger(trigger.id);
+      expect(updated?.status).toBe('queued');
+    });
+
     it('fires a queued trigger on a later tick after the session frees up', async () => {
       const captureService = makeCaptureService({ active: true });
       const healthGate = makeHealthGate(true);

@@ -242,17 +242,17 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
+    if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
+      if (trigger.status !== 'queued') {
+        await this.patch(trigger.id, { status: 'queued' });
+      }
+      return;
+    }
     const gate = await this.healthGate.evaluate(trigger.connectionId);
     if (!gate.allow) {
       const reason = gate.skipReason ?? 'health_gate_blocked';
       await this.patch(trigger.id, { status: 'skipped', skipReason: reason });
       void this.dispatchSessionSkipped(trigger, reason);
-      return;
-    }
-    if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
-      if (trigger.status !== 'queued') {
-        await this.patch(trigger.id, { status: 'queued' });
-      }
       return;
     }
     try {

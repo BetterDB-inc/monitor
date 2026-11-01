@@ -291,6 +291,28 @@ describe('CaptureScheduler', () => {
       await scheduler.deleteSchedule(schedule.id);
     });
 
+    it('records session_already_active when a session starts during the health gate', async () => {
+      const captureService = makeCaptureService({
+        throwOnStart: new Error(
+          `A capture session is already active on connection ${CONNECTION_ID}`,
+        ),
+      });
+      const healthGate = makeHealthGate(true);
+      const { scheduler, storage } = makeScheduler(captureService, healthGate);
+
+      const schedule = await scheduler.createSchedule({
+        connectionId: CONNECTION_ID,
+        intervalSeconds: 30,
+        durationMs: 5000,
+      });
+      await scheduler.fireOnce(schedule.id);
+
+      const updated = await storage.getScheduledCapture(schedule.id);
+      expect(updated?.lastSkipReason).toBe('session_already_active');
+
+      await scheduler.deleteSchedule(schedule.id);
+    });
+
     it('records start_failed when startSession throws', async () => {
       const captureService = makeCaptureService({
         throwOnStart: new Error('database down'),
