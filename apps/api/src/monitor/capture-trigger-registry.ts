@@ -232,18 +232,17 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (this.seenAnomalies.has(evt.id)) {
         continue;
       }
+      if (evt.connectionId) {
+        const match = await this.findActiveTrigger(
+          evt.connectionId,
+          evt.metricType,
+          evt.anomalyType,
+        );
+        if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
+          await this.tryFire(match);
+        }
+      }
       this.seenAnomalies.set(evt.id, evt.timestamp);
-      if (!evt.connectionId) {
-        continue;
-      }
-      const match = await this.findActiveTrigger(
-        evt.connectionId,
-        evt.metricType,
-        evt.anomalyType,
-      );
-      if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
-        await this.tryFire(match);
-      }
     }
     this.lastAnomalyAt = maxTs;
     const oldestLive = maxTs - LATE_ANOMALY_LOOKBACK_MS;
