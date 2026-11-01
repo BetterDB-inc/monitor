@@ -52,6 +52,17 @@ export function escapeDiscord(text: string): string {
   return text.replace(/([\\`*_~|>\[\]()])/g, '\\$1').replace(/@(everyone|here)/g, '@\u200b$1');
 }
 
+function escapeWithin(text: string, limit: number, escape: (text: string) => string): string {
+  let fits = 0;
+  let tooLong = text.length + 1;
+  while (tooLong - fits > 1) {
+    const middle = Math.floor((fits + tooLong) / 2);
+    if (escape(text.slice(0, middle)).length <= limit) fits = middle;
+    else tooLong = middle;
+  }
+  return escape(text.slice(0, fits));
+}
+
 function instanceLabel(p: WebhookPayload): string {
   const host = p.instance?.host ?? 'unknown';
   const port = p.instance?.port;
@@ -101,7 +112,7 @@ export function toSlack(payload: WebhookPayload, appBaseUrl?: string): Record<st
       ? [
           {
             type: 'section',
-            text: { type: 'mrkdwn', text: escapeSlack(message).slice(0, SLACK_TEXT_LIMIT) },
+            text: { type: 'mrkdwn', text: escapeWithin(message, SLACK_TEXT_LIMIT, escapeSlack) },
           },
         ]
       : []),
@@ -150,7 +161,7 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
       {
         title: safeTitle,
         ...(message
-          ? { description: escapeDiscord(message).slice(0, DISCORD_DESCRIPTION_LIMIT) }
+          ? { description: escapeWithin(message, DISCORD_DESCRIPTION_LIMIT, escapeDiscord) }
           : {}),
         color: DISCORD_COLORS[payload.event] ?? 0x3e63dd,
         fields,
