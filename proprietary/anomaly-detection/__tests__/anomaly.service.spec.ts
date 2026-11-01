@@ -5442,6 +5442,74 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('close callbacks across a save', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'closing-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+    const outbox = () => (service as any).persistenceOutbox;
+    const evictFirst = () => {
+      for (let i = 1; i <= OUTBOX_MAX_ENTRIES; i++) outbox().enqueueResolve(`r-${i}`, 1, 1);
+    };
+
+    it('moves the callback to the resolve when a close lands during the retried save', async () => {
+      const onCloseDrop = jest.fn();
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      storage.saveAnomalyEvent.mockImplementationOnce(async () => {
+        await (service as any).resolveAnomalyOutcome('closing-1', onCloseDrop);
+      });
+
+      await (service as any).drainPersistenceOutbox();
+      expect(outbox().resolvedAt('closing-1')).toEqual(expect.any(Number));
+      evictFirst();
+
+      expect(outbox().has('closing-1')).toBe(false);
+      expect(onCloseDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the close when a user dismissal follows a detector close', async () => {
+      const onCloseDrop = jest.fn();
+      const event = { ...anomaly(), persisted: true };
+      (service as any).recentAnomalies.push(event);
+      outbox().enqueueRewrite(event, Date.now());
+      storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+
+      await (service as any).resolveAnomalyOutcome('closing-1', onCloseDrop);
+      await service.resolveAnomaly('closing-1');
+      evictFirst();
+
+      expect(onCloseDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes the close of a stored event left in the outbox as a plain save', async () => {
+      const event = { ...anomaly(), persisted: true };
+      (service as any).recentAnomalies.push(event);
+      outbox().enqueueSave(event, mockCtx, Date.now());
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      await service.resolveAnomaly('closing-1');
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'closing-1', resolved: true }),
+        'conn-1',
+      );
+      expect(outbox().has('closing-1')).toBe(false);
+    });
+  });
+
   describe('COB pressure detection', () => {
     const MB = 1024 * 1024;
     const HARD = 256 * MB;
