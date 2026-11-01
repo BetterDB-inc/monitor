@@ -1591,9 +1591,7 @@ export class AnomalyService
     const sample = computeConnectionChurn(this.lastChurnReading.get(ctx.connectionId), reading);
     this.lastChurnReading.set(ctx.connectionId, reading);
     if (sample.connectsPerSec === null) {
-      const buffer = buffers.get(MetricType.CONNECTION_CHURN);
-      const detector = detectors.get(MetricType.CONNECTION_CHURN);
-      if (buffer && detector) this.resetSpikeRun(detector, buffer, timestamp);
+      detectors.get(MetricType.CONNECTION_CHURN)?.resetRun();
       return;
     }
 
@@ -1615,7 +1613,7 @@ export class AnomalyService
     buffer.addSample(sample.connectsPerSec, timestamp);
     const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
     if (!elevated || !isChurnWithFlatPopulation(sample)) {
-      this.resetSpikeRun(detector, buffer, timestamp);
+      detector.resetRun();
       return;
     }
 
@@ -1629,10 +1627,6 @@ export class AnomalyService
       `${sample.connectedClients} — clients are reconnecting instead of reusing connections`;
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${anomaly.message}`);
     await this.addAnomaly(anomaly, ctx);
-  }
-
-  private resetSpikeRun(detector: SpikeDetector, buffer: MetricBuffer, timestamp: number): void {
-    detector.detect(buffer, buffer.getMean(), timestamp);
   }
 
   /**

@@ -215,4 +215,26 @@ describe('SpikeDetector', () => {
       expect(detector.getConfig().warningZScore).toBe(2.2);
     });
   });
+
+  describe('resetRun', () => {
+    it('restarts the consecutive run without alerting or evaluating a value', () => {
+      const buffer = new MetricBuffer(MetricType.CONNECTIONS);
+      for (let i = 0; i < 60; i++) buffer.addSample(100 + (i % 2), i);
+      const twoInARow = new SpikeDetector(MetricType.CONNECTIONS, {
+        warningZScore: 3,
+        criticalZScore: 5,
+        consecutiveRequired: 2,
+        cooldownMs: 0,
+      });
+      const detect = jest.spyOn(twoInARow, 'detect');
+
+      expect(twoInARow.detect(buffer, 500, 1_000)).toBeNull();
+      detect.mockClear();
+      twoInARow.resetRun();
+
+      expect(detect).not.toHaveBeenCalled();
+      expect(twoInARow.detect(buffer, 500, 2_000)).toBeNull();
+      expect(twoInARow.detect(buffer, 500, 3_000)).not.toBeNull();
+    });
+  });
 });
