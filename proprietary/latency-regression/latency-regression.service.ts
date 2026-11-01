@@ -157,6 +157,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       stdDev: 0,
       threshold: worst.degradationFactor,
       message: finding.message,
+      commands: finding.commands.map((c) => c.command).sort(),
       // Instance metadata, consistent with other anomaly producers.
       sourceHost: ctx.host,
       sourcePort: ctx.port,

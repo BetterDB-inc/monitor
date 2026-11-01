@@ -99,6 +99,7 @@ describe('LatencyRegressionService', () => {
     const [event, connId] = storage.saveAnomalyEvent.mock.calls[0];
     expect(connId).toBe('conn-1');
     expect(event.id).toMatch(UUID_RE);
+    expect(event.commands).toEqual(['hmget']);
     expect(event).toMatchObject({
       metricType: 'command_p99',
       anomalyType: 'spike',

@@ -56,6 +56,27 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows.map((r) => r.replicaAddr).sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
     });
 
+    it('stores the regressed commands and the event sequence', async () => {
+      const fields = { commands: ['get', 'set'], eventSequence: 7 };
+      await storage.saveAnomalyEvent(event(fields), CONN);
+      await storage.saveAnomalyEvents([event({ ...fields, id: randomUUID() })], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject(fields);
+      expect(rows[1]).toMatchObject(fields);
+    });
+
+    it('keeps the commands and the sequence when a later save omits them', async () => {
+      await storage.saveAnomalyEvent(event({ commands: ['get'], eventSequence: 7 }), CONN);
+      await storage.saveAnomalyEvent(correlated, CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row).toMatchObject({ commands: ['get'], eventSequence: 7 });
+    });
+
     it('keeps the replica address when a later save omits it', async () => {
       await storage.saveAnomalyEvent(event({ replicaAddr: '10.0.0.2:6379' }), CONN);
       await storage.saveAnomalyEvent(correlated, CONN);

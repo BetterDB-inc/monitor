@@ -367,6 +367,7 @@ export class AnomalyService
   // Last total_connections_received reading and the derived churn sample per
   // connection; the sample is exposed for other detectors to read.
   private lastChurnReading = new Map<string, ConnectionChurnReading>();
+  private nextEventSequence = 0;
   private churnPerOpBuffers = new Map<string, MetricBuffer>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
@@ -5949,6 +5950,8 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       replicaAddr: anomaly.replicaAddr,
+      commands: anomaly.commands,
+      eventSequence: anomaly.eventSequence,
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs: anomaly.resolvedAt === undefined ? undefined : anomaly.resolvedAt - anomaly.timestamp,
@@ -5985,6 +5988,7 @@ export class AnomalyService
     onDrop?: () => void,
   ): Promise<void> {
     this.stampScope(anomaly, ctx?.connectionId || anomaly.connectionId);
+    anomaly.eventSequence ??= this.nextEventSequence++;
     this.recentAnomalies.push(anomaly);
     this.rememberIncidentEvent(anomaly);
 
@@ -6718,6 +6722,8 @@ export class AnomalyService
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       replicaAddr: s.replicaAddr,
+      commands: s.commands,
+      eventSequence: s.eventSequence,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,

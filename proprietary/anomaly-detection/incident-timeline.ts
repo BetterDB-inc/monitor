@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
 import { SequenceRule } from './sequence-rules';
-import { SUSTAINED_COOLDOWN_MS, regressedCommands } from '../latency-regression/regression-detector';
+import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
 
@@ -178,10 +178,19 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
   };
 }
 
+function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
+  const unstamped = Number.MAX_SAFE_INTEGER;
+  return (
+    a.timestamp - b.timestamp ||
+    (a.eventSequence ?? unstamped) - (b.eventSequence ?? unstamped) ||
+    (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  );
+}
+
 function signalKey(event: AnomalyEvent): string {
   const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
   return POINT_IN_TIME_METRICS.has(event.metricType)
-    ? `${signal}\u0000${regressedCommands(event.message).join(',')}`
+    ? `${signal}\u0000${(event.commands ?? []).join(',')}`
     : signal;
 }
 
@@ -245,9 +254,7 @@ export class IncidentTimelineBuilder {
 
     const timelines: IncidentTimeline[] = [];
     for (const [scope, scoped] of byScope) {
-      const sorted = [...scoped].sort(
-        (a, b) => a.timestamp - b.timestamp || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
-      );
+      const sorted = [...scoped].sort(byEventOrder);
       const scopedBoundaries = boundaries
         .filter((b) => b.scopeId === scope)
         .sort(

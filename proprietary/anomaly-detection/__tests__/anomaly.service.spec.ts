@@ -8036,7 +8036,8 @@ describe('AnomalyService', () => {
         anomaly({
           timestamp,
           metricType: MetricType.COMMAND_P99,
-          message: `Sustained P99 latency degradation: ${command} p99 5.0ms (baseline 1.0ms, 5.0x).`,
+          commands: [command],
+          message: 'Sustained P99 latency degradation: 5.0x.',
         });
 
       it('does not hold an incident open on a later alert for another command', async () => {
@@ -8210,6 +8211,31 @@ describe('AnomalyService', () => {
 
       expect((service as any).liveIncidents[0].startedAt).toBe(now - MIN);
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
+    });
+
+    it('stamps events of one poll in the order they were raised', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'z-first', timestamp: now }), ctx);
+      await (service as any).addAnomaly(anomaly({ id: 'a-second', timestamp: now }), ctx);
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].entries.map((e: any) => e.anomalyId)).toEqual([
+        'z-first',
+        'a-second',
+      ]);
+      const saved = storage.saveAnomalyEvent.mock.calls.map(([e]: any[]) => e.eventSequence);
+      expect(saved[0]).toBeLessThan(saved[1]);
+    });
+
+    it('reads the event order back from storage', () => {
+      const row = { ...anomaly({ id: 'stored' }), anomalyType: 'spike', eventSequence: 7 };
+
+      expect((service as any).storedToAnomalyEvent(row).eventSequence).toBe(7);
+      expect(
+        (service as any).storedToAnomalyEvent({ ...row, commands: ['get'] }).commands,
+      ).toEqual(['get']);
     });
 
     it('resumes an incident across a restart from its stored events', async () => {

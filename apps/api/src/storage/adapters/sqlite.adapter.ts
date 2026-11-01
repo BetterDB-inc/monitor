@@ -810,6 +810,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!anomalyEventInfo.some((col) => col.name === 'replica_addr')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN replica_addr TEXT');
     }
+    if (!anomalyEventInfo.some((col) => col.name === 'commands')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN commands TEXT');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'event_sequence')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN event_sequence INTEGER');
+    }
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
     // Pre-existing rows were all collected from the connected database, which
@@ -1816,6 +1822,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         correlation_id TEXT,
         related_metrics TEXT,
         replica_addr TEXT,
+        commands TEXT,
+        event_sequence INTEGER,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -2707,15 +2715,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, commands, event_sequence,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        commands = COALESCE(anomaly_events.commands, excluded.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2736,6 +2746,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.correlationId || null,
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
       event.replicaAddr ?? null,
+      event.commands ? JSON.stringify(event.commands) : null,
+      event.eventSequence ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
@@ -2755,15 +2767,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, commands, event_sequence,
         resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
         scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        commands = COALESCE(anomaly_events.commands, excluded.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2786,6 +2800,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.correlationId || null,
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
           event.replicaAddr ?? null,
+          event.commands ? JSON.stringify(event.commands) : null,
+          event.eventSequence ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,

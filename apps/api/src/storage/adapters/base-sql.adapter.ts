@@ -203,6 +203,8 @@ export class RowMappers {
       correlationId: row.correlation_id,
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
       replicaAddr: row.replica_addr ?? undefined,
+      commands: row.commands ? this.dialect.fromArray(row.commands) : undefined,
+      eventSequence: row.event_sequence == null ? undefined : Number(row.event_sequence),
       resolved: this.dialect.fromBoolean(row.resolved),
       resolvedAt: row.resolved_at ? (typeof row.resolved_at === 'string' ? parseInt(row.resolved_at, 10) : row.resolved_at) : undefined,
       durationMs: row.duration_ms ? (typeof row.duration_ms === 'string' ? parseInt(row.duration_ms, 10) : row.duration_ms) : undefined,

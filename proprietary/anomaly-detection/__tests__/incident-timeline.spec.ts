@@ -212,6 +212,43 @@ describe('IncidentTimelineBuilder', () => {
     });
   });
 
+  describe('same timestamp ordering', () => {
+    const later = (eventSequence?: number) =>
+      event({ id: 'a-later', eventSequence, metricType: MetricType.MEMORY_USED });
+    const earlier = (eventSequence?: number) =>
+      event({ id: 'z-earlier', eventSequence, metricType: MetricType.CONNECTIONS });
+
+    it('orders events of one timestamp by insertion, not by id', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [later(2), earlier(1)],
+        T0 + MIN,
+        neverRecovers,
+      );
+
+      expect(incident.entries.map((e) => e.anomalyId)).toEqual(['z-earlier', 'a-later']);
+      expect(incident.sequence).toEqual([MetricType.CONNECTIONS, MetricType.MEMORY_USED]);
+    });
+
+    it('builds the same incident id from either read order', () => {
+      const builder = new IncidentTimelineBuilder();
+
+      const [one] = builder.build([later(2), earlier(1)], T0 + MIN, neverRecovers);
+      const [other] = builder.build([earlier(1), later(2)], T0 + MIN, neverRecovers);
+
+      expect(one.incidentId).toBe(other.incidentId);
+    });
+
+    it('falls back to the id for rows without a sequence', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [earlier(), later()],
+        T0 + MIN,
+        neverRecovers,
+      );
+
+      expect(incident.entries.map((e) => e.anomalyId)).toEqual(['a-later', 'z-earlier']);
+    });
+  });
+
   describe('clustering', () => {
     it('keeps events within the gap in one incident, ordered by time then id', () => {
       const later = event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC });
