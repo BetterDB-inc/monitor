@@ -108,6 +108,7 @@ describe('HealthGateService', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   it('allows the capture for a healthy primary with no recent anomalies', async () => {
@@ -391,7 +392,6 @@ describe('HealthGateService', () => {
     });
     await evaluateSettled(service);
     expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
-    debug.mockRestore();
   });
 
   it('takes one sample when the baseline gap is under the limit', async () => {

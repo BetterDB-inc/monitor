@@ -21,6 +21,8 @@ interface ReplicaAckSample {
   acks: Map<string, number>;
 }
 
+type ReplicaLine = [string, Record<string, string>];
+
 @Injectable()
 export class HealthGateService {
   private readonly logger = new Logger(HealthGateService.name);
@@ -56,10 +58,8 @@ export class HealthGateService {
     const info = await this.connectionRegistry.get(connectionId).getInfoParsed();
 
     const memoryPct = readMemoryPct(info);
-    const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(
-      info,
-      this.replicaIoStaleSeconds,
-    );
+    const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress, ackSample } =
+      readReplication(info, this.replicaIoStaleSeconds);
     const now = Date.now();
 
     const [oomEvents, roleChangeEvents] = await Promise.all([
@@ -75,11 +75,9 @@ export class HealthGateService {
       failoverInProgress: infoFailoverInProgress || roleChangeEvents > 0,
     };
 
-    const result = await this.settleLag(
-      connectionId,
-      info,
-      evaluateHealthGate(signals, this.thresholds),
-    );
+    const firstResult = evaluateHealthGate(signals, this.thresholds);
+    const result =
+      ackSample === null ? firstResult : await this.settleLag(connectionId, ackSample, firstResult);
     if (!result.allow) {
       this.logger.debug(
         `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(result.signals)}`,
@@ -90,11 +88,10 @@ export class HealthGateService {
 
   private async settleLag(
     connectionId: string,
-    info: unknown,
+    baseline: ReplicaAckSample,
     result: HealthGateResult,
   ): Promise<HealthGateResult> {
-    const baseline = parseAckSample(readReplicationSection(info) ?? {});
-    if (result.skipReason !== 'replication_lag_elevated' || baseline === null) {
+    if (result.skipReason !== 'replication_lag_elevated') {
       return result;
     }
     const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline);
@@ -185,33 +182,42 @@ function readReplication(
   replicationLagBytes: number | null;
   replicaLinkDown: boolean | null;
   infoFailoverInProgress: boolean;
+  ackSample: ReplicaAckSample | null;
 } {
   const replication = readReplicationSection(info);
   if (replication === undefined) {
-    return { replicationLagBytes: null, replicaLinkDown: null, infoFailoverInProgress: false };
+    return {
+      replicationLagBytes: null,
+      replicaLinkDown: null,
+      infoFailoverInProgress: false,
+      ackSample: null,
+    };
   }
 
   const failoverState = replication.master_failover_state;
   const infoFailoverInProgress =
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
+  const replicaLines = readReplicaLines(replication);
+  const ackSample = parseAckSample(replication, replicaLines);
+
   return {
-    replicationLagBytes: furthestReplicaGap(replication),
-    replicaLinkDown: readReplicaLinkDown(replication, replicaIoStaleSeconds),
+    replicationLagBytes: furthestReplicaGap(replication, ackSample),
+    replicaLinkDown: readReplicaLinkDown(replication, replicaLines, replicaIoStaleSeconds),
     infoFailoverInProgress,
+    ackSample,
   };
 }
 
 function readReplicaLinkDown(
   replication: Record<string, string>,
+  replicaLines: ReplicaLine[],
   replicaIoStaleSeconds: number,
 ): boolean | null {
   const masterPrefixes = REPLICA_ROLES.has(replication.role) ? readMasterPrefixes(replication) : [];
   const links = [
     ...masterPrefixes.map((prefix) => isMasterLinkDown(replication, prefix, replicaIoStaleSeconds)),
-    ...readReplicaLines(replication).map(([, fields]) =>
-      isReplicaLinkDown(fields, replicaIoStaleSeconds),
-    ),
+    ...replicaLines.map(([, fields]) => isReplicaLinkDown(fields, replicaIoStaleSeconds)),
   ];
   if (links.includes(true)) {
     return true;
@@ -264,8 +270,10 @@ function isReplicaLinkDown(
   return lagSeconds > replicaIoStaleSeconds;
 }
 
-function furthestReplicaGap(replication: Record<string, string>): number | null {
-  const sample = parseAckSample(replication);
+function furthestReplicaGap(
+  replication: Record<string, string>,
+  sample: ReplicaAckSample | null,
+): number | null {
   if (sample === null) {
     return null;
   }
@@ -288,14 +296,17 @@ function hasConnectedReplicas(replication: Record<string, string>): boolean {
   );
 }
 
-function parseAckSample(replication: Record<string, string>): ReplicaAckSample | null {
+function parseAckSample(
+  replication: Record<string, string>,
+  replicaLines = readReplicaLines(replication),
+): ReplicaAckSample | null {
   const primaryOffset = parseNumber(replication.master_repl_offset);
-  return primaryOffset === null ? null : { primaryOffset, acks: readAcks(replication) };
+  return primaryOffset === null ? null : { primaryOffset, acks: readAcks(replicaLines) };
 }
 
-function readAcks(replication: Record<string, string>): Map<string, number> {
+function readAcks(replicaLines: ReplicaLine[]): Map<string, number> {
   const acks = new Map<string, number>();
-  for (const [key, fields] of readReplicaLines(replication)) {
+  for (const [key, fields] of replicaLines) {
     const offset = readAckedOffset(fields);
     if (offset !== null) {
       const id = fields.ip === undefined ? key : `${fields.ip}:${fields.port}`;
@@ -305,7 +316,7 @@ function readAcks(replication: Record<string, string>): Map<string, number> {
   return acks;
 }
 
-function readReplicaLines(replication: Record<string, string>): [string, Record<string, string>][] {
+function readReplicaLines(replication: Record<string, string>): ReplicaLine[] {
   return Object.entries(replication)
     .filter(([key]) => REPLICA_LINE_KEY.test(key))
     .map(([key, value]) => [key, InfoParser.parseKvLine(value, ',')]);
