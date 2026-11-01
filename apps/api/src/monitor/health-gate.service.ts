@@ -91,7 +91,11 @@ export class HealthGateService {
     baseline: ReplicaAckSample,
     result: HealthGateResult,
   ): Promise<HealthGateResult> {
-    if (result.skipReason !== 'replication_lag_elevated') {
+    const gaps = [...readReplicaGaps(baseline).values()];
+    if (
+      result.skipReason !== 'replication_lag_elevated' ||
+      !gaps.some((gap) => this.isBehindLimit(gap))
+    ) {
       return result;
     }
     const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline);
@@ -103,7 +107,6 @@ export class HealthGateService {
     baseline: ReplicaAckSample,
   ): Promise<number> {
     const gaps = readReplicaGaps(baseline);
-    const threshold = this.thresholds.replicationLagThresholdBytes;
     const deadline = Date.now() + REPLICA_ACK_TIMEOUT_MS;
     const firstSample = await this.readAckSampleBefore(connectionId, deadline);
     if (firstSample === null) {
@@ -113,11 +116,11 @@ export class HealthGateService {
     const pending = new Map<string, number>();
     for (const [id, gap] of gaps) {
       const ack = firstSample.acks.get(id);
-      if (ack === undefined || gap < threshold) {
+      if (ack === undefined || !this.isBehindLimit(gap)) {
         continue;
       }
       const freshGap = Math.max(0, firstSample.primaryOffset - ack);
-      if (freshGap >= threshold) {
+      if (this.isBehindLimit(freshGap)) {
         pending.set(id, ack);
       } else {
         gaps.set(id, freshGap);
@@ -145,6 +148,10 @@ export class HealthGateService {
       previous = sample;
     }
     return Math.max(...gaps.values());
+  }
+
+  private isBehindLimit(gap: number): boolean {
+    return gap > 0 && gap >= this.thresholds.replicationLagThresholdBytes;
   }
 
   private async readAckSampleBefore(

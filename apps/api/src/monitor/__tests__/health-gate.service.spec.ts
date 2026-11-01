@@ -442,6 +442,39 @@ describe('HealthGateService', () => {
     expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
   });
 
+  describe('with a lag limit of 0', () => {
+    const config = { MONITOR_REPLICATION_LAG_BYTES: 0 };
+
+    it('keeps the lag of a primary without replicas at 0', async () => {
+      const { service, client } = makeService({ info: primaryInfo(100_000_000), config });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+      expect(result.signals.replicationLagBytes).toBe(0);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+    });
+
+    it('does not wait for a replica that is already in sync', async () => {
+      const { service, client } = makeService({
+        info: primaryInfo(100_000_000, 100_000_000),
+        config,
+      });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+      expect(result.signals.replicationLagBytes).toBe(0);
+    });
+
+    it('stops waiting once the sample before the polls shows a replica in sync', async () => {
+      const { service, client } = makeService({
+        info: primaryInfo(100_000_000, 99_000_000, 100_000_000),
+        samples: [primaryInfo(100_000_000, 100_000_000, 100_000_000)],
+        config,
+      });
+      const result = await service.evaluate(CONNECTION_ID);
+      expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+      expect(result.signals.replicationLagBytes).toBe(0);
+    });
+  });
+
   it('takes one sample when the baseline gap is under the limit', async () => {
     const { service, client } = makeService({ info: primaryInfo(100_000_000, 95_000_000) });
     const result = await service.evaluate(CONNECTION_ID);
