@@ -71,6 +71,69 @@ describe('IncidentTimelineBuilder', () => {
       ]);
     });
 
+    it('keeps the stored start when a same timestamp sibling outlives its event', () => {
+      const sibling = event({ id: 'a-sibling', timestamp: T0 });
+      const tail = event({ id: 'b-tail', timestamp: T0 + MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [sibling, tail],
+        T0 + 2 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+      );
+
+      expect(incidents.map((i) => i.incidentId)).toEqual([incidentIdFor('conn-a', 'z-gone', T0)]);
+      expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual([sibling.id, tail.id]);
+    });
+
+    it('keeps the stored start when only a same timestamp sibling is left', () => {
+      const sibling = event({ id: 'a-sibling', timestamp: T0 });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [sibling],
+        T0 + MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+      );
+
+      expect(incident.incidentId).toBe(incidentIdFor('conn-a', 'z-gone', T0));
+    });
+
+    it('splits same timestamp boundaries in event order, not id order', () => {
+      const first = event({ id: 'z-first', timestamp: T0, eventSequence: 1 });
+      const second = event({ id: 'a-second', timestamp: T0, eventSequence: 2 });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, second],
+        T0 + MIN,
+        neverRecovers,
+        [boundary(T0, second.id), boundary(T0, first.id)],
+      );
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId)).sort()).toEqual([
+        [second.id],
+        [first.id],
+      ]);
+    });
+
+    it('holds a same timestamp boundary back until its own event', () => {
+      const head = event({ id: 'a-head', timestamp: T0 - MIN });
+      const before = event({ id: 'b-before', timestamp: T0 });
+      const own = event({ id: 'c-own', timestamp: T0 });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [head, before, own],
+        T0 + MIN,
+        neverRecovers,
+        [boundary(T0 - MIN, head.id), boundary(T0, own.id)],
+      );
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        [head.id, before.id],
+        [own.id],
+      ]);
+    });
+
     it('keeps the id and start of an incident whose head left the window', () => {
       const head = event({ timestamp: T0 });
       const tail = event({ timestamp: T0 + MIN });

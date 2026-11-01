@@ -199,10 +199,20 @@ interface IncidentCluster {
   start?: IncidentBoundary;
 }
 
-function startsByEvent(boundary: IncidentBoundary, event: AnomalyEvent): boolean {
+function positionsOf(sorted: AnomalyEvent[]): (anomalyId: string) => number {
+  const positions = new Map(sorted.map((event, i) => [event.id, i]));
+  return (anomalyId) => positions.get(anomalyId) ?? -1;
+}
+
+function startsByEvent(
+  boundary: IncidentBoundary,
+  event: AnomalyEvent,
+  positionOf: (anomalyId: string) => number,
+): boolean {
   return (
     boundary.startedAt < event.timestamp ||
-    (boundary.startedAt === event.timestamp && boundary.anomalyId <= event.id)
+    (boundary.startedAt === event.timestamp &&
+      positionOf(boundary.anomalyId) <= positionOf(event.id))
   );
 }
 
@@ -255,14 +265,16 @@ export class IncidentTimelineBuilder {
     const timelines: IncidentTimeline[] = [];
     for (const [scope, scoped] of byScope) {
       const sorted = [...scoped].sort(byEventOrder);
+      const positionOf = positionsOf(sorted);
       const scopedBoundaries = boundaries
         .filter((b) => b.scopeId === scope)
         .sort(
           (a, b) =>
             a.startedAt - b.startedAt ||
+            positionOf(a.anomalyId) - positionOf(b.anomalyId) ||
             (a.anomalyId < b.anomalyId ? -1 : a.anomalyId > b.anomalyId ? 1 : 0),
         );
-      for (const cluster of this.cluster(sorted, scopedBoundaries)) {
+      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf)) {
         timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
@@ -274,6 +286,7 @@ export class IncidentTimelineBuilder {
   private cluster(
     sorted: AnomalyEvent[],
     boundaries: readonly IncidentBoundary[],
+    positionOf: (anomalyId: string) => number,
   ): IncidentCluster[] {
     const clusters: IncidentCluster[] = [];
     let current: AnomalyEvent[] = [];
@@ -282,7 +295,7 @@ export class IncidentTimelineBuilder {
     let used: IncidentBoundary | undefined;
     let next = 0;
     for (const event of sorted) {
-      while (next < boundaries.length && startsByEvent(boundaries[next], event)) {
+      while (next < boundaries.length && startsByEvent(boundaries[next], event, positionOf)) {
         latest = boundaries[next];
         next += 1;
       }

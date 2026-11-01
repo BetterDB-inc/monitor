@@ -8304,6 +8304,32 @@ describe('AnomalyService', () => {
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
     });
 
+    it('gives history and live one id when a stored start outlived its event', async () => {
+      const t = Date.now() - 2 * MIN;
+      const rows = [
+        { ...anomaly({ id: 'a-sibling', timestamp: t }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'b-tail', timestamp: t + MIN }), anomalyType: 'spike' },
+      ];
+      const stored = [{ scopeId: 'conn-1', startedAt: t, anomalyId: 'z-gone' }];
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockResolvedValue(stored);
+
+      const history = await service.getIncidentTimelines('conn-1');
+      (service as any).incidentEvents.set('conn-1', [
+        anomaly({ id: 'a-sibling', timestamp: t }),
+        anomaly({ id: 'b-tail', timestamp: t + MIN }),
+      ]);
+      (service as any).incidentsDirty = true;
+      await (service as any).tickIncidentTimelines(Date.now());
+
+      expect(history.map((i) => i.incidentId)).toEqual([incidentIdFor('conn-1', 'z-gone', t)]);
+      expect((service as any).liveIncidents.map((i: any) => i.incidentId)).toEqual(
+        history.map((i) => i.incidentId),
+      );
+    });
+
     it('splits history at boundaries stored under an earlier cluster key', async () => {
       const t = Date.now() - 20 * MIN;
       const rows = ['a', 'b'].map((id, i) => ({
