@@ -26,6 +26,7 @@ import {
   AnomalySeverity,
   AnomalyType,
   AnomalyPattern,
+  ANOMALY_WEBHOOK_SINK,
   AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
@@ -41,6 +42,7 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
+  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock };
   let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
@@ -89,6 +91,7 @@ describe('AnomalyService', () => {
       updateReplBufferPressure: jest.fn(),
     };
 
+    anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
     webhookEventsProService = {
       isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
@@ -178,6 +181,7 @@ describe('AnomalyService', () => {
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
         { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+        { provide: ANOMALY_WEBHOOK_SINK, useValue: anomalyWebhookSink },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
@@ -4632,6 +4636,66 @@ describe('AnomalyService', () => {
   });
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
+
+  describe('saved anomaly webhooks', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'saved-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('hands an event over once its first save lands', async () => {
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'saved-1' }),
+      );
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the outbox when the first save fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing for a save the outbox drops', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+    });
+
+    it('keeps the save when the webhook fails', async () => {
+      anomalyWebhookSink.dispatchAnomalyWebhook.mockRejectedValueOnce(new Error('webhook down'));
+
+      await expect((service as any).addAnomaly(anomaly(), mockCtx)).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+    });
+  });
 
   describe('COB pressure detection', () => {
     const MB = 1024 * 1024;

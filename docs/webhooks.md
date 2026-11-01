@@ -75,7 +75,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
 | `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds or went away, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
-| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. `command_p99` and `replication_divergence` are excluded; they send `latency.regression.detected` and `replication.divergence` instead |
+| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. Sent when the event is first saved, so it waits for storage if a save has to be retried. `command_p99` and `replication_divergence` are excluded; they send `latency.regression.detected` and `replication.divergence` instead |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
@@ -359,7 +359,7 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 
 #### replication.divergence (Pro)
 
-Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
+Sent when a divergence opens or escalates, once the event has been saved. If storage is down the webhook waits for the retry, and is skipped if the event closes first. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
 
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 

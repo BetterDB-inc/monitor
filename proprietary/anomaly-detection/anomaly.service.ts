@@ -226,6 +226,8 @@ import {
   AnomalySummary,
   SpikeDetectorConfig,
   AnomalyEventSink,
+  ANOMALY_WEBHOOK_SINK,
+  AnomalyWebhookSink,
 } from './types';
 
 interface MetricExtractor {
@@ -542,6 +544,9 @@ export class AnomalyService
     // own CLUSTER NODES view (no per-node fan-out).
     @Optional()
     private readonly clusterDiscovery?: ClusterDiscoveryService,
+    @Optional()
+    @Inject(ANOMALY_WEBHOOK_SINK)
+    private readonly anomalyWebhookSink?: AnomalyWebhookSink,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -5503,10 +5508,16 @@ export class AnomalyService
     if (!connectionId) return;
     const wasResolved = anomaly.resolved;
     const firstSave = !anomaly.persisted;
-    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
+    const stored = this.toStoredAnomalyEvent(anomaly, context);
+    await this.storage.saveAnomalyEvent(stored, connectionId);
     anomaly.persisted = true;
     this.releaseLatch(anomaly);
-    if (firstSave) this.anomalySaveHooks.get(anomaly)?.();
+    if (firstSave) {
+      this.anomalySaveHooks.get(anomaly)?.();
+      this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+        this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
+      });
+    }
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
