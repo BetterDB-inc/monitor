@@ -1,4 +1,6 @@
 import { execSync } from 'child_process';
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
 import * as path from 'path';
 
 const COMPOSE_FILE = 'docker-compose.test.yml';
@@ -20,6 +22,8 @@ const CONTAINER_NAMES = [
  * container names and ports so tests never interfere with dev containers.
  */
 export default async function globalSetup() {
+  process.env.BETTERDB_TEST_TMP_DIR = mkdtempSync(path.join(tmpdir(), 'betterdb-test-'));
+
   const projectRoot = path.resolve(__dirname, '../../..');
   const skipDocker = process.env.SKIP_DOCKER_SETUP === 'true';
 

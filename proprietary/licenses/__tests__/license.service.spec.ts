@@ -441,7 +441,7 @@ describe('LicenseService', () => {
     });
 
     afterEach(() => {
-      keyedService.onModuleDestroy();
+      keyedService?.onModuleDestroy();
     });
 
     it('should call entitlement server with license key', async () => {
