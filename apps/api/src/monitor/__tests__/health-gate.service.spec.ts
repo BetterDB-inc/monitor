@@ -464,6 +464,21 @@ describe('HealthGateService', () => {
       }
     });
 
+    it('measure apart when the later reading has a lagging replica the first lacks', async () => {
+      const laterReading = primaryInfo(100_000_000, 100_000_000, 40_000_000);
+      const { service } = makeService({
+        info: primaryInfo(100_000_000, 50_000_000, 100_000_000),
+        samples: [laterReading],
+        nextInfo: laterReading,
+      });
+      const pending = [service.evaluate(CONNECTION_ID), service.evaluate(CONNECTION_ID)];
+      await jest.runAllTimersAsync();
+      const [first, second] = await Promise.all(pending);
+      expect(first).toMatchObject({ allow: true });
+      expect(second).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+      expect(second.signals.replicationLagBytes).toBe(60_000_000);
+    });
+
     it('measure each connection on its own', async () => {
       const { service, client } = makeService({ info: lagging() });
       const pending = [service.evaluate('conn-1'), service.evaluate('conn-2')];

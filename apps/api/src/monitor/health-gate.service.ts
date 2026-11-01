@@ -23,6 +23,11 @@ interface ReplicaAckSample {
 
 type ReplicaLine = [string, Record<string, string>];
 
+interface LagMeasurement {
+  lag: Promise<number>;
+  replicas: Set<string>;
+}
+
 @Injectable()
 export class HealthGateService {
   private readonly logger = new Logger(HealthGateService.name);
@@ -30,7 +35,7 @@ export class HealthGateService {
   private readonly failoverWindowMs: number;
   private readonly replicaIoStaleSeconds: number;
   private readonly thresholds: HealthGateThresholds;
-  private readonly lagMeasurements = new Map<string, Promise<number>>();
+  private readonly lagMeasurements = new Map<string, LagMeasurement>();
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -104,15 +109,23 @@ export class HealthGateService {
   }
 
   private shareLagMeasurement(connectionId: string, baseline: ReplicaAckSample): Promise<number> {
+    const replicas = this.replicasBehindLimit(baseline);
     const inFlight = this.lagMeasurements.get(connectionId);
-    if (inFlight !== undefined) {
-      return inFlight;
+    if (inFlight === undefined) {
+      const lag = this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
+        this.lagMeasurements.delete(connectionId);
+      });
+      this.lagMeasurements.set(connectionId, { lag, replicas });
+      return lag;
     }
-    const measurement = this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
-      this.lagMeasurements.delete(connectionId);
-    });
-    this.lagMeasurements.set(connectionId, measurement);
-    return measurement;
+    return [...replicas].every((id) => inFlight.replicas.has(id))
+      ? inFlight.lag
+      : this.measureLagAtNextAcks(connectionId, baseline);
+  }
+
+  private replicasBehindLimit(sample: ReplicaAckSample): Set<string> {
+    const behind = [...readReplicaGaps(sample)].filter(([, gap]) => this.isBehindLimit(gap));
+    return new Set(behind.map(([id]) => id));
   }
 
   private async measureLagAtNextAcks(

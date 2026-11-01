@@ -591,6 +591,113 @@ describe('CaptureTriggerRegistry', () => {
       expect(triggers.map((t) => t.status)).toEqual(['skipped', 'skipped', 'skipped']);
     });
 
+    it('evaluates again after a session ran on the connection', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(false, 'replication_lag_elevated');
+      healthGate.evaluate.mockResolvedValueOnce({ allow: true, signals: {}, thresholds: {} });
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'connections');
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'memory_used');
+
+      await registry.tick();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(2);
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+      const triggers = await registry.listTriggers({ connectionId: CONNECTION_ID });
+      expect(triggers.map((t) => t.status).sort()).toEqual(['fired', 'skipped']);
+    });
+
+    describe('a trigger that changes while the tick runs', () => {
+      const allow = { allow: true, signals: {}, thresholds: {} };
+      const deny = { allow: false, skipReason: 'memory_above_threshold', signals: {}, thresholds: {} };
+
+      async function firingTrigger(registry: CaptureTriggerRegistry, storage: MemoryAdapter) {
+        await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
+        const [trigger] = await registry.listTriggers({ connectionId: CONNECTION_ID });
+        return trigger;
+      }
+
+      it('does not fire one cancelled during the health gate', async () => {
+        const captureService = makeCaptureService();
+        const healthGate = makeHealthGate(true);
+        const { registry, storage } = makeRegistry(captureService, healthGate);
+        const trigger = await firingTrigger(registry, storage);
+        healthGate.evaluate.mockImplementation(async () => {
+          await registry.cancelTrigger(trigger.id);
+          return allow;
+        });
+
+        await registry.tick();
+
+        expect(captureService.startSession).not.toHaveBeenCalled();
+        expect((await registry.getTrigger(trigger.id))?.status).toBe('cancelled');
+      });
+
+      it('does not report one cancelled during a blocking health gate as skipped', async () => {
+        const captureService = makeCaptureService();
+        const healthGate = makeHealthGate(false);
+        const dispatcher = makeDispatcher();
+        const { registry, storage } = makeRegistry(captureService, healthGate, dispatcher);
+        const trigger = await firingTrigger(registry, storage);
+        healthGate.evaluate.mockImplementation(async () => {
+          await registry.cancelTrigger(trigger.id);
+          return deny;
+        });
+
+        await registry.tick();
+        await settle();
+
+        expect((await registry.getTrigger(trigger.id))?.status).toBe('cancelled');
+        expect(dispatcher.calls.map((c) => c.event)).not.toContain(
+          WebhookEventType.MONITOR_SESSION_SKIPPED,
+        );
+      });
+
+      it('does not fire one that expires during the health gate', async () => {
+        const captureService = makeCaptureService();
+        const healthGate = makeHealthGate(true);
+        const { registry, storage } = makeRegistry(captureService, healthGate);
+        await registry.createTrigger({
+          connectionId: CONNECTION_ID,
+          metricType: METRIC,
+          anomalyType: ANOMALY,
+          expiresAt: Date.now() + 30,
+        });
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: METRIC, timestamp: Date.now() + 1 }),
+          CONNECTION_ID,
+        );
+        healthGate.evaluate.mockImplementation(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          return allow;
+        });
+
+        await registry.tick();
+
+        expect(captureService.startSession).not.toHaveBeenCalled();
+      });
+
+      it('does not queue one cancelled while an earlier fire ran', async () => {
+        const captureService = makeCaptureService();
+        const healthGate = makeHealthGate(true);
+        const { registry, storage } = makeRegistry(captureService, healthGate);
+        await createFiringTrigger(registry, storage, CONNECTION_ID, 'connections');
+        await createFiringTrigger(registry, storage, CONNECTION_ID, 'memory_used');
+        const triggers = await registry.listTriggers({ connectionId: CONNECTION_ID });
+        captureService.startSession.mockImplementation(async ({ triggerId }) => {
+          const other = triggers.find((t) => t.id !== triggerId)!;
+          await registry.cancelTrigger(other.id);
+          captureService.hasActiveSessionOn.mockReturnValue(true);
+          return { id: 'sess-1', status: 'running' };
+        });
+
+        await registry.tick();
+
+        const statuses = await registry.listTriggers({ connectionId: CONNECTION_ID });
+        expect(statuses.map((t) => t.status).sort()).toEqual(['cancelled', 'fired']);
+      });
+    });
+
     it('leaves no gate rejection unhandled when an earlier trigger fails the tick', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(true);

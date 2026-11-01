@@ -266,12 +266,15 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
 
   private async tryFire(trigger: StoredCaptureTrigger, gates: TickGates): Promise<void> {
     if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
-      if (trigger.status !== 'queued') {
+      if (trigger.status !== 'queued' && (await this.canStillFire(trigger.id))) {
         await this.patch(trigger.id, { status: 'queued' });
       }
       return;
     }
     const gate = await this.evaluateGate(trigger.connectionId, gates);
+    if (!(await this.canStillFire(trigger.id))) {
+      return;
+    }
     if (!gate.allow) {
       const reason = gate.skipReason ?? 'health_gate_blocked';
       await this.patch(trigger.id, { status: 'skipped', skipReason: reason });
@@ -300,7 +303,18 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         status: 'skipped',
         skipReason: `start_failed: ${message}`,
       });
+    } finally {
+      gates.delete(trigger.connectionId);
     }
+  }
+
+  private async canStillFire(id: string): Promise<boolean> {
+    const current = await this.storage.getCaptureTrigger(id);
+    return (
+      current !== null &&
+      (current.status === 'configured' || current.status === 'queued') &&
+      current.expiresAt > Date.now()
+    );
   }
 
   private async findActiveTrigger(
