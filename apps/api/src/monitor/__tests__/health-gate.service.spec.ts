@@ -442,6 +442,44 @@ describe('HealthGateService', () => {
     expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
   });
 
+  describe('overlapping evaluations', () => {
+    const lagging = () => primaryInfo(100_000_000, 50_000_000);
+    const countPolls = (client: { getInfoParsed: jest.Mock }) =>
+      client.getInfoParsed.mock.calls.filter(([sections]) => sections !== undefined).length;
+
+    async function countPollsOfOneEvaluation(): Promise<number> {
+      const { service, client } = makeService({ info: lagging() });
+      await evaluateSettled(service);
+      return countPolls(client);
+    }
+
+    it('share one measurement on the same connection', async () => {
+      const { service, client } = makeService({ info: lagging() });
+      const pending = [1, 2, 3].map(() => service.evaluate(CONNECTION_ID));
+      await jest.runAllTimersAsync();
+      const results = await Promise.all(pending);
+      expect(countPolls(client)).toBe(await countPollsOfOneEvaluation());
+      for (const result of results) {
+        expect(result.signals.replicationLagBytes).toBe(50_000_000);
+      }
+    });
+
+    it('measure each connection on its own', async () => {
+      const { service, client } = makeService({ info: lagging() });
+      const pending = [service.evaluate('conn-1'), service.evaluate('conn-2')];
+      await jest.runAllTimersAsync();
+      await Promise.all(pending);
+      expect(countPolls(client)).toBe(2 * (await countPollsOfOneEvaluation()));
+    });
+
+    it('measure again once the shared measurement is over', async () => {
+      const { service, client } = makeService({ info: lagging() });
+      await evaluateSettled(service);
+      await evaluateSettled(service);
+      expect(countPolls(client)).toBe(2 * (await countPollsOfOneEvaluation()));
+    });
+  });
+
   describe('with a lag limit of 0', () => {
     const config = { MONITOR_REPLICATION_LAG_BYTES: 0 };
 

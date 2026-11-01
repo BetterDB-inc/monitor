@@ -30,6 +30,7 @@ export class HealthGateService {
   private readonly failoverWindowMs: number;
   private readonly replicaIoStaleSeconds: number;
   private readonly thresholds: HealthGateThresholds;
+  private readonly lagMeasurements = new Map<string, Promise<number>>();
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -98,8 +99,20 @@ export class HealthGateService {
     ) {
       return result;
     }
-    const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline);
+    const replicationLagBytes = await this.shareLagMeasurement(connectionId, baseline);
     return evaluateHealthGate({ ...result.signals, replicationLagBytes }, this.thresholds);
+  }
+
+  private shareLagMeasurement(connectionId: string, baseline: ReplicaAckSample): Promise<number> {
+    const inFlight = this.lagMeasurements.get(connectionId);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const measurement = this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
+      this.lagMeasurements.delete(connectionId);
+    });
+    this.lagMeasurements.set(connectionId, measurement);
+    return measurement;
   }
 
   private async measureLagAtNextAcks(
