@@ -3210,16 +3210,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (query.scopeIds?.length === 0) return [];
 
     const result = await this.pool.query(
-      `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries b
-       WHERE ($1::text[] IS NULL OR b.scope_id = ANY($1))
-         AND (
-           (b.started_at >= $2 AND ($3::bigint IS NULL OR b.started_at <= $3))
-           OR b.started_at = (
-             SELECT MAX(p.started_at) FROM incident_boundaries p
-             WHERE p.scope_id = b.scope_id AND p.started_at < $2
-           )
-         )
-       ORDER BY b.started_at ASC, b.anomaly_id ASC`,
+      `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+       WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
+         AND started_at >= $2
+         AND ($3::bigint IS NULL OR started_at <= $3)
+       UNION ALL
+       SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+       JOIN (
+         SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+         WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
+         GROUP BY scope_id
+       ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+       ORDER BY started_at ASC, anomaly_id ASC`,
       [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
     );
     return result.rows.map((row) => ({

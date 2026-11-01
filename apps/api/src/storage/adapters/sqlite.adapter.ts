@@ -3147,24 +3147,26 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (query.scopeIds?.length === 0) return [];
 
     const scopes = query.scopeIds?.map(() => '?').join(', ');
-    const inScope = scopes ? `b.scope_id IN (${scopes}) AND ` : '';
-    const inWindow = query.endTime ? 'b.started_at <= ?' : '1 = 1';
+    const inScope = scopes ? `scope_id IN (${scopes}) AND ` : '';
+    const inWindow = query.endTime ? 'AND started_at <= ?' : '';
     const rows = this.db
       .prepare(
-        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries b
-         WHERE ${inScope}(
-           (b.started_at >= ? AND ${inWindow})
-           OR b.started_at = (
-             SELECT MAX(p.started_at) FROM incident_boundaries p
-             WHERE p.scope_id = b.scope_id AND p.started_at < ?
-           )
-         )
-         ORDER BY b.started_at ASC, b.anomaly_id ASC`,
+        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+         WHERE ${inScope}started_at >= ? ${inWindow}
+         UNION ALL
+         SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+         JOIN (
+           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+           WHERE ${inScope}started_at < ?
+           GROUP BY scope_id
+         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+         ORDER BY started_at ASC, anomaly_id ASC`,
       )
       .all(
         ...(query.scopeIds ?? []),
         query.startTime,
         ...(query.endTime ? [query.endTime] : []),
+        ...(query.scopeIds ?? []),
         query.startTime,
       ) as { scope_id: string; started_at: number; anomaly_id: string }[];
     return rows.map((row) => ({
