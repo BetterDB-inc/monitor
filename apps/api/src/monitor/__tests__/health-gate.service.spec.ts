@@ -301,6 +301,27 @@ describe('HealthGateService', () => {
   });
 
   it.each([
+    ['the sample before the polls', 0],
+    ['a later poll', 1],
+  ])('stops at the time budget when %s hangs', async (_name, answeredCalls) => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: Array.from({ length: answeredCalls }, () => primaryInfo(100_000_000, 50_000_000)),
+    });
+    client.getInfoParsed.mockImplementation(() => new Promise(() => undefined));
+    const settled = jest.fn();
+    const pending = service.evaluate(CONNECTION_ID).then((result) => {
+      settled();
+      return result;
+    });
+    await jest.advanceTimersByTimeAsync(2500);
+    expect(settled).toHaveBeenCalled();
+    const result = await pending;
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it.each([
     ['its line is gone', makeInfo({ role: 'master', master_repl_offset: '130000000' })],
     [
       'it has fallen back to a resync',

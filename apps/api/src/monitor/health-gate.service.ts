@@ -105,7 +105,7 @@ export class HealthGateService {
     const gaps = readReplicaGaps(baseline);
     const threshold = this.thresholds.replicationLagThresholdBytes;
     const deadline = Date.now() + REPLICA_ACK_TIMEOUT_MS;
-    const firstSample = await this.readAckSample(connectionId);
+    const firstSample = await this.readAckSampleBefore(connectionId, deadline);
     if (firstSample === null) {
       return Math.max(...gaps.values());
     }
@@ -126,8 +126,10 @@ export class HealthGateService {
 
     let previous = firstSample;
     while (pending.size > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, REPLICA_ACK_POLL_INTERVAL_MS));
-      const sample = await this.readAckSample(connectionId);
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(REPLICA_ACK_POLL_INTERVAL_MS, deadline - Date.now())),
+      );
+      const sample = await this.readAckSampleBefore(connectionId, deadline);
       if (sample === null) {
         break;
       }
@@ -143,6 +145,21 @@ export class HealthGateService {
       previous = sample;
     }
     return Math.max(...gaps.values());
+  }
+
+  private async readAckSampleBefore(
+    connectionId: string,
+    deadline: number,
+  ): Promise<ReplicaAckSample | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
+    });
+    try {
+      return await Promise.race([this.readAckSample(connectionId), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async readAckSample(connectionId: string): Promise<ReplicaAckSample | null> {
