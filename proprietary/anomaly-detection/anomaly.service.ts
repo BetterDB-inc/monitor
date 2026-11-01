@@ -5517,10 +5517,10 @@ export class AnomalyService
         this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
       });
     }
-    this.persistenceOutbox.settleSave(anomaly.id);
+    const onCloseDrop = this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
-      this.persistenceOutbox.enqueueResolve(anomaly.id, anomaly.resolvedAt ?? now, now);
+      this.persistenceOutbox.enqueueResolve(anomaly.id, anomaly.resolvedAt ?? now, now, onCloseDrop);
     }
   }
 
@@ -5562,7 +5562,7 @@ export class AnomalyService
       }
       return;
     }
-    if (entry.anomaly.persisted && !entry.rewrite) {
+    if (entry.anomaly.persisted && !entry.rewrite && !entry.anomaly.resolved) {
       this.persistenceOutbox.settle(entry.id);
       return;
     }
@@ -6459,6 +6459,7 @@ export class AnomalyService
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
       anomaly.resolvedAt = resolvedAt;
+      this.persistenceOutbox.carryResolve(anomalyId, resolvedAt, onDrop);
       return 'resolved';
     }
 

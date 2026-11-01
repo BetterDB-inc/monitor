@@ -70,6 +70,8 @@ export class PersistenceOutbox {
   }
 
   enqueueResolve(id: string, resolvedAt: number, now: number, onDrop?: () => void): void {
+    const existing = this.pending.get(id);
+    if (existing?.kind === 'resolve') existing.onDrop ??= onDrop;
     this.add({ kind: 'resolve', id, resolvedAt, enqueuedAt: now, onDrop });
   }
 
@@ -78,7 +80,7 @@ export class PersistenceOutbox {
     if (entry?.kind !== 'save') return false;
     entry.anomaly.resolved = true;
     entry.anomaly.resolvedAt = resolvedAt;
-    entry.onCloseDrop = onDrop;
+    entry.onCloseDrop = onDrop ?? entry.onCloseDrop;
     return true;
   }
 
@@ -96,8 +98,11 @@ export class PersistenceOutbox {
     this.pending.delete(id);
   }
 
-  settleSave(id: string): void {
-    if (this.pending.get(id)?.kind === 'save') this.pending.delete(id);
+  settleSave(id: string): (() => void) | undefined {
+    const entry = this.pending.get(id);
+    if (entry?.kind !== 'save') return undefined;
+    this.pending.delete(id);
+    return entry.onCloseDrop;
   }
 
   settleResolve(id: string): void {
