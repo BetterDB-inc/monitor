@@ -80,6 +80,7 @@ export interface DivergenceConnectionState {
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, number>;
   rateHistory: number[];
+  replid: string | null;
   replicas: Map<string, ReplicaDivergenceState>;
   observed: Set<string>;
   staleAcks: Set<string>;
@@ -141,6 +142,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     accumulators: new Map(),
     staleGaps: new Map(),
     rateHistory: [],
+    replid: null,
     replicas: new Map(),
     observed: new Set(),
     staleAcks: new Set(),
@@ -153,7 +155,7 @@ function writesStopped(window: DivergenceWindow): boolean {
   return window.bytesPerSec === null || window.bytesPerSec === 0;
 }
 
-function isBehind(window: DivergenceWindow): boolean {
+function isBehind(window: Pick<DivergenceWindow, 'gapBytes' | 'secondsBehind'>): boolean {
   if (window.gapBytes < DIVERGENCE_FLOOR_BYTES) return false;
   if (window.secondsBehind === null) return true;
   return window.secondsBehind >= DIVERGENCE_FLOOR_SECONDS;
@@ -324,7 +326,11 @@ function staleAckFinding(
   rate: number | null,
 ): DivergenceFinding | null {
   const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
-  if (secondsBehind === null && gapBytes < DIVERGENCE_FLOOR_BYTES) return null;
+  if (!isBehind({ gapBytes, secondsBehind })) {
+    replica.staleWindows = 0;
+    replica.staleSince = null;
+    return null;
+  }
   if (replica.staleWindows === 0) replica.staleSince = start;
   replica.staleWindows++;
   const target: DivergenceLevel =
@@ -385,7 +391,7 @@ function closeWindow(
   }
 
   for (const [addr, gapBytes] of state.staleGaps) {
-    if (state.accumulators.has(addr)) continue;
+    if ((state.accumulators.get(addr)?.gaps.length ?? 0) >= DIVERGENCE_MIN_SAMPLES) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
     if (replica.clearing) continue;
@@ -416,6 +422,11 @@ function closeWindow(
   return outcomes;
 }
 
+function resetRateBaseline(state: DivergenceConnectionState): void {
+  state.rateHistory = [];
+  for (const replica of state.replicas.values()) replica.baselineRate = null;
+}
+
 function windowRate(state: DivergenceConnectionState, rateEwma: number | null): number | null {
   const idle = state.windowPeakRate !== null && state.windowPeakRate < DIVERGENCE_IDLE_BYTES_PER_SEC;
   return idle ? 0 : rateEwma;
@@ -437,9 +448,16 @@ export function observeDivergence(
     state.staleGaps = new Map();
     state.observed = new Set();
     state.staleAcks = new Set();
+    state.replid = null;
+    resetRateBaseline(state);
     return [...state.replicas.values()].flatMap((replica) => dropReplica(state, replica));
   }
   const outcomes: DivergenceOutcome[] = [];
+
+  if (state.replid !== sample.replid) {
+    if (state.replid !== null) resetRateBaseline(state);
+    state.replid = sample.replid;
+  }
 
   const previousSampleAt = state.lastSampleAt ?? sample.timestamp;
   const gapMs = sample.timestamp - previousSampleAt;
