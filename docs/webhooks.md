@@ -75,7 +75,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
 | `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds or went away, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
-| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
+| `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. Sent when the event is first saved, so it waits for storage if a save has to be retried. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
@@ -361,7 +361,7 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 
 #### replication.divergence (Pro)
 
-Sent when a divergence opens or escalates. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
+Sent when a divergence opens or escalates, once the event has been saved. If storage is down the webhook waits for the retry, and is skipped if the event closes first. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
 
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
@@ -385,7 +385,11 @@ Detection works on windows of at least 30 seconds, or three poll intervals if th
 
 #### replication.recovered (Pro)
 
-`reason` is `caught_up` when the replica stays under the alert thresholds for two windows: its gap is below 1 MiB, or less than 5 seconds behind at the current write rate. `gapBytes` can therefore be above zero, and above 1 MiB on a fast primary. It is `replica_gone` when an alerted replica goes offline or drops out of the primary's replica list, or the node stops being a primary; `gapBytes` is then `null` because the gap can no longer be read. It says the alert closed, not that the replica caught up. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open; `gapBytes` is then `null`. After a restart the event stays open until the replica has been assessed: it closes with this reason once the replica has stayed under the alert thresholds for two windows, or is no longer connected. A replica that is still behind but below the alert thresholds keeps its event open. If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere. Removing a connection closes its divergence events without sending `replication.recovered`.
+`reason` is `caught_up` when the replica stays under the alert thresholds for two windows: its gap is below 1 MiB, or less than 5 seconds behind at the current write rate. `gapBytes` can therefore be above zero, and above 1 MiB on a fast primary. It is `resolved_after_restart` when the monitor closes a divergence the previous run left open and the replica has stayed under the alert thresholds for two windows; `gapBytes` is then `null`. A replica that is still behind but below the alert thresholds keeps its event open.
+
+No `replication.recovered` is sent when the replica was not seen to catch up: when an alerted replica goes offline or drops out of the primary's replica list, when the node stops being a primary, or when a replica with a restart-orphaned event is gone. The anomaly event closes silently, because a dropped replica is usually worse off than one that was behind. Treat a missing recovery as unknown, and watch `replication.lag` or the replica's connection state if you need to page on it.
+
+If the replica alerts again, the old event closes with no `replication.recovered`, since the new `replication.divergence` replaces it. A restart sends at most one per replica, and none when the event was already resolved elsewhere. Removing a connection closes its divergence events without sending `replication.recovered`.
 
 ```json
 {

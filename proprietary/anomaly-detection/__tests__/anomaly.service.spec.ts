@@ -1,7 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { AnomalyService } from '../anomaly.service';
-import { OUTBOX_MAX_AGE_MS, OUTBOX_RETRY_BASE_MS } from '../anomaly-persistence-outbox';
+import {
+  OUTBOX_MAX_AGE_MS,
+  OUTBOX_MAX_ENTRIES,
+  OUTBOX_RETRY_BASE_MS,
+} from '../anomaly-persistence-outbox';
 import type { ReplicationStreamSample } from '../replication-stream';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
@@ -26,6 +30,7 @@ import {
   AnomalySeverity,
   AnomalyType,
   AnomalyPattern,
+  ANOMALY_WEBHOOK_SINK,
   AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
@@ -42,6 +47,7 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
+  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock };
   let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
@@ -53,6 +59,7 @@ describe('AnomalyService', () => {
     /-(failover|promotion|cluster-state|persistence|dup-primary|stuck-replica|orphaned-slots|hostname-staleness|replica-slot-state)-|^config-drift-/;
 
   afterEach(() => {
+    if (jest.isMockFunction(Date.now)) (Date.now as jest.Mock).mockRestore();
     const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id as string);
     expect(ids.filter((id) => STRING_EVENT_ID.test(id))).toEqual([]);
   });
@@ -91,6 +98,7 @@ describe('AnomalyService', () => {
       updateReplBufferPressure: jest.fn(),
     };
 
+    anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
     webhookEventsProService = {
       isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
@@ -181,6 +189,7 @@ describe('AnomalyService', () => {
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
         { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+        { provide: ANOMALY_WEBHOOK_SINK, useValue: anomalyWebhookSink },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
@@ -2222,6 +2231,19 @@ describe('AnomalyService', () => {
         .getRecentEvents()
         .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
       expect(events).toHaveLength(0);
+    });
+
+    it('keeps one event for an unsaved conflict that has left the ring', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (service as any).recentAnomalies = [];
+
+      await poll();
+
+      const ids = new Set(storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id));
+      expect(ids.size).toBe(1);
+      expect((service as any).persistenceOutbox.size).toBe(1);
     });
 
     it('raises the conflict again when the outbox drops its unsaved event', async () => {
@@ -5846,6 +5868,66 @@ describe('AnomalyService', () => {
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
 
+  describe('saved anomaly webhooks', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'saved-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('hands an event over once its first save lands', async () => {
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'saved-1' }),
+      );
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the outbox when the first save fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing for a save the outbox drops', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+    });
+
+    it('keeps the save when the webhook fails', async () => {
+      anomalyWebhookSink.dispatchAnomalyWebhook.mockRejectedValueOnce(new Error('webhook down'));
+
+      await expect((service as any).addAnomaly(anomaly(), mockCtx)).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+    });
+  });
+
   describe('COB pressure detection', () => {
     const MB = 1024 * 1024;
     const HARD = 256 * MB;
@@ -7609,8 +7691,8 @@ describe('AnomalyService', () => {
     });
 
     it('skips groups from other members that do not involve the caller', async () => {
-      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === undefined
+      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId, involving }: any) =>
+        connectionId === undefined && !involving
           ? [
               {
                 correlationId: 'grp-other',
@@ -7631,7 +7713,7 @@ describe('AnomalyService', () => {
       const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
 
       expect(groups).toEqual([]);
-      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
     });
 
     it('rebuilds a group by its correlation id rather than the newest page of events', async () => {
@@ -7661,164 +7743,6 @@ describe('AnomalyService', () => {
       );
     });
 
-    it('finds an older group from a busy sibling the caller took part in', async () => {
-      const group = (correlationId: string, timestamp: number) => ({
-        correlationId,
-        timestamp,
-        pattern: 'memory_pressure',
-        severity: 'warning',
-        diagnosis: '',
-        recommendations: [],
-        anomalyCount: 1,
-        metricTypes: [],
-        connectionId: 'node-1',
-      });
-      const sibling = [
-        ...Array.from({ length: 1500 }, (_, i) => group(`noise-${i}`, 1_000_000 + i)),
-        group('grp-1', 1_000_000),
-      ];
-      storage.getCorrelatedGroups.mockImplementation(
-        async ({
-          connectionId,
-          startTime,
-          endTime,
-          correlationIds,
-          limit = 100,
-          offset = 0,
-        }: any) =>
-          connectionId !== undefined
-            ? []
-            : sibling
-                .filter(
-                  (g) =>
-                    (!correlationIds || correlationIds.includes(g.correlationId)) &&
-                    (!startTime || g.timestamp >= startTime) &&
-                    (!endTime || g.timestamp <= endTime),
-                )
-                .slice(offset, offset + limit),
-      );
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-1'
-          ? [member('a', 'node-1')]
-          : connectionId === 'node-2'
-            ? [member('b', 'node-2')]
-            : [],
-      );
-
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
-    });
-
-    it('finds a pattern-filtered sibling group behind newer groups of other patterns', async () => {
-      const group = (correlationId: string, timestamp: number, pattern: string) => ({
-        correlationId,
-        timestamp,
-        pattern,
-        severity: 'warning',
-        diagnosis: '',
-        recommendations: [],
-        anomalyCount: 1,
-        metricTypes: [],
-        connectionId: 'node-1',
-      });
-      const sibling = [
-        ...Array.from({ length: 60 }, (_, i) => group(`other-${i}`, 3_000_000 - i, 'batch_job')),
-        group('grp-1', 1_000_000, 'memory_pressure'),
-      ];
-      storage.getCorrelatedGroups.mockImplementation(
-        async ({
-          connectionId,
-          startTime,
-          endTime,
-          pattern,
-          correlationIds,
-          limit = 100,
-          offset = 0,
-        }: any) =>
-          connectionId !== undefined
-            ? []
-            : sibling
-                .filter(
-                  (g) =>
-                    (!correlationIds || correlationIds.includes(g.correlationId)) &&
-                    (!pattern || g.pattern === pattern) &&
-                    (!startTime || g.timestamp >= startTime) &&
-                    (!endTime || g.timestamp <= endTime),
-                )
-                .slice(offset, offset + limit),
-      );
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-2'
-          ? [
-              ...sibling.map((g, i) => ({
-                ...member(`b-${i}`, 'node-2'),
-                correlationId: g.correlationId,
-                timestamp: g.timestamp,
-              })),
-            ]
-          : connectionId === 'node-1'
-            ? [member('a', 'node-1')]
-            : [],
-      );
-
-      const groups = await service.getRecentCorrelatedGroups(
-        1,
-        undefined,
-        AnomalyPattern.MEMORY_PRESSURE,
-        50,
-        'node-2',
-      );
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
-    });
-
-    it('reads past the newest caller events to find the groups it took part in', async () => {
-      const caller = [
-        ...Array.from({ length: 10_000 }, (_, i) => ({
-          ...member(`plain-${i}`, 'node-2'),
-          correlationId: undefined,
-          timestamp: 2_000_000 - i,
-        })),
-        member('b', 'node-2'),
-      ];
-      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === undefined
-          ? [
-              {
-                correlationId: 'grp-1',
-                timestamp: 1_000_000,
-                pattern: 'memory_pressure',
-                severity: 'warning',
-                diagnosis: '',
-                recommendations: [],
-                anomalyCount: 2,
-                metricTypes: [],
-                connectionId: 'node-1',
-              },
-            ]
-          : [],
-      );
-      storage.getAnomalyEvents.mockImplementation(
-        async ({ connectionId, startTime, endTime, limit = 100, offset = 0 }: any) =>
-          connectionId === 'node-2'
-            ? caller
-                .filter(
-                  (e) =>
-                    (!startTime || e.timestamp >= startTime) &&
-                    (!endTime || e.timestamp <= endTime),
-                )
-                .slice(offset, offset + limit)
-            : connectionId === 'node-1'
-              ? [member('a', 'node-1')]
-              : [],
-      );
-
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
-    });
-
     const siblingGroup = (correlationId: string, timestamp: number) => ({
       correlationId,
       timestamp,
@@ -7831,52 +7755,25 @@ describe('AnomalyService', () => {
       connectionId: 'node-1',
     });
 
-    it('keeps looking past caller groups no sibling shares', async () => {
-      const caller = [
-        { ...member('x1', 'node-2'), correlationId: 'solo-1', timestamp: 1_000_300 },
-        { ...member('x2', 'node-2'), correlationId: 'solo-2', timestamp: 1_000_200 },
-        member('b', 'node-2'),
-      ];
-      storage.getCorrelatedGroups.mockImplementation(
-        async ({ connectionId, correlationIds }: any) =>
-          connectionId === undefined && correlationIds?.includes('grp-1')
-            ? [siblingGroup('grp-1', 1_000_000)]
-            : [],
-      );
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-2'
-          ? caller
-          : connectionId === 'node-1'
-            ? [member('a', 'node-1')]
-            : [],
-      );
+    it('asks storage for the groups the caller took part in', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([]);
 
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 2, 'node-2');
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
-    });
-
-    it('drops sibling groups that start outside the requested window', async () => {
-      storage.getCorrelatedGroups.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === undefined ? [siblingGroup('grp-1', 1_000_000)] : [],
-      );
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-2'
-          ? [{ ...member('b', 'node-2'), timestamp: 1_002_000 }]
-          : connectionId === 'node-1'
-            ? [member('a', 'node-1')]
-            : [],
-      );
-
-      const groups = await service.getRecentCorrelatedGroups(
-        1_001_000,
-        undefined,
-        undefined,
+      await service.getRecentCorrelatedGroups(
+        1_000_000,
+        2_000_000,
+        AnomalyPattern.MEMORY_PRESSURE,
         50,
         'node-2',
       );
 
-      expect(groups).toEqual([]);
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith({
+        startTime: 1_000_000,
+        endTime: 2_000_000,
+        pattern: AnomalyPattern.MEMORY_PRESSURE,
+        limit: 50,
+        involving: { connectionId: 'node-2', startTime: 995_000, endTime: 2_005_000 },
+      });
+      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
     });
 
     it('finds a stored group from any member of the topology', async () => {
@@ -7911,31 +7808,6 @@ describe('AnomalyService', () => {
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
         expect.objectContaining({ connectionId: 'node-2', limit: 50 }),
       );
-      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({ correlationIds: ['grp-1'] }),
-      );
-    });
-
-    it('looks up shared groups once per chunk however many members the topology has', async () => {
-      (service as any).connectionRegistry.listMembers.mockReturnValue(
-        Array.from({ length: 6 }, (_, i) => ({ id: `node-${i + 1}` })),
-      );
-      const caller = Array.from({ length: 501 }, (_, i) => ({
-        ...member(`b-${i}`, 'node-2'),
-        correlationId: `grp-${i}`,
-      }));
-      storage.getCorrelatedGroups.mockResolvedValue([]);
-      storage.getAnomalyEvents.mockImplementation(async ({ connectionId }: any) =>
-        connectionId === 'node-2' ? caller : [],
-      );
-
-      await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      const lookups = (storage.getCorrelatedGroups as jest.Mock).mock.calls
-        .map(([options]: any[]) => options)
-        .filter((options) => options.correlationIds);
-      expect(lookups.map((options) => options.correlationIds.length)).toEqual([500, 1]);
-      expect(lookups.every((options) => options.connectionId === undefined)).toBe(true);
     });
 
     it('caps the groups read from storage', async () => {
@@ -8647,7 +8519,7 @@ describe('AnomalyService', () => {
         .map(([data]: [{ replica: string; reason: string }]) => data)
         .filter((data: { reason: string }) => data.reason === 'resolved_after_restart');
 
-    it('reads open events once and closes them when the replica has left', async () => {
+    it('reads open events once and closes them silently when the replica has left', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
 
       const t = await feed([2], T0);
@@ -8664,14 +8536,7 @@ describe('AnomalyService', () => {
         offset: 0,
       });
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
-      expect(restartRecoveries()).toEqual([
-        expect.objectContaining({
-          replica: '10.0.0.9:6379',
-          reason: 'resolved_after_restart',
-          gapBytes: null,
-          connectionId: 'conn-1',
-        }),
-      ]);
+      expect(restartRecoveries()).toEqual([]);
     });
 
     it('keeps an orphaned event open until the replica has caught up', async () => {
@@ -8736,10 +8601,9 @@ describe('AnomalyService', () => {
       );
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(DIVERGENCE_ORPHAN_PAGE_SIZE + 3);
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
-      expect(restartRecoveries()).toHaveLength(1);
     });
 
-    it('sends one recovered webhook per replica, none for a replica still diverging', async () => {
+    it('sends no recovered webhook for a replica that left or is still diverging', async () => {
       let calls = 0;
       storage.getAnomalyEvents.mockImplementation(async () => {
         calls++;
@@ -8757,17 +8621,17 @@ describe('AnomalyService', () => {
 
       expect((await divergenceHistory())[0].level).toBe('warning');
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
-      expect(restartRecoveries().map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
+      expect(restartRecoveries()).toEqual([]);
     });
 
     it('sends no second recovered webhook when closing a replica\'s events is retried', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([
-        orphan('a-warn', '10.0.0.9:6379'),
-        orphan('a-crit', '10.0.0.9:6379'),
+        orphan('a-warn', '10.0.0.2:6379'),
+        orphan('a-crit', '10.0.0.2:6379'),
       ]);
       storage.resolveOpenAnomaly.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
 
-      await feed([2, 4, 6, 8], T0);
+      await feed([0, 0, 0, 0], T0);
 
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
       expect(restartRecoveries()).toHaveLength(1);
@@ -8866,6 +8730,54 @@ describe('AnomalyService', () => {
       expect(saved[1].message).toBe(divergenceHook.mock.calls[0][0].message);
       expect(saved[1].value).toBe(divergenceHook.mock.calls[0][0].gapBytes);
       expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual(['warning']);
+    });
+
+    describe('replication.divergence timing', () => {
+      const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+      const levels = () => hook().mock.calls.map(([data]: [{ level: string }]) => data.level);
+      const expireOutbox = async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        await (service as any).drainPersistenceOutbox();
+      };
+
+      it('waits for the save before sending it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        expect(hook()).not.toHaveBeenCalled();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(levels()).toEqual(['warning']);
+      });
+
+      it('sends none for a dropped save and alerts again', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const dropped = replica.eventId;
+
+        await expireOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+        expect(replica.eventId).toBeNull();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([14, 16, 18, 20, 22, 24], t);
+        expect(levels()).toEqual(['warning']);
+        expect(replica.eventId).not.toBe(dropped);
+      });
+
+      it('sends none for an event that closed before its save landed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        let t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        while (replica.eventId !== null) t = await feed([0], t);
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+      });
     });
 
     it('moves to the escalation while its save is pending', async () => {
@@ -8997,68 +8909,123 @@ describe('AnomalyService', () => {
         return t;
       }
 
-      it('sends replication.recovered with a null gap when an alerted replica drops out', async () => {
+      const trackedEventId = () =>
+        (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379').eventId;
+      const fillOutbox = () => {
+        for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) {
+          (service as any).persistenceOutbox.enqueueResolve(`filler-${i}`, 1, 1);
+        }
+      };
+
+      it('closes silently when an alerted replica drops out', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await poll(absent, t);
 
-        expect(recoveredCalls()).toHaveLength(1);
-        expect(recoveredCalls()[0][0]).toMatchObject({
-          replica: '10.0.0.2:6379',
-          reason: 'replica_gone',
-          gapBytes: null,
-        });
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it when an alerted replica goes offline', async () => {
+      it('closes silently when an alerted replica goes offline', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await poll(offline, t);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it for each alerted replica when the node stops being a primary', async () => {
+      it('closes silently when the node stops being a primary', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('does not claim the replica is offline when the node stops being a primary', async () => {
+      it('leaves a failed close to the outbox', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
-
-        await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
-
-        expect(recoveredCalls()[0][0].message).toBe(
-          'Replica 10.0.0.2:6379 is no longer tracked by this node, so its divergence was closed.',
-        );
-      });
-
-      it('sends it once and leaves a failed resolve to the outbox', async () => {
-        const t = await feed([2, 4, 6, 8, 10, 12], T0);
-        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const eventId = trackedEventId();
         storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
 
         await poll(absent, t);
 
-        expect(recoveredCalls()).toHaveLength(1);
         expect((service as any).persistenceOutbox.has(eventId)).toBe(true);
 
         await (service as any).drainPersistenceOutbox();
 
         expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
-        expect(recoveredCalls()).toHaveLength(1);
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it for an alert that was sent but never saved', async () => {
+      it('sends nothing for an alert that was never saved', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
 
         await poll(absent, t);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(recoveredCalls()).toEqual([]);
+        expect((webhookEventsProService as any).dispatchReplicationDivergence).not.toHaveBeenCalled();
+      });
+
+      it('closes a dropped-out replica event again after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        const next = await poll(absent, t);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await poll(absent, next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends no second recovered webhook when it re-closes an evicted recovery', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        let next = t;
+        while (recoveredCalls().length === 0) next = await feed([0], next);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await feed([0, 0, 0, 0], next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toHaveLength(1);
+      });
+
+      it('re-closes a superseded warning after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const warningId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        await feed([130, 140, 150], t);
+        fillOutbox();
+
+        const orphans = (service as any).divergenceOrphans.get('conn-1');
+        expect([...orphans.get('10.0.0.2:6379').eventIds]).toEqual([warningId]);
+      });
+
+      it('sweeps a removed connection again after the outbox evicts its close', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        fillOutbox();
+        expect((service as any).removedDivergenceSweeps.has('conn-1')).toBe(true);
+
+        storage.getAnomalyEvents.mockResolvedValueOnce([{ id: eventId }]);
+        await (service as any).sweepRemovedConnections();
+
+        const attempts = storage.resolveAnomaly.mock.calls.filter(([id]: [string]) => id === eventId);
+        expect(attempts).toHaveLength(2);
       });
 
       it('sends nothing for a replica that never alerted', async () => {
@@ -9734,7 +9701,6 @@ describe('AnomalyService', () => {
         failSaves();
         await pollWith(clients(85));
         (service as any).clientSaturationLevel.delete('conn-1');
-        (service as any).clientSaturationRaisedBy.delete('conn-1');
 
         await expireOutbox();
 

@@ -27,14 +27,12 @@ describe('MemoryAdapter anomaly upsert', () => {
     await storage.initialize();
   });
 
-  it('finds an existing event without scanning the list', async () => {
+  it('updates an existing event in place', async () => {
     const first = event();
     await storage.saveAnomalyEvent(first, 'conn-1');
-    const scan = jest.spyOn((storage as any).anomalyEvents, 'findIndex');
 
     await storage.saveAnomalyEvent({ ...first, correlationId: 'group' }, 'conn-1');
 
-    expect(scan).not.toHaveBeenCalled();
     expect(await storage.getAnomalyEvents()).toEqual([
       expect.objectContaining({ id: first.id, correlationId: 'group' }),
     ]);

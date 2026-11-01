@@ -224,6 +224,7 @@ export interface AnomalyQueryOptions {
   offset?: number;
   connectionId?: string;
   correlationIds?: string[];
+  involving?: { connectionId: string; startTime?: number; endTime?: number };
 }
 
 export interface AnomalyStats {

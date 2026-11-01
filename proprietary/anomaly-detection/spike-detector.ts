@@ -46,6 +46,10 @@ export class SpikeDetector {
     };
   }
 
+  resetRun(): void {
+    this.consecutiveCounts.delete(this.metricType);
+  }
+
   detect(buffer: MetricBuffer, currentValue: number, timestamp: number): AnomalyEvent | null {
     if (!buffer.isReady()) {
       return null;
@@ -151,10 +155,6 @@ export class SpikeDetector {
       message,
       resolved: false,
     };
-  }
-
-  resetRun(): void {
-    this.consecutiveCounts.delete(this.metricType);
   }
 
   private generateMessage(

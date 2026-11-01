@@ -1,6 +1,9 @@
+import { InfoParser } from '@app/database/parsers/info.parser';
+
 export const REPLICATION_RATE_EWMA_ALPHA = 0.3;
 
-const REPLICA_LINE_KEY = /^slave(\d+)$/;
+const REPLICA_LINE_KEY = /^(?:slave|replica)(\d+)$/;
+const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 
 export interface ReplicaOffsetLine {
   key: string;
@@ -38,21 +41,12 @@ function toFiniteNumber(raw: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function parseFields(value: string): Record<string, string> {
-  const fields: Record<string, string> = {};
-  for (const pair of value.split(',')) {
-    const eq = pair.indexOf('=');
-    if (eq > 0) fields[pair.slice(0, eq)] = pair.slice(eq + 1);
-  }
-  return fields;
-}
-
 export function parseReplicaLines(info: Record<string, string>): ReplicaOffsetLine[] {
   const parsed: Array<{ index: number; line: ReplicaOffsetLine }> = [];
   for (const [key, value] of Object.entries(info)) {
     const match = REPLICA_LINE_KEY.exec(key);
     if (!match || typeof value !== 'string') continue;
-    const fields = parseFields(value);
+    const fields = InfoParser.parseKvLine(value, ',');
     const offset = toFiniteNumber(fields.offset);
     if (!fields.ip || !fields.port || offset === null) continue;
     parsed.push({
@@ -109,7 +103,7 @@ export class ReplicationStreamTracker {
 
     this.baselines.set(connectionId, { replid, offset: masterReplOffset, ts: timestamp, ewma });
 
-    const isReplica = info.role === 'slave' || info.role === 'replica';
+    const isReplica = REPLICA_ROLES.has(info.role);
     return {
       timestamp,
       role: isReplica ? 'replica' : 'primary',

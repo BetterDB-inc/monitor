@@ -44,7 +44,6 @@ export type CobLevel = 'none' | 'warning' | 'critical';
 
 interface ReplicaPressureState {
   ackedLevel: CobLevel;
-  ackedFinding: CobPressureFinding | null;
   softBreachSince: number | null;
   lastPressuredAt: number | null;
   lastSeenAt: number;
@@ -152,7 +151,6 @@ function getReplicaState(
   }
   const created: ReplicaPressureState = {
     ackedLevel: 'none',
-    ackedFinding: null,
     softBreachSince: null,
     lastPressuredAt: null,
     lastSeenAt: timestamp,
@@ -475,20 +473,27 @@ export function acknowledgeCobFinding(
     return;
   }
   replicaState.ackedLevel = finding.level;
-  replicaState.ackedFinding = finding;
 }
 
 export function cobPressureRearm(
   state: CobConnectionState,
   finding: CobPressureFinding,
 ): () => void {
+  if (finding.kind === 'resync-loop') {
+    const previousFiredAt = state.resyncFiredAt;
+    return () => {
+      state.resyncFiredAt = previousFiredAt;
+    };
+  }
   const replicaState = state.replicas.get(finding.replicaAddr ?? AGGREGATE_KEY);
   const previousLevel = replicaState?.ackedLevel ?? 'none';
   return () => {
-    if (replicaState?.ackedFinding !== finding) return;
-    replicaState.ackedFinding = null;
-    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[replicaState.ackedLevel]) {
+    if (replicaState && LEVEL_RANK[previousLevel] < LEVEL_RANK[replicaState.ackedLevel]) {
       replicaState.ackedLevel = previousLevel;
     }
   };
+}
+
+export function cobPressureLatch(finding: CobPressureFinding): string {
+  return finding.kind === 'resync-loop' ? finding.kind : (finding.replicaAddr ?? AGGREGATE_KEY);
 }

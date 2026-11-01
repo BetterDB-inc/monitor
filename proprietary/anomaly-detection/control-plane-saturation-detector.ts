@@ -247,12 +247,9 @@ export function acknowledgeSaturationFinding(state: ControlPlaneState, timestamp
   state.evidenceFloorAt = timestamp;
 }
 
-export function controlPlaneSaturationRearm(
-  state: ControlPlaneState,
-  timestamp: number,
-): () => void {
+export function controlPlaneSaturationRearm(state: ControlPlaneState): () => void {
   return () => {
-    if (state.evidenceFloorAt === timestamp) state.episodeActive = false;
+    state.episodeActive = false;
   };
 }
 

@@ -94,6 +94,8 @@ class Harness {
   }
 }
 
+const climbingLag = (window: number): number => 20 + window * (WINDOW_MS / 1000);
+
 function divergences(outcomes: DivergenceOutcome[][]): DivergenceFinding[] {
   return outcomes.flat().filter((o): o is DivergenceFinding => o.kind === 'divergence');
 }
@@ -291,7 +293,7 @@ const TIMING_ROWS: TimingRow[] = [
   },
   {
     name: 'an unacked replica warns over contiguous windows',
-    steps: polls(7, 10_000, () => 2, 30),
+    steps: polls(7, 10_000, () => 20, 30),
     windows: [],
     chain: 0,
     openedAt: 70_000,
@@ -300,9 +302,9 @@ const TIMING_ROWS: TimingRow[] = [
   {
     name: 'an outage restarts the unacked streak',
     steps: [
-      ...polls(4, 10_000, () => 2, 30),
-      { after: 300_000, gap: 2, lagSec: 30 },
-      ...polls(3, 10_000, () => 2, 30),
+      ...polls(4, 10_000, () => 20, 30),
+      { after: 300_000, gap: 20, lagSec: 30 },
+      ...polls(3, 10_000, () => 20, 30),
     ],
     windows: [],
     chain: 0,
@@ -414,10 +416,13 @@ describe('observeDivergence', () => {
 
   it('stays quiet through a write burst that recovers', () => {
     const h = new Harness();
-    const out = h.windows(
-      [2, 4, 6, 4, 2, 0, 0].map((m) => ({ gap: m * MiB, rate: MiB })),
-    );
-    expect(out.flat()).toEqual([]);
+    const rate = 0.5 * MiB;
+    const climb = h.windows([4, 6, 8].map((m) => ({ gap: m * MiB, rate })));
+    expect(replicaObservedLevel(h.state, ADDR, h.t, WINDOW_MS)).toBe('behind');
+
+    const drain = h.windows([4, 2, 0, 0].map((m) => ({ gap: m * MiB, rate })));
+    expect([...climb, ...drain].flat()).toEqual([]);
+    expect(replicaObservedLevel(h.state, ADDR, h.t, WINDOW_MS)).toBe('none');
   });
 
   it('warns on a gap that grows across four windows', () => {
@@ -530,29 +535,161 @@ describe('observeDivergence', () => {
     expect(gone.flat().map((o) => o.kind)).toEqual(['cleared']);
   });
 
-  it('escalates an active finding whose ack stays stale', () => {
+  it('escalates an active finding whose ack stays stale under a raised repl-timeout', () => {
     const h = new Harness();
     h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
 
-    const stale = divergences(h.windows(Array.from({ length: 5 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
+    const stale = divergences(
+      h.windows(Array.from({ length: 5 }, (_, i) => ({ gap: 10 * MiB, rate: MiB, lagSec: climbingLag(i) }))),
+    );
     expect(stale).toHaveLength(1);
     expect(stale[0]).toMatchObject({ level: 'critical', reason: 'not_acking', gapBytes: 10 * MiB });
   });
 
   it('flags a replica that stops acking while it looked healthy', () => {
     const h = new Harness();
-    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+    const rate = 0.2 * MiB;
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate })));
 
-    const stale = h.windows([2, 4, 6, 8, 10].map((m) => ({ gap: m * MiB, rate: MiB, lagSec: 30 })));
+    const stale = h.windows(
+      [2, 4, 6, 8, 10].map((m, i) => ({ gap: m * MiB, rate, lagSec: climbingLag(i) })),
+    );
     expect(divergences(stale).map((f) => [f.level, f.reason, f.gapBytes / MiB])).toEqual([
       ['warning', 'not_acking', 4],
       ['critical', 'not_acking', 8],
     ]);
   });
 
+  it('warns at most once before the default repl-timeout drops a stalled replica', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+
+    const out = h.windows([
+      { gap: 30 * MiB, rate: MiB, lagSec: 25 },
+      { gap: 60 * MiB, rate: MiB, lagSec: 55 },
+      { gap: 0, rate: MiB, present: false },
+      { gap: 0, rate: MiB, present: false },
+    ]);
+
+    expect(out.flat().map((o) => (o.kind === 'divergence' ? o.level : o.kind))).toEqual([
+      'warning',
+      'cleared',
+    ]);
+  });
+
+  it('stays quiet on a stale ack whose gap is under the floor at the current write rate', () => {
+    const h = new Harness();
+    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: MiB - 1, rate: MiB, lagSec: 30 })));
+    expect(out.flat()).toEqual([]);
+  });
+
+  it('stays quiet on a stale ack only seconds behind a fast primary', () => {
+    const h = new Harness();
+    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 8 * MiB, rate: 4 * MiB, lagSec: 30 })));
+    expect(out.flat()).toEqual([]);
+  });
+
+  it('counts stale windows only while the replica is behind', () => {
+    const h = new Harness();
+    const behind = { gap: 40 * MiB, rate: MiB, lagSec: 30 };
+    const caughtUp = { gap: 0, rate: MiB, lagSec: 30 };
+    expect(divergences(h.windows([behind, caughtUp, behind]))).toEqual([]);
+  });
+
+  it('raises no alert for a disconnect the last-IO path owns', () => {
+    const h = new Harness();
+    h.windows([0, 0, 0].map(() => ({ gap: 0, rate: 1024 })));
+
+    const out = h.windows([
+      { gap: 40_000, rate: 1024, lagSec: 25 },
+      { gap: 70_000, rate: 1024, lagSec: 55 },
+      { gap: 0, rate: 1024, state: 'wait_bgsave' },
+      { gap: 0, rate: 1024, present: false },
+    ]);
+
+    expect(out.flat()).toEqual([]);
+  });
+
+  describe('a replica that acks only now and then', () => {
+    const sporadic = (h: Harness, windows: number): DivergenceOutcome[] => {
+      const outcomes: DivergenceOutcome[] = [];
+      for (let w = 0; w < windows; w++) {
+        for (const lagSec of [0, 20, 20]) {
+          const spec = { gap: 50 * MiB, rate: 0.1 * MiB, lagSec };
+          const emitted = observeDivergence(h.state, h.sample(spec), WINDOW_MS);
+          for (const o of emitted) {
+            if (o.kind === 'divergence') acknowledgeDivergence(h.state, o, `evt-${o.level}`);
+          }
+          outcomes.push(...emitted);
+          h.t += POLL_MS;
+        }
+      }
+      return outcomes;
+    };
+
+    it('alerts when one tracked sample and two stale ones fill each window', () => {
+      const h = new Harness();
+
+      const findings = divergences([sporadic(h, 6)]);
+
+      expect(findings.map((f) => [f.level, f.reason])).toEqual([
+        ['warning', 'not_acking'],
+        ['critical', 'not_acking'],
+      ]);
+    });
+  });
+
+  describe('the write-rate baseline', () => {
+    const history = (h: Harness) => h.state.rateHistory;
+    const demoted = (t: number): ReplicationStreamSample => ({
+      timestamp: t,
+      role: 'replica',
+      replid: 'a'.repeat(40),
+      masterReplOffset: 0,
+      bytesPerSec: 0,
+      bytesPerSecEwma: 0,
+      replBacklogHistlen: null,
+      replicas: [],
+    });
+
+    it('starts over when the node stops being a primary', () => {
+      const h = new Harness();
+      h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+      expect(history(h).length).toBeGreaterThan(0);
+
+      observeDivergence(h.state, demoted(h.t), WINDOW_MS);
+
+      expect(history(h)).toEqual([]);
+    });
+
+    it('starts over when the replication id changes', () => {
+      const h = new Harness();
+      h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));
+
+      const restarted = { ...h.sample({ gap: 0, rate: 2 * MiB }), replid: 'b'.repeat(40) };
+      observeDivergence(h.state, restarted, WINDOW_MS);
+
+      expect(history(h)).not.toContain(MiB);
+    });
+
+    it('drops the baseline held by an open alert when the replication id changes', () => {
+      const h = new Harness();
+      h.windows([0, 0, 0].map(() => ({ gap: 0, rate: 0.5 * MiB })));
+      h.windows([22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })));
+      expect(h.state.replicas.get(ADDR)?.baselineRate).not.toBeNull();
+
+      const restarted = { ...h.sample({ gap: 28 * MiB, rate: 4 * MiB }), replid: 'b'.repeat(40) };
+      observeDivergence(h.state, restarted, WINDOW_MS);
+
+      expect(h.state.replicas.get(ADDR)?.baselineRate).toBeNull();
+    });
+  });
+
   it('flags a stale ack with a real gap while the primary takes no writes', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 2 * MiB, rate: 0, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: 2 * MiB, rate: 0, lagSec: climbingLag(i) })),
+    );
     expect(divergences(out).map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
       ['warning', 'not_acking', null],
       ['critical', 'not_acking', null],
@@ -561,7 +698,9 @@ describe('observeDivergence', () => {
 
   it('flags a stale ack with a real gap while the write rate is unknown', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 2 * MiB, rate: null, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: 2 * MiB, rate: null, lagSec: climbingLag(i) })),
+    );
     expect(divergences(out).map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
       ['warning', 'not_acking', null],
       ['critical', 'not_acking', null],
@@ -687,13 +826,33 @@ describe('observeDivergence', () => {
       });
     });
 
-    it('reports a replica that stops acking once only pings are flowing', () => {
+    it('stays quiet through a burst that drains, then warns on a gap that keeps growing', () => {
+      const s = new Stream();
+      s.writing(9);
+
+      const burst = [
+        ...Array.from({ length: 6 }, () => s.poll(6 * MiB, 0)).flat(),
+        ...Array.from({ length: 6 }, () => s.poll(0, 6 * MiB)).flat(),
+      ];
+      expect(burst).toEqual([]);
+
+      s.writing(9);
+      const sustained = divergences([Array.from({ length: 18 }, () => s.poll(11 * MiB, 10 * MiB)).flat()]);
+      expect(sustained.map((f) => [f.level, f.reason])).toEqual([['warning', 'growth']]);
+    });
+
+    it('reports a replica that stops acking under a raised repl-timeout', () => {
       const s = new Stream();
       s.writing(9);
       s.poll(4 * MiB, 0);
       s.lag = 30;
 
-      const findings = divergences([s.stopped(60)]);
+      const findings = divergences([
+        Array.from({ length: 60 }, (_, i) => {
+          s.lag = 11 + i * (POLL_MS / 1000);
+          return s.poll(14, 0);
+        }).flat(),
+      ]);
 
       expect(findings.map((f) => [f.level, f.reason, f.secondsBehind])).toEqual([
         ['warning', 'not_acking', null],
@@ -865,7 +1024,7 @@ describe('observeDivergence', () => {
     const returned = h.windows(
       [
         { gap: 0, rate: MiB, present: false },
-        ...Array.from({ length: 6 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 })),
+        ...Array.from({ length: 6 }, (_, i) => ({ gap: 10 * MiB, rate: MiB, lagSec: climbingLag(i) })),
       ],
       false,
     );

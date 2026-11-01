@@ -69,10 +69,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      // Trigger the polling check
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -109,9 +106,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchConnectionSpike).not.toHaveBeenCalled();
@@ -137,9 +132,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -176,9 +169,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchLatencySpike).not.toHaveBeenCalled();
@@ -202,9 +193,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       // When value is 0, baseline/0 = Infinity
       expect(webhookProService.dispatchLatencySpike).toHaveBeenCalledWith({
@@ -254,9 +243,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledTimes(2);
       expect(webhookProService.dispatchConnectionSpike).toHaveBeenCalledTimes(1);
@@ -285,9 +272,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
     });
@@ -314,9 +299,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
     });
@@ -343,23 +326,13 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
     });
   });
 
   describe('error handling', () => {
-    it('should handle storage errors gracefully', async () => {
-      storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));
-
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-
     it('should continue processing if webhook dispatch fails', async () => {
       const anomalies: StoredAnomalyEvent[] = [
         {
@@ -380,176 +353,9 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
       webhookProService.dispatchAnomalyDetected.mockRejectedValue(new Error('Webhook error'));
 
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
-    });
-  });
-
-  describe('events saved late', () => {
-    const start = Date.now();
-    const MINUTE = 60_000;
-    let stored: StoredAnomalyEvent[];
-    let clock: jest.SpyInstance;
-
-    const event = (id: string, timestamp: number): StoredAnomalyEvent => ({
-      id,
-      timestamp,
-      metricType: 'connections',
-      anomalyType: 'spike',
-      severity: 'warning',
-      value: 150,
-      baseline: 50,
-      stdDev: 20,
-      zScore: 5,
-      threshold: 3,
-      message: '',
-      resolved: false,
-    });
-
-    const poll = () => (service as any).checkForNewAnomalies();
-    const dispatched = () =>
-      webhookProService.dispatchAnomalyDetected.mock.calls.map(([data]: any[]) => data.anomalyId);
-
-    beforeEach(() => {
-      stored = [];
-      clock = jest.spyOn(Date, 'now').mockReturnValue(start + 10 * MINUTE);
-      (service as any).startedAt = start;
-      storageClient.getAnomalyEvents.mockImplementation(
-        async ({ startTime, endTime, limit = 100, offset = 0 }: any) =>
-          stored
-            .filter((e) => e.timestamp >= startTime && e.timestamp <= endTime)
-            .sort((a, b) => b.timestamp - a.timestamp || b.id.localeCompare(a.id))
-            .slice(offset, offset + limit),
-      );
-    });
-
-    afterEach(() => {
-      clock.mockRestore();
-    });
-
-    it('sends an event that reaches storage after its own timestamp has passed', async () => {
-      await poll();
-      stored.push(event('late', start + MINUTE));
-
-      await poll();
-
-      expect(dispatched()).toEqual(['late']);
-    });
-
-    it('sends each event once', async () => {
-      stored.push(event('a', start + MINUTE));
-
-      await poll();
-      await poll();
-
-      expect(dispatched()).toEqual(['a']);
-    });
-
-    it('sends each event once when polls overlap', async () => {
-      stored.push(event('a', start + MINUTE));
-
-      await Promise.all([poll(), poll()]);
-
-      expect(dispatched()).toEqual(['a']);
-    });
-
-    it('skips a poll while the previous one runs and keeps its cursor', async () => {
-      stored.push(
-        ...Array.from({ length: 11_000 }, (_, i) => event(`e-${i}`, start + MINUTE + i)),
-      );
-      const query = storageClient.getAnomalyEvents.getMockImplementation()!;
-      let release!: () => void;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      storageClient.getAnomalyEvents.mockImplementationOnce(async (options: any) => {
-        await held;
-        return query(options);
-      });
-
-      const first = poll();
-      await poll();
-
-      expect(storageClient.getAnomalyEvents).toHaveBeenCalledTimes(1);
-
-      release();
-      await first;
-
-      expect(storageClient.getAnomalyEvents).toHaveBeenCalledTimes(10);
-      expect((service as any).scanCursor).toBe(10_000);
-    });
-
-    it('polls again after a poll fails', async () => {
-      storageClient.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
-      stored.push(event('a', start + MINUTE));
-
-      await poll();
-      await poll();
-
-      expect(dispatched()).toEqual(['a']);
-    });
-
-    it('does not send events from before it started', async () => {
-      stored.push(event('old', start - MINUTE));
-
-      await poll();
-
-      expect(dispatched()).toEqual([]);
-    });
-
-    it('sends a late event still in the outbox window after a long uptime', async () => {
-      clock.mockReturnValue(start + 180 * MINUTE);
-      await poll();
-      stored.push(event('late', start + 130 * MINUTE));
-
-      await poll();
-
-      expect(dispatched()).toEqual(['late']);
-    });
-
-    it('reads past the first page of the window', async () => {
-      stored.push(...Array.from({ length: 1500 }, (_, i) => event(`e-${i}`, start + MINUTE + i)));
-
-      await poll();
-
-      expect(new Set(dispatched()).size).toBe(1500);
-    });
-
-    it('reaches the oldest end of a window larger than one poll can read', async () => {
-      stored.push(
-        event('late', start + MINUTE),
-        ...Array.from({ length: 12_000 }, (_, i) => event(`e-${i}`, start + 2 * MINUTE + i)),
-      );
-
-      await poll();
-      expect(dispatched()).not.toContain('late');
-
-      await poll();
-      expect(dispatched()).toContain('late');
-      expect(new Set(dispatched()).size).toBe(12_001);
-    });
-
-    it('still sends new events first while working through a large window', async () => {
-      stored.push(...Array.from({ length: 25_000 }, (_, i) => event(`e-${i}`, start + MINUTE + i)));
-      await poll();
-
-      stored.push(event('new', start + 9 * MINUTE));
-      await poll();
-
-      expect(dispatched()).toContain('new');
-    });
-
-    it('forgets events once they leave the window', async () => {
-      stored.push(event('a', start + MINUTE));
-      await poll();
-      expect((service as any).sentEvents.size).toBe(1);
-
-      clock.mockReturnValue(start + 300 * MINUTE);
-      await poll();
-
-      expect((service as any).sentEvents.size).toBe(0);
+      await expect(service.dispatchAnomalyWebhook(anomalies[0])).resolves.not.toThrow();
     });
   });
 });

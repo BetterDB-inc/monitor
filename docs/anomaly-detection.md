@@ -390,6 +390,11 @@ If storage is unavailable, the finding stays as one event in memory and the shar
 
 Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
 
+Detection runs on each monitored connection that currently reports a primary role, because the replica offsets come from the primary's own `INFO replication`. Nothing covers a primary that isn't registered as its own connection:
+
+- A Sentinel connection reports no offsets, so it gets no divergence detection. Set `SENTINEL_AUTO_REGISTER_NODES` to register the primaries it monitors. See [Sentinel Auto-Registration](./sentinel-auto-registration.md).
+- A cluster connection only reads the node it's connected to, so shards whose primary lives elsewhere, including any shard after a failover, are not covered. Set `CLUSTER_AUTO_REGISTER_NODES` to register every node. See [Cluster Auto-Registration](./cluster-auto-registration.md).
+
 **Recommended actions**:
 - Compare the replica offset gap with the primary write rate over the next few minutes
 - Check replica host CPU, disk and network for a slow apply path
@@ -568,7 +573,7 @@ Some metrics have custom thresholds beyond Z-score:
 **What it measures**: Bytes each connected replica is behind the primary, and how many seconds that is at the current write rate
 **Why anomalies matter**: A replica can fall behind while `lag` stays low, which risks data loss on failover and full resyncs
 **Typical baseline**: Near zero
-**Source**: `INFO replication` (`master_repl_offset`, `slaveN` offset, state and lag)
+**Source**: `INFO replication` (`master_repl_offset`, `slaveN` or `replicaN` offset, state and lag)
 **Detection method**: Window-based detector (not z-score based). See the [REPLICATION_DIVERGENCE pattern](#replication_divergence) for thresholds. The anomaly page shows each replica's status. Divergence sends `replication.divergence` instead of `anomaly.detected`.
 
 ### connection_churn

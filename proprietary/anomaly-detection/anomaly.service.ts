@@ -144,6 +144,7 @@ import {
   ReplicaObservation,
   SlaveOutputBufferLimit,
   acknowledgeCobFinding,
+  cobPressureLatch,
   cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
@@ -262,6 +263,8 @@ import {
   AnomalySummary,
   SpikeDetectorConfig,
   AnomalyEventSink,
+  ANOMALY_WEBHOOK_SINK,
+  AnomalyWebhookSink,
 } from './types';
 
 interface MetricExtractor {
@@ -285,8 +288,6 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
-const MAX_INVOLVED_GROUP_IDS = 5_000;
-const MAX_SCANNED_CALLER_EVENTS = 100_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
@@ -447,12 +448,12 @@ export class AnomalyService
   private removedDivergenceSweeps = new Set<string>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
-    if (entry.kind === 'save') entry.onDrop?.();
   });
   private correlationTicking = false;
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
   private readonly latchHolders = new Map<string, string>();
+  private readonly anomalySaveHooks = new WeakMap<AnomalyEvent, () => void>();
   private readonly anomalyLatches = new WeakMap<AnomalyEvent, string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
@@ -483,7 +484,6 @@ export class AnomalyService
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
-  private clientSaturationRaisedBy = new Map<string, string>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -592,6 +592,9 @@ export class AnomalyService
     // own CLUSTER NODES view (no per-node fan-out).
     @Optional()
     private readonly clusterDiscovery?: ClusterDiscoveryService,
+    @Optional()
+    @Inject(ANOMALY_WEBHOOK_SINK)
+    private readonly anomalyWebhookSink?: AnomalyWebhookSink,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -798,7 +801,6 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
-    this.clientSaturationRaisedBy.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
@@ -1762,12 +1764,12 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         event,
         ctx,
-        this.clientSaturationRearm(ctx.connectionId, event.id, prev),
+        ctx.connectionId,
+        this.clientSaturationRearm(ctx.connectionId, prev),
       );
-      this.clientSaturationRaisedBy.set(ctx.connectionId, event.id);
     }
 
     // Advance the level last: on steady/de-escalation this re-arms alerting on recovery.
@@ -1776,12 +1778,9 @@ export class AnomalyService
 
   private clientSaturationRearm(
     connectionId: string,
-    eventId: string,
     previous: 'none' | 'warning' | 'critical',
   ): () => void {
     return () => {
-      if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
-      this.clientSaturationRaisedBy.delete(connectionId);
       const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
       if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
         this.clientSaturationLevel.set(connectionId, previous);
@@ -3295,7 +3294,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, loadSaturationRearm(state, finding));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, loadSaturationRearm(state));
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
@@ -3748,7 +3747,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, forkMemoryRearm(state, finding));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, forkMemoryRearm(state));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -3942,7 +3941,12 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx, cobPressureRearm(state, finding));
+      await this.addLatchedAnomaly(
+        event,
+        ctx,
+        `${ctx.connectionId}:${cobPressureLatch(finding)}`,
+        cobPressureRearm(state, finding),
+      );
       acknowledgeCobFinding(state, finding);
     }
   }
@@ -4044,7 +4048,12 @@ export class AnomalyService
     } else {
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     }
-    await this.addAnomaly(event, ctx, memoryOverheadRearm(state, finding));
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      `${ctx.connectionId}:${finding.level === 'info' ? 'note' : 'level'}`,
+      memoryOverheadRearm(state, finding),
+    );
     acknowledgeMemoryOverheadFinding(state, finding);
   }
 
@@ -4109,7 +4118,7 @@ export class AnomalyService
       ctx.connectionId,
     );
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, controlPlaneSaturationRearm(state, timestamp));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, controlPlaneSaturationRearm(state));
     acknowledgeSaturationFinding(state, timestamp);
   }
 
@@ -4851,7 +4860,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, resyncLoopRearm(state));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, resyncLoopRearm(state));
     acknowledgeResyncLoopFinding(state);
   }
 
@@ -5587,7 +5596,9 @@ export class AnomalyService
       if (eventIdsByConn) {
         const existingId = eventIds.get(signature);
         if (existingId) {
-          const existing = this.recentAnomalies.find((e) => e.id === existingId);
+          const existing =
+            this.recentAnomalies.find((e) => e.id === existingId) ??
+            this.persistenceOutbox.unsavedAnomaly(existingId);
           // Still open in the in-memory ring → dedupe. If it's been evicted from
           // the ring we can't tell from memory alone, so consult the storage-
           // backed feed (the source of truth for activeOnly reads): only re-emit
@@ -5874,9 +5885,17 @@ export class AnomalyService
     const connectionId = context?.connectionId || anomaly.connectionId;
     if (!connectionId) return;
     const wasResolved = anomaly.resolved;
-    await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
+    const firstSave = !anomaly.persisted;
+    const stored = this.toStoredAnomalyEvent(anomaly, context);
+    await this.storage.saveAnomalyEvent(stored, connectionId);
     anomaly.persisted = true;
     this.releaseLatch(anomaly);
+    if (firstSave) {
+      this.anomalySaveHooks.get(anomaly)?.();
+      this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+        this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
+      });
+    }
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
@@ -6199,60 +6218,6 @@ export class AnomalyService
     return groups.slice(0, limit);
   }
 
-  private async siblingGroupsInvolving(
-    connectionId: string,
-    siblings: string[],
-    known: Set<string>,
-    startTime: number,
-    endTime: number | undefined,
-    pattern: AnomalyPattern | undefined,
-    limit: number,
-  ): Promise<StoredCorrelatedGroup[]> {
-    if (siblings.length === 0) return [];
-    const pageSize = 10_000;
-    const seen = new Set<string>();
-    const found = new Map<string, StoredCorrelatedGroup>();
-    const inWindow = (g: StoredCorrelatedGroup) =>
-      g.timestamp >= startTime && (endTime === undefined || g.timestamp <= endTime);
-    for (
-      let offset = 0;
-      found.size < limit &&
-      seen.size < MAX_INVOLVED_GROUP_IDS &&
-      offset < MAX_SCANNED_CALLER_EVENTS;
-      offset += pageSize
-    ) {
-      const page = await this.storage.getAnomalyEvents({
-        startTime: startTime - this.correlationIntervalMs,
-        endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
-        connectionId,
-        limit: pageSize,
-        offset,
-      });
-      const candidates: string[] = [];
-      for (const e of page) {
-        if (seen.size >= MAX_INVOLVED_GROUP_IDS) break;
-        if (!e.correlationId || known.has(e.correlationId) || seen.has(e.correlationId)) continue;
-        seen.add(e.correlationId);
-        candidates.push(e.correlationId);
-      }
-      for (
-        let i = 0;
-        i < candidates.length && found.size < limit;
-        i += CORRELATION_ID_CHUNK_SIZE
-      ) {
-        const chunk = candidates.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
-        const groups = await this.storage.getCorrelatedGroups({
-          pattern: pattern as string,
-          correlationIds: chunk,
-          limit: chunk.length,
-        });
-        for (const g of groups) if (inWindow(g)) found.set(g.correlationId, g);
-      }
-      if (page.length < pageSize) break;
-    }
-    return [...found.values()];
-  }
-
   async getRecentCorrelatedGroups(
     startTime?: number,
     endTime?: number,
@@ -6281,16 +6246,21 @@ export class AnomalyService
       limit: boundedLimit,
       connectionId,
     });
-    const found = connectionId
-      ? await this.siblingGroupsInvolving(
-          connectionId,
-          this.scopeConnectionIds(connectionId).filter((id) => id !== connectionId),
-          new Set(own.map((s) => s.correlationId)),
+    const hasSiblings =
+      connectionId !== undefined &&
+      this.scopeConnectionIds(connectionId).some((id) => id !== connectionId);
+    const found = hasSiblings
+      ? await this.storage.getCorrelatedGroups({
           startTime,
           endTime,
-          pattern,
-          boundedLimit,
-        )
+          pattern: pattern as string,
+          limit: boundedLimit,
+          involving: {
+            connectionId,
+            startTime: startTime - this.correlationIntervalMs,
+            endTime: endTime === undefined ? undefined : endTime + this.correlationIntervalMs,
+          },
+        })
       : [];
     const stored = [...new Map([...own, ...found].map((s) => [s.correlationId, s])).values()]
       .sort((a, b) => b.timestamp - a.timestamp)
@@ -6483,7 +6453,9 @@ export class AnomalyService
         continue;
       }
       orphans.delete(replica);
-      if (orphan.claimed && assessment !== 'diverging') this.dispatchOrphanRecovered(replica, ctx);
+      if (orphan.claimed && assessment === 'caught_up' && !orphan.notified) {
+        this.dispatchOrphanRecovered(replica, ctx);
+      }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
   }
@@ -6531,7 +6503,11 @@ export class AnomalyService
       try {
         const open = await this.readOpenDivergenceEvents(connectionId);
         if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
-        for (const event of open) await this.resolveAnomalyOutcome(event.id);
+        for (const event of open) {
+          await this.resolveAnomalyOutcome(event.id, () => {
+            this.removedDivergenceSweeps.add(connectionId);
+          });
+        }
       } catch (err) {
         this.logger.warn(
           `Failed to read open divergence events of removed connection ${connectionId}: ${
@@ -6542,9 +6518,31 @@ export class AnomalyService
     }
   }
 
-  private async closeRemovedDivergenceEvents(ids: string[]): Promise<void> {
-    for (const id of ids) await this.resolveAnomalyOutcome(id);
+  private async closeRemovedDivergenceEvents(connectionId: string, ids: string[]): Promise<void> {
+    for (const id of ids) {
+      await this.resolveAnomalyOutcome(id, () => {
+        this.removedDivergenceSweeps.add(connectionId);
+      });
+    }
     await this.sweepRemovedConnections();
+  }
+
+  private retryDroppedDivergenceClose(connectionId: string, replica: string, id: string): void {
+    const state = this.divergenceState.get(connectionId);
+    if (!state) {
+      this.removedDivergenceSweeps.add(connectionId);
+      return;
+    }
+    const orphans = this.divergenceOrphans.get(connectionId) ?? new Map<string, OrphanedDivergence>();
+    const orphan = orphans.get(replica) ?? {
+      eventIds: new Set<string>(),
+      sinceWindow: state.closedWindowCount,
+      claimed: false,
+      notified: true,
+    };
+    orphan.eventIds.add(id);
+    orphans.set(replica, orphan);
+    this.divergenceOrphans.set(connectionId, orphans);
   }
 
   private closeDivergenceEventsOnRemoval(connectionId: string): void {
@@ -6557,7 +6555,7 @@ export class AnomalyService
     if (!this.divergenceOrphansSwept.has(connectionId)) {
       this.removedDivergenceSweeps.add(connectionId);
     }
-    this.closeRemovedDivergenceEvents(ids).catch((err) => {
+    this.closeRemovedDivergenceEvents(connectionId, ids).catch((err) => {
       this.logger.error('Failed to resolve divergence events of a removed connection', err);
     });
   }
@@ -6601,30 +6599,38 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
-    await this.addAnomaly(event, ctx);
+    this.anomalySaveHooks.set(event, () => {
+      if (event.resolved) return;
+      this.webhookEventsProService
+        ?.dispatchReplicationDivergence({
+          replica: finding.addr,
+          level: finding.level,
+          reason: finding.reason,
+          gapBytes: finding.gapBytes,
+          secondsBehind: finding.secondsBehind,
+          bytesPerSec: finding.bytesPerSec,
+          slopeBytesPerWindow: finding.slopeBytesPerWindow,
+          windowCount: finding.windowCount,
+          correlatedSignals: relatedMetrics,
+          message,
+          timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch replication.divergence webhook', err);
+        });
+    });
+    await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${finding.addr}`, () => {
+      acknowledgeRecovery(state, finding.addr);
+    });
     acknowledgeDivergence(state, finding, event.id);
 
-    this.webhookEventsProService
-      ?.dispatchReplicationDivergence({
-        replica: finding.addr,
-        level: finding.level,
-        reason: finding.reason,
-        gapBytes: finding.gapBytes,
-        secondsBehind: finding.secondsBehind,
-        bytesPerSec: finding.bytesPerSec,
-        slopeBytesPerWindow: finding.slopeBytesPerWindow,
-        windowCount: finding.windowCount,
-        correlatedSignals: relatedMetrics,
-        message,
-        timestamp,
-        instance: { host: ctx.host, port: ctx.port },
-        connectionId: ctx.connectionId,
-      })
-      .catch((err) => {
-        this.logger.error('Failed to dispatch replication.divergence webhook', err);
+    if (previousEventId) {
+      await this.resolveAnomalyOutcome(previousEventId, () => {
+        this.retryDroppedDivergenceClose(ctx.connectionId, finding.addr, previousEventId);
       });
-
-    if (previousEventId) await this.resolveAnomalyOutcome(previousEventId);
+    }
   }
 
   private async resolveReplicationDivergence(
@@ -6633,19 +6639,15 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
-    if (recovery.eventId) await this.resolveAnomalyOutcome(recovery.eventId);
+    const { eventId } = recovery;
+    if (eventId) {
+      await this.resolveAnomalyOutcome(eventId, () => {
+        this.retryDroppedDivergenceClose(ctx.connectionId, recovery.addr, eventId);
+      });
+    }
     acknowledgeRecovery(state, recovery.addr);
 
-    if (recovery.kind === 'cleared') {
-      this.dispatchReplicationRecovered(ctx, {
-        replica: recovery.addr,
-        reason: 'replica_gone',
-        gapBytes: null,
-        message: `Replica ${recovery.addr} is no longer tracked by this node, so its divergence was closed.`,
-        timestamp,
-      });
-      return;
-    }
+    if (recovery.kind === 'cleared') return;
 
     this.dispatchReplicationRecovered(ctx, {
       replica: recovery.addr,
@@ -6830,7 +6832,10 @@ export class AnomalyService
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
-  private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
+  private async resolveAnomalyOutcome(
+    anomalyId: string,
+    onDrop?: () => void,
+  ): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly =
       this.recentAnomalies.find((a) => a.id === anomalyId) ??
       this.persistenceOutbox.unsavedAnomaly(anomalyId);
@@ -6853,7 +6858,7 @@ export class AnomalyService
       persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
-      this.queueResolve(anomalyId, resolvedAt);
+      this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
     }
 
@@ -6863,7 +6868,7 @@ export class AnomalyService
       // caller drops it. A cache-present event may just be a momentary storage
       // miss, so keep retrying that one.
       if (!anomaly) return 'gone';
-      this.queueResolve(anomalyId, resolvedAt);
+      this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
     }
 
@@ -6878,14 +6883,14 @@ export class AnomalyService
     return 'resolved';
   }
 
-  private queueResolve(anomalyId: string, resolvedAt: number): void {
+  private queueResolve(anomalyId: string, resolvedAt: number, onDrop?: () => void): void {
     const pendingSave = this.persistenceOutbox.unsavedAnomaly(anomalyId);
     if (pendingSave) {
       pendingSave.resolved = true;
       pendingSave.resolvedAt = resolvedAt;
       return;
     }
-    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
+    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now(), onDrop);
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {
