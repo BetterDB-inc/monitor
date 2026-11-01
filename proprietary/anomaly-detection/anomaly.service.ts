@@ -339,6 +339,7 @@ export class AnomalyService
 
   private recentAnomalies: AnomalyEvent[] = [];
   private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
+  private readonly incidentEventsById = new Map<string, AnomalyEvent>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly incidentTimelineBuilder = new IncidentTimelineBuilder(
     {},
@@ -351,7 +352,8 @@ export class AnomalyService
   private incidentBoundarySeed: Promise<boolean> | null = null;
   private liveBoundaries: StoredIncidentBoundary[] = [];
   private tickingIncidentTimelines = false;
-  private incidentFingerprint: string | null = null;
+  private incidentsDirty = true;
+  private liveEventsById = new Map<string, AnomalyEvent>();
   private incidentsBuiltAt = 0;
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
@@ -882,7 +884,7 @@ export class AnomalyService
     this.reshardSkewEventIds.delete(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
-    this.incidentEvents.delete(connectionId);
+    this.forgetIncidentEvents(connectionId, () => true);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -5967,16 +5969,31 @@ export class AnomalyService
     const connectionId = anomaly.connectionId ?? '';
     const events = this.incidentEvents.get(connectionId) ?? [];
     events.push(anomaly);
-    if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) events.shift();
+    this.incidentEventsById.set(anomaly.id, anomaly);
+    if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
+      const evicted = events.shift();
+      if (evicted) this.incidentEventsById.delete(evicted.id);
+    }
     this.incidentEvents.set(connectionId, events);
+    this.incidentsDirty = true;
+  }
+
+  private forgetIncidentEvents(
+    connectionId: string,
+    forgotten: (anomaly: AnomalyEvent) => boolean,
+  ): void {
+    const events = this.incidentEvents.get(connectionId) ?? [];
+    const kept = events.filter((a) => !forgotten(a));
+    events
+      .filter((a) => forgotten(a))
+      .forEach((a) => this.incidentEventsById.delete(a.id));
+    if (kept.length > 0) this.incidentEvents.set(connectionId, kept);
+    else this.incidentEvents.delete(connectionId);
+    this.incidentsDirty = true;
   }
 
   private findIncidentEvent(anomalyId: string): AnomalyEvent | undefined {
-    for (const events of this.incidentEvents.values()) {
-      const found = events.find((a) => a.id === anomalyId);
-      if (found) return found;
-    }
-    return undefined;
+    return this.incidentEventsById.get(anomalyId);
   }
 
   private stampScope(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
@@ -6192,18 +6209,27 @@ export class AnomalyService
     return this.connectionRegistry.getConfig(connectionId)?.membership?.seedId;
   }
 
-  private correlationScopeOf(connectionId: string | undefined): string {
+  private seedsByClusterKey(): Map<string, string> {
+    const seeds = new Map<string, string>();
+    for (const [peer, clusterKey] of this.connectionClusterKeys) {
+      if (seeds.has(clusterKey)) continue;
+      const seedId = this.seedIdOf(peer);
+      if (seedId) seeds.set(clusterKey, seedId);
+    }
+    return seeds;
+  }
+
+  private correlationScopeOf(
+    connectionId: string | undefined,
+    seeds?: Map<string, string>,
+  ): string {
     if (!connectionId) return '';
     const seedId = this.seedIdOf(connectionId);
     if (seedId) return seedId;
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     if (!clusterKey) return connectionId;
     if (this.connectionRegistry.listMembers(connectionId).length > 0) return connectionId;
-    for (const [peer, peerKey] of this.connectionClusterKeys) {
-      const peerSeedId = peerKey === clusterKey ? this.seedIdOf(peer) : undefined;
-      if (peerSeedId) return peerSeedId;
-    }
-    return clusterKey;
+    return (seeds ?? this.seedsByClusterKey()).get(clusterKey) ?? clusterKey;
   }
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => {
@@ -6287,6 +6313,7 @@ export class AnomalyService
   private async seedIncidentBoundaries(startTime: number): Promise<boolean> {
     try {
       this.liveBoundaries = await this.storage.getIncidentBoundaries({ startTime });
+      this.incidentsDirty = true;
       const known = new Set([...this.incidentEvents.values()].flat().map((a) => a.id));
       const stored = await this.storedAnomaliesInRange(undefined, startTime, undefined);
       stored
@@ -6341,27 +6368,21 @@ export class AnomalyService
     const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
       now - windowMs,
     ));
-    const known = new Map(
-      [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies].map((a) => [a.id, a]),
-    );
-    const live = [...known.values()].filter((a) => a.timestamp >= now - windowMs);
-    const fingerprintOf = () =>
-      [...live.map((a) => `${a.id}:${a.resolved}`), this.liveBoundaries.length].join(',');
-    if (
-      fingerprintOf() !== this.incidentFingerprint ||
-      now - this.incidentsBuiltAt >= INCIDENT_REBUILD_INTERVAL_MS
-    ) {
+    if (this.incidentsDirty || now - this.incidentsBuiltAt >= INCIDENT_REBUILD_INTERVAL_MS) {
+      const known = [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies];
+      const live = known.filter((a) => a.timestamp >= now - windowMs);
+      this.liveEventsById = new Map(live.map((a) => [a.id, a]));
       this.liveIncidents = this.incidentTimelineBuilder.build(
-        live,
+        [...this.liveEventsById.values()],
         now,
         this.incidentRecoveryProbe,
         this.liveBoundaries,
       );
       this.incidentsBuiltAt = now;
+      this.incidentsDirty = false;
     }
     if (boundariesSeeded) await this.storeIncidentBoundaries(now - windowMs);
     else this.incidentBoundarySeed = null;
-    this.incidentFingerprint = fingerprintOf();
     if (!seeded) {
       this.sequenceDedupeSeedFailedAt ??= now;
       if (now - this.sequenceDedupeSeedFailedAt < windowMs) {
@@ -6376,13 +6397,12 @@ export class AnomalyService
       if (at < now - windowMs) this.sequenceGroupedAnomalies.delete(key);
     }
 
-    const byId = new Map(live.map((a) => [a.id, a]));
     for (const incident of this.liveIncidents) {
       for (const match of incident.sequenceMatches) {
         const keys = match.anomalyIds.map((id) => `${match.pattern}\u0000${id}`);
         if (keys.some((key) => this.sequenceGroupedAnomalies.has(key))) continue;
         const anomalies = match.anomalyIds
-          .map((id) => byId.get(id))
+          .map((id) => this.liveEventsById.get(id))
           .filter((a): a is AnomalyEvent => a !== undefined);
         if (anomalies.length === 0) continue;
         anomalies.forEach((a) =>
@@ -6641,16 +6661,18 @@ export class AnomalyService
   }
 
   private scopeConnectionIds(connectionId: string): string[] {
-    const scope = this.correlationScopeOf(connectionId);
+    const seeds = this.seedsByClusterKey();
+    const scope = this.correlationScopeOf(connectionId, seeds);
     const members = this.connectionRegistry.listMembers(scope);
+    const peers = [...this.connectionClusterKeys]
+      .filter(([, clusterKey]) => (seeds.get(clusterKey) ?? clusterKey) === scope)
+      .map(([peer]) => peer);
     return [
       ...new Set([
         connectionId,
         ...(this.connectionRegistry.getConfig(scope) ? [scope] : []),
         ...members.map((m) => m.id),
-        ...[...this.connectionClusterKeys.keys()].filter(
-          (peer) => this.correlationScopeOf(peer) === scope,
-        ),
+        ...peers.filter((peer) => this.correlationScopeOf(peer, seeds) === scope),
       ]),
     ];
   }
@@ -7287,6 +7309,7 @@ export class AnomalyService
           const cached = this.recentAnomalies.find((a) => a.id === id);
           if (cached) {
             cached.resolved = true;
+            this.incidentsDirty = true;
             cached.resolvedAt ??= resolvedAt;
           }
         }
@@ -7714,6 +7737,7 @@ export class AnomalyService
     // row that doesn't exist, so flipping the cached copy fully dismisses it.
     if (anomaly && !anomaly.persisted) {
       anomaly.resolved = true;
+      this.incidentsDirty = true;
       anomaly.resolvedAt ??= resolvedAt;
       this.persistenceOutbox.carryResolve(anomalyId, anomaly.resolvedAt, onDrop);
       return 'resolved';
@@ -7743,6 +7767,7 @@ export class AnomalyService
       }
       if (evicted) {
         evicted.resolved = true;
+        this.incidentsDirty = true;
         evicted.resolvedAt ??= resolvedAt;
       }
       return 'gone';
@@ -7754,6 +7779,7 @@ export class AnomalyService
     const cached = anomaly ?? evicted;
     if (cached) {
       cached.resolved = true;
+      this.incidentsDirty = true;
       cached.resolvedAt ??= resolvedAt;
     }
 
@@ -7779,6 +7805,7 @@ export class AnomalyService
       // Memory-only member: safe to flip the cache (no durable row to resurface).
       if (!anomaly.persisted) {
         anomaly.resolved = true;
+        this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
         continue;
       }
@@ -7790,6 +7817,7 @@ export class AnomalyService
       }
       if (persisted) {
         anomaly.resolved = true;
+        this.incidentsDirty = true;
         anomaly.resolvedAt ??= resolvedAt;
       } else {
         allResolved = false;
@@ -7801,11 +7829,8 @@ export class AnomalyService
   clearResolved(): number {
     const beforeCount = this.recentAnomalies.length;
     this.recentAnomalies = this.recentAnomalies.filter((a) => !a.resolved);
-    for (const [connectionId, events] of this.incidentEvents) {
-      this.incidentEvents.set(
-        connectionId,
-        events.filter((a) => !a.resolved),
-      );
+    for (const connectionId of [...this.incidentEvents.keys()]) {
+      this.forgetIncidentEvents(connectionId, (a) => a.resolved === true);
     }
     return beforeCount - this.recentAnomalies.length;
   }

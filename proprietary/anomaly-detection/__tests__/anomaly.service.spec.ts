@@ -1698,6 +1698,21 @@ describe('AnomalyService', () => {
       expect((service as any).clusterKeyByNode.size).toBe(0);
     });
 
+    it('resolves the peers of a scope without a registry scan per peer', async () => {
+      const registry = (service as any).connectionRegistry;
+      for (let i = 0; i < 100; i += 1) {
+        (service as any).connectionClusterKeys.set(`solo-${i}`, `cluster:${i}`);
+      }
+      (service as any).connectionClusterKeys.set('conn-a', 'cluster:shared');
+      (service as any).connectionClusterKeys.set('conn-b', 'cluster:shared');
+      registry.listMembers.mockClear();
+
+      const peers = (service as any).scopeConnectionIds('conn-a');
+
+      expect(peers.sort()).toEqual(['conn-a', 'conn-b']);
+      expect(registry.listMembers.mock.calls.length).toBeLessThan(10);
+    });
+
     it('leaves the scope of a removed connection', async () => {
       await pollCluster(6000, false);
 
@@ -8432,6 +8447,76 @@ describe('AnomalyService', () => {
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(2);
     });
 
+    it('does not walk the live events on a tick where nothing changed', async () => {
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'one', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      await (service as any).tickIncidentTimelines(now);
+      const walk = jest.spyOn((service as any).incidentEvents, 'values');
+
+      await (service as any).tickIncidentTimelines(now + 5000);
+
+      expect(walk).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds on the next tick when a connection is removed', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'one', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      await (service as any).tickIncidentTimelines(now);
+
+      (service as any).onConnectionRemoved('conn-1');
+      await (service as any).tickIncidentTimelines(now + 5000);
+
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
+    it('finds a remembered event without walking every connection', async () => {
+      await (service as any).addAnomaly(anomaly({ id: 'one' }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      const walk = jest.spyOn((service as any).incidentEvents, 'values');
+
+      expect((service as any).findIncidentEvent('one')?.id).toBe('one');
+      expect(walk).not.toHaveBeenCalled();
+    });
+
+    it('forgets an event once it leaves the per connection window', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'oldest' }), ctx);
+      for (let i = 0; i < 200; i += 1) {
+        await (service as any).addAnomaly(anomaly({ id: `next-${i}` }), ctx);
+      }
+
+      expect((service as any).findIncidentEvent('oldest')).toBeUndefined();
+      expect((service as any).findIncidentEvent('next-199')?.id).toBe('next-199');
+    });
+
+    it('forgets the events of a removed connection and cleared events', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      const other = { connectionId: 'conn-2', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'gone', connectionId: 'conn-1' }), ctx);
+      await (service as any).addAnomaly(
+        anomaly({ id: 'closed', connectionId: 'conn-2', resolved: true }),
+        other,
+      );
+
+      (service as any).onConnectionRemoved('conn-1');
+      service.clearResolved();
+
+      expect((service as any).findIncidentEvent('gone')).toBeUndefined();
+      expect((service as any).findIncidentEvent('closed')).toBeUndefined();
+    });
+
     it('does not rebuild timelines on a tick where nothing changed', async () => {
       const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
       const now = Date.now();
@@ -8449,15 +8534,14 @@ describe('AnomalyService', () => {
       expect(build).toHaveBeenCalledTimes(2);
     });
 
-    it('rebuilds when an event replaces another on one connection', async () => {
+    it('rebuilds when a new event arrives on one connection', async () => {
       const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
       const now = Date.now();
-      const incidentEvents = (service as any).incidentEvents;
-      incidentEvents.set('conn-1', [anomaly({ id: 'a', timestamp: now - MIN })]);
-      incidentEvents.set('conn-2', [anomaly({ id: 'b', timestamp: now - MIN })]);
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'a', timestamp: now - MIN }), ctx);
       await (service as any).tickIncidentTimelines(now);
 
-      incidentEvents.set('conn-1', [anomaly({ id: 'c', timestamp: now })]);
+      await (service as any).addAnomaly(anomaly({ id: 'c', timestamp: now }), ctx);
       await (service as any).tickIncidentTimelines(now + 1000);
 
       expect(build).toHaveBeenCalledTimes(2);
@@ -8470,7 +8554,7 @@ describe('AnomalyService', () => {
       await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
       await (service as any).tickIncidentTimelines(now + 1000);
 
-      event.resolved = true;
+      await service.resolveAnomaly('one');
       await (service as any).tickIncidentTimelines(now + 6000);
 
       expect(build).toHaveBeenCalledTimes(2);
