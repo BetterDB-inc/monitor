@@ -155,7 +155,6 @@ const TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
 
 const LOAD_PATTERN_LABEL: Record<LoadPattern, string> = {
   stress: 'load is rising with stress',
-  latency: 'load is trending up under a sustained latency regression',
   step: 'load stepped up under stress and is holding',
 };
 
@@ -305,32 +304,24 @@ function pearson(xs: number[], ys: number[]): number | null {
   return cov / Math.sqrt(vx * vy);
 }
 
-type LoadPattern = 'stress' | 'latency' | 'step';
+type LoadPattern = 'stress' | 'step';
 
 interface CoMovement {
   r: number | null;
   pattern: LoadPattern;
 }
 
-function coMovement(run: RetryAmplificationWindow[]): CoMovement | null {
+function coMovement(run: RetryAmplificationWindow[], base: WindowBaseline): CoMovement | null {
   const load = run.map((w) => w.cmdsPerClient);
-  const series: Array<Array<number | null>> = [
-    run.map((w) => w.errorRate),
-    run.map((w) => w.churnPerSec),
+  const retryLegs = [
+    { series: run.map((w) => w.errorRate), stressed: run.some((w) => hasErrorStress(w, base)) },
+    { series: run.map((w) => w.churnPerSec), stressed: run.some((w) => hasChurnStress(w, base)) },
   ];
   let best: CoMovement | null = null;
-  for (const s of series) {
-    if (s.some((v) => v === null)) continue;
-    const r = pearson(load, s as number[]);
+  for (const { series, stressed } of retryLegs) {
+    if (!stressed || series.some((v) => v === null)) continue;
+    const r = pearson(load, series as number[]);
     if (r !== null && (best === null || r > (best.r ?? -Infinity))) best = { r, pattern: 'stress' };
-  }
-  if (run[run.length - 1].latencyEvent) {
-    const r = pearson(
-      load,
-      load.map((_, i) => i),
-    );
-    if (r !== null && (best === null || r > (best.r ?? -Infinity)))
-      best = { r, pattern: 'latency' };
   }
   return best;
 }
@@ -352,7 +343,7 @@ function isHeldStep(run: RetryAmplificationWindow[], base: WindowBaseline): bool
 }
 
 function classifyLoad(run: RetryAmplificationWindow[], base: WindowBaseline): CoMovement | null {
-  const movement = coMovement(run);
+  const movement = coMovement(run, base);
   if (
     movement !== null &&
     movement.r !== null &&

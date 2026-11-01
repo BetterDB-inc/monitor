@@ -47,6 +47,10 @@ function hot(multiplier: number, extra: Partial<WindowSpec> = {}): WindowSpec {
   };
 }
 
+function storm(multiplier: number, extra: Partial<WindowSpec> = {}): WindowSpec {
+  return hot(multiplier, { errorsPerSec: (multiplier - 1) * 10, ...extra });
+}
+
 class Driver {
   state: RetryAmplificationState = createRetryAmplificationState();
   t = 0;
@@ -84,7 +88,7 @@ class Driver {
   }
 
   ramp(count: number, extra: Partial<WindowSpec> = {}, from = 1.5): void {
-    for (let i = 0; i < count; i++) this.window(hot(from + i * 0.15, extra));
+    for (let i = 0; i < count; i++) this.window(storm(from + i * 0.15, extra));
   }
 
   poll(
@@ -171,13 +175,37 @@ describe('retry amplification detector', () => {
     expect(d.state.lastEpisode?.windows).toBe(2);
   });
 
-  it('raises a warning for sustained co-rising load and P99 with flat clients', () => {
+  it('does not alert on organic growth through a fixed pool under a P99 regression', () => {
     const d = new Driver();
     d.baseline();
     d.window(hot(1.5));
     d.window(hot(1.7));
     d.window(hot(1.9));
-    d.window(hot(2.0));
+    d.window(hot(2.1));
+    d.window(hot(2.3));
+
+    expect(d.findings).toHaveLength(0);
+    expect(describeRetryAmplificationState(d.state).classification).toBe('candidate');
+  });
+
+  it('does not count an error rate that tracks load below the stress floor', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(hot(1.5, { errorsPerSec: 0.2 }));
+    d.window(hot(1.7, { errorsPerSec: 0.3 }));
+    d.window(hot(1.9, { errorsPerSec: 0.4 }));
+    d.window(hot(2.1, { errorsPerSec: 0.5 }));
+
+    expect(d.findings).toHaveLength(0);
+  });
+
+  it('raises a warning when errors rise with load under a P99 regression', () => {
+    const d = new Driver();
+    d.baseline();
+    d.window(storm(1.5));
+    d.window(storm(1.7));
+    d.window(storm(1.9));
+    d.window(storm(2.0));
     expect(d.findings).toHaveLength(1);
     const f = d.findings[0];
     expect(f.level).toBe('warning');
@@ -186,7 +214,7 @@ describe('retry amplification detector', () => {
     expect(f.loadRatio).toBeCloseTo(1.9, 1);
     expect(f.pattern).toBe('rising');
     expect(f.correlation).toBeGreaterThanOrEqual(0.5);
-    expect(f.relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    expect(f.relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
     expect(f.message).toContain('Retry amplification');
     expect(readRetryAmplificationTrigger(f.message)).toBe('a latency regression (COMMAND_P99)');
   });
@@ -194,10 +222,10 @@ describe('retry amplification detector', () => {
   it('escalates to critical when a saturation event lands in the episode', () => {
     const d = new Driver();
     d.baseline();
-    d.window(hot(1.5));
-    d.window(hot(1.7));
-    d.window(hot(1.9, { saturation: MetricType.LOAD_SATURATION }));
-    d.window(hot(2.0));
+    d.window(storm(1.5));
+    d.window(storm(1.7));
+    d.window(storm(1.9, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(storm(2.0));
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].level).toBe('critical');
     expect(d.findings[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
@@ -215,12 +243,12 @@ describe('retry amplification detector', () => {
   it('drops back to warning once saturation clears and re-emits critical when it returns', () => {
     const d = new Driver();
     d.baseline();
-    d.window(hot(1.5));
-    d.window(hot(1.65));
-    d.window(hot(1.8, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(storm(1.5));
+    d.window(storm(1.65));
+    d.window(storm(1.8, { saturation: MetricType.LOAD_SATURATION }));
     d.ramp(2, {}, 1.95);
-    d.window(hot(2.25, { saturation: MetricType.LOAD_SATURATION }));
-    d.window(hot(2.4));
+    d.window(storm(2.25, { saturation: MetricType.LOAD_SATURATION }));
+    d.window(storm(2.4));
     expect(d.findings.map((f) => f.level)).toEqual(['critical', 'critical']);
   });
 
@@ -237,10 +265,10 @@ describe('retry amplification detector', () => {
   it('counts a P99 event that lands after the window has already rolled over', () => {
     const d = new Driver();
     d.baseline();
-    d.window(hot(1.5, { lateP99: true }));
-    d.window(hot(1.7, { lateP99: true }));
-    d.window(hot(1.9, { lateP99: true }));
-    d.window(hot(2.0, { lateP99: true }));
+    d.window(storm(1.5, { lateP99: true }));
+    d.window(storm(1.7, { lateP99: true }));
+    d.window(storm(1.9, { lateP99: true }));
+    d.window(storm(2.0, { lateP99: true }));
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].trigger).toBe('latency');
     expect(d.findings[0].relatedMetrics).toContain(MetricType.COMMAND_P99);
@@ -317,7 +345,7 @@ describe('retry amplification detector', () => {
     d.ramp(4, { p99: false, stressActive: true });
     expect(d.findings).toHaveLength(1);
     expect(d.findings[0].trigger).toBe('latency');
-    expect(d.findings[0].message).toContain('sustained latency regression');
+    expect(d.findings[0].message).toContain('load is rising with stress');
   });
 
   it('reports critical when saturation started before the episode and is still active', () => {
@@ -432,7 +460,7 @@ describe('retry amplification detector', () => {
       const d = new Driver();
       d.baseline();
       d.ramp(2, { p99: true });
-      d.window(hot(2.0, { p99: true, activeSaturation: [MetricType.LOAD_SATURATION] }));
+      d.window(hot(2.0, { errorsPerSec: 10, activeSaturation: [MetricType.LOAD_SATURATION] }));
       skipGap(d);
 
       expect(d.poll(hotSpec)?.level).toBe('critical');
@@ -576,7 +604,7 @@ describe('retry amplification detector', () => {
   it('links the error replies when they join a latency episode', () => {
     const d = new Driver();
     d.baseline();
-    d.ramp(4, { errorsPerSec: 5 });
+    d.ramp(4);
     d.window(hot(2.1, { errorsPerSec: 5 }));
     expect(d.findings[0].trigger).toBe('latency');
     expect(d.findings[0].relatedMetrics).toEqual([
@@ -598,9 +626,9 @@ describe('retry amplification detector', () => {
     const d = new Driver();
     d.baseline();
     d.window(hot(1.5, { p99: false, errorsPerSec: 5 }));
-    d.window(hot(1.7));
-    d.window(hot(1.9));
-    d.window(hot(2.0));
+    d.window(storm(1.7));
+    d.window(storm(1.9));
+    d.window(storm(2.0));
     expect(d.findings[0].trigger).toBe('errors');
   });
 

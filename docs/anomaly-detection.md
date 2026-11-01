@@ -332,7 +332,7 @@ Each condition fires once per episode and the tracking state clears when the chi
 
 ### RETRY_AMPLIFICATION
 
-**Triggers**: Commands per client keep climbing while connected clients stay flat and the server is under stress (a P99 latency regression, an error-reply burst or connection churn)
+**Triggers**: Commands per client keep climbing while connected clients stay flat, error replies or connection churn move with them, and the server is under stress (a P99 latency regression, an error-reply burst or connection churn)
 
 **What it means**: Clients are retrying failed or slow calls, and the retries add load that makes the server slower, which causes more retries. Unlike a transient retry burst, this loop does not settle on its own.
 
@@ -342,7 +342,7 @@ Each condition fires once per episode and the tracking state clears when the chi
 - At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped once the latency guard sees the command healthy for 5 samples in a row; until then the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
 
 A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
-- **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and the error or churn rate, or, under a sustained P99 regression, between commands per client and the window index. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
+- **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and an error or churn rate that reached its stress level in the run. A P99 regression makes a window hot but cannot qualify a run alone, because organic growth through a fixed pool slows the server in the same way. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
 - **Step**: the last 3 windows are all at least 2× baseline, the latest is within 10% of their peak, and at least one of them shows retry evidence (an error-reply or reconnect burst). This catches a storm that jumps up, or overshoots and settles, then holds. Latency alone is not enough for a step, because a legitimate batch job through pooled clients looks the same.
 
 Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
@@ -358,7 +358,7 @@ If storage is unavailable, the finding stays as one event in memory and the shar
 
 **OTLP-pushed instances**: Coverage follows the exporter's own push interval, taken from the median of the last 5 gaps between pushes, so a gap longer than 3 push intervals still counts as missed samples. Pushed metrics carry command, ops, client and connection counters but no error replies, and latency regressions are not tracked for pushed instances, so connection churn is the only stress signal there. Client attribution needs `CLIENT LIST` or stored client snapshots, and neither exists for a pushed instance, so `topContributors` is `null` there.
 
-**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. The heuristic cannot tell retries from real growth that flows through a fixed connection pool. If an application scales its traffic through pooled clients while a genuine latency regression is open, the episode looks the same. Check the named trigger and the top clients before throttling. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
+**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. Client-side timeouts retried on the same connection, with no error replies or reconnects, leave no retry evidence on the server, so they are not flagged; the run stays a `candidate` in the status tool. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
 
 **Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
 - Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting clients at 1.3× or more of their lifetime rate

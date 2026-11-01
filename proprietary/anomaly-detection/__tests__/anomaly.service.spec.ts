@@ -3482,6 +3482,7 @@ describe('AnomalyService', () => {
       opts: {
         p99Once?: boolean;
         noP99?: boolean;
+        noErrors?: boolean;
         coolWindows?: number;
         realEmit?: boolean;
         cpuEvent?: Record<string, unknown>;
@@ -3528,7 +3529,7 @@ describe('AnomalyService', () => {
         }
         for (let i = 0; i < 60; i++) {
           commands += 1000 * factor;
-          errors += 0.1;
+          errors += hot && !opts.noErrors ? (factor - 1) * 10 : 0.1;
           try {
             await (service as any).detectRetryAmplification(
               {
@@ -3558,7 +3559,7 @@ describe('AnomalyService', () => {
       expect(recorded[0].connectionId).toBe('conn-1');
       expect(recorded[0].threshold).toBe(1.3);
       expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
-      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
       expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
     });
 
@@ -3634,8 +3635,8 @@ describe('AnomalyService', () => {
       const { recorded } = await runRetry({ p99Once: true });
 
       expect(recorded).toHaveLength(1);
-      expect(recorded[0].message).toContain('sustained latency regression');
-      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+      expect(recorded[0].message).toContain('load is rising with stress');
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
     });
 
     it('re-arms the level when the outbox drops the event', async () => {
@@ -3680,18 +3681,17 @@ describe('AnomalyService', () => {
       });
       service.reportLatencyDegraded('conn-1', true);
 
-      const { recorded } = await runRetry({ noP99: true });
+      await runRetry({ noP99: true, noErrors: true });
 
-      expect(recorded).toHaveLength(1);
-      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+      expect(service.getRetryAmplificationStatus('conn-1').classification).toBe('candidate');
     });
 
     it('stops counting a held P99 regression once the latency guard reports recovery', async () => {
       service.reportLatencyDegraded('conn-1', false);
 
-      const { recorded } = await runRetry({ p99Once: true });
+      await runRetry({ p99Once: true, noErrors: true });
 
-      expect(recorded).toHaveLength(0);
+      expect(service.getRetryAmplificationStatus('conn-1').windows).toBeLessThanOrEqual(1);
     });
 
     it('ignores a load saturation event once the saturation detector has re-armed', async () => {
