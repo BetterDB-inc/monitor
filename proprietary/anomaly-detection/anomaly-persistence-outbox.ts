@@ -19,6 +19,7 @@ export interface PendingSave extends RetrySchedule {
   anomaly: AnomalyEvent;
   ctx?: ConnectionContext;
   rewrite?: boolean;
+  onCloseDrop?: () => void;
 }
 
 export interface PendingResolve extends RetrySchedule {
@@ -30,12 +31,12 @@ export type OutboxEntry = PendingSave | PendingResolve;
 export type OutboxDropReason = 'full' | 'expired';
 
 function closesEvent(entry: OutboxEntry): boolean {
-  return entry.kind === 'resolve' || (entry.rewrite === true && entry.anomaly.resolved);
+  return entry.kind === 'resolve' || entry.anomaly.resolved;
 }
 
 export class PersistenceOutbox {
   private readonly pending = new Map<string, OutboxEntry>();
-  private heldDrops: Array<() => void> = [];
+  private heldDrops: PendingSave[] = [];
 
   constructor(private readonly onDrop: (entry: OutboxEntry, reason: OutboxDropReason) => void) {}
 
@@ -57,17 +58,28 @@ export class PersistenceOutbox {
   }
 
   enqueueRewrite(anomaly: AnomalyEvent, now: number): void {
-    const resolvedAt = this.resolvedAt(anomaly.id);
-    if (resolvedAt !== undefined) {
+    const pendingResolve = this.pending.get(anomaly.id);
+    let onCloseDrop: (() => void) | undefined;
+    if (pendingResolve?.kind === 'resolve') {
       anomaly.resolved = true;
-      anomaly.resolvedAt = resolvedAt;
+      anomaly.resolvedAt = pendingResolve.resolvedAt;
+      onCloseDrop = pendingResolve.onDrop;
       this.pending.delete(anomaly.id);
     }
-    this.add({ kind: 'save', id: anomaly.id, anomaly, enqueuedAt: now, rewrite: true });
+    this.add({ kind: 'save', id: anomaly.id, anomaly, enqueuedAt: now, rewrite: true, onCloseDrop });
   }
 
   enqueueResolve(id: string, resolvedAt: number, now: number, onDrop?: () => void): void {
     this.add({ kind: 'resolve', id, resolvedAt, enqueuedAt: now, onDrop });
+  }
+
+  carryResolve(id: string, resolvedAt: number, onDrop?: () => void): boolean {
+    const entry = this.pending.get(id);
+    if (entry?.kind !== 'save') return false;
+    entry.anomaly.resolved = true;
+    entry.anomaly.resolvedAt = resolvedAt;
+    entry.onCloseDrop = onDrop;
+    return true;
   }
 
   unsavedAnomaly(id: string): AnomalyEvent | undefined {
@@ -123,13 +135,16 @@ export class PersistenceOutbox {
     this.pending.delete(victim.id);
     this.onDrop(victim, 'full');
     if (victim.kind === 'resolve') victim.onDrop?.();
-    else if (victim.onDrop) this.heldDrops.push(victim.onDrop);
+    else if (victim.anomaly.resolved) victim.onCloseDrop?.();
+    else if (victim.onDrop) this.heldDrops.push(victim);
   }
 
   private releaseHeldDrops(): void {
     if (this.pending.size >= OUTBOX_MAX_ENTRIES) return;
     const held = this.heldDrops;
     this.heldDrops = [];
-    for (const onDrop of held) onDrop();
+    for (const entry of held) {
+      if (!entry.anomaly.resolved) entry.onDrop?.();
+    }
   }
 }
