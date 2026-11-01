@@ -65,7 +65,7 @@ export function PreflightPanel({ preflight }: Props) {
             <dt>Replication lag</dt>
             <dd className="font-mono">
               {preflight.health.signals.replicationLagBytes === null
-                ? 'unavailable'
+                ? 'n/a'
                 : formatBytes(preflight.health.signals.replicationLagBytes)}
             </dd>
             <dt>Replica link</dt>

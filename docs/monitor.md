@@ -58,8 +58,9 @@ opens. Surface findings:
   the limit may only be writes in flight, so the gate polls for up to
   2.5 s until that replica acks again and compares the new ack with the
   primary offset just before it. A replica that drops or never acks
-  keeps its first gap. Unreadable lag shows as unavailable, unreadable
-  link state shows as n/a, and neither blocks. The gate only blocks
+  keeps its first gap. Lag or link state with nothing to measure, such
+  as lag on a replica with no replicas of its own, or that can't be
+  read, shows as n/a and does not block. The gate only blocks
   anomaly-triggered and scheduled captures; manual sessions surface the
   report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested

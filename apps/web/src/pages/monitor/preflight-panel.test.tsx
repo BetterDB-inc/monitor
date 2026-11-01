@@ -46,8 +46,8 @@ describe('PreflightPanel replica link', () => {
     expect(replicaLinkValue()).toBe(label);
   });
 
-  it('shows unmeasured replication lag as unavailable instead of 0 B', () => {
+  it('shows unmeasured replication lag as n/a instead of 0 B', () => {
     render(<PreflightPanel preflight={makePreflight({ replicationLagBytes: null })} />);
-    expect(screen.getByText('Replication lag').nextElementSibling?.textContent).toBe('unavailable');
+    expect(screen.getByText('Replication lag').nextElementSibling?.textContent).toBe('n/a');
   });
 });
