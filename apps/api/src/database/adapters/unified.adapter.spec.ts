@@ -1,9 +1,16 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { Logger } from '@nestjs/common';
 import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
   QUIT_TIMEOUT_MS,
+  TLS_MATERIAL_RECHECK_MS,
+  WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
+import { generateTlsPair, type TlsPair } from '../../../test/helpers/tls-fixtures';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
 // the real constructor (which would open a live Valkey connection).
@@ -703,5 +710,290 @@ describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
     const [second] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
     expect(graphCalls.filter((c) => c === 'GRAPH.MEMORY')).toHaveLength(keys.length);
     expect(second.keyDetails?.every((d) => d.memoryBytes === 3 * MB)).toBe(true);
+  });
+});
+
+describe('UnifiedDatabaseAdapter — TLS material and certificate auth', () => {
+  // lazyConnect means the constructor builds the iovalkey client without
+  // dialing, so the options it was given can be inspected directly.
+  const CA = '-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n';
+  const CERT = '-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+
+  it('sends AUTH credentials in password mode (unchanged behaviour)', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: 'db.example.com', port: 6379, username: 'default', password: '' });
+    const options = adapter.getClient().options;
+    expect(options.username).toBe('default');
+    expect(options.tls).toBeUndefined();
+  });
+
+  it('passes the user-supplied CA, certificate, key and passphrase to the TLS socket unmodified', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'monitor',
+      password: 'pw',
+      tls: true,
+      tlsConfig: { ca: CA, cert: CERT, key: KEY, passphrase: 'secret' },
+    });
+    const tls = adapter.getClient().options.tls!;
+    expect(tls.ca).toBe(CA);
+    expect(tls.cert).toBe(CERT);
+    expect(tls.key).toBe(KEY);
+    expect(tls.passphrase).toBe('secret');
+    // SNI is still applied alongside the material.
+    expect(tls.servername).toBe('db.example.com');
+    // Server verification is never weakened.
+    expect(tls.rejectUnauthorized).toBeUndefined();
+  });
+
+  it('omits username and password entirely in certificate mode so no AUTH is sent', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'default',
+      password: '',
+      tls: true,
+      tlsConfig: { cert: CERT, key: KEY },
+      authMode: 'certificate',
+    });
+    const options = adapter.getClient().options;
+    // iovalkey stores an absent credential as null; what matters is that it is
+    // falsy, which is the condition under which it skips AUTH entirely.
+    expect(options.username).toBeFalsy();
+    expect(options.password).toBeFalsy();
+    expect(options.tls?.cert).toBe(CERT);
+  });
+
+  it('defers an invalid auth/TLS combination to connect() instead of throwing from the constructor', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+    });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('reports the ACL user from ACL WHOAMI after connect, tolerating servers without ACL', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => Promise.resolve('app-monitor'));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+    await expect(probe.call(adapter)).resolves.toBe('app-monitor');
+    expect(call).toHaveBeenCalledWith('ACL', 'WHOAMI');
+
+    call.mockImplementationOnce(() => Promise.reject(new Error("ERR unknown command 'ACL'")));
+    await expect(probe.call(adapter)).resolves.toBeUndefined();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', () => {
+  // Real material: refreshes validate the pair before adopting it.
+  let pairA: TlsPair;
+  let pairB: TlsPair;
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeAll(() => {
+    pairA = generateTlsPair('node-a');
+    pairB = generateTlsPair('node-b');
+  });
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-rotation-'));
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairA.cert);
+    fs.writeFileSync(path.join(certDir, 'client.key'), pairA.key);
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+    jest.useRealTimers();
+  });
+
+  const fileAdapter = () =>
+    new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+  const writePair = (pair: TlsPair) => {
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pair.cert);
+    fs.writeFileSync(path.join(certDir, 'client.key'), pair.key);
+  };
+  const certOf = (holder: { options: { tls?: { cert?: unknown } } }) => (holder.options.tls?.cert as Buffer | string | undefined)?.toString();
+
+  it('adopts a mismatched pair at construction with a warning rather than failing, so the reconnect refresh can heal it', () => {
+    // Files caught mid-rotation at boot: certificate B next to key A.
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const adapter = fileAdapter();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/TLS material is not usable.*re-read before each reconnect/));
+      const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string }; tlsSetupError: Error | null });
+      expect(material.tlsSetupError).toBeNull();
+      expect(material.tlsMaterial.cert?.toString()).toBe(pairB.cert);
+
+      // The key lands: the forced re-read before a reconnect adopts the complete pair.
+      fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+      (adapter as unknown as { refreshTlsMaterial(force: boolean): void }).refreshTlsMaterial(true);
+      const client = (adapter as unknown as { _client: { options: { tls?: { cert?: unknown; key?: unknown } } } })._client;
+      expect(certOf(client)).toBe(pairB.cert);
+      expect((client.options.tls?.key as Buffer | string | undefined)?.toString()).toBe(pairB.key);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    expect(certOf(client)).toBe(pairA.cert);
+
+    writePair(pairB);
+    client.emit('reconnecting');
+
+    expect(certOf(client)).toBe(pairB.cert);
+    // SNI survives the refresh.
+    expect(client.options.tls?.servername).toBe('db.example.com');
+  });
+
+  it('presents rotated files on every new socket, not only after a reconnect of the main client', () => {
+    jest.useFakeTimers();
+    const adapter = fileAdapter();
+    const newSocket = () =>
+      (adapter as unknown as { createValkeyClient(name: string): { options: { tls?: { cert?: Buffer | string; servername?: string } } } })
+        .createValkeyClient('scratch');
+    // A cached CLI client is kept current as well (it reconnects on its own).
+    const cliClient = { options: {} as { tls?: { cert?: Buffer | string } }, on: jest.fn() };
+    (adapter as unknown as { cliClient: unknown }).cliClient = cliClient;
+    expect(certOf(newSocket())).toBe(pairA.cert);
+
+    writePair(pairB);
+
+    // Within the recheck window nothing is stat-ed: scratch clients stay cheap.
+    expect(certOf(newSocket())).toBe(pairA.cert);
+
+    jest.advanceTimersByTime(TLS_MATERIAL_RECHECK_MS + 1);
+    // A scratch client (key analytics, CLI) built now carries the new material...
+    expect(certOf(newSocket())).toBe(pairB.cert);
+    // ...and so do the long-lived clients' option objects (cluster discovery copies the main one).
+    expect(certOf(adapter.getClient())).toBe(pairB.cert);
+    expect(adapter.getClient().options.tls?.servername).toBe('db.example.com');
+    expect(certOf(cliClient)).toBe(pairB.cert);
+  });
+
+  it('keeps the previous pair when a rotation is caught between writing the certificate and the key', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+
+    // Only the certificate has been replaced so far: the files do not match.
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairA.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairA.key);
+
+    // The key lands: the next refresh adopts the complete new pair.
+    fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairB.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairB.key);
+  });
+
+  it('keeps the previously loaded material when the rotated file is unreadable', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    const client = adapter.getClient();
+    fs.rmSync(path.join(certDir, 'client.crt'));
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairA.cert);
+  });
+
+  it('gives up on ACL WHOAMI after the deadline instead of hanging connect()', async () => {
+    jest.useFakeTimers();
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => new Promise<never>(() => undefined));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+
+    const pending = probe.call(adapter);
+    jest.advanceTimersByTime(WHOAMI_TIMEOUT_MS + 1);
+    await expect(pending).resolves.toBeUndefined();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per connect', () => {
+  const CERT = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-late-mount-'));
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+  });
+
+  it('recovers when the certificate files appear after construction (late-mounted secret)', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: '127.0.0.1',
+      port: 1,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    // Files missing: the deferred error surfaces on connect, every time.
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+
+    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT);
+    fs.writeFileSync(path.join(certDir, 'client.key'), KEY);
+
+    // Now the material loads and the dial proceeds (and fails on the dead port instead).
+    let message = '';
+    try {
+      await adapter.connect();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toMatch(/not found/);
+    // The failed dial discards the client, so inspect the loaded material directly.
+    const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string } }).tlsMaterial;
+    expect(material.cert?.toString()).toBe(CERT);
+    await adapter.disconnect().catch(() => undefined);
+  });
+
+  it('keeps a permanent configuration error permanent', async () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, tls: true, authMode: 'certificate' });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('does not probe WHOAMI on the initial ready (doConnect owns that), only on later reconnects', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
+    const probe = jest
+      .spyOn(adapter as unknown as { probeAuthenticatedUser: () => Promise<string | undefined> }, 'probeAuthenticatedUser')
+      .mockResolvedValue('app');
+    const client = adapter.getClient();
+
+    client.emit('ready');
+    expect(probe).not.toHaveBeenCalled();
+
+    client.emit('ready');
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 });

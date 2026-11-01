@@ -2,7 +2,7 @@ import Valkey from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
-import { createClient, createTargetClient } from './client-factory';
+import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
@@ -24,7 +24,8 @@ export interface CommandMigrationOptions {
 export async function runCommandMigration(opts: CommandMigrationOptions): Promise<void> {
   const { sourceConfig, targetConfig, sourceIsCluster, targetIsCluster, job, maxLogLines } = opts;
   const sourceClients: Valkey[] = [];
-  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster);
+  const onTlsRefreshError = (message: string) => log(job, maxLogLines, message);
+  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster, onTlsRefreshError);
 
   try {
     await targetClient.connect();
@@ -38,26 +39,41 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
         const nodesRaw = await discoveryClient.call('CLUSTER', 'NODES') as string;
         const masters = parseClusterMasters(nodesRaw);
         log(job, maxLogLines, `Cluster mode: ${masters.length} master(s) detected`);
-        for (const { host, port } of masters) {
+        for (const { host, port, hostname } of masters) {
           const client = new Valkey({
             host,
             port,
-            username: sourceConfig.username || undefined,
-            password: sourceConfig.password || undefined,
-            tls: sourceConfig.tls ? {} : undefined,
+            ...nodeClientAuthOptions(sourceConfig, host, hostname),
             lazyConnect: true,
+            connectTimeout: 10_000,
+            commandTimeout: 15_000,
             connectionName: 'BetterDB-Migration-Source',
           });
-          await client.connect();
+          attachTlsRefresh(client, sourceConfig, host, hostname, onTlsRefreshError);
+          // Register before connecting: a client whose first dial fails keeps
+          // reconnecting in the background unless the outer cleanup quits it.
           sourceClients.push(client);
+          try {
+            await client.connect();
+          } catch (err) {
+            client.disconnect();
+            throw err;
+          }
         }
       } finally {
         await discoveryClient.quit();
       }
     } else {
-      const client = createClient(sourceConfig, 'BetterDB-Migration-Source');
-      await client.connect();
+      const client = createClient(sourceConfig, 'BetterDB-Migration-Source', onTlsRefreshError);
+      // Register before connecting so the outer cleanup quits it, and stop the
+      // reconnect loop iovalkey starts when the first dial fails.
       sourceClients.push(client);
+      try {
+        await client.connect();
+      } catch (err) {
+        client.disconnect();
+        throw err;
+      }
     }
 
     log(job, maxLogLines, `Connected to source (${sourceClients.length} node(s))`);
@@ -159,16 +175,21 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
 
 // ── Helpers ──
 
-function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number }> {
-  const results: Array<{ host: string; port: number }> = [];
+export function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number; hostname?: string }> {
+  const results: Array<{ host: string; port: number; hostname?: string }> = [];
   for (const line of nodesRaw.split('\n')) {
     if (!line.trim()) continue;
     const parts = line.split(' ');
     const flags = parts[2] ?? '';
     if (!flags.includes('master')) continue;
     if (flags.includes('fail') || flags.includes('noaddr')) continue;
-    // address format: host:port@clusterport (host may be IPv6, e.g. [::1]:6379@16379)
-    const addrPart = (parts[1] ?? '').split('@')[0];
+    // address format: host:port@clusterport[,hostname] (host may be IPv6, e.g.
+    // [::1]:6379@16379). The optional trailing hostname is the one the node
+    // announces (cluster-announce-hostname) and is what its certificate names.
+    const addressField = parts[1] ?? '';
+    const commaIdx = addressField.indexOf(',');
+    const hostname = commaIdx === -1 ? undefined : addressField.slice(commaIdx + 1) || undefined;
+    const addrPart = (commaIdx === -1 ? addressField : addressField.slice(0, commaIdx)).split('@')[0];
     const lastColon = addrPart.lastIndexOf(':');
     let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
     const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
@@ -177,7 +198,7 @@ function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: numb
       host = host.slice(1, -1);
     }
     if (host && !isNaN(port)) {
-      results.push({ host, port });
+      results.push(hostname ? { host, port, hostname } : { host, port });
     }
   }
   return results;

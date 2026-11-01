@@ -215,6 +215,11 @@ A connection can reach its database through an SSH bastion/jump host (single hop
 | Variable               | Required | Default | Description                                                                                                                                                                                              |
 | ---------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BETTERDB_SSH_KEY_DIR` | No       | -       | Directory that server-side SSH private keys must live in. Enables the "server file path" key source; a connection's `privateKeyPath` must resolve inside this directory. Unset disables file-based keys. |
+| `BETTERDB_TLS_CERT_DIR` | No       | -       | Directory that server-side TLS files (CA bundle, client certificate, private key) must live in. Enables the "server file paths" source for a connection's `tlsConfig`; its `caPath`/`certPath`/`keyPath` must resolve inside this directory. Unset disables file paths (inline PEM still works). |
+| `DB_TLS_CA_FILE` | No       | -       | PEM CA bundle used to verify the env-configured database's server certificate (private PKI). |
+| `DB_TLS_CERT_FILE` / `DB_TLS_KEY_FILE` | No | - | PEM client certificate and private key presented to the env-configured database (mutual TLS). |
+| `DB_TLS_KEY_PASSPHRASE` | No       | -       | Passphrase for `DB_TLS_KEY_FILE`. |
+| `DB_AUTH_MODE` | No       | `password` | `certificate` sends no `AUTH`; the server maps the client certificate to an ACL user (`tls-auth-clients-user`). Requires `DB_TLS=true` and a client certificate + key. |
 
 **Private key sources**:
 
