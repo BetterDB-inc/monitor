@@ -31,6 +31,7 @@ import { SpikeDetector } from './spike-detector';
 import { Correlator } from './correlator';
 import {
   computeConnectionChurn,
+  connectsPerOp,
   isChurnWithFlatPopulation,
   ConnectionChurnReading,
 } from './connection-churn';
@@ -366,6 +367,7 @@ export class AnomalyService
   // Last total_connections_received reading and the derived churn sample per
   // connection; the sample is exposed for other detectors to read.
   private lastChurnReading = new Map<string, ConnectionChurnReading>();
+  private churnPerOpBuffers = new Map<string, MetricBuffer>();
   // Previous lifetime evicted_clients counter per connection — same DELTA reasoning
   // as rejected_connections; `clientEvictionLimit` caches the maxmemory-clients
   // config value (fetched once) so the alert can say whether eviction is even
@@ -843,6 +845,7 @@ export class AnomalyService
     this.lastSlowlogId.delete(connectionId);
     this.lastRejectedConnections.delete(connectionId);
     this.lastChurnReading.delete(connectionId);
+    this.churnPerOpBuffers.delete(connectionId);
     this.lastEvictedClients.delete(connectionId);
     this.replicaFanoutUnreachable.delete(connectionId);
     this.clientEvictionLimit.delete(connectionId);
@@ -1732,8 +1735,19 @@ export class AnomalyService
 
     const buffer = buffers.get(MetricType.CONNECTION_CHURN)!;
     const detector = detectors.get(MetricType.CONNECTION_CHURN)!;
+    const perOpBuffer =
+      this.churnPerOpBuffers.get(ctx.connectionId) ?? new MetricBuffer(MetricType.CONNECTION_CHURN);
+    this.churnPerOpBuffers.set(ctx.connectionId, perOpBuffer);
+    const perOp = connectsPerOp(
+      sample.connectsPerSec,
+      this.parseNumber(info.instantaneous_ops_per_sec),
+    );
     buffer.addSample(sample.connectsPerSec, timestamp);
-    const elevated = buffer.getZScore(sample.connectsPerSec) >= detector.getConfig().warningZScore;
+    perOpBuffer.addSample(perOp, timestamp);
+    const threshold = detector.getConfig().warningZScore;
+    const elevated =
+      buffer.getZScore(sample.connectsPerSec) >= threshold &&
+      perOpBuffer.getZScore(perOp) >= threshold;
     if (!elevated || !isChurnWithFlatPopulation(sample)) {
       detector.resetRun();
       return;

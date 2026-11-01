@@ -3759,7 +3759,12 @@ describe('AnomalyService', () => {
 
   describe('connection churn', () => {
     function runChurn(
-      steps: Array<{ connectsPerSec: number; clients: number; counterReset?: boolean }>,
+      steps: Array<{
+        connectsPerSec: number;
+        clients: number;
+        counterReset?: boolean;
+        ops?: number;
+      }>,
     ) {
       const buffers = new Map();
       const detectors = new Map();
@@ -3782,7 +3787,11 @@ describe('AnomalyService', () => {
           total = step.counterReset ? 0 : total + step.connectsPerSec;
           await (service as any).detectConnectionChurn(
             mockCtx,
-            { total_connections_received: String(total), connected_clients: String(step.clients) },
+            {
+              total_connections_received: String(total),
+              connected_clients: String(step.clients),
+              ...(step.ops === undefined ? {} : { instantaneous_ops_per_sec: String(step.ops) }),
+            },
             buffers,
             detectors,
             ts,
@@ -3808,6 +3817,30 @@ describe('AnomalyService', () => {
       expect(recorded[0].metricType).toBe(MetricType.CONNECTION_CHURN);
       expect(recorded[0].connectionId).toBe('conn-1');
       expect(recorded[0].message).toContain('connected_clients does not grow (now 100)');
+    });
+
+    it('does not alert when per-request clients follow a traffic surge', async () => {
+      const opsBaseline = baseline.map((step) => ({ ...step, ops: step.connectsPerSec * 50 }));
+      const { recorded } = await runChurn([
+        ...opsBaseline,
+        { connectsPerSec: 400, clients: 101, ops: 20_000 },
+        { connectsPerSec: 420, clients: 100, ops: 21_000 },
+        { connectsPerSec: 410, clients: 100, ops: 20_500 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('alerts when connects outpace a flat request rate', async () => {
+      const opsBaseline = baseline.map((step) => ({ ...step, ops: step.connectsPerSec * 50 }));
+      const { recorded } = await runChurn([
+        ...opsBaseline,
+        { connectsPerSec: 400, clients: 101, ops: 1_050 },
+        { connectsPerSec: 420, clients: 100, ops: 1_050 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].value).toBe(420);
     });
 
     it('does not alert when the spike comes with a population jump', async () => {

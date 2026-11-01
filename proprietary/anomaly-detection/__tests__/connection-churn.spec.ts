@@ -1,5 +1,6 @@
 import {
   computeConnectionChurn,
+  connectsPerOp,
   isChurnWithFlatPopulation,
   ConnectionChurnReading,
 } from '../connection-churn';
@@ -52,6 +53,17 @@ describe('computeConnectionChurn', () => {
     const sample = computeConnectionChurn(reading(10, 0, 0), reading(10, 3, 1_000));
 
     expect(sample.retainedRatio).toBe(3);
+  });
+});
+
+describe('connectsPerOp', () => {
+  it('stays level when connects follow the request rate', () => {
+    expect(connectsPerOp(400, 20_000)).toBe(connectsPerOp(20, 1_000));
+  });
+
+  it('falls back to connects per second without a request rate', () => {
+    expect(connectsPerOp(400, null)).toBe(400);
+    expect(connectsPerOp(400, 0)).toBe(400);
   });
 });
 
