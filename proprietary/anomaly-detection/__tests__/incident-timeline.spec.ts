@@ -87,10 +87,10 @@ describe('IncidentTimelineBuilder', () => {
 
     it('counts the span cap from the stored start', () => {
       const head = event({ timestamp: T0 });
-      const inside = event({ timestamp: T0 + 29 * MIN });
+      const inside = event({ timestamp: T0 + MIN });
       const past = event({ timestamp: T0 + 31 * MIN });
 
-      const incidents = new IncidentTimelineBuilder().build(
+      const incidents = new IncidentTimelineBuilder({ gapMs: 40 * MIN }).build(
         [inside, past],
         T0 + 32 * MIN,
         neverRecovers,
@@ -103,6 +103,23 @@ describe('IncidentTimelineBuilder', () => {
       ]);
       expect(incidents[0].startedAt).toBe(T0);
       expect(incidents[1].startedAt).toBe(T0 + 31 * MIN);
+    });
+
+    it('does not reuse a stored start past the gap for the first event', () => {
+      const head = event({ timestamp: T0 });
+      const fresh = event({ timestamp: T0 + 10 * MIN });
+      const next = event({ timestamp: T0 + 11 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [fresh, next],
+        T0 + 12 * MIN,
+        neverRecovers,
+        [boundary(T0, head.id)],
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].startedAt).toBe(T0 + 10 * MIN);
+      expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual([fresh.id, next.id]);
     });
 
     it('splits on a boundary whose event is no longer loaded', () => {

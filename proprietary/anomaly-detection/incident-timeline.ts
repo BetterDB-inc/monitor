@@ -304,7 +304,9 @@ export class IncidentTimelineBuilder {
         start = undefined;
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
-        start = stored;
+        if (stored.anomalyId === event.id || event.timestamp - stored.startedAt <= this.opts.gapMs) {
+          start = stored;
+        }
         used = stored;
       }
       current.push(event);

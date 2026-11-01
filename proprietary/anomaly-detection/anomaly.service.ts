@@ -6266,6 +6266,12 @@ export class AnomalyService
   private async seedIncidentBoundaries(startTime: number): Promise<boolean> {
     try {
       this.liveBoundaries = await this.storage.getIncidentBoundaries({ startTime });
+      const known = new Set([...this.incidentEvents.values()].flat().map((a) => a.id));
+      const stored = await this.storedAnomaliesInRange(undefined, startTime, undefined);
+      stored
+        .filter((a) => !known.has(a.id))
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .forEach((a) => this.rememberIncidentEvent({ ...a, persisted: true }));
       return true;
     } catch (err) {
       this.logger.warn(`Failed to read incident boundaries: ${err}`);
@@ -6311,13 +6317,13 @@ export class AnomalyService
   private async refreshIncidentTimelines(now: number): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
+    const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
+      now - windowMs,
+    ));
     const known = new Map(
       [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies].map((a) => [a.id, a]),
     );
     const live = [...known.values()].filter((a) => a.timestamp >= now - windowMs);
-    const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
-      now - windowMs,
-    ));
     const fingerprintOf = () =>
       [...live.map((a) => `${a.id}:${a.resolved}`), this.liveBoundaries.length].join(',');
     if (

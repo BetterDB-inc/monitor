@@ -8212,6 +8212,44 @@ describe('AnomalyService', () => {
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
     });
 
+    it('resumes an incident across a restart from its stored events', async () => {
+      const now = Date.now();
+      const rows = [6, 4, 2].map((ago) => ({
+        ...anomaly({ id: `stored-${ago}`, timestamp: now - ago * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockResolvedValue(rows);
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: now - 6 * MIN, anomalyId: 'stored-6' },
+      ]);
+      await (service as any).addAnomaly(anomaly({ id: 'tail', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents).toHaveLength(1);
+      expect((service as any).liveIncidents[0].startedAt).toBe(now - 6 * MIN);
+      expect((service as any).liveIncidents[0].entries).toHaveLength(4);
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
+    it('retries the restart seed when the stored events cannot be read', async () => {
+      const now = Date.now();
+      storage.getAnomalyEvents.mockRejectedValueOnce(new Error('down'));
+      const row = { ...anomaly({ id: 'stored', timestamp: now - MIN }), anomalyType: 'spike' };
+
+      await (service as any).tickIncidentTimelines(now);
+      storage.getAnomalyEvents.mockResolvedValue([row]);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect((service as any).liveIncidents.map((i: any) => i.entries[0].anomalyId)).toEqual([
+        'stored',
+      ]);
+    });
+
     it('keeps the live view when boundaries cannot be read or saved', async () => {
       const now = Date.now();
       storage.getIncidentBoundaries.mockRejectedValue(new Error('down'));
