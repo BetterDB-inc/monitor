@@ -407,7 +407,6 @@ export class AnomalyService
   private removedDivergenceSweeps = new Set<string>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
-    if (entry.kind === 'save') entry.onDrop?.();
   });
   private correlationTicking = false;
   private outboxDraining = false;
@@ -5210,7 +5209,9 @@ export class AnomalyService
       if (eventIdsByConn) {
         const existingId = eventIds.get(signature);
         if (existingId) {
-          const existing = this.recentAnomalies.find((e) => e.id === existingId);
+          const existing =
+            this.recentAnomalies.find((e) => e.id === existingId) ??
+            this.persistenceOutbox.unsavedAnomaly(existingId);
           // Still open in the in-memory ring → dedupe. If it's been evicted from
           // the ring we can't tell from memory alone, so consult the storage-
           // backed feed (the source of truth for activeOnly reads): only re-emit

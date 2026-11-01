@@ -48,6 +48,7 @@ describe('AnomalyService', () => {
     /-(failover|promotion|cluster-state|persistence|dup-primary|stuck-replica|orphaned-slots|hostname-staleness|replica-slot-state)-|^config-drift-/;
 
   afterEach(() => {
+    if (jest.isMockFunction(Date.now)) (Date.now as jest.Mock).mockRestore();
     const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id as string);
     expect(ids.filter((id) => STRING_EVENT_ID.test(id))).toEqual([]);
   });
@@ -2214,6 +2215,19 @@ describe('AnomalyService', () => {
         .getRecentEvents()
         .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
       expect(events).toHaveLength(0);
+    });
+
+    it('keeps one event for an unsaved conflict that has left the ring', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (service as any).recentAnomalies = [];
+
+      await poll();
+
+      const ids = new Set(storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id));
+      expect(ids.size).toBe(1);
+      expect((service as any).persistenceOutbox.size).toBe(1);
     });
 
     it('raises the conflict again when the outbox drops its unsaved event', async () => {
