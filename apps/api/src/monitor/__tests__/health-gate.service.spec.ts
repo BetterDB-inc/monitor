@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 import type { StoragePort, StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
@@ -380,6 +381,17 @@ describe('HealthGateService', () => {
     expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
     expect(client.getInfoParsed).toHaveBeenCalledWith();
     expect(replacement.getInfoParsed).toHaveBeenCalledWith(['replication']);
+  });
+
+  it('logs the measured lag rather than the baseline gap', async () => {
+    const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation();
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [primaryInfo(101_000_000, 60_000_000)],
+    });
+    await evaluateSettled(service);
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
+    debug.mockRestore();
   });
 
   it('takes one sample when the baseline gap is under the limit', async () => {

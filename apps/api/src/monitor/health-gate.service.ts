@@ -82,7 +82,7 @@ export class HealthGateService {
     );
     if (!result.allow) {
       this.logger.debug(
-        `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(signals)}`,
+        `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(result.signals)}`,
       );
     }
     return result;
