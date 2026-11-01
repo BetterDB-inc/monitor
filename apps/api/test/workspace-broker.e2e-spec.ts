@@ -22,7 +22,6 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', {
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -151,7 +150,6 @@ describe('Workspace broker sign-in (E2E)', () => {
     delete process.env.AUTH_SECRET;
     delete process.env.AUTH_PUBLIC_URL;
     process.env.NODE_ENV = 'test';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_BROKER_PUBLIC_KEY = publicKey;

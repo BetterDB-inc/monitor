@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
-import { rmSync } from 'fs';
 import * as path from 'path';
+import { removeTestTmpDir } from './test-tmp-dir';
 
 const COMPOSE_FILE = 'docker-compose.test.yml';
 const PROJECT_NAME = 'betterdb-test';
@@ -10,7 +10,7 @@ const PROJECT_NAME = 'betterdb-test';
  * Only affects test containers (betterdb-test-*), never dev containers.
  */
 export default async function globalTeardown() {
-  rmSync(process.env.BETTERDB_TEST_TMP_DIR!, { recursive: true, force: true });
+  removeTestTmpDir();
 
   const projectRoot = path.resolve(__dirname, '../../..');
   const skipDocker = process.env.SKIP_DOCKER_SETUP === 'true';

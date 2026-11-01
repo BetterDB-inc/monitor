@@ -22,7 +22,6 @@ const TRUSTED_ORIGIN = 'http://localhost:5173';
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -89,7 +88,6 @@ describe('Workspace authorization (E2E)', () => {
     delete process.env.WORKSPACE_DISABLED;
     delete process.env.AUTH_SECRET;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;

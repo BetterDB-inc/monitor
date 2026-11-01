@@ -19,7 +19,6 @@ const OWNER_SIGN_IN_IP = '198.51.100.51';
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -88,7 +87,6 @@ describe('Workspace activity log (E2E)', () => {
     delete process.env.AUTH_SECRET;
     delete process.env.ACTIVITY_RETENTION_DAYS;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;

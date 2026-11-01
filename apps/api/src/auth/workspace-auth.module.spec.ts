@@ -1,3 +1,4 @@
+import { join } from 'path';
 import { Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
@@ -5,6 +6,7 @@ import { StorageModule } from '../storage/storage.module';
 import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
 import { TelemetryModule } from '../telemetry/telemetry.module';
 import { ActorResolver } from './actor-resolver';
+import * as authSecret from './auth-secret';
 import { WorkspaceAuthModule } from './workspace-auth.module';
 import { SystemModule } from '../system/system.module';
 
@@ -78,6 +80,9 @@ describe('WorkspaceAuthModule', () => {
   it('boots when BETTERDB_DATA_DIR is set to an empty string', async () => {
     const previous = process.env.BETTERDB_DATA_DIR;
     process.env.BETTERDB_DATA_DIR = '';
+    const resolveSecret = jest
+      .spyOn(authSecret, 'resolveAuthSecret')
+      .mockReturnValue('x'.repeat(32));
     try {
       const app = await boot({
         WORKSPACE_DISABLED: undefined,
@@ -85,13 +90,11 @@ describe('WorkspaceAuthModule', () => {
         AUTH_SECRET: undefined,
       });
       expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(200);
+      expect(resolveSecret).toHaveBeenCalledWith(expect.anything(), join(process.cwd(), 'data'));
       await app.close();
     } finally {
-      if (previous === undefined) {
-        delete process.env.BETTERDB_DATA_DIR;
-      } else {
-        process.env.BETTERDB_DATA_DIR = previous;
-      }
+      resolveSecret.mockRestore();
+      process.env.BETTERDB_DATA_DIR = previous;
     }
   });
 

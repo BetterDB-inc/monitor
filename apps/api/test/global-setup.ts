@@ -1,7 +1,8 @@
 import { execSync } from 'child_process';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
+import { removeTestTmpDir } from './test-tmp-dir';
 
 const COMPOSE_FILE = 'docker-compose.test.yml';
 const PROJECT_NAME = 'betterdb-test';
@@ -181,7 +182,7 @@ export default async function globalSetup() {
       // Ignore log errors
     }
 
-    rmSync(process.env.BETTERDB_TEST_TMP_DIR!, { recursive: true, force: true });
+    removeTestTmpDir();
     throw error;
   }
 }

@@ -88,9 +88,6 @@ describe('LicenseService signed tokens & offline licenses', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
-    delete process.env.BETTERDB_LICENSE_KEY;
-    delete process.env.BETTERDB_OFFLINE_LICENSE;
-    delete process.env.BETTERDB_OFFLINE_LICENSE_FILE;
 
     files = {};
     (fs.readFileSync as jest.Mock).mockImplementation((path: unknown) => {

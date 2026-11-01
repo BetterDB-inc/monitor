@@ -1,7 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { LicenseService } from '../license.service';
 import { Feature, Tier } from '../types';
@@ -38,18 +37,7 @@ describe('LicenseService', () => {
     return { promise, resolve, reject };
   };
 
-  beforeEach(async () => {
-    jest.resetModules();
-    process.env = { ...originalEnv };
-    // These specs predate signed entitlement tokens and mock unsigned responses
-    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
-    delete process.env.BETTERDB_LICENSE_KEY;
-    delete process.env.BETTERDB_OFFLINE_LICENSE;
-    delete process.env.BETTERDB_OFFLINE_LICENSE_FILE;
-    testDataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
-    process.env.BETTERDB_DATA_DIR = testDataDir;
-    mockTelemetryClient = createMockTelemetryClient();
-
+  const createService = async (): Promise<LicenseService> => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LicenseService,
@@ -66,19 +54,30 @@ describe('LicenseService', () => {
       ],
     }).compile();
 
-    service = module.get<LicenseService>(LicenseService);
+    return module.get<LicenseService>(LicenseService);
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...originalEnv };
+    // These specs predate signed entitlement tokens and mock unsigned responses
+    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
+    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR!, 'license-'));
+    process.env.BETTERDB_DATA_DIR = testDataDir;
+    mockTelemetryClient = createMockTelemetryClient();
     mockFetch = jest.spyOn(global, 'fetch');
   });
 
   afterEach(() => {
     service?.onModuleDestroy();
-    rmSync(testDataDir, { recursive: true, force: true });
     process.env = originalEnv;
     mockFetch?.mockRestore();
+    rmSync(testDataDir, { recursive: true, force: true });
   });
 
   describe('keyless validation', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+      service = await createService();
       process.env.BETTERDB_TELEMETRY = 'false';
     });
 
@@ -160,6 +159,10 @@ describe('LicenseService', () => {
   });
 
   describe('sendStartupError', () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
+
     it('should send correct payload shape with eventType startup_error', async () => {
       mockFetch.mockResolvedValue({ ok: true });
 
@@ -293,6 +296,10 @@ describe('LicenseService', () => {
   });
 
   describe('version info via validateLicense', () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
+
     it('should store version info from entitlement response', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
         valid: true,
@@ -320,6 +327,10 @@ describe('LicenseService', () => {
   });
 
   describe('activateLicenseKey', () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
+
     it('should keep previous key and entitlement when activation validation fails', async () => {
       const previousEntitlement = {
         valid: true,
@@ -479,7 +490,6 @@ describe('LicenseService', () => {
       new LicenseService({ get: jest.fn() } as unknown as ConfigService, mockTelemetryClient);
 
     beforeEach(() => {
-      rmSync(join(testDataDir, 'instance-id'), { force: true });
       process.env.BETTERDB_TELEMETRY = 'false';
     });
 
@@ -568,6 +578,10 @@ describe('LicenseService', () => {
   });
 
   describe('ensureValidated', () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
+
     it('clears its timeout once validation settles', async () => {
       jest.useFakeTimers();
       try {

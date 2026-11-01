@@ -12,10 +12,6 @@ describe('LicenseService', () => {
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     process.env.APP_VERSION = '0.1.0';
-    // Disable actual HTTP calls
-    delete process.env.BETTERDB_LICENSE_KEY;
-    delete process.env.BETTERDB_OFFLINE_LICENSE;
-    delete process.env.BETTERDB_OFFLINE_LICENSE_FILE;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
