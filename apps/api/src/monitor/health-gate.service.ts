@@ -35,7 +35,7 @@ export class HealthGateService {
   private readonly failoverWindowMs: number;
   private readonly replicaIoStaleSeconds: number;
   private readonly thresholds: HealthGateThresholds;
-  private readonly lagMeasurements = new Map<string, LagMeasurement>();
+  private readonly lagMeasurements = new Map<string, Set<LagMeasurement>>();
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -110,19 +110,24 @@ export class HealthGateService {
 
   private shareLagMeasurement(connectionId: string, baseline: ReplicaAckSample): Promise<number> {
     const replicas = this.replicasBehindLimit(baseline);
-    const inFlight = this.lagMeasurements.get(connectionId);
-    if (inFlight && [...replicas].every((id) => inFlight.replicas.has(id))) {
-      return inFlight.lag;
+    const inFlight = this.lagMeasurements.get(connectionId) ?? new Set<LagMeasurement>();
+    const covering = [...inFlight].find((measurement) =>
+      [...replicas].every((id) => measurement.replicas.has(id)),
+    );
+    if (covering) {
+      return covering.lag;
     }
     const measurement: LagMeasurement = {
       lag: this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
-        if (this.lagMeasurements.get(connectionId) === measurement) {
+        inFlight.delete(measurement);
+        if (inFlight.size === 0 && this.lagMeasurements.get(connectionId) === inFlight) {
           this.lagMeasurements.delete(connectionId);
         }
       }),
-      replicas: new Set([...(inFlight?.replicas ?? []), ...replicas]),
+      replicas,
     };
-    this.lagMeasurements.set(connectionId, measurement);
+    inFlight.add(measurement);
+    this.lagMeasurements.set(connectionId, inFlight);
     return measurement.lag;
   }
 

@@ -493,6 +493,27 @@ describe('HealthGateService', () => {
       expect(measure).toHaveBeenCalledTimes(2);
     });
 
+    it('take a measurement only from one that covered their replica', async () => {
+      const { service } = makeService({ info: primaryInfo(100_000_000) });
+      const settle: Array<(lag: number) => void> = [];
+      jest
+        .spyOn(service as any, 'measureLagAtNextAcks')
+        .mockImplementation(() => new Promise((resolve) => settle.push(resolve)));
+      const share = (id: string): Promise<number> =>
+        (service as any).shareLagMeasurement(CONNECTION_ID, {
+          primaryOffset: 100_000_000,
+          acks: new Map([[id, 0]]),
+        });
+
+      share('slave0');
+      share('slave1');
+      const third = share('slave0');
+      settle[1](0);
+      settle[0](60_000_000);
+
+      await expect(third).resolves.toBe(60_000_000);
+    });
+
     it('measure each connection on its own', async () => {
       const { service, client } = makeService({ info: lagging() });
       const pending = [service.evaluate('conn-1'), service.evaluate('conn-2')];
