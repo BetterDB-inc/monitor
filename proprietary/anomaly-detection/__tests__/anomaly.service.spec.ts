@@ -11183,7 +11183,8 @@ describe('AnomalyService', () => {
         await pollWith(clients(85));
 
         expect(events()).toHaveLength(2);
-        expect(events()[0].persisted).not.toBe(true);
+        expect(events()[0]).toMatchObject({ resolved: true, persisted: true });
+        expect(events()[1].resolved).toBe(false);
       });
 
       it('falls back to the level below when only the escalation is dropped', async () => {
