@@ -206,7 +206,11 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
         continue;
       }
-      await this.tryFire(trigger);
+      try {
+        await this.tryFire(trigger);
+      } catch (err) {
+        this.logger.error(`Failed to fire queued trigger ${trigger.id}: ${(err as Error).message}`);
+      }
     }
   }
 
@@ -259,17 +263,21 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (this.seenAnomalies.has(evt.id)) {
         continue;
       }
-      if (evt.connectionId) {
-        const match = await this.findActiveTrigger(
-          evt.connectionId,
-          evt.metricType,
-          evt.anomalyType,
-        );
-        if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
-          await this.tryFire(match);
+      try {
+        if (evt.connectionId) {
+          const match = await this.findActiveTrigger(
+            evt.connectionId,
+            evt.metricType,
+            evt.anomalyType,
+          );
+          if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
+            await this.tryFire(match);
+          }
         }
+        this.seenAnomalies.set(evt.id, evt.timestamp);
+      } catch (err) {
+        this.logger.error(`Failed to match anomaly ${evt.id}: ${(err as Error).message}`);
       }
-      this.seenAnomalies.set(evt.id, evt.timestamp);
     }
     this.lastAnomalyAt = maxTs;
     this.anomalyScan = resumeAt;

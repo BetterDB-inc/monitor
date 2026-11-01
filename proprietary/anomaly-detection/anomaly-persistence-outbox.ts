@@ -35,6 +35,10 @@ function closesEvent(entry: OutboxEntry): boolean {
   return entry.kind === 'resolve' || entry.anomaly.resolved;
 }
 
+function reRaisesClose(entry: OutboxEntry): boolean {
+  return entry.kind === 'resolve' ? entry.onDrop !== undefined : entry.onCloseDrop !== undefined;
+}
+
 function isExpired(entry: OutboxEntry, now: number): boolean {
   if (entry.kind === 'resolve') {
     return (
@@ -104,6 +108,11 @@ export class PersistenceOutbox {
     return entry?.kind === 'resolve' ? entry.resolvedAt : undefined;
   }
 
+  isRowMissing(id: string): boolean {
+    const entry = this.pending.get(id);
+    return entry?.kind === 'resolve' && entry.rowMissingSince !== undefined;
+  }
+
   markRowMissing(id: string, now: number): void {
     const entry = this.pending.get(id);
     if (entry?.kind === 'resolve') entry.rowMissingSince ??= now;
@@ -145,18 +154,30 @@ export class PersistenceOutbox {
 
   private add(entry: OutboxEntry): void {
     if (this.pending.has(entry.id)) return;
-    if (this.pending.size >= OUTBOX_MAX_ENTRIES) this.evict();
+    if (this.pending.size >= OUTBOX_MAX_ENTRIES && !this.makeRoom(entry)) return;
     this.pending.set(entry.id, entry);
   }
 
-  private evict(): void {
+  private makeRoom(incoming: OutboxEntry): boolean {
     const entries = [...this.pending.values()];
-    const victim = entries.find((entry) => !closesEvent(entry)) ?? entries[0];
-    this.pending.delete(victim.id);
-    this.onDrop(victim, 'full');
-    if (victim.kind === 'resolve') victim.onDrop?.();
-    else if (victim.anomaly.resolved) victim.onCloseDrop?.();
-    else if (victim.onDrop) this.heldDrops.push(victim);
+    const victim =
+      entries.find((entry) => !closesEvent(entry)) ??
+      entries.find((entry) => closesEvent(entry) && reRaisesClose(entry));
+    if (victim) {
+      this.pending.delete(victim.id);
+      this.discard(victim);
+      return true;
+    }
+    if (closesEvent(incoming)) return true;
+    this.discard(incoming);
+    return false;
+  }
+
+  private discard(entry: OutboxEntry): void {
+    this.onDrop(entry, 'full');
+    if (entry.kind === 'resolve') entry.onDrop?.();
+    else if (entry.anomaly.resolved) entry.onCloseDrop?.();
+    else if (entry.onDrop) this.heldDrops.push(entry);
   }
 
   private releaseHeldDrops(): void {
@@ -164,7 +185,8 @@ export class PersistenceOutbox {
     const held = this.heldDrops;
     this.heldDrops = [];
     for (const entry of held) {
-      if (!entry.anomaly.resolved) entry.onDrop?.();
+      if (entry.anomaly.resolved || entry.anomaly.persisted || this.pending.has(entry.id)) continue;
+      entry.onDrop?.();
     }
   }
 }

@@ -259,7 +259,60 @@ describe('CaptureTriggerRegistry', () => {
       });
       await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
 
-      await expect(registry.tick()).rejects.toThrow('storage down');
+      await registry.tick();
+      expect(captureService.startSession).not.toHaveBeenCalled();
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reaches later events past one that keeps failing', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      healthGate.evaluate.mockImplementation(async (connectionId: string) => {
+        if (connectionId === 'removed') throw new Error('Connection not found');
+        return { allow: true, signals: {}, thresholds: {} };
+      });
+      const timestamp = Date.now() + 1;
+      await registry.createTrigger({ connectionId: 'removed', metricType: METRIC, anomalyType: ANOMALY });
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), 'removed');
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: timestamp + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+      expect(captureService.startSession).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: CONNECTION_ID }),
+      );
+    });
+
+    it('reaches new events past a queued trigger that keeps failing', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      healthGate.evaluate.mockImplementation(async (connectionId: string) => {
+        if (connectionId === 'removed') throw new Error('Connection not found');
+        return { allow: true, signals: {}, thresholds: {} };
+      });
+      const queued = await registry.createTrigger({
+        connectionId: 'removed',
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.updateCaptureTrigger(queued.id, { status: 'queued' });
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+
       await registry.tick();
 
       expect(captureService.startSession).toHaveBeenCalledTimes(1);

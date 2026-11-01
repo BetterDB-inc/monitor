@@ -6144,30 +6144,32 @@ export class AnomalyService
   private async drainPersistenceOutbox(): Promise<void> {
     await this.sweepRemovedConnections();
     for (const entry of this.persistenceOutbox.due(Date.now())) {
-      await this.retryPersistence(entry);
+      if (!(await this.retryPersistence(entry))) return;
     }
   }
 
-  private async retryPersistence(entry: OutboxEntry): Promise<void> {
+  private async retryPersistence(entry: OutboxEntry): Promise<boolean> {
     if (entry.kind === 'resolve') {
-      if ((await this.resolveAnomalyOutcome(entry.id)) === 'retry') {
-        this.persistenceOutbox.defer(entry.id, Date.now());
-      } else {
+      if ((await this.resolveAnomalyOutcome(entry.id)) !== 'retry') {
         this.persistenceOutbox.settle(entry.id);
+        return true;
       }
-      return;
+      this.persistenceOutbox.defer(entry.id, Date.now());
+      return this.persistenceOutbox.isRowMissing(entry.id);
     }
     if (entry.anomaly.persisted && !entry.rewrite && !entry.anomaly.resolved) {
       this.persistenceOutbox.settle(entry.id);
-      return;
+      return true;
     }
     try {
       await this.persistAnomaly(entry.anomaly, entry.ctx);
+      return true;
     } catch (err) {
       this.logger.debug(
         `Retry of anomaly ${entry.id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       this.persistenceOutbox.defer(entry.id, Date.now());
+      return false;
     }
   }
 
