@@ -7734,6 +7734,21 @@ describe('AnomalyService', () => {
         expect([...orphans.get('10.0.0.2:6379').eventIds]).toEqual([warningId]);
       });
 
+      it('re-closes an event whose close rode on a pending rewrite the outbox evicted', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        (service as any).persistenceOutbox.enqueueRewrite(event, Date.now());
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        const next = await poll(absent, t);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await poll(absent, next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+      });
+
       it('sweeps a removed connection again after the outbox evicts its close', async () => {
         await feed([2, 4, 6, 8, 10, 12], T0);
         const eventId = trackedEventId();
@@ -8417,6 +8432,67 @@ describe('AnomalyService', () => {
         const raised = events();
         expect(raised).toHaveLength(2);
         expect(raised[1].severity).toBe(AnomalySeverity.WARNING);
+      });
+
+      describe('dismissed before its save landed', () => {
+        const fillOutbox = (enqueue: (i: number) => void) => {
+          for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) enqueue(i);
+        };
+
+        it('keeps the save past its age and does not raise it again', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          await service.resolveAnomaly(first.id);
+
+          await expireOutbox();
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(true);
+
+          healSaves();
+          await (service as any).drainPersistenceOutbox();
+          await pollWith(clients(85));
+
+          expect(events()).toHaveLength(1);
+          expect(storage.saveAnomalyEvent).toHaveBeenLastCalledWith(
+            expect.objectContaining({ id: first.id, resolved: true }),
+            'conn-1',
+          );
+        });
+
+        it('does not raise it again when a full outbox evicts it', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          await service.resolveAnomaly(first.id);
+
+          fillOutbox((i) => (service as any).persistenceOutbox.enqueueResolve(`r-${i}`, 1, 1));
+          (service as any).persistenceOutbox.settle('r-0');
+          (service as any).persistenceOutbox.due(Date.now());
+
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
+          expect((service as any).latchHolders.size).toBe(0);
+          healSaves();
+          await pollWith(clients(85));
+          expect(events()).toHaveLength(1);
+        });
+
+        it('does not raise it again when it was dismissed after being evicted', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          fillOutbox((i) =>
+            (service as any).persistenceOutbox.enqueueSave({ id: `s-${i}` }, undefined, 1),
+          );
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
+
+          await service.resolveAnomaly(first.id);
+          (service as any).persistenceOutbox.settle('s-0');
+          (service as any).persistenceOutbox.due(Date.now());
+
+          healSaves();
+          await pollWith(clients(85));
+          expect(events()).toHaveLength(1);
+        });
       });
 
       it('leaves no state behind when the connection went away before the drop', async () => {
