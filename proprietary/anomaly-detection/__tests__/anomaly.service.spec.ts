@@ -4090,11 +4090,45 @@ describe('AnomalyService', () => {
         expect(resolvedIds()).toEqual(['old-1']);
       });
 
-      it('retries a failed read on the next poll, then reads no more', async () => {
+      it('waits between reads while storage stays down', async () => {
+        let now = Date.now();
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+        await pollAt(50);
+        const reads = storage.getAnomalyEvents.mock.calls.length;
+
+        await pollAt(50);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads);
+
+        now += 60_000;
+        await pollAt(50);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads * 2);
+      });
+
+      it('caps the wait between reads and clears it once a read succeeds', async () => {
+        let now = Date.now();
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+        for (let i = 0; i < 12; i += 1) {
+          await pollAt(50);
+          now += 120_000;
+        }
+        const retry = [...(service as any).openEventsRetry.values()][0];
+        expect(retry.delayMs).toBe(60_000);
+
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+        expect((service as any).openEventsRetry.size).toBe(0);
+      });
+
+      it('retries a failed read after the wait, then reads no more', async () => {
         storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
         await pollAt(50);
         expect(resolvedIds()).toEqual([]);
 
+        (service as any).openEventsRetry.clear();
         openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
         await pollAt(50);
         const reads = storage.getAnomalyEvents.mock.calls.length;
@@ -4109,6 +4143,7 @@ describe('AnomalyService', () => {
         await pollAt(85);
         const [raised] = satEvents();
 
+        (service as any).openEventsRetry.clear();
         openRows({ [MetricType.CLIENT_SATURATION]: [raised.id] });
         await pollAt(85);
         await pollAt(50);

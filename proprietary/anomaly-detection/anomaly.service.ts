@@ -302,6 +302,7 @@ interface ConnectionPersistenceState {
 }
 
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
+const OPEN_EVENTS_MAX_RETRY_MS = 60_000;
 
 const ADOPTED_METRICS: MetricType[] = [
   MetricType.CLIENT_SATURATION,
@@ -505,6 +506,7 @@ export class AnomalyService
   private backlogCoverageEventIds = new Map<string, string>();
   private staleBacklogEventIds = new Map<string, string[]>();
   private openEventsAdopted = new Set<string>();
+  private readonly openEventsRetry = new Map<string, { at: number; delayMs: number }>();
   private adoptedReshardEventIds = new Map<string, string>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
@@ -860,6 +862,7 @@ export class AnomalyService
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
     this.openEventsAdopted.delete(connectionId);
+    this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
@@ -1869,6 +1872,8 @@ export class AnomalyService
     const { connectionId } = ctx;
     if (this.openEventsAdopted.has(connectionId)) return;
     if (!this.reclaimRemovedConnection(connectionId)) return;
+    const retry = this.openEventsRetry.get(connectionId);
+    if (retry && timestamp < retry.at) return;
     try {
       const open = new Map<MetricType, StoredAnomalyEvent[]>();
       for (const metricType of ADOPTED_METRICS) {
@@ -1901,7 +1906,13 @@ export class AnomalyService
       }
       this.adoptRaftFlappingEvents(connectionId, rows(MetricType.RAFT_HEALTH), timestamp);
       this.openEventsAdopted.add(connectionId);
+      this.openEventsRetry.delete(connectionId);
     } catch (err) {
+      const delayMs = Math.min(
+        (retry?.delayMs ?? this.getIntervalMs()) * 2,
+        OPEN_EVENTS_MAX_RETRY_MS,
+      );
+      this.openEventsRetry.set(connectionId, { at: timestamp + delayMs, delayMs });
       this.logger.warn(
         `Failed to read open events for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)
