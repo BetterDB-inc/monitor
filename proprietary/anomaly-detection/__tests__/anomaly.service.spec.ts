@@ -8470,7 +8470,6 @@ describe('AnomalyService', () => {
         failSaves();
         await pollWith(clients(85));
         (service as any).clientSaturationLevel.delete('conn-1');
-        (service as any).clientSaturationRaisedBy.delete('conn-1');
 
         await expireOutbox();
 

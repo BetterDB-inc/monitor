@@ -64,7 +64,6 @@ export interface LoadSaturationState {
   lastLevel: LoadLevel;
   /** Consecutive polls at the SAME band, reset whenever the band changes. */
   consecutive: number;
-  ackedFinding: LoadSaturationFinding | null;
 }
 
 export interface LoadSaturationFinding {
@@ -77,7 +76,7 @@ export interface LoadSaturationFinding {
 const LEVEL_RANK: Record<LoadLevel, number> = { none: 0, warning: 1, critical: 2 };
 
 export function createLoadSaturationState(): LoadSaturationState {
-  return { ackedLevel: 'none', lastLevel: 'none', consecutive: 0, ackedFinding: null };
+  return { ackedLevel: 'none', lastLevel: 'none', consecutive: 0 };
 }
 
 function classify(busyFraction: number): LoadLevel {
@@ -211,17 +210,11 @@ export function acknowledgeLoadSaturationFinding(
   finding: LoadSaturationFinding,
 ): void {
   state.ackedLevel = finding.level;
-  state.ackedFinding = finding;
 }
 
-export function loadSaturationRearm(
-  state: LoadSaturationState,
-  finding: LoadSaturationFinding,
-): () => void {
+export function loadSaturationRearm(state: LoadSaturationState): () => void {
   const previousLevel = state.ackedLevel;
   return () => {
-    if (state.ackedFinding !== finding) return;
-    state.ackedFinding = null;
     if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
       state.ackedLevel = previousLevel;
     }

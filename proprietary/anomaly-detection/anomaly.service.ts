@@ -134,6 +134,7 @@ import {
   ReplicaObservation,
   SlaveOutputBufferLimit,
   acknowledgeCobFinding,
+  cobPressureLatch,
   cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
@@ -432,7 +433,6 @@ export class AnomalyService
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
   private clientSaturationLevel = new Map<string, 'none' | 'warning' | 'critical'>();
-  private clientSaturationRaisedBy = new Map<string, string>();
   // Large-reply commandlog pressure (valkey#2926): per-connection set of active
   // offending-command signatures (dedupe, like activeTopologyConflicts), plus
   // the cached commandlog-reply-larger-than threshold with a slow recheck
@@ -744,7 +744,6 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
-    this.clientSaturationRaisedBy.delete(connectionId);
     this.raftPrevTerm.delete(connectionId);
     this.raftTermChanges.delete(connectionId);
     this.raftLeaderlessSince.delete(connectionId);
@@ -1685,12 +1684,12 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(
+      await this.addLatchedAnomaly(
         event,
         ctx,
-        this.clientSaturationRearm(ctx.connectionId, event.id, prev),
+        ctx.connectionId,
+        this.clientSaturationRearm(ctx.connectionId, prev),
       );
-      this.clientSaturationRaisedBy.set(ctx.connectionId, event.id);
     }
 
     // Advance the level last: on steady/de-escalation this re-arms alerting on recovery.
@@ -1699,12 +1698,9 @@ export class AnomalyService
 
   private clientSaturationRearm(
     connectionId: string,
-    eventId: string,
     previous: 'none' | 'warning' | 'critical',
   ): () => void {
     return () => {
-      if (this.clientSaturationRaisedBy.get(connectionId) !== eventId) return;
-      this.clientSaturationRaisedBy.delete(connectionId);
       const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
       if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
         this.clientSaturationLevel.set(connectionId, previous);
@@ -3152,7 +3148,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, loadSaturationRearm(state, finding));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, loadSaturationRearm(state));
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
@@ -3370,7 +3366,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, forkMemoryRearm(state, finding));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, forkMemoryRearm(state));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -3564,7 +3560,12 @@ export class AnomalyService
         connectionId: ctx.connectionId,
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      await this.addAnomaly(event, ctx, cobPressureRearm(state, finding));
+      await this.addLatchedAnomaly(
+        event,
+        ctx,
+        `${ctx.connectionId}:${cobPressureLatch(finding)}`,
+        cobPressureRearm(state, finding),
+      );
       acknowledgeCobFinding(state, finding);
     }
   }
@@ -3666,7 +3667,12 @@ export class AnomalyService
     } else {
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     }
-    await this.addAnomaly(event, ctx, memoryOverheadRearm(state, finding));
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      `${ctx.connectionId}:${finding.level === 'info' ? 'note' : 'level'}`,
+      memoryOverheadRearm(state, finding),
+    );
     acknowledgeMemoryOverheadFinding(state, finding);
   }
 
@@ -3731,7 +3737,7 @@ export class AnomalyService
       ctx.connectionId,
     );
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, controlPlaneSaturationRearm(state, timestamp));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, controlPlaneSaturationRearm(state));
     acknowledgeSaturationFinding(state, timestamp);
   }
 
@@ -4473,7 +4479,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addAnomaly(event, ctx, resyncLoopRearm(state));
+    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, resyncLoopRearm(state));
     acknowledgeResyncLoopFinding(state);
   }
 
