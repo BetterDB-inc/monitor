@@ -3,8 +3,7 @@ import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
-export const RETRY_AMP_ATTRIBUTION_MIN_WINDOWS = 2;
-export const RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS = 3;
+export const RETRY_AMP_CLIENT_SNAPSHOTS = 4;
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
@@ -29,7 +28,6 @@ interface ClientCommandCount {
   key: string;
   keyKind: ContributorKeyKind;
   totalCommands: number;
-  ageSec: number;
 }
 
 export interface ClientCommandSnapshot {
@@ -37,9 +35,13 @@ export interface ClientCommandSnapshot {
   clients: Map<string, ClientCommandCount>;
 }
 
-export interface AttributionInput {
+export interface EpisodeClientSnapshots {
+  before: ClientCommandSnapshot | null;
   first: ClientCommandSnapshot | null;
   latest: ClientCommandSnapshot | null;
+}
+
+export interface AttributionInput extends EpisodeClientSnapshots {
   capture: ClientSnapshotGroupRow[];
   newConnections: NewClientConnectionGroup[];
   limit?: number;
@@ -48,8 +50,8 @@ export interface AttributionInput {
 interface ContributorAccumulator {
   key: string;
   keyKind: ContributorKeyKind;
-  commands: number;
-  lifetimeRate: number;
+  episodeRate: number;
+  preEpisodeRate: number;
   newConnections: number;
   connections: number;
 }
@@ -91,7 +93,6 @@ export function readClientCommandCounts(
     counts.set(client.id, {
       ...contributorKey(client),
       totalCommands,
-      ageSec: Number.isFinite(client.age) ? client.age : 0,
     });
   }
   return counts.size === 0 ? null : { takenAt, clients: counts };
@@ -106,8 +107,8 @@ function accumulatorFor(
   if (acc === undefined) {
     acc = {
       ...identity,
-      commands: 0,
-      lifetimeRate: 0,
+      episodeRate: 0,
+      preEpisodeRate: 0,
       newConnections: 0,
       connections: 0,
     };
@@ -116,24 +117,59 @@ function accumulatorFor(
   return acc;
 }
 
+export function pushClientSnapshot(
+  history: ClientCommandSnapshot[],
+  snapshot: ClientCommandSnapshot,
+  episodeStart: number | null,
+): ClientCommandSnapshot[] {
+  if (episodeStart === null) {
+    return [...history, snapshot].slice(-RETRY_AMP_CLIENT_SNAPSHOTS);
+  }
+  const preEpisode = history.filter((s) => s.takenAt <= episodeStart).slice(-2);
+  return [...preEpisode, snapshot];
+}
+
+export function selectClientSnapshots(
+  history: ClientCommandSnapshot[],
+  episodeStart: number,
+  until: number,
+): EpisodeClientSnapshots {
+  const preEpisode = history.filter((s) => s.takenAt <= episodeStart);
+  const during = history.filter((s) => s.takenAt > episodeStart && s.takenAt <= until);
+  return {
+    before: preEpisode[preEpisode.length - 2] ?? null,
+    first: preEpisode[preEpisode.length - 1] ?? null,
+    latest: during[during.length - 1] ?? null,
+  };
+}
+
+function commandRates(
+  from: ClientCommandSnapshot,
+  to: ClientCommandSnapshot,
+): Array<{ client: ClientCommandCount; rate: number }> {
+  const dtSec = (to.takenAt - from.takenAt) / 1000;
+  if (dtSec <= 0) return [];
+  const rates: Array<{ client: ClientCommandCount; rate: number }> = [];
+  for (const [clientId, client] of to.clients) {
+    const earlier = from.clients.get(clientId)?.totalCommands ?? 0;
+    if (client.totalCommands < earlier) continue;
+    rates.push({ client, rate: (client.totalCommands - earlier) / dtSec });
+  }
+  return rates;
+}
+
 function addCommandGrowth(
   map: Map<string, ContributorAccumulator>,
+  before: ClientCommandSnapshot,
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
-): boolean {
-  const dtSec = (latest.takenAt - first.takenAt) / 1000;
-  if (dtSec <= 0) return false;
-  let measured = false;
-  for (const [clientId, before] of first.clients) {
-    const after = latest.clients.get(clientId);
-    if (after === undefined || after.totalCommands < before.totalCommands) continue;
-    if (before.ageSec <= 0) continue;
-    const acc = accumulatorFor(map, before);
-    acc.commands += (after.totalCommands - before.totalCommands) / dtSec;
-    acc.lifetimeRate += before.totalCommands / before.ageSec;
-    measured = true;
+): void {
+  for (const { client, rate } of commandRates(before, first)) {
+    accumulatorFor(map, client).preEpisodeRate += rate;
   }
-  return measured;
+  for (const { client, rate } of commandRates(first, latest)) {
+    accumulatorFor(map, client).episodeRate += rate;
+  }
 }
 
 function addReconnects(
@@ -153,14 +189,13 @@ export function rankRetryAmplificationContributors(
   input: AttributionInput,
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
-  const hasCommandRates =
-    input.first !== null &&
-    input.latest !== null &&
-    addCommandGrowth(map, input.first, input.latest);
+  if (input.before !== null && input.first !== null && input.latest !== null) {
+    addCommandGrowth(map, input.before, input.first, input.latest);
+  }
   addReconnects(map, input.newConnections, input.capture);
 
   const contributors = [...map.values()].map((acc) => {
-    const growth = hasCommandRates && acc.lifetimeRate > 0 ? acc.commands / acc.lifetimeRate : null;
+    const growth = acc.preEpisodeRate > 0 ? acc.episodeRate / acc.preEpisodeRate : null;
     return {
       key: acc.key,
       keyKind: acc.keyKind,

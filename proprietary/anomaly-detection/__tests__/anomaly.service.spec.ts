@@ -17,9 +17,6 @@ import { ConnectionContext } from '@app/common/services/multi-connection-poller'
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
-import {
-  RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
-} from '../retry-amplification-attribution';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
@@ -3479,6 +3476,18 @@ describe('AnomalyService', () => {
   });
 
   describe('retry amplification', () => {
+    const growingClients = () => {
+      let reads = 0;
+      return jest.fn().mockImplementation(async () => {
+        reads += 1;
+        const checkout = 10_000 + 600 * reads + 60_000 * Math.max(0, reads - 13);
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': String(checkout) },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': String(10_000 + 600 * reads) },
+        ];
+      });
+    };
+
     async function runRetry(
       opts: {
         p99Once?: boolean;
@@ -3565,15 +3574,7 @@ describe('AnomalyService', () => {
     });
 
     it('dispatches retry_amplification.detected with the finding and contributors', async () => {
-      let calls = 0;
-      dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        const grown = calls > 1;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
-      });
+      dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       const { recorded } = await runRetry();
@@ -3604,15 +3605,7 @@ describe('AnomalyService', () => {
     });
 
     it('reports detector status and contributors per connection', async () => {
-      let calls = 0;
-      dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        const grown = calls > 1;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
-      });
+      dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
@@ -3762,15 +3755,7 @@ describe('AnomalyService', () => {
     });
 
     it('keeps reporting the contributors of the last episode once it closes', async () => {
-      let calls = 0;
-      dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        const grown = calls > 1;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
-      });
+      dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       await runRetry({ coolWindows: 3 });
@@ -3781,15 +3766,7 @@ describe('AnomalyService', () => {
     });
 
     it('drops the contributors once a newer episode replaces the last one', async () => {
-      let calls = 0;
-      dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        const grown = calls > 1;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
-      });
+      dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       await runRetry({ coolWindows: 3 });
@@ -3799,35 +3776,12 @@ describe('AnomalyService', () => {
       expect(service.getRetryAmplificationStatus('conn-1').topContributors).toBeNull();
     });
 
-    it('replaces a first snapshot left over from an earlier episode', async () => {
-      (service as any).retryAmplificationFirstClients.set('conn-1', {
-        episodeStart: 1,
-        snapshot: { takenAt: 0, clients: new Map() },
-        attempts: 1,
-      });
-      dbClient.getClients = jest.fn().mockResolvedValue([]);
-
-      await runRetry();
-
-      expect(dbClient.getClients).toHaveBeenCalledTimes(1);
-      expect((service as any).retryAmplificationFirstClients.get('conn-1').episodeStart).not.toBe(1);
-    });
-
     it('names the clients whose command rate grew from CLIENT LIST tot-cmds', async () => {
-      let calls = 0;
-      dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        const grown = calls > 1;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
-      });
+      dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
       const { recorded } = await runRetry();
 
-      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
       expect(storage.getClientSnapshots).toHaveBeenCalledWith(
         expect.objectContaining({ connectionId: 'conn-1', limit: 1 }),
       );
@@ -3848,32 +3802,75 @@ describe('AnomalyService', () => {
       expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
     });
 
-    it('retakes the first snapshot after a failed CLIENT LIST', async () => {
-      let calls = 0;
+    it('does not wait for CLIENT LIST inside the poll', async () => {
+      dbClient.getClients = jest.fn().mockReturnValue(new Promise(() => undefined));
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      };
+      const state = {
+        ...jest.requireActual('../retry-amplification-detector').createRetryAmplificationState(),
+        hotRun: [{ start: 900_000 }, { start: 960_000 }],
+      };
+      (service as any).retryAmplificationState.set('conn-1', state);
+
+      const outcome = await Promise.race([
+        (service as any).detectRetryAmplification(info, mockCtx, 1_000_000).then(() => 'returned'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 50)),
+      ]);
+
+      expect(dbClient.getClients).toHaveBeenCalledTimes(1);
+      expect(outcome).toBe('returned');
+    });
+
+    it('reads CLIENT LIST at most once a window and skips while a read is pending', async () => {
+      let answer: (clients: unknown[]) => void = () => undefined;
+      dbClient.getClients = jest.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            answer = resolve;
+          }),
+      );
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      };
+      const poll = (ts: number) =>
+        (service as any).detectRetryAmplification(info, mockCtx, ts);
+
+      await poll(1_000_000);
+      await poll(1_030_000);
+      await poll(1_060_000);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(1);
+
+      answer([]);
+      await new Promise((resolve) => setImmediate(resolve));
+      await poll(1_061_000);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      await poll(1_062_000);
+      expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+    });
+
+    it('names a reconnecting client with its growth against the pre-episode rate', async () => {
+      let reads = 0;
       dbClient.getClients = jest.fn().mockImplementation(async () => {
-        calls += 1;
-        if (calls === 1) throw new Error('timeout');
-        const grown = calls > 2;
-        return [
-          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': grown ? '900000' : '10000' },
-          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': grown ? '10100' : '10000' },
-        ];
+        reads += 1;
+        const pooled = { addr: '10.0.0.1:1', name: 'storm', user: 'default', age: 1000 };
+        return reads <= 13
+          ? [{ ...pooled, id: '1', 'tot-cmds': String(600 * reads) }]
+          : [{ ...pooled, id: String(100 + reads), age: 1, 'tot-cmds': String(6000 * (reads - 13)) }];
       });
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
-      const { recorded } = await runRetry();
+      await runRetry();
 
-      expect(dbClient.getClients).toHaveBeenCalledTimes(3);
-      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
-    });
-
-    it('stops retrying CLIENT LIST after a few failed first snapshots', async () => {
-      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
-      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
-
-      await runRetry({ coolWindows: 0 });
-
-      expect(dbClient.getClients).toHaveBeenCalledTimes(RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS);
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'storm', commandRateGrowth: 10 }),
+      ]);
     });
 
     it('reads the latest client capture as counts, not rows', async () => {
@@ -4090,7 +4087,6 @@ describe('AnomalyService', () => {
           expect.objectContaining({ startTime: 320_000, endTime: 500_000 }),
         );
         expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 320_000, 500_000);
-        expect(dbClient.getClients).not.toHaveBeenCalled();
       });
 
       it('dates the event at the end of the episode', async () => {
@@ -4422,7 +4418,7 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
 
       expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
-      expect((service as any).retryAmplificationFirstClients.has('conn-1')).toBe(false);
+      expect((service as any).retryAmplificationClients.has('conn-1')).toBe(false);
       expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
     });
   });
@@ -6081,7 +6077,7 @@ describe('AnomalyService', () => {
         replication: { connected_slaves: '0', sync_full: '0' },
       });
       await poll();
-      expect(dbClient.getClients).not.toHaveBeenCalled();
+      expect(dbClient.getClients).not.toHaveBeenCalledWith({ type: 'replica' });
       expect(dbClient.getConfigValue).not.toHaveBeenCalled();
       expect(cobEvents()).toHaveLength(0);
     });

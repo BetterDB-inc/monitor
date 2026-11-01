@@ -232,11 +232,11 @@ import {
 } from './retry-amplification-detector';
 import {
   ClientCommandSnapshot,
-  RETRY_AMP_ATTRIBUTION_MIN_WINDOWS,
-  RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
+  pushClientSnapshot,
   rankRetryAmplificationContributors,
+  selectClientSnapshots,
   readClientCommandCounts,
 } from './retry-amplification-attribution';
 import {
@@ -292,6 +292,12 @@ interface ConnectionPersistenceState {
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
+
+interface RetryAmplificationClientHistory {
+  snapshots: ClientCommandSnapshot[];
+  readAt: number | null;
+  reading: boolean;
+}
 
 @Injectable()
 export class AnomalyService
@@ -472,10 +478,7 @@ export class AnomalyService
   // a momentary batch/burst from alerting.
   private loadSaturationState = new Map<string, LoadSaturationState>();
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
-  private retryAmplificationFirstClients = new Map<
-    string,
-    { episodeStart: number; snapshot: ClientCommandSnapshot | null | undefined; attempts: number }
-  >();
+  private retryAmplificationClients = new Map<string, RetryAmplificationClientHistory>();
   private retryAmplificationContributors = new Map<
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
@@ -864,7 +867,7 @@ export class AnomalyService
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
     this.retryAmplificationState.delete(connectionId);
-    this.retryAmplificationFirstClients.delete(connectionId);
+    this.retryAmplificationClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -3372,30 +3375,16 @@ export class AnomalyService
       activeSaturation: [...activeSaturation],
     });
 
-    const episodeStart = retryAmplificationEpisodeStart(state, finding);
-    if (episodeStart === null) {
-      this.retryAmplificationFirstClients.delete(ctx.connectionId);
-    } else if (state.hotRun.length >= RETRY_AMP_ATTRIBUTION_MIN_WINDOWS) {
-      const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
-      const attempts = first?.episodeStart === episodeStart ? first.attempts : 0;
-      const needed = first?.episodeStart !== episodeStart || first.snapshot === undefined;
-      if (needed && attempts < RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS) {
-        this.retryAmplificationFirstClients.set(ctx.connectionId, {
-          episodeStart,
-          snapshot: await this.readClientCommandCounts(ctx, timestamp),
-          attempts: attempts + 1,
-        });
-      }
-    }
+    this.refreshClientSnapshots(ctx, state, timestamp);
     if (finding === null) return;
 
-    const attributionStart = episodeStart ?? timestamp - RETRY_AMP_WINDOW_MS;
+    const attributionStart =
+      retryAmplificationEpisodeStart(state, finding) ?? timestamp - RETRY_AMP_WINDOW_MS;
     const closedAt = state.hotRun.length === 0 ? state.lastEpisode?.endedAt : undefined;
     const contributors = await this.attributeRetryAmplification(
       ctx,
-      timestamp,
       attributionStart,
-      closedAt,
+      closedAt ?? timestamp,
     );
     this.retryAmplificationContributors.set(ctx.connectionId, {
       episodeStart: attributionStart,
@@ -3449,11 +3438,37 @@ export class AnomalyService
     }
   }
 
+  private refreshClientSnapshots(
+    ctx: ConnectionContext,
+    state: RetryAmplificationState,
+    timestamp: number,
+  ): void {
+    if (ctx.connectionType === 'external') return;
+    let history = this.retryAmplificationClients.get(ctx.connectionId);
+    if (history === undefined) {
+      history = { snapshots: [], readAt: null, reading: false };
+      this.retryAmplificationClients.set(ctx.connectionId, history);
+    }
+    const tracked = history;
+    if (tracked.reading) return;
+    if (tracked.readAt !== null && timestamp - tracked.readAt < RETRY_AMP_WINDOW_MS) return;
+    tracked.reading = true;
+    tracked.readAt = timestamp;
+    void this.readClientCommandCounts(ctx, timestamp).then((snapshot) => {
+      tracked.reading = false;
+      if (snapshot === null) return;
+      tracked.snapshots = pushClientSnapshot(
+        tracked.snapshots,
+        snapshot,
+        retryAmplificationEpisodeStart(state, null),
+      );
+    });
+  }
+
   private async readClientCommandCounts(
     ctx: ConnectionContext,
     timestamp: number,
-  ): Promise<ClientCommandSnapshot | null | undefined> {
-    if (ctx.connectionType === 'external') return undefined;
+  ): Promise<ClientCommandSnapshot | null> {
     try {
       const clients = await this.raceWithTimeout(
         ctx.client.getClients({ type: 'normal' }),
@@ -3463,23 +3478,17 @@ export class AnomalyService
       return readClientCommandCounts(clients, timestamp);
     } catch (error) {
       this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
-      return undefined;
+      return null;
     }
   }
 
   private async attributeRetryAmplification(
     ctx: ConnectionContext,
-    timestamp: number,
     episodeStart: number,
-    closedAt?: number,
+    until: number,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const first = this.retryAmplificationFirstClients.get(ctx.connectionId);
-    const firstSnapshot = first?.episodeStart === episodeStart ? (first.snapshot ?? null) : null;
-    const latest =
-      closedAt === undefined && firstSnapshot !== null
-        ? ((await this.readClientCommandCounts(ctx, timestamp)) ?? null)
-        : null;
-    const until = closedAt ?? timestamp;
+    const history = this.retryAmplificationClients.get(ctx.connectionId)?.snapshots ?? [];
+    const snapshots = selectClientSnapshots(history, episodeStart, until);
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
@@ -3493,13 +3502,10 @@ export class AnomalyService
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
     const reconnectsKnown = snapshotsLoaded && capture.length > 0;
-    if (!reconnectsKnown && (firstSnapshot === null || latest === null)) return null;
-    return rankRetryAmplificationContributors({
-      first: firstSnapshot,
-      latest,
-      capture,
-      newConnections,
-    });
+    const ratesKnown =
+      snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
+    if (!reconnectsKnown && !ratesKnown) return null;
+    return rankRetryAmplificationContributors({ ...snapshots, capture, newConnections });
   }
 
   private async latestClientCapture(
