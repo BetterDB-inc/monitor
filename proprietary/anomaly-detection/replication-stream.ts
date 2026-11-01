@@ -2,7 +2,8 @@ import { InfoParser } from '@app/database/parsers/info.parser';
 
 export const REPLICATION_RATE_EWMA_ALPHA = 0.3;
 
-const REPLICA_LINE_KEY = /^slave(\d+)$/;
+const REPLICA_LINE_KEY = /^(?:slave|replica)(\d+)$/;
+const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 
 export interface ReplicaOffsetLine {
   key: string;
@@ -103,7 +104,7 @@ export class ReplicationStreamTracker {
 
     this.baselines.set(connectionId, { replid, offset: masterReplOffset, ts: timestamp, ewma });
 
-    const isReplica = info.role === 'slave' || info.role === 'replica';
+    const isReplica = REPLICA_ROLES.has(info.role);
     const sample: ReplicationStreamSample = {
       timestamp,
       role: isReplica ? 'replica' : 'primary',

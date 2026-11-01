@@ -11,6 +11,7 @@ interface RetrySchedule {
   enqueuedAt: number;
   attempts?: number;
   retryAt?: number;
+  onDrop?: () => void;
 }
 
 export interface PendingSave extends RetrySchedule {
@@ -18,7 +19,6 @@ export interface PendingSave extends RetrySchedule {
   anomaly: AnomalyEvent;
   ctx?: ConnectionContext;
   rewrite?: boolean;
-  onDrop?: () => void;
 }
 
 export interface PendingResolve extends RetrySchedule {
@@ -29,8 +29,13 @@ export interface PendingResolve extends RetrySchedule {
 export type OutboxEntry = PendingSave | PendingResolve;
 export type OutboxDropReason = 'full' | 'expired';
 
+function closesEvent(entry: OutboxEntry): boolean {
+  return entry.kind === 'resolve' || (entry.rewrite === true && entry.anomaly.resolved);
+}
+
 export class PersistenceOutbox {
   private readonly pending = new Map<string, OutboxEntry>();
+  private heldDrops: Array<() => void> = [];
 
   constructor(private readonly onDrop: (entry: OutboxEntry, reason: OutboxDropReason) => void) {}
 
@@ -61,8 +66,8 @@ export class PersistenceOutbox {
     this.add({ kind: 'save', id: anomaly.id, anomaly, enqueuedAt: now, rewrite: true });
   }
 
-  enqueueResolve(id: string, resolvedAt: number, now: number): void {
-    this.add({ kind: 'resolve', id, resolvedAt, enqueuedAt: now });
+  enqueueResolve(id: string, resolvedAt: number, now: number, onDrop?: () => void): void {
+    this.add({ kind: 'resolve', id, resolvedAt, enqueuedAt: now, onDrop });
   }
 
   unsavedAnomaly(id: string): AnomalyEvent | undefined {
@@ -97,20 +102,34 @@ export class PersistenceOutbox {
 
   due(now: number): OutboxEntry[] {
     for (const entry of this.pending.values()) {
-      if (now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) continue;
+      if (closesEvent(entry) || now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) continue;
       this.pending.delete(entry.id);
       this.onDrop(entry, 'expired');
+      entry.onDrop?.();
     }
+    this.releaseHeldDrops();
     return [...this.pending.values()].filter((entry) => (entry.retryAt ?? 0) <= now);
   }
 
   private add(entry: OutboxEntry): void {
     if (this.pending.has(entry.id)) return;
-    if (this.pending.size >= OUTBOX_MAX_ENTRIES) {
-      const oldest = this.pending.values().next().value as OutboxEntry;
-      this.pending.delete(oldest.id);
-      this.onDrop(oldest, 'full');
-    }
+    if (this.pending.size >= OUTBOX_MAX_ENTRIES) this.evict();
     this.pending.set(entry.id, entry);
+  }
+
+  private evict(): void {
+    const entries = [...this.pending.values()];
+    const victim = entries.find((entry) => !closesEvent(entry)) ?? entries[0];
+    this.pending.delete(victim.id);
+    this.onDrop(victim, 'full');
+    if (victim.kind === 'resolve') victim.onDrop?.();
+    else if (victim.onDrop) this.heldDrops.push(victim.onDrop);
+  }
+
+  private releaseHeldDrops(): void {
+    if (this.pending.size >= OUTBOX_MAX_ENTRIES) return;
+    const held = this.heldDrops;
+    this.heldDrops = [];
+    for (const onDrop of held) onDrop();
   }
 }

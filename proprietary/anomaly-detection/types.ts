@@ -1,3 +1,5 @@
+import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
+
 export enum MetricType {
   CONNECTIONS = 'connections',
   OPS_PER_SEC = 'ops_per_sec',
@@ -234,4 +236,10 @@ export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
 
 export interface AnomalyEventSink {
   ingestExternalAnomaly(event: AnomalyEvent): void;
+}
+
+export const ANOMALY_WEBHOOK_SINK = 'ANOMALY_WEBHOOK_SINK';
+
+export interface AnomalyWebhookSink {
+  dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
 }

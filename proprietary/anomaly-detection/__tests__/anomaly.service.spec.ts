@@ -7,7 +7,11 @@ import { AnomalyService } from '../anomaly.service';
 import { IncidentTimelineBuilder, incidentIdFor } from '../incident-timeline';
 import { MetricBuffer } from '../metric-buffer';
 import * as sequenceRules from '../sequence-rules';
-import { OUTBOX_MAX_AGE_MS, OUTBOX_RETRY_BASE_MS } from '../anomaly-persistence-outbox';
+import {
+  OUTBOX_MAX_AGE_MS,
+  OUTBOX_MAX_ENTRIES,
+  OUTBOX_RETRY_BASE_MS,
+} from '../anomaly-persistence-outbox';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -28,6 +32,7 @@ import {
   AnomalySeverity,
   AnomalyType,
   AnomalyPattern,
+  ANOMALY_WEBHOOK_SINK,
   AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
@@ -43,6 +48,7 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
+  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock };
   let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
@@ -54,6 +60,7 @@ describe('AnomalyService', () => {
     /-(failover|promotion|cluster-state|persistence|dup-primary|stuck-replica|orphaned-slots|hostname-staleness|replica-slot-state)-|^config-drift-/;
 
   afterEach(() => {
+    if (jest.isMockFunction(Date.now)) (Date.now as jest.Mock).mockRestore();
     const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id as string);
     expect(ids.filter((id) => STRING_EVENT_ID.test(id))).toEqual([]);
   });
@@ -93,6 +100,7 @@ describe('AnomalyService', () => {
       updateReplBufferPressure: jest.fn(),
     };
 
+    anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
     webhookEventsProService = {
       isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
@@ -182,6 +190,7 @@ describe('AnomalyService', () => {
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
         { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+        { provide: ANOMALY_WEBHOOK_SINK, useValue: anomalyWebhookSink },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
@@ -2544,6 +2553,19 @@ describe('AnomalyService', () => {
         .getRecentEvents()
         .filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
       expect(events).toHaveLength(0);
+    });
+
+    it('keeps one event for an unsaved conflict that has left the ring', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (service as any).recentAnomalies = [];
+
+      await poll();
+
+      const ids = new Set(storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id));
+      expect(ids.size).toBe(1);
+      expect((service as any).persistenceOutbox.size).toBe(1);
     });
 
     it('raises the conflict again when the outbox drops its unsaved event', async () => {
@@ -5283,6 +5305,66 @@ describe('AnomalyService', () => {
   });
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
+
+  describe('saved anomaly webhooks', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'saved-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('hands an event over once its first save lands', async () => {
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'saved-1' }),
+      );
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the outbox when the first save fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing for a save the outbox drops', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+    });
+
+    it('keeps the save when the webhook fails', async () => {
+      anomalyWebhookSink.dispatchAnomalyWebhook.mockRejectedValueOnce(new Error('webhook down'));
+
+      await expect((service as any).addAnomaly(anomaly(), mockCtx)).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+    });
+  });
 
   describe('COB pressure detection', () => {
     const MB = 1024 * 1024;
@@ -9554,7 +9636,7 @@ describe('AnomalyService', () => {
         .map(([data]: [{ replica: string; reason: string }]) => data)
         .filter((data: { reason: string }) => data.reason === 'resolved_after_restart');
 
-    it('reads open events once and closes them when the replica has left', async () => {
+    it('reads open events once and closes them silently when the replica has left', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
 
       const t = await feed([2], T0);
@@ -9571,14 +9653,7 @@ describe('AnomalyService', () => {
         offset: 0,
       });
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
-      expect(restartRecoveries()).toEqual([
-        expect.objectContaining({
-          replica: '10.0.0.9:6379',
-          reason: 'resolved_after_restart',
-          gapBytes: null,
-          connectionId: 'conn-1',
-        }),
-      ]);
+      expect(restartRecoveries()).toEqual([]);
     });
 
     it('keeps an orphaned event open until the replica has caught up', async () => {
@@ -9655,10 +9730,9 @@ describe('AnomalyService', () => {
       );
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(OPEN_EVENT_PAGE_SIZE + 3);
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
-      expect(restartRecoveries()).toHaveLength(1);
     });
 
-    it('sends one recovered webhook per replica, none for a replica still diverging', async () => {
+    it('sends no recovered webhook for a replica that left or is still diverging', async () => {
       let calls = 0;
       storage.getAnomalyEvents.mockImplementation(async () => {
         calls++;
@@ -9676,17 +9750,17 @@ describe('AnomalyService', () => {
 
       expect((await divergenceHistory())[0].level).toBe('warning');
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
-      expect(restartRecoveries().map((d: { replica: string }) => d.replica)).toEqual(['10.0.0.9:6379']);
+      expect(restartRecoveries()).toEqual([]);
     });
 
     it('sends no second recovered webhook when closing a replica\'s events is retried', async () => {
       storage.getAnomalyEvents.mockResolvedValueOnce([
-        orphan('a-warn', '10.0.0.9:6379'),
-        orphan('a-crit', '10.0.0.9:6379'),
+        orphan('a-warn', '10.0.0.2:6379'),
+        orphan('a-crit', '10.0.0.2:6379'),
       ]);
       storage.resolveOpenAnomaly.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
 
-      await feed([2, 4, 6, 8], T0);
+      await feed([0, 0, 0, 0], T0);
 
       expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
       expect(restartRecoveries()).toHaveLength(1);
@@ -9785,6 +9859,54 @@ describe('AnomalyService', () => {
       expect(saved[1].message).toBe(divergenceHook.mock.calls[0][0].message);
       expect(saved[1].value).toBe(divergenceHook.mock.calls[0][0].gapBytes);
       expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual(['warning']);
+    });
+
+    describe('replication.divergence timing', () => {
+      const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+      const levels = () => hook().mock.calls.map(([data]: [{ level: string }]) => data.level);
+      const expireOutbox = async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        await (service as any).drainPersistenceOutbox();
+      };
+
+      it('waits for the save before sending it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        expect(hook()).not.toHaveBeenCalled();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(levels()).toEqual(['warning']);
+      });
+
+      it('sends none for a dropped save and alerts again', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const dropped = replica.eventId;
+
+        await expireOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+        expect(replica.eventId).toBeNull();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([14, 16, 18, 20, 22, 24], t);
+        expect(levels()).toEqual(['warning']);
+        expect(replica.eventId).not.toBe(dropped);
+      });
+
+      it('sends none for an event that closed before its save landed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        let t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        while (replica.eventId !== null) t = await feed([0], t);
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+      });
     });
 
     it('moves to the escalation while its save is pending', async () => {
@@ -9916,68 +10038,123 @@ describe('AnomalyService', () => {
         return t;
       }
 
-      it('sends replication.recovered with a null gap when an alerted replica drops out', async () => {
+      const trackedEventId = () =>
+        (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379').eventId;
+      const fillOutbox = () => {
+        for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) {
+          (service as any).persistenceOutbox.enqueueResolve(`filler-${i}`, 1, 1);
+        }
+      };
+
+      it('closes silently when an alerted replica drops out', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await poll(absent, t);
 
-        expect(recoveredCalls()).toHaveLength(1);
-        expect(recoveredCalls()[0][0]).toMatchObject({
-          replica: '10.0.0.2:6379',
-          reason: 'replica_gone',
-          gapBytes: null,
-        });
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it when an alerted replica goes offline', async () => {
+      it('closes silently when an alerted replica goes offline', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await poll(offline, t);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it for each alerted replica when the node stops being a primary', async () => {
+      it('closes silently when the node stops being a primary', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
 
         await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('does not claim the replica is offline when the node stops being a primary', async () => {
+      it('leaves a failed close to the outbox', async () => {
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
-
-        await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
-
-        expect(recoveredCalls()[0][0].message).toBe(
-          'Replica 10.0.0.2:6379 is no longer tracked by this node, so its divergence was closed.',
-        );
-      });
-
-      it('sends it once and leaves a failed resolve to the outbox', async () => {
-        const t = await feed([2, 4, 6, 8, 10, 12], T0);
-        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const eventId = trackedEventId();
         storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
 
         await poll(absent, t);
 
-        expect(recoveredCalls()).toHaveLength(1);
         expect((service as any).persistenceOutbox.has(eventId)).toBe(true);
 
         await (service as any).drainPersistenceOutbox();
 
         expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
-        expect(recoveredCalls()).toHaveLength(1);
+        expect(recoveredCalls()).toEqual([]);
       });
 
-      it('sends it for an alert that was sent but never saved', async () => {
+      it('sends nothing for an alert that was never saved', async () => {
         storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
         const t = await feed([2, 4, 6, 8, 10, 12], T0);
 
         await poll(absent, t);
 
-        expect(recoveredCalls().map(([data]) => data.reason)).toEqual(['replica_gone']);
+        expect(recoveredCalls()).toEqual([]);
+        expect((webhookEventsProService as any).dispatchReplicationDivergence).not.toHaveBeenCalled();
+      });
+
+      it('closes a dropped-out replica event again after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        const next = await poll(absent, t);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await poll(absent, next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends no second recovered webhook when it re-closes an evicted recovery', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        let next = t;
+        while (recoveredCalls().length === 0) next = await feed([0], next);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await feed([0, 0, 0, 0], next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toHaveLength(1);
+      });
+
+      it('re-closes a superseded warning after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const warningId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        await feed([130, 140, 150], t);
+        fillOutbox();
+
+        const orphans = (service as any).divergenceOrphans.get('conn-1');
+        expect([...orphans.get('10.0.0.2:6379').eventIds]).toEqual([warningId]);
+      });
+
+      it('sweeps a removed connection again after the outbox evicts its close', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        fillOutbox();
+        expect((service as any).removedConnectionSweeps.has('conn-1')).toBe(true);
+
+        storage.getAnomalyEvents.mockResolvedValueOnce([{ id: eventId }]);
+        await (service as any).sweepRemovedConnections();
+
+        const attempts = storage.resolveAnomaly.mock.calls.filter(([id]: [string]) => id === eventId);
+        expect(attempts).toHaveLength(2);
       });
 
       it('sends nothing for a replica that never alerted', async () => {
@@ -11015,7 +11192,6 @@ describe('AnomalyService', () => {
         failSaves();
         await pollWith(clients(85));
         (service as any).clientSaturationLevel.delete('conn-1');
-        (service as any).clientSaturationRaisedBy.delete('conn-1');
 
         await expireOutbox();
 

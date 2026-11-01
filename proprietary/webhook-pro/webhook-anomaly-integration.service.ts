@@ -1,28 +1,18 @@
-import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
-import { OUTBOX_MAX_AGE_MS } from '../anomaly-detection/anomaly-persistence-outbox';
-
-const LATE_SAVE_LOOKBACK_MS = OUTBOX_MAX_AGE_MS + 60_000;
-const EVENT_PAGE_SIZE = 1000;
-const MAX_PAGES_PER_POLL = 10;
+import type { AnomalyWebhookSink } from '../anomaly-detection/types';
 
 /**
  * Webhook Anomaly Integration Service
  *
  * Integrates webhook dispatching with anomaly detection.
- * Dispatches webhooks when anomalies and correlated groups are detected.
+ * AnomalyService hands each event over after its first successful save.
  */
 @Injectable()
-export class WebhookAnomalyIntegrationService implements OnModuleInit {
+export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
   private readonly logger = new Logger(WebhookAnomalyIntegrationService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private readonly POLL_INTERVAL_MS = 5000; // Check every 5 seconds
-  private readonly startedAt: number = Date.now();
-  private readonly sentEvents = new Map<string, number>();
-  private scanCursor = 0;
-  private pollInFlight = false;
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -30,90 +20,10 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
     private readonly configService: ConfigService,
   ) {}
 
-  async onModuleInit() {
-    this.logger.log('Webhook anomaly integration service initialized');
-    this.startPolling();
-  }
-
-  onModuleDestroy() {
-    this.stopPolling();
-  }
-
-  /**
-   * Start polling for new anomalies
-   */
-  private startPolling(): void {
-    this.pollInterval = setInterval(() => {
-      this.checkForNewAnomalies().catch(error => {
-        this.logger.error('Error checking for new anomalies:', error);
-      });
-    }, this.POLL_INTERVAL_MS);
-
-    // Run immediately on start
-    this.checkForNewAnomalies().catch(error => {
-      this.logger.error('Error in initial anomaly check:', error);
-    });
-  }
-
-  /**
-   * Stop polling
-   */
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  /**
-   * Check for new anomalies and dispatch webhooks
-   */
-  private async checkForNewAnomalies(): Promise<void> {
-    if (this.pollInFlight) return;
-    this.pollInFlight = true;
-    try {
-      const now = Date.now();
-      const windowStart = Math.max(this.startedAt, now - LATE_SAVE_LOOKBACK_MS);
-
-      let cursor = Math.max(this.scanCursor, EVENT_PAGE_SIZE);
-      let more = (await this.dispatchPage(windowStart, now, 0)) === EVENT_PAGE_SIZE;
-      for (let pages = 1; more && pages < MAX_PAGES_PER_POLL; pages++) {
-        more = (await this.dispatchPage(windowStart, now, cursor)) === EVENT_PAGE_SIZE;
-        if (more) cursor += EVENT_PAGE_SIZE;
-      }
-      this.scanCursor = more ? cursor : 0;
-
-      for (const [id, timestamp] of this.sentEvents) {
-        if (timestamp < windowStart) this.sentEvents.delete(id);
-      }
-    } catch (error) {
-      this.logger.error('Failed to check for new anomalies:', error);
-    } finally {
-      this.pollInFlight = false;
-    }
-  }
-
-  private async dispatchPage(startTime: number, endTime: number, offset: number): Promise<number> {
-    const page = await this.storage.getAnomalyEvents({
-      startTime,
-      endTime,
-      limit: EVENT_PAGE_SIZE,
-      offset,
-    });
-
-    for (const anomaly of page) {
-      if (this.sentEvents.has(anomaly.id)) continue;
-      this.sentEvents.set(anomaly.id, anomaly.timestamp);
-      await this.dispatchAnomalyWebhook(anomaly);
-    }
-
-    return page.length;
-  }
-
   /**
    * Dispatch webhook for an anomaly event
    */
-  private async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
+  async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
       // command_p99 regressions and replication divergence each have a dedicated event
       // (latency.regression.detected, replication.divergence); skip the generic

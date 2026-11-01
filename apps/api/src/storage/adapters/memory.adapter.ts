@@ -154,7 +154,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private clientSnapshots: StoredClientSnapshot[] = [];
   /** Keyed by `${connectionId}:${bucketStart}`. */
   private clientAnalyticsRollups: Map<string, ClientAnalyticsRollup> = new Map();
-  private anomalyEvents: StoredAnomalyEvent[] = [];
+  private anomalyEvents = new Map<string, StoredAnomalyEvent>();
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
   private incidentBoundaries: StoredIncidentBoundary[] = [];
@@ -644,13 +644,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   private upsertAnomalyEvent(event: StoredAnomalyEvent): void {
-    const idx = this.anomalyEvents.findIndex((e) => e.id === event.id);
-    if (idx < 0) {
-      this.anomalyEvents.push({ ...event, insertedAt: Date.now() });
+    const existing = this.anomalyEvents.get(event.id);
+    if (!existing) {
+      this.anomalyEvents.set(event.id, { ...event, insertedAt: Date.now() });
       return;
     }
-    const existing = this.anomalyEvents[idx];
-    this.anomalyEvents[idx] = {
+    this.anomalyEvents.set(event.id, {
       ...existing,
       correlationId: event.correlationId ?? existing.correlationId,
       relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
@@ -659,7 +658,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       resolvedAt: existing.resolvedAt ?? event.resolvedAt,
       durationMs: existing.durationMs ?? event.durationMs,
       scopeId: existing.scopeId ?? event.scopeId,
-    };
+    });
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -702,7 +701,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async getAnomalyEvents(options: AnomalyQueryOptions = {}): Promise<StoredAnomalyEvent[]> {
-    let filtered = [...this.anomalyEvents];
+    let filtered = [...this.anomalyEvents.values()];
 
     if (options.connectionId)
       filtered = filtered.filter((e) => e.connectionId === options.connectionId);
@@ -732,7 +731,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     endTime?: number,
     connectionId?: string,
   ): Promise<AnomalyStats> {
-    let filtered = [...this.anomalyEvents];
+    let filtered = [...this.anomalyEvents.values()];
     if (connectionId) filtered = filtered.filter((e) => e.connectionId === connectionId);
     if (startTime) filtered = filtered.filter((e) => e.timestamp >= startTime);
     if (endTime) filtered = filtered.filter((e) => e.timestamp <= endTime);
@@ -755,7 +754,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async resolveAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find((e) => e.id === id);
+    const event = this.anomalyEvents.get(id);
     if (!event) return false; // no such anomaly
     if (!event.resolved) {
       event.resolved = true;
@@ -767,7 +766,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find((e) => e.id === id);
+    const event = this.anomalyEvents.get(id);
     if (!event || event.resolved) return false;
     event.resolved = true;
     event.resolvedAt = resolvedAt;
@@ -776,15 +775,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    const before = this.anomalyEvents.length;
-    if (connectionId) {
-      this.anomalyEvents = this.anomalyEvents.filter(
-        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
-      );
-    } else {
-      this.anomalyEvents = this.anomalyEvents.filter((e) => e.timestamp >= cutoffTimestamp);
+    const before = this.anomalyEvents.size;
+    for (const event of this.anomalyEvents.values()) {
+      if (event.timestamp >= cutoffTimestamp) continue;
+      if (!connectionId || event.connectionId === connectionId) this.anomalyEvents.delete(event.id);
     }
-    return before - this.anomalyEvents.length;
+    return before - this.anomalyEvents.size;
   }
 
   async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
@@ -819,7 +815,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.involvingConnectionId) {
       const caller = options.involvingConnectionId;
       const involved = new Set(
-        this.anomalyEvents.filter((e) => e.connectionId === caller).map((e) => e.correlationId),
+        [...this.anomalyEvents.values()]
+          .filter((e) => e.connectionId === caller)
+          .map((e) => e.correlationId),
       );
       filtered = filtered.filter(
         (g) => g.connectionId === caller || involved.has(g.correlationId),
@@ -849,7 +847,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const groups = new Set(correlationIds);
     const ids = new Set(anomalyIds);
     const seenPerGroup = new Map<string, number>();
-    return this.anomalyEvents
+    return [...this.anomalyEvents.values()]
       .filter((e) => (e.correlationId && groups.has(e.correlationId)) || ids.has(e.id))
       .sort((a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
       .filter((e) => {

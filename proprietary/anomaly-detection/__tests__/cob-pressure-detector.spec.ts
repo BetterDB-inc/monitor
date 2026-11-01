@@ -5,6 +5,7 @@ import {
   COB_WARN_RATIO,
   CobConnectionState,
   acknowledgeCobFinding,
+  cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
@@ -280,6 +281,25 @@ describe('evaluateCobPressure', () => {
       }),
     );
     expect(findings).toHaveLength(0);
+  });
+
+  it('reopens the resync-loop gate when its event is dropped', () => {
+    const state = createCobConnectionState();
+    evaluateCobPressure(state, input({ limit: unlimited, syncFullDelta: 1 }));
+    const [finding] = evaluateCobPressure(
+      state,
+      input({ limit: unlimited, syncFullDelta: 1, timestamp: base + 30_000 }),
+    );
+    const rearm = cobPressureRearm(state, finding);
+    acknowledgeCobFinding(state, finding);
+
+    rearm();
+
+    const reraised = evaluateCobPressure(
+      state,
+      input({ limit: unlimited, syncFullDelta: 1, timestamp: base + 60_000 }),
+    );
+    expect(reraised.map((f) => f.kind)).toEqual(['resync-loop']);
   });
 
   it('suppresses resync-loop re-emission until the refire window passes', () => {
