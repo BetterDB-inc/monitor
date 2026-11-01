@@ -796,6 +796,21 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       const ids = new Set(options.correlationIds);
       filtered = filtered.filter((g) => ids.has(g.correlationId));
     }
+    if (options.involving) {
+      const { connectionId, startTime, endTime } = options.involving;
+      const ids = new Set<string>();
+      for (const event of this.anomalyEvents.values()) {
+        if (
+          event.correlationId &&
+          event.connectionId === connectionId &&
+          (startTime === undefined || event.timestamp >= startTime) &&
+          (endTime === undefined || event.timestamp <= endTime)
+        ) {
+          ids.add(event.correlationId);
+        }
+      }
+      filtered = filtered.filter((g) => ids.has(g.correlationId));
+    }
 
     return filtered
       .sort((a, b) => b.timestamp - a.timestamp)

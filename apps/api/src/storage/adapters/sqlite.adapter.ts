@@ -2995,6 +2995,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
       params.push(...options.correlationIds);
     }
+    if (options.involving) {
+      const { connectionId, startTime, endTime } = options.involving;
+      const member = ['connection_id = ?', 'correlation_id IS NOT NULL'];
+      params.push(connectionId);
+      if (startTime !== undefined) {
+        member.push('timestamp >= ?');
+        params.push(startTime);
+      }
+      if (endTime !== undefined) {
+        member.push('timestamp <= ?');
+        params.push(endTime);
+      }
+      conditions.push(
+        `correlation_id IN (SELECT correlation_id FROM anomaly_events WHERE ${member.join(' AND ')})`,
+      );
+    }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = options.limit ?? 50;
