@@ -222,6 +222,74 @@ describe('observeResyncEscalation', () => {
     const at = (timestamp: number, ...replicas: ReplicationStreamSample['replicas']) =>
       sample({ timestamp, replicas });
 
+    describe('two replicas back in one poll', () => {
+      const both = (timestamp: number) =>
+        at(timestamp, line(REPLICA_A, 'online'), line(REPLICA_B, 'online'));
+
+      const rejoin = (after: ReturnType<typeof counters>) => {
+        const state = createResyncEscalationState();
+        observeResyncEscalation(state, both(T0), counters(), 40);
+        observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+        return observeResyncEscalation(state, both(T0 + 2000), after, 40);
+      };
+
+      it('gives each replica its own full sync', () => {
+        const escalations = rejoin(counters(2));
+
+        expect(escalations.map((e) => e.addr)).toEqual([REPLICA_A, REPLICA_B]);
+        expect(escalations.map((e) => e.fullSyncs)).toEqual([1, 1]);
+      });
+
+      it('gives each replica its own failed partial sync', () => {
+        const escalations = rejoin(counters(0, 0, 2));
+
+        expect(escalations.map((e) => e.partialSyncErrors)).toEqual([1, 1]);
+      });
+
+      it('escalates one replica when only one sync moved', () => {
+        expect(rejoin(counters(1, 1)).map((e) => e.fullSyncs)).toEqual([1]);
+      });
+
+      it('rounds a share up for the replica that comes first', () => {
+        expect(rejoin(counters(3)).map((e) => e.fullSyncs)).toEqual([2, 1]);
+      });
+    });
+
+    describe('after CONFIG RESETSTAT', () => {
+      it('still sees a full sync of a replica that was already gone', () => {
+        const state = createResyncEscalationState();
+        observeResyncEscalation(state, back(T0), counters(10, 5, 5), 40);
+        observeResyncEscalation(state, gone(T0 + 1000), counters(10, 5, 5), null);
+        observeResyncEscalation(state, gone(T0 + 2000), counters(), null);
+
+        const [escalation] = observeResyncEscalation(state, back(T0 + 3000), counters(1), 40);
+
+        expect(escalation.fullSyncs).toBe(1);
+      });
+
+      it('rebases the full syncs already attributed', () => {
+        const state = createResyncEscalationState();
+        observeResyncEscalation(state, back(T0), counters(10), 40);
+        observeResyncEscalation(state, gone(T0 + 1000), counters(10), null);
+        observeResyncEscalation(state, back(T0 + 2000), counters(11), 40);
+        observeResyncEscalation(state, back(T0 + 3000), counters(), 40);
+        observeResyncEscalation(state, gone(T0 + 4000), counters(), null);
+
+        const [escalation] = observeResyncEscalation(state, back(T0 + 5000), counters(1), 40);
+
+        expect(escalation.fullSyncs).toBe(1);
+      });
+
+      it('stays quiet when the reset moved nothing', () => {
+        const state = createResyncEscalationState();
+        observeResyncEscalation(state, back(T0), counters(10), 40);
+        observeResyncEscalation(state, gone(T0 + 1000), counters(10), null);
+        observeResyncEscalation(state, gone(T0 + 2000), counters(), null);
+
+        expect(observeResyncEscalation(state, back(T0 + 3000), counters(), 40)).toEqual([]);
+      });
+    });
+
     it.each(['wait_bgsave', 'send_bulk'])('emits when the replica enters %s', (syncState) => {
       const state = createResyncEscalationState();
       observeResyncEscalation(state, back(T0), counters(), 40);

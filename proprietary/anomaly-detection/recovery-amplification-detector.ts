@@ -139,12 +139,34 @@ function movedSince(before: SyncCounters, after: SyncCounters): SyncCounters {
   };
 }
 
+function shareOf(remaining: number, replicasLeft: number): number {
+  return Math.ceil(Math.max(0, remaining) / replicasLeft);
+}
+
+function countersWentBack(before: SyncCounters, after: SyncCounters): boolean {
+  return (
+    after.full < before.full ||
+    after.partialOk < before.partialOk ||
+    after.partialErr < before.partialErr
+  );
+}
+
+function rebaseAfterReset(state: ResyncEscalationState): void {
+  state.counters = { full: 0, partialOk: 0, partialErr: 0 };
+  state.attributedFullSyncs = 0;
+  for (const disconnect of state.pending.values()) {
+    disconnect.counters = state.counters;
+    disconnect.attributedFullSyncs = 0;
+  }
+}
+
 export function observeResyncEscalation(
   state: ResyncEscalationState,
   sample: ReplicationStreamSample,
   counters: SyncCounters,
   coverageSec: number | null,
 ): ResyncEscalation[] {
+  if (state.counters && countersWentBack(state.counters, counters)) rebaseAfterReset(state);
   const online = new Set(sample.replicas.filter((r) => r.state === 'online').map((r) => r.addr));
   const baseline = state.counters ?? counters;
 
@@ -184,26 +206,34 @@ export function observeResyncEscalation(
     }
   }
 
+  let rejoining = 0;
   for (const [addr, disconnect] of state.pending) {
     if (sample.timestamp - disconnect.disconnectAt > RESYNC_ESCALATION_WINDOW_MS) {
       state.pending.delete(addr);
-      continue;
+    } else if (online.has(addr)) {
+      rejoining += 1;
     }
+  }
+
+  let errorsTaken = 0;
+  for (const [addr, disconnect] of state.pending) {
     if (!online.has(addr)) continue;
     state.pending.delete(addr);
     const moved = movedSince(disconnect.counters, counters);
     const attributed = state.attributedFullSyncs - disconnect.attributedFullSyncs;
-    const fullSyncs = moved.full - attributed;
-    const partialSyncErrors = moved.partialErr - attributed;
+    const fullSyncs = shareOf(moved.full - attributed, rejoining);
+    const partialSyncErrors = shareOf(moved.partialErr - attributed - errorsTaken, rejoining);
+    rejoining -= 1;
     if (fullSyncs > 0 || partialSyncErrors > 0) {
-      state.attributedFullSyncs += Math.max(0, fullSyncs);
+      state.attributedFullSyncs += fullSyncs;
+      errorsTaken += Math.max(0, partialSyncErrors - fullSyncs);
       escalations.push({
         addr,
         occurredAt: disconnect.disconnectAt,
         disconnectedForMs: sample.timestamp - disconnect.disconnectAt,
         coverageSec: disconnect.coverageSec,
-        fullSyncs: Math.max(0, fullSyncs),
-        partialSyncErrors: Math.max(0, partialSyncErrors),
+        fullSyncs,
+        partialSyncErrors,
         syncState: null,
       });
     }
