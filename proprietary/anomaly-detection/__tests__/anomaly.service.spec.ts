@@ -20,6 +20,7 @@ import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import {
   RETRY_AMP_FIRST_SNAPSHOT_ATTEMPTS,
 } from '../retry-amplification-attribution';
+import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_ORPHAN_PAGE_SIZE,
@@ -3694,6 +3695,28 @@ describe('AnomalyService', () => {
       expect(service.getRetryAmplificationStatus('conn-1').windows).toBeLessThanOrEqual(1);
     });
 
+    it('forgets a degraded verdict the latency guard stopped refreshing', async () => {
+      const reportedAt = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockReturnValue(reportedAt);
+      service.reportLatencyDegraded('conn-1', true);
+      (Date.now as jest.Mock).mockReturnValue(reportedAt + RETRY_AMP_LATENCY_VERDICT_TTL_MS + 1);
+
+      await runRetry({ noP99: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').windows).toBe(0);
+    });
+
+    it('falls back to the held event once a healthy verdict goes stale', async () => {
+      const reportedAt = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockReturnValue(reportedAt);
+      service.reportLatencyDegraded('conn-1', false);
+      (Date.now as jest.Mock).mockReturnValue(reportedAt + RETRY_AMP_LATENCY_VERDICT_TTL_MS + 1);
+
+      await runRetry({ p99Once: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').classification).toBe('candidate');
+    });
+
     it('ignores a load saturation event once the saturation detector has re-armed', async () => {
       (service as any).recentAnomalies.push({
         id: 'load-sat',
@@ -4427,6 +4450,23 @@ describe('AnomalyService', () => {
       const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
       return buffers.get(MetricType.ERROR_REPLIES);
     };
+
+    it('keeps a burst on a quiet instance at warning until the critical threshold', async () => {
+      let total = 1000;
+      const step = async (delta: number) => {
+        total += delta;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      };
+      for (let i = 0; i < 40; i++) await step(i % 2);
+
+      await step(30);
+      await step(30);
+
+      expect(errorEvents()).toHaveLength(1);
+      expect(errorEvents()[0].zScore).toBeGreaterThan(3);
+      expect(errorEvents()[0].severity).toBe(AnomalySeverity.WARNING);
+    });
 
     it('feeds the per-second rate, not the lifetime counter', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));

@@ -11,6 +11,7 @@ import {
 export interface SpikeDetectorOptions {
   minValue?: number;
   thresholdOverridesBelowMean?: boolean;
+  zScoreCritical?: boolean;
 }
 
 interface ConsecutiveCounter {
@@ -33,6 +34,7 @@ export class SpikeDetector {
     this.options = {
       minValue: options.minValue ?? Number.NEGATIVE_INFINITY,
       thresholdOverridesBelowMean: options.thresholdOverridesBelowMean ?? false,
+      zScoreCritical: options.zScoreCritical ?? true,
     };
     // Set defaults
     this.config = {
@@ -92,7 +94,7 @@ export class SpikeDetector {
     let severity: AnomalySeverity | null = null;
     let threshold: number = 0;
 
-    if (absZScore >= this.config.criticalZScore) {
+    if (this.options.zScoreCritical && absZScore >= this.config.criticalZScore) {
       severity = AnomalySeverity.CRITICAL;
       threshold = this.config.criticalZScore;
     } else if (absZScore >= this.config.warningZScore) {

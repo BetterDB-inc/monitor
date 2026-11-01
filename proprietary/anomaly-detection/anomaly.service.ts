@@ -213,6 +213,7 @@ import {
 } from './load-saturation-detector';
 import {
   RETRY_AMP_CMDS_PER_CLIENT_RATIO,
+  RETRY_AMP_LATENCY_VERDICT_TTL_MS,
   RETRY_AMP_SATURATION_HOLD_MS,
   RETRY_AMP_HELD_SATURATION_METRICS,
   RETRY_AMP_STRESS_HOLD_MS,
@@ -479,7 +480,7 @@ export class AnomalyService
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
   >();
-  private latencyDegraded = new Map<string, boolean>();
+  private latencyDegraded = new Map<string, { degraded: boolean; reportedAt: number }>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
   // on every poll, and re-arm once it drops back below the warning threshold.
@@ -3226,7 +3227,11 @@ export class AnomalyService
         new SpikeDetector(
           MetricType.ERROR_REPLIES,
           this.resolveSpikeConfig(MetricType.ERROR_REPLIES),
-          { minValue: ERROR_REPLIES_MIN_PER_SEC, thresholdOverridesBelowMean: true },
+          {
+            minValue: ERROR_REPLIES_MIN_PER_SEC,
+            thresholdOverridesBelowMean: true,
+            zScoreCritical: false,
+          },
         ),
       );
     }
@@ -3325,7 +3330,7 @@ export class AnomalyService
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
-    const degraded = this.latencyDegraded.get(ctx.connectionId);
+    const degraded = this.freshLatencyVerdict(ctx.connectionId);
     const stressActive =
       degraded === true ||
       (degraded === undefined &&
@@ -5997,8 +6002,15 @@ export class AnomalyService
     if (degraded === null) {
       this.latencyDegraded.delete(connectionId);
     } else {
-      this.latencyDegraded.set(connectionId, degraded);
+      this.latencyDegraded.set(connectionId, { degraded, reportedAt: Date.now() });
     }
+  }
+
+  private freshLatencyVerdict(connectionId: string): boolean | undefined {
+    const verdict = this.latencyDegraded.get(connectionId);
+    if (verdict === undefined) return undefined;
+    const age = Date.now() - verdict.reportedAt;
+    return age <= RETRY_AMP_LATENCY_VERDICT_TTL_MS ? verdict.degraded : undefined;
   }
 
   ingestExternalAnomaly(event: AnomalyEvent): void {

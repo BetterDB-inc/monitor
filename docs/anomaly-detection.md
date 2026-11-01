@@ -339,7 +339,7 @@ Each condition fires once per episode and the tracking state clears when the chi
 **Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. It raises no findings until it has collected 10 windows (10 minutes). A window is hot when:
 - Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
 - Connected clients stay within ±15% of baseline
-- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped once the latency guard sees the command healthy for 5 samples in a row; until then the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped once the latency guard sees the command healthy for 5 samples in a row; a verdict from the guard counts for 5 min, and after that the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
 
 A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
 - **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and an error or churn rate that reached its stress level in the run. A P99 regression makes a window hot but cannot qualify a run alone, because organic growth through a fixed pool slows the server in the same way. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
@@ -479,6 +479,8 @@ Some metrics have custom thresholds beyond Z-score:
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
 | `error_replies` | 200/s | 2000/s | 2 | 60s |
+
+`error_replies` needs at least 20/s to alert. On a quiet instance almost any burst scores a high Z-score, so a Z-score alone only reaches warning here, and critical needs the absolute threshold.
 
 ## Monitored Metrics
 

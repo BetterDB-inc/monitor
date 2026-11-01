@@ -203,6 +203,33 @@ describe('SpikeDetector', () => {
       expect(result!.message).toContain('(94.3% below normal');
     });
 
+    describe('zScoreCritical', () => {
+      const quietBuffer = () => {
+        const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+        for (let i = 0; i < 30; i++) buffer.addSample(i % 2, i * 1000);
+        return buffer;
+      };
+      const detector = () =>
+        new SpikeDetector(
+          MetricType.ERROR_REPLIES,
+          { warningThreshold: 200, criticalThreshold: 2000, consecutiveRequired: 1, cooldownMs: 0 },
+          { zScoreCritical: false },
+        );
+
+      it('caps a z-score severity at warning', () => {
+        const result = detector().detect(quietBuffer(), 30, 50_000);
+
+        expect(result!.zScore).toBeGreaterThan(5);
+        expect(result!.severity).toBe(AnomalySeverity.WARNING);
+      });
+
+      it('still goes critical from the absolute threshold', () => {
+        expect(detector().detect(quietBuffer(), 2000, 50_000)!.severity).toBe(
+          AnomalySeverity.CRITICAL,
+        );
+      });
+    });
+
     it('resets the consecutive count on a below-mean sample under the threshold', () => {
       const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(
