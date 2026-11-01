@@ -16,6 +16,7 @@ import {
   ConnectionContext,
 } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+import { withTimeout } from '@app/common/utils/with-timeout';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
@@ -290,6 +291,7 @@ interface ConnectionPersistenceState {
   aofErrorReported?: boolean;
 }
 
+const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const MAX_CORRELATED_MEMBER_ROWS = 10_000;
@@ -893,6 +895,7 @@ export class AnomalyService
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
     this.retryAmplificationState.delete(connectionId);
+    this.retryAmplificationReports.delete(connectionId);
     this.retryAmplificationClients.delete(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
@@ -3581,10 +3584,13 @@ export class AnomalyService
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let snapshotsLoaded = true;
     try {
-      [capture, newConnections] = await Promise.all([
-        this.latestClientCapture(ctx.connectionId, episodeStart, until),
-        this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
-      ]);
+      [capture, newConnections] = await withTimeout(
+        Promise.all([
+          this.latestClientCapture(ctx.connectionId, episodeStart, until),
+          this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
+        ]),
+        RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
+      );
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);

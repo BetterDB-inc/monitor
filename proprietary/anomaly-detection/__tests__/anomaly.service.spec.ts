@@ -3907,6 +3907,33 @@ describe('AnomalyService', () => {
       expect(recorded).toHaveLength(0);
     });
 
+    it('gives up on an attribution read that hangs', async () => {
+      jest.useFakeTimers();
+      try {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+        storage.getNewClientConnections = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+        const attribution = (service as any).attributeRetryAmplification(
+          { connectionId: 'conn-1', connectionName: 'conn' },
+          1,
+          2,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        await expect(attribution).resolves.toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('forgets the report chain of a removed connection', () => {
+      (service as any).retryAmplificationReports.set('conn-1', new Promise(() => undefined));
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).retryAmplificationReports.has('conn-1')).toBe(false);
+    });
+
     it('reports a connection on its own recent events', () => {
       const event = (id: string, connectionId: string) => ({ id, connectionId, timestamp: 1 });
       (service as any).recentAnomalies.push(event('a', 'conn-1'), event('b', 'conn-2'));
