@@ -152,6 +152,29 @@ describe('PersistenceOutbox', () => {
       expect(dropped).toEqual([['close', 'full']]);
     });
 
+    it('takes the callback of a repeat resolve when the first brought none', () => {
+      const onDrop = jest.fn();
+      outbox.enqueueResolve('close', 100, 0);
+      outbox.enqueueResolve('close', 200, 0, onDrop);
+      for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
+
+      outbox.enqueueResolve('new', 100, 1);
+
+      expect(onDrop).toHaveBeenCalledTimes(1);
+      expect(outbox.has('close')).toBe(false);
+    });
+
+    it('keeps the callback of a resolve when a repeat brings none', () => {
+      const onDrop = jest.fn();
+      outbox.enqueueResolve('close', 100, 0, onDrop);
+      outbox.enqueueResolve('close', 200, 0);
+      for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
+
+      outbox.enqueueResolve('new', 100, 1);
+
+      expect(onDrop).toHaveBeenCalledTimes(1);
+    });
+
     it('does not expire a resolve', () => {
       outbox.enqueueResolve('close', 100, 0);
 
@@ -249,6 +272,25 @@ describe('PersistenceOutbox', () => {
 
         expect(onCloseDrop).toHaveBeenCalledTimes(1);
         expect(rearm).not.toHaveBeenCalled();
+      });
+
+      it('keeps its callback when a later resolve brings none', () => {
+        const onCloseDrop = jest.fn();
+        outbox.enqueueRewrite(event('a'), 0);
+        outbox.carryResolve('a', 100, onCloseDrop);
+        outbox.carryResolve('a', 200);
+
+        evictFirst();
+
+        expect(onCloseDrop).toHaveBeenCalledTimes(1);
+      });
+
+      it('hands its callback back when the save settles', () => {
+        const onCloseDrop = jest.fn();
+        outbox.enqueueRewrite(event('a'), 0);
+        outbox.carryResolve('a', 100, onCloseDrop);
+
+        expect(outbox.settleSave('a')).toBe(onCloseDrop);
       });
 
       it('keeps the callback of a resolve folded into a rewrite', () => {
