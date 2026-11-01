@@ -319,6 +319,22 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('fires for an event the outbox saved nearly an hour after it happened', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger(anyTrigger);
+      const hour = 60 * 60_000;
+      const unrelated = { metricType: 'memory_used', timestamp: trigger.createdAt + hour };
+      await storage.saveAnomalyEvent(makeAnomaly(unrelated), CONNECTION_ID);
+      await registry.tick();
+
+      const late = makeAnomaly({ timestamp: trigger.createdAt + 1_000 });
+      await storage.saveAnomalyEvent(late, CONNECTION_ID);
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
     it('fires for a late event in a lookback busier than one tick can read', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));

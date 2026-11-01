@@ -22,7 +22,7 @@ import { MonitorCaptureService } from './monitor-capture.service';
 export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
-const LATE_ANOMALY_LOOKBACK_MS = 5 * 60_000;
+const LATE_ANOMALY_LOOKBACK_MS = 61 * 60_000;
 const INSERTED_WATERMARK_MARGIN_MS = 5_000;
 
 interface AnomalyScan {
