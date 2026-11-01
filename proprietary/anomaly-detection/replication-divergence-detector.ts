@@ -92,6 +92,7 @@ export interface OrphanedDivergence {
   eventIds: Set<string>;
   sinceWindow: number;
   claimed: boolean;
+  notified?: boolean;
 }
 
 export interface DivergenceFinding {

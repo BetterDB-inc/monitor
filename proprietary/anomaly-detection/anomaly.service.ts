@@ -413,6 +413,7 @@ export class AnomalyService
   private outboxDraining = false;
   private readonly anomalyContexts = new WeakMap<AnomalyEvent, ConnectionContext>();
   private readonly latchHolders = new Map<string, string>();
+  private readonly anomalySaveHooks = new WeakMap<AnomalyEvent, () => void>();
   private readonly anomalyLatches = new WeakMap<AnomalyEvent, string>();
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
@@ -5501,9 +5502,11 @@ export class AnomalyService
     const connectionId = context?.connectionId || anomaly.connectionId;
     if (!connectionId) return;
     const wasResolved = anomaly.resolved;
+    const firstSave = !anomaly.persisted;
     await this.storage.saveAnomalyEvent(this.toStoredAnomalyEvent(anomaly, context), connectionId);
     anomaly.persisted = true;
     this.releaseLatch(anomaly);
+    if (firstSave) this.anomalySaveHooks.get(anomaly)?.();
     this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
@@ -6102,7 +6105,9 @@ export class AnomalyService
         continue;
       }
       orphans.delete(replica);
-      if (orphan.claimed && assessment !== 'diverging') this.dispatchOrphanRecovered(replica, ctx);
+      if (orphan.claimed && assessment === 'caught_up' && !orphan.notified) {
+        this.dispatchOrphanRecovered(replica, ctx);
+      }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
   }
@@ -6150,7 +6155,11 @@ export class AnomalyService
       try {
         const open = await this.readOpenDivergenceEvents(connectionId);
         if (!this.removedDivergenceSweeps.delete(connectionId)) continue;
-        for (const event of open) await this.resolveAnomalyOutcome(event.id);
+        for (const event of open) {
+          await this.resolveAnomalyOutcome(event.id, () => {
+            this.removedDivergenceSweeps.add(connectionId);
+          });
+        }
       } catch (err) {
         this.logger.warn(
           `Failed to read open divergence events of removed connection ${connectionId}: ${
@@ -6161,9 +6170,31 @@ export class AnomalyService
     }
   }
 
-  private async closeRemovedDivergenceEvents(ids: string[]): Promise<void> {
-    for (const id of ids) await this.resolveAnomalyOutcome(id);
+  private async closeRemovedDivergenceEvents(connectionId: string, ids: string[]): Promise<void> {
+    for (const id of ids) {
+      await this.resolveAnomalyOutcome(id, () => {
+        this.removedDivergenceSweeps.add(connectionId);
+      });
+    }
     await this.sweepRemovedConnections();
+  }
+
+  private retryDroppedDivergenceClose(connectionId: string, replica: string, id: string): void {
+    const state = this.divergenceState.get(connectionId);
+    if (!state) {
+      this.removedDivergenceSweeps.add(connectionId);
+      return;
+    }
+    const orphans = this.divergenceOrphans.get(connectionId) ?? new Map<string, OrphanedDivergence>();
+    const orphan = orphans.get(replica) ?? {
+      eventIds: new Set<string>(),
+      sinceWindow: state.closedWindowCount,
+      claimed: false,
+      notified: true,
+    };
+    orphan.eventIds.add(id);
+    orphans.set(replica, orphan);
+    this.divergenceOrphans.set(connectionId, orphans);
   }
 
   private closeDivergenceEventsOnRemoval(connectionId: string): void {
@@ -6176,7 +6207,7 @@ export class AnomalyService
     if (!this.divergenceOrphansSwept.has(connectionId)) {
       this.removedDivergenceSweeps.add(connectionId);
     }
-    this.closeRemovedDivergenceEvents(ids).catch((err) => {
+    this.closeRemovedDivergenceEvents(connectionId, ids).catch((err) => {
       this.logger.error('Failed to resolve divergence events of a removed connection', err);
     });
   }
@@ -6220,30 +6251,38 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
-    await this.addAnomaly(event, ctx);
+    this.anomalySaveHooks.set(event, () => {
+      if (event.resolved) return;
+      this.webhookEventsProService
+        ?.dispatchReplicationDivergence({
+          replica: finding.addr,
+          level: finding.level,
+          reason: finding.reason,
+          gapBytes: finding.gapBytes,
+          secondsBehind: finding.secondsBehind,
+          bytesPerSec: finding.bytesPerSec,
+          slopeBytesPerWindow: finding.slopeBytesPerWindow,
+          windowCount: finding.windowCount,
+          correlatedSignals: relatedMetrics,
+          message,
+          timestamp,
+          instance: { host: ctx.host, port: ctx.port },
+          connectionId: ctx.connectionId,
+        })
+        .catch((err) => {
+          this.logger.error('Failed to dispatch replication.divergence webhook', err);
+        });
+    });
+    await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${finding.addr}`, () => {
+      acknowledgeRecovery(state, finding.addr);
+    });
     acknowledgeDivergence(state, finding, event.id);
 
-    this.webhookEventsProService
-      ?.dispatchReplicationDivergence({
-        replica: finding.addr,
-        level: finding.level,
-        reason: finding.reason,
-        gapBytes: finding.gapBytes,
-        secondsBehind: finding.secondsBehind,
-        bytesPerSec: finding.bytesPerSec,
-        slopeBytesPerWindow: finding.slopeBytesPerWindow,
-        windowCount: finding.windowCount,
-        correlatedSignals: relatedMetrics,
-        message,
-        timestamp,
-        instance: { host: ctx.host, port: ctx.port },
-        connectionId: ctx.connectionId,
-      })
-      .catch((err) => {
-        this.logger.error('Failed to dispatch replication.divergence webhook', err);
+    if (previousEventId) {
+      await this.resolveAnomalyOutcome(previousEventId, () => {
+        this.retryDroppedDivergenceClose(ctx.connectionId, finding.addr, previousEventId);
       });
-
-    if (previousEventId) await this.resolveAnomalyOutcome(previousEventId);
+    }
   }
 
   private async resolveReplicationDivergence(
@@ -6252,19 +6291,15 @@ export class AnomalyService
     ctx: ConnectionContext,
     timestamp: number,
   ): Promise<void> {
-    if (recovery.eventId) await this.resolveAnomalyOutcome(recovery.eventId);
+    const { eventId } = recovery;
+    if (eventId) {
+      await this.resolveAnomalyOutcome(eventId, () => {
+        this.retryDroppedDivergenceClose(ctx.connectionId, recovery.addr, eventId);
+      });
+    }
     acknowledgeRecovery(state, recovery.addr);
 
-    if (recovery.kind === 'cleared') {
-      this.dispatchReplicationRecovered(ctx, {
-        replica: recovery.addr,
-        reason: 'replica_gone',
-        gapBytes: null,
-        message: `Replica ${recovery.addr} is no longer tracked by this node, so its divergence was closed.`,
-        timestamp,
-      });
-      return;
-    }
+    if (recovery.kind === 'cleared') return;
 
     this.dispatchReplicationRecovered(ctx, {
       replica: recovery.addr,
@@ -6449,7 +6484,10 @@ export class AnomalyService
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
-  private async resolveAnomalyOutcome(anomalyId: string): Promise<'resolved' | 'retry' | 'gone'> {
+  private async resolveAnomalyOutcome(
+    anomalyId: string,
+    onDrop?: () => void,
+  ): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly =
       this.recentAnomalies.find((a) => a.id === anomalyId) ??
       this.persistenceOutbox.unsavedAnomaly(anomalyId);
@@ -6472,7 +6510,7 @@ export class AnomalyService
       persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
-      this.queueResolve(anomalyId, resolvedAt);
+      this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
     }
 
@@ -6482,7 +6520,7 @@ export class AnomalyService
       // caller drops it. A cache-present event may just be a momentary storage
       // miss, so keep retrying that one.
       if (!anomaly) return 'gone';
-      this.queueResolve(anomalyId, resolvedAt);
+      this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
     }
 
@@ -6497,14 +6535,14 @@ export class AnomalyService
     return 'resolved';
   }
 
-  private queueResolve(anomalyId: string, resolvedAt: number): void {
+  private queueResolve(anomalyId: string, resolvedAt: number, onDrop?: () => void): void {
     const pendingSave = this.persistenceOutbox.unsavedAnomaly(anomalyId);
     if (pendingSave) {
       pendingSave.resolved = true;
       pendingSave.resolvedAt = resolvedAt;
       return;
     }
-    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now());
+    this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now(), onDrop);
   }
 
   async resolveGroup(correlationId: string): Promise<boolean> {
