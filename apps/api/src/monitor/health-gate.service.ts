@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
-import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { InfoParser } from '../database/parsers/info.parser';
 import {
@@ -14,7 +13,13 @@ import {
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
 const NUMBERED_MASTER_LINK_KEY = /^(master_\d+)_link_status$/;
-const REPLICA_ACK_SAMPLE_GAP_MS = 1100;
+const REPLICA_ACK_POLL_INTERVAL_MS = 100;
+const REPLICA_ACK_TIMEOUT_MS = 2500;
+
+interface ReplicaAckSample {
+  primaryOffset: number;
+  acks: Map<string, number>;
+}
 
 @Injectable()
 export class HealthGateService {
@@ -48,13 +53,10 @@ export class HealthGateService {
   }
 
   async evaluate(connectionId: string): Promise<HealthGateResult> {
-    const client = this.connectionRegistry.get(connectionId);
-    const baseline = await client.getInfoParsed();
-    const info = hasAckedReplica(baseline) ? await sampleAfterAckGap(client) : baseline;
+    const info = await this.connectionRegistry.get(connectionId).getInfoParsed();
 
     const memoryPct = readMemoryPct(info);
     const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress } = readReplication(
-      baseline,
       info,
       this.replicaIoStaleSeconds,
     );
@@ -73,13 +75,75 @@ export class HealthGateService {
       failoverInProgress: infoFailoverInProgress || roleChangeEvents > 0,
     };
 
-    const result = evaluateHealthGate(signals, this.thresholds);
+    const result = await this.settleLag(
+      connectionId,
+      info,
+      evaluateHealthGate(signals, this.thresholds),
+    );
     if (!result.allow) {
       this.logger.debug(
         `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(signals)}`,
       );
     }
     return result;
+  }
+
+  private async settleLag(
+    connectionId: string,
+    info: unknown,
+    result: HealthGateResult,
+  ): Promise<HealthGateResult> {
+    const baseline = parseAckSample(readReplicationSection(info) ?? {});
+    if (result.skipReason !== 'replication_lag_elevated' || baseline === null) {
+      return result;
+    }
+    const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline);
+    return evaluateHealthGate({ ...result.signals, replicationLagBytes }, this.thresholds);
+  }
+
+  private async measureLagAtNextAcks(
+    connectionId: string,
+    baseline: ReplicaAckSample,
+  ): Promise<number> {
+    const gaps = readReplicaGaps(baseline);
+    const threshold = this.thresholds.replicationLagThresholdBytes;
+    const pending = new Map(
+      [...baseline.acks].filter(([, ack]) => baseline.primaryOffset - ack >= threshold),
+    );
+    const deadline = Date.now() + REPLICA_ACK_TIMEOUT_MS;
+    let previous = baseline;
+
+    while (pending.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, REPLICA_ACK_POLL_INTERVAL_MS));
+      const sample = await this.readAckSample(connectionId);
+      if (sample === null) {
+        break;
+      }
+      for (const [id, baselineAck] of pending) {
+        const ack = sample.acks.get(id);
+        if (ack === undefined) {
+          pending.delete(id);
+        } else if (ack > baselineAck) {
+          gaps.set(id, Math.max(0, previous.primaryOffset - ack));
+          pending.delete(id);
+        }
+      }
+      previous = sample;
+    }
+    return Math.max(...gaps.values());
+  }
+
+  private async readAckSample(connectionId: string): Promise<ReplicaAckSample | null> {
+    try {
+      const client = this.connectionRegistry.get(connectionId);
+      const info = await client.getInfoParsed(['replication']);
+      return parseAckSample(readReplicationSection(info) ?? {});
+    } catch (err) {
+      this.logger.warn(
+        `health gate keeping baseline lag for ${connectionId}: ${(err as Error).message}`,
+      );
+      return null;
+    }
   }
 
   private async countRecentEvents(
@@ -110,21 +174,11 @@ function readMemoryPct(info: unknown): number {
   return used / max;
 }
 
-async function sampleAfterAckGap(client: DatabasePort) {
-  await new Promise((resolve) => setTimeout(resolve, REPLICA_ACK_SAMPLE_GAP_MS));
-  return client.getInfoParsed();
-}
-
 function readReplicationSection(info: unknown): Record<string, string> | undefined {
   return (info as { replication?: Record<string, string> }).replication;
 }
 
-function hasAckedReplica(info: unknown): boolean {
-  return readAckedOffsets(readReplicationSection(info) ?? {}).length > 0;
-}
-
 function readReplication(
-  baseline: unknown,
   info: unknown,
   replicaIoStaleSeconds: number,
 ): {
@@ -142,7 +196,7 @@ function readReplication(
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
   return {
-    replicationLagBytes: furthestReplicaGap(readReplicationSection(baseline), replication),
+    replicationLagBytes: furthestReplicaGap(replication),
     replicaLinkDown: REPLICA_ROLES.has(replication.role)
       ? readReplicaLinkDown(replication, replicaIoStaleSeconds)
       : null,
@@ -191,19 +245,21 @@ function isMasterLinkDown(
     : false;
 }
 
-function furthestReplicaGap(
-  baseline: Record<string, string> | undefined,
-  replication: Record<string, string>,
-): number | null {
-  const primaryOffset = parseNumber(baseline?.master_repl_offset);
-  if (primaryOffset === null) {
+function furthestReplicaGap(replication: Record<string, string>): number | null {
+  const sample = parseAckSample(replication);
+  if (sample === null) {
     return null;
   }
-  const ackedOffsets = readAckedOffsets(replication);
-  if (ackedOffsets.length === 0) {
+  if (sample.acks.size === 0) {
     return REPLICA_ROLES.has(replication.role) || hasConnectedReplicas(replication) ? null : 0;
   }
-  return Math.max(0, primaryOffset - Math.min(...ackedOffsets));
+  return Math.max(...readReplicaGaps(sample).values());
+}
+
+function readReplicaGaps(sample: ReplicaAckSample): Map<string, number> {
+  return new Map(
+    [...sample.acks].map(([id, ack]) => [id, Math.max(0, sample.primaryOffset - ack)]),
+  );
 }
 
 function hasConnectedReplicas(replication: Record<string, string>): boolean {
@@ -213,13 +269,25 @@ function hasConnectedReplicas(replication: Record<string, string>): boolean {
   );
 }
 
-function readAckedOffsets(replication: Record<string, string>): number[] {
-  return Object.entries(replication)
-    .filter(([key]) => REPLICA_LINE_KEY.test(key))
-    .map(([, value]) => InfoParser.parseKvLine(value, ','))
-    .filter((fields) => fields.state === 'online')
-    .map((fields) => parseNumber(fields.offset))
-    .filter((offset): offset is number => offset !== null && offset > 0);
+function parseAckSample(replication: Record<string, string>): ReplicaAckSample | null {
+  const primaryOffset = parseNumber(replication.master_repl_offset);
+  return primaryOffset === null ? null : { primaryOffset, acks: readAcks(replication) };
+}
+
+function readAcks(replication: Record<string, string>): Map<string, number> {
+  const acks = new Map<string, number>();
+  for (const [key, value] of Object.entries(replication)) {
+    if (!REPLICA_LINE_KEY.test(key)) {
+      continue;
+    }
+    const fields = InfoParser.parseKvLine(value, ',');
+    const offset = parseNumber(fields.offset);
+    if (fields.state === 'online' && offset !== null && offset > 0) {
+      const id = fields.ip === undefined ? key : `${fields.ip}:${fields.port}`;
+      acks.set(id, Math.min(offset, acks.get(id) ?? offset));
+    }
+  }
+  return acks;
 }
 
 function parseNumber(raw: string | undefined): number | null {

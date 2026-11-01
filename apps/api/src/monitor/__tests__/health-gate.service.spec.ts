@@ -40,20 +40,42 @@ function makeInfo(overrides: {
   };
 }
 
+function primaryInfo(primaryOffset: number, ...replicaOffsets: number[]): unknown {
+  return makeInfo({
+    role: 'master',
+    master_repl_offset: String(primaryOffset),
+    replicas: Object.fromEntries(
+      replicaOffsets.map((offset, index) => [
+        `slave${index}`,
+        `ip=10.0.0.${index + 2},port=6379,state=online,offset=${offset},lag=0`,
+      ]),
+    ),
+  });
+}
+
 function makeService({
   info,
+  samples = [],
   nextInfo = info,
   anomalyEvents = [],
   config = {},
 }: {
   info: unknown;
+  samples?: unknown[];
   nextInfo?: unknown;
   anomalyEvents?: StoredAnomalyEvent[];
   config?: Record<string, number>;
 }) {
-  const client = {
-    getInfoParsed: jest.fn().mockResolvedValueOnce(info).mockResolvedValue(nextInfo),
-  };
+  const getInfoParsed = jest.fn().mockResolvedValueOnce(info);
+  for (const sample of samples) {
+    if (sample instanceof Error) {
+      getInfoParsed.mockRejectedValueOnce(sample);
+    } else {
+      getInfoParsed.mockResolvedValueOnce(sample);
+    }
+  }
+  getInfoParsed.mockResolvedValue(nextInfo);
+  const client = { getInfoParsed };
   const registry = { get: jest.fn().mockReturnValue(client) } as unknown as ConnectionRegistry;
   const storage = {
     getAnomalyEvents: jest.fn().mockImplementation(({ metricType }: { metricType?: string }) => {
@@ -205,41 +227,187 @@ describe('HealthGateService', () => {
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
-  it('waits past one replica ack interval before taking the second sample', async () => {
-    const info = makeInfo({
-      role: 'master',
-      replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
+  it('keeps sampling until a late ack lands', async () => {
+    const stale = Array.from({ length: 14 }, (_, i) =>
+      primaryInfo(100_000_000 + (i + 1) * 3_000_000, 70_000_000),
+    );
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 70_000_000),
+      samples: stale,
+      nextInfo: primaryInfo(145_000_000, 143_000_000),
     });
-    const { service, client } = makeService({ info });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.allow).toBe(true);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(16);
+  });
+
+  it('measures a steady backlog smaller than the wait for the next ack', async () => {
+    const stale = Array.from({ length: 9 }, (_, i) =>
+      primaryInfo(100_000_000 + (i + 1) * 5_000_000, 50_000_000),
+    );
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: stale,
+      nextInfo: primaryInfo(150_000_000, 100_000_000),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(45_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('keeps the baseline gap when no ack lands before the timeout', async () => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      nextInfo: primaryInfo(130_000_000, 50_000_000),
+    });
     const pending = service.evaluate(CONNECTION_ID);
+    await jest.advanceTimersByTimeAsync(2500);
+    const calls = client.getInfoParsed.mock.calls.length;
     await jest.advanceTimersByTimeAsync(1000);
-    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
-    await jest.advanceTimersByTimeAsync(100);
+    const result = await pending;
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(calls);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it.each([
+    ['its line is gone', makeInfo({ role: 'master', master_repl_offset: '130000000' })],
+    [
+      'it has fallen back to a resync',
+      makeInfo({
+        role: 'master',
+        master_repl_offset: '130000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=wait_bgsave,offset=0,lag=0' },
+      }),
+    ],
+  ])('keeps the baseline gap of a replica when %s', async (_name, sample) => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [sample],
+    });
+    const result = await evaluateSettled(service);
     expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('follows a replica by address when the slaveN lines renumber', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=0',
+          slave1: 'ip=10.0.0.3,port=6379,state=online,offset=60000000,lag=0',
+        },
+      }),
+      samples: [
+        makeInfo({
+          role: 'master',
+          master_repl_offset: '101000000',
+          replicas: { slave0: 'ip=10.0.0.3,port=6379,state=online,offset=99000000,lag=0' },
+        }),
+      ],
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('keeps the furthest replica when two report the same address', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: {
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=99000000,lag=0',
+          slave1: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=0',
+        },
+      }),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('waits only for the replicas at or above the limit', async () => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 95_000_000, 50_000_000),
+      samples: [primaryInfo(101_000_000, 95_000_000, 99_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(result.signals.replicationLagBytes).toBe(5_000_000);
+    expect(result.allow).toBe(true);
+  });
+
+  it('falls back to the baseline gap when a later sample fails', async () => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [new Error('connection lost')],
+    });
+    const result = await evaluateSettled(service);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('falls back to the baseline gap when the connection is removed mid-wait', async () => {
+    const { service, registry } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
+    const pending = service.evaluate(CONNECTION_ID);
+    await jest.advanceTimersByTimeAsync(0);
+    (registry.get as jest.Mock).mockImplementation(() => {
+      throw new Error('Connection not found');
+    });
+    await jest.runAllTimersAsync();
+    const result = await pending;
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('asks a fresh client for the replication section on each later sample', async () => {
+    const { service, client, registry } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      nextInfo: primaryInfo(101_000_000, 100_000_000),
+    });
+    const replacement = {
+      getInfoParsed: jest.fn().mockResolvedValue(primaryInfo(101_000_000, 100_000_000)),
+    };
+    const pending = service.evaluate(CONNECTION_ID);
+    await jest.advanceTimersByTimeAsync(0);
+    (registry.get as jest.Mock).mockReturnValue(replacement);
+    await jest.runAllTimersAsync();
     await pending;
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(client.getInfoParsed).toHaveBeenCalledWith();
+    expect(replacement.getInfoParsed).toHaveBeenCalledWith(['replication']);
+  });
+
+  it('takes one sample when the baseline gap is under the limit', async () => {
+    const { service, client } = makeService({ info: primaryInfo(100_000_000, 95_000_000) });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(result.signals.replicationLagBytes).toBe(5_000_000);
+    expect(result.allow).toBe(true);
+  });
+
+  it('takes one sample when another signal already skips the capture', async () => {
+    const { service, client } = makeService({
+      info: makeInfo({
+        role: 'master',
+        used_memory: '9000',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=0' },
+      }),
+    });
+    const result = await service.evaluate(CONNECTION_ID);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
   });
 
   it('takes one sample when no replica can be measured', async () => {
     const { service, client } = makeService({ info: makeInfo({ role: 'master' }) });
     await evaluateSettled(service);
     expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
-  });
-
-  it('reads the other signals from the latest sample', async () => {
-    const { service } = makeService({
-      info: makeInfo({
-        role: 'master',
-        used_memory: '1000',
-        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
-      }),
-      nextInfo: makeInfo({
-        role: 'master',
-        used_memory: '9000',
-        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0' },
-      }),
-    });
-    const result = await evaluateSettled(service);
-    expect(result).toMatchObject({ allow: false, skipReason: 'memory_above_threshold' });
   });
 
   it('measures a replica line that has no lag field', async () => {
