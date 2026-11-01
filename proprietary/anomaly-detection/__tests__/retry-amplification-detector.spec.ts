@@ -6,7 +6,6 @@ import {
   retryAmplificationMaxPollGap,
   retryAmplificationRearm,
   evaluateRetryAmplification,
-  readRetryAmplificationTrigger,
   RetryAmplificationFinding,
   RetryAmplificationState,
   RETRY_AMP_ARM_WINDOWS,
@@ -216,7 +215,8 @@ describe('retry amplification detector', () => {
     expect(f.correlation).toBeGreaterThanOrEqual(0.5);
     expect(f.relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
     expect(f.message).toContain('Retry amplification');
-    expect(readRetryAmplificationTrigger(f.message)).toBe('a latency regression (COMMAND_P99)');
+    expect(f.trigger).toBe('latency');
+    expect(f.message).toContain('Trigger: a latency regression (COMMAND_P99).');
   });
 
   it('escalates to critical when a saturation event lands in the episode', () => {
@@ -889,6 +889,19 @@ describe('retry amplification detector', () => {
       d.ramp(4, { saturation: MetricType.LOAD_SATURATION });
       d.window(hot(2.1));
       d.window(hot(2.2));
+
+      expect(describeRetryAmplificationState(d.state)).toMatchObject({
+        classification: 'amplifying',
+        level: 'warning',
+      });
+    });
+
+    it('keeps reporting the level after a dropped save re-arms the episode', () => {
+      const d = new Driver();
+      d.baseline();
+      d.ramp(4);
+
+      retryAmplificationRearm(d.state, d.findings[0])();
 
       expect(describeRetryAmplificationState(d.state)).toMatchObject({
         classification: 'amplifying',

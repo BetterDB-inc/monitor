@@ -9,7 +9,7 @@ import {
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
 import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
-import { readRetryAmplificationTrigger } from './retry-amplification-detector';
+import { RETRY_AMP_TRIGGER_LABEL } from './retry-amplification-detector';
 
 const RETRY_AMPLIFICATION_DIAGNOSIS =
   'Retry amplification: load per client is rising or has stepped up together with {trigger} while the client ' +
@@ -76,7 +76,10 @@ export class Correlator {
       {
         pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
         requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
-        check: (anomalies) => !anomalies.some((a) => DIVERGENCE_YIELDS_TO.has(a.metricType)),
+        check: (anomalies) =>
+          !anomalies.some(
+            (a) => DIVERGENCE_YIELDS_TO.has(a.metricType) || isControlPlaneSaturationEvent(a),
+          ),
         diagnosis: 'Replica falling behind the primary — watching whether it catches up',
         recommendations: [
           'Compare the replica offset gap with the primary write rate over the next few minutes',
@@ -103,18 +106,6 @@ export class Correlator {
           'Check replica connection stability and cluster heartbeat health',
           'Keep a management path available: connect over a unix socket or reserved port for admin commands',
           'Upgrade to a QoS-capable version once the upstream trusted-sources feature (valkey#3927) lands',
-        ],
-      },
-      {
-        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
-        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
-        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
-        recommendations: [
-          'Add exponential backoff with jitter and a retry budget to the client retry policy',
-          'Put a circuit breaker in front of the instance so failing calls stop retrying',
-          'Set client timeouts above the observed P99 so slow replies are not retried',
-          'Throttle or inspect the clients whose command rate grew the most',
-          'Shed load until latency and error rates recover',
         ],
       },
       {
@@ -160,6 +151,18 @@ export class Correlator {
           'Review cluster-level slow queries across nodes',
           'Inspect CLUSTER INFO for partially-failed slots',
           'Confirm no split-brain scenario exists',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
+        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
+        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
+        recommendations: [
+          'Add exponential backoff with jitter and a retry budget to the client retry policy',
+          'Put a circuit breaker in front of the instance so failing calls stop retrying',
+          'Set client timeouts above the observed P99 so slow replies are not retried',
+          'Throttle or inspect the clients whose command rate grew the most',
+          'Shed load until latency and error rates recover',
         ],
       },
       {
@@ -551,8 +554,12 @@ export class Correlator {
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
     if (rule.pattern === AnomalyPattern.RETRY_AMPLIFICATION) {
       const event = anomalies.find((a) => a.metricType === MetricType.RETRY_AMPLIFICATION);
-      const trigger = event ? readRetryAmplificationTrigger(event.message) : null;
-      return trigger ? RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', trigger) : rule.diagnosis;
+      return event?.retryTrigger
+        ? RETRY_AMPLIFICATION_DIAGNOSIS.replace(
+            '{trigger}',
+            RETRY_AMP_TRIGGER_LABEL[event.retryTrigger],
+          )
+        : rule.diagnosis;
     }
     if (rule.pattern === AnomalyPattern.REPLICATION_DIVERGENCE) {
       return describeReplicationDivergence(rule.diagnosis, anomalies);

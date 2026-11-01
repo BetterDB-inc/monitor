@@ -3182,17 +3182,6 @@ export class AnomalyService
     await this.addAnomaly(event, ctx);
   }
 
-  /**
-   * Detect event-loop SATURATION using the real-work busyness signal that raw
-   * CPU% hides (valkey-io/valkey#2055). On a largely single-threaded server the
-   * true busyness indicator is how much of wall-clock time the event loop
-   * spends doing work, derived from INFO stats
-   * `instantaneous_eventloop_duration_usec` * `instantaneous_eventloop_cycles_per_sec`.
-   * Those fields are optional (older servers omit them), so this is a graceful
-   * no-op when they are absent. State-based with hysteresis: emits only when
-   * busyness escalates and re-arms on a drop; the passed cpuUtilization lets the
-   * message point out when CPU% understates the load.
-   */
   private async detectErrorReplies(
     info: Record<string, string>,
     errorstats: ErrorStatsInfo | undefined,
@@ -3263,6 +3252,17 @@ export class AnomalyService
     await this.addAnomaly(anomaly, ctx);
   }
 
+  /**
+   * Detect event-loop SATURATION using the real-work busyness signal that raw
+   * CPU% hides (valkey-io/valkey#2055). On a largely single-threaded server the
+   * true busyness indicator is how much of wall-clock time the event loop
+   * spends doing work, derived from INFO stats
+   * `instantaneous_eventloop_duration_usec` * `instantaneous_eventloop_cycles_per_sec`.
+   * Those fields are optional (older servers omit them), so this is a graceful
+   * no-op when they are absent. State-based with hysteresis: emits only when
+   * busyness escalates and re-arms on a drop; the passed cpuUtilization lets the
+   * message point out when CPU% understates the load.
+   */
   private async detectLoadSaturation(
     info: Record<string, string>,
     ctx: ConnectionContext,
@@ -3407,20 +3407,15 @@ export class AnomalyService
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
       message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
       relatedMetrics: finding.relatedMetrics,
+      retryTrigger: finding.trigger,
       resolved: false,
       connectionId: ctx.connectionId,
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addLatchedAnomaly(
-      event,
-      ctx,
-      ctx.connectionId,
-      retryAmplificationRearm(state, finding),
-    );
-
-    if (this.webhookEventsProService) {
+    this.anomalySaveHooks.set(event, () => {
+      if (event.resolved) return;
       this.webhookEventsProService
-        .dispatchRetryAmplificationDetected({
+        ?.dispatchRetryAmplificationDetected({
           level: finding.level,
           trigger: finding.trigger,
           windows: finding.windows,
@@ -3436,7 +3431,13 @@ export class AnomalyService
         .catch((err) => {
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
         });
-    }
+    });
+    await this.addLatchedAnomaly(
+      event,
+      ctx,
+      ctx.connectionId,
+      retryAmplificationRearm(state, finding),
+    );
   }
 
   private refreshClientSnapshots(

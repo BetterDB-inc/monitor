@@ -299,7 +299,12 @@ describe('Correlator', () => {
 
     it('names the trigger from the detector event in the diagnosis', () => {
       const groups = correlator.correlate([
-        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message, connectionId: 'a' }),
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          retryTrigger: 'latency',
+          connectionId: 'a',
+        }),
       ]);
 
       expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
@@ -344,9 +349,9 @@ describe('Correlator', () => {
       expect(groups[0].recommendations.join(' ')).toContain('backoff');
     });
 
-    it('falls back to the generic diagnosis when the message has no trigger', () => {
+    it('falls back to the generic diagnosis when the event has no trigger', () => {
       const groups = correlator.correlate([
-        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message: 'retry amplification' }),
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message }),
       ]);
 
       expect(groups[0].diagnosis).toContain('stepped up together with a stress signal');
@@ -362,6 +367,55 @@ describe('Correlator', () => {
       ]);
 
       expect(groups[0].anomalies[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    });
+  });
+
+  describe('pattern precedence', () => {
+    const signals: Record<string, Partial<AnomalyEvent>> = {
+      saturation: {
+        metricType: MetricType.CPU_UTILIZATION,
+        syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+      },
+      auth: { metricType: MetricType.ACL_DENIED },
+      role: { metricType: MetricType.REPLICATION_ROLE },
+      clusterState: { metricType: MetricType.CLUSTER_STATE },
+      retry: { metricType: MetricType.RETRY_AMPLIFICATION },
+      divergence: { metricType: MetricType.REPLICATION_DIVERGENCE },
+    };
+
+    it.each([
+      ['saturation', 'divergence', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'retry', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'role', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'clusterState', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'auth', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['auth', 'retry', AnomalyPattern.AUTH_ATTACK],
+      ['role', 'retry', AnomalyPattern.NODE_FAILOVER],
+      ['clusterState', 'retry', AnomalyPattern.NODE_FAILOVER],
+      ['auth', 'divergence', AnomalyPattern.AUTH_ATTACK],
+      ['role', 'divergence', AnomalyPattern.NODE_FAILOVER],
+      ['clusterState', 'divergence', AnomalyPattern.NODE_FAILOVER],
+      ['retry', 'divergence', AnomalyPattern.RETRY_AMPLIFICATION],
+    ])('%s wins over %s', (winner, loser, pattern) => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', ...signals[loser] }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', ...signals[winner] }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(pattern);
+      expect(groups[0].anomalies).toHaveLength(2);
+    });
+
+    it('keeps divergence over a plain CPU move without the saturation marker', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', metricType: MetricType.CPU_UTILIZATION }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', ...signals.divergence }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
     });
   });
 
@@ -663,7 +717,6 @@ describe('Correlator', () => {
         divergence({ timestamp: now }),
         makeAnomaly({
           metricType: MetricType.CPU_UTILIZATION,
-          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
           timestamp: now + 100,
           connectionId: 'c1',
         }),

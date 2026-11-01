@@ -1,6 +1,6 @@
 import { leastSquaresSlope } from '../cache-simulator/growth-fit';
 import { median } from '../latency-regression/regression-detector';
-import { MetricType } from './types';
+import { MetricType, RetryAmplificationTrigger } from './types';
 
 export const RETRY_AMP_WINDOW_MS = 60_000;
 export const RETRY_AMP_MIN_COVERAGE = 0.5;
@@ -44,7 +44,7 @@ export const RETRY_AMP_HELD_SATURATION_METRICS: readonly MetricType[] = [
 ];
 
 export type RetryAmplificationLevel = 'none' | 'warning' | 'critical';
-export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
+export type { RetryAmplificationTrigger };
 export type RetryAmplificationPattern = 'rising' | 'step';
 export type RetryAmplificationEpisodeClass = 'transient' | 'unconfirmed' | 'amplifying';
 
@@ -141,6 +141,7 @@ export interface RetryAmplificationState {
   coldStreak: number;
   episodeLevel: RetryAmplificationLevel;
   episodeMovement: CoMovement | null;
+  currentLevel: RetryAmplificationLevel;
   ackedLevel: RetryAmplificationLevel;
   pending: RetryAmplificationFinding | null;
   lastEpisode: RetryAmplificationEpisode | null;
@@ -148,7 +149,7 @@ export interface RetryAmplificationState {
 
 const LEVEL_RANK: Record<RetryAmplificationLevel, number> = { none: 0, warning: 1, critical: 2 };
 
-const TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
+export const RETRY_AMP_TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> = {
   latency: 'a latency regression (COMMAND_P99)',
   errors: 'an error-reply burst',
   churn: 'connection churn',
@@ -158,8 +159,6 @@ const LOAD_PATTERN_LABEL: Record<LoadPattern, string> = {
   stress: 'load is rising with stress',
   step: 'load stepped up under stress and is holding',
 };
-
-const TRIGGER_PATTERN = /Trigger: ([^.]+)\./;
 
 export function retryAmplificationMaxPollGap(pollIntervalMs: number): number {
   if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) return RETRY_AMP_MAX_POLL_GAP_MS;
@@ -195,6 +194,7 @@ export function createRetryAmplificationState(
     coldStreak: 0,
     episodeLevel: 'none',
     episodeMovement: null,
+    currentLevel: 'none',
     ackedLevel: 'none',
     pending: null,
     lastEpisode: null,
@@ -407,13 +407,8 @@ function buildMessage(
     `stay flat at ~${Math.round(clients)}; ` +
     LOAD_PATTERN_LABEL[pattern] +
     (correlation === null ? '' : ` (r=${correlation.toFixed(2)})`) +
-    `. Trigger: ${TRIGGER_LABEL[trigger]}. ${outcome}`
+    `. Trigger: ${RETRY_AMP_TRIGGER_LABEL[trigger]}. ${outcome}`
   );
-}
-
-export function readRetryAmplificationTrigger(message: string): string | null {
-  const match = TRIGGER_PATTERN.exec(message);
-  return match ? match[1] : null;
 }
 
 function hotWindowCount(state: RetryAmplificationState): number {
@@ -483,6 +478,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
   state.coldStreak = 0;
   state.episodeLevel = 'none';
   state.episodeMovement = null;
+  state.currentLevel = 'none';
   state.ackedLevel = 'none';
   state.pending = null;
 }
@@ -532,6 +528,7 @@ function evaluateWindow(
 
   state.episodeLevel =
     LEVEL_RANK[finding.level] > LEVEL_RANK[state.episodeLevel] ? finding.level : state.episodeLevel;
+  state.currentLevel = finding.level;
   if (LEVEL_RANK[finding.level] < LEVEL_RANK[state.ackedLevel]) {
     state.ackedLevel = finding.level;
   }
@@ -692,7 +689,7 @@ export function describeRetryAmplificationState(
   return {
     armed,
     classification,
-    level: classification === 'amplifying' ? state.ackedLevel : 'none',
+    level: classification === 'amplifying' ? state.currentLevel : 'none',
     windows: hotWindowCount(state),
     baseline: armed ? computeBaseline(state.coldWindows) : null,
     lastEpisode: state.lastEpisode,

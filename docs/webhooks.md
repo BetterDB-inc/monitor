@@ -538,11 +538,11 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 - `rising`: load rises at least 10% and moves with stress inside the run (`correlation` ≥ 0.5).
 - `step`: the last 3 windows hold at 2× baseline or more with an error-reply or reconnect burst. `correlation` is `null` for this shape.
 
-`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires when a run first reaches a level and each time it rises to `critical` again after falling back to `warning`. A fall to `warning` does not fire. It re-arms after 2 normal windows.
+`level` is `critical` while saturation is active in the latest window, otherwise `warning`. It fires when a run first reaches a level and each time it rises to `critical` again after falling back to `warning`. A fall to `warning` does not fire. It is sent when the event is first saved, so it waits for storage if a save has to be retried, and a finding that is never saved sends nothing. It re-arms after 2 normal windows.
 
 This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
 
-`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its lifetime average and needs CLIENT LIST `tot-cmds` (Valkey 8+); on older servers it is `null` and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+`trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
 
 ```json
 {

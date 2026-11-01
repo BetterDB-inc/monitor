@@ -3571,13 +3571,17 @@ describe('AnomalyService', () => {
       expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
       expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
+      expect(recorded[0].retryTrigger).toBe('latency');
     });
 
     it('dispatches retry_amplification.detected with the finding and contributors', async () => {
       dbClient.getClients = growingClients();
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
 
-      const { recorded } = await runRetry();
+      await runRetry({ realEmit: true });
+      const recorded = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
 
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
@@ -3598,9 +3602,11 @@ describe('AnomalyService', () => {
         new Error('dispatcher down'),
       );
 
-      const { recorded, errorsCaught } = await runRetry();
+      const { errorsCaught } = await runRetry({ realEmit: true });
 
-      expect(recorded).toHaveLength(1);
+      expect(
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+      ).toHaveLength(1);
       expect(errorsCaught).toHaveLength(0);
     });
 
@@ -4373,23 +4379,70 @@ describe('AnomalyService', () => {
       });
     });
 
-    it('sends the webhook during a storage outage, once', async () => {
+    it('holds the webhook until the save goes through', async () => {
       storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
 
       await runRetry({ realEmit: true });
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
 
+      storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+      await (service as any).drainPersistenceOutbox();
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
     });
 
-    it('does not repeat the webhook when a failed write later succeeds', async () => {
+    it('sends one webhook however many saves it takes', async () => {
       storage.saveAnomalyEvent = jest
         .fn()
         .mockRejectedValueOnce(new Error('storage down'))
         .mockResolvedValue('id');
 
       await runRetry({ realEmit: true });
+      await (service as any).drainPersistenceOutbox();
 
       expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no webhook for a finding the outbox dropped', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+      await runRetry({ realEmit: true });
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+      await (service as any).drainPersistenceOutbox();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
+    });
+
+    it('sends one webhook when a dropped finding is raised again', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+      const dropOnce = (w: number) => {
+        if (w === 16) {
+          (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+          storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+        }
+        return false;
+      };
+
+      await runRetry({ realEmit: true, saturated: dropOnce });
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no webhook for a finding resolved before its save went through', async () => {
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          service
+            .getRecentEvents()
+            .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION)[0].resolved = true;
+          throw new Error('storage down');
+        })
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+      await (service as any).drainPersistenceOutbox();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
     });
 
     it('ignores a relative CPU move, even a critical one', async () => {

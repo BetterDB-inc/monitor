@@ -145,6 +145,8 @@ export enum AnomalyPattern {
   UNKNOWN = 'unknown',
 }
 
+export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
+
 export interface AnomalyEvent {
   id: string;
   timestamp: number;
@@ -171,6 +173,7 @@ export interface AnomalyEvent {
    * the numeric fields.
    */
   syntheticPattern?: AnomalyPattern;
+  retryTrigger?: RetryAmplificationTrigger;
   /**
    * Transient (not persisted): whether this cached event was durably written to
    * storage. Deterministic string-id events (failover/promotion/cluster/
