@@ -49,13 +49,19 @@ opens. Surface findings:
 - **ACL banner** — when the connection user is missing `+monitor`, an
   `ACL SETUSER` snippet is rendered with a copy-to-clipboard button.
 - **Health gate** — memory pressure, recent OOM events, active failover,
-  an unhealthy replica link, and replication lag. Lag compares each
-  replica's acked offset with the primary offset from about a second
-  earlier, so writes still in flight do not count; this adds a wait of
-  about a second when a replica can be measured. Lag or link state that
-  cannot be read shows as unavailable and does not block. The gate only
-  blocks anomaly-triggered and scheduled captures; manual sessions
-  surface the report as a warning.
+  an unhealthy replica link, and replication lag. A link is unhealthy
+  when a primary's replica is not online or has stopped acking, or when
+  a replica's own link to its primary is down, syncing or stale. This
+  means a normal resync also blocks until it finishes. Lag starts as the
+  gap between the primary offset and each replica's last ack. A gap
+  under the limit is reported as is and needs no wait. A gap at or above
+  the limit may only be writes in flight, so the gate polls for up to
+  2.5 s until that replica acks again and compares the new ack with the
+  primary offset just before it. A replica that drops or never acks
+  keeps its first gap. Unreadable lag shows as unavailable, unreadable
+  link state shows as n/a, and neither blocks. The gate only blocks
+  anomaly-triggered and scheduled captures; manual sessions surface the
+  report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested
   duration based on the live ops/sec.
 
@@ -157,5 +163,6 @@ demo host).
 | `MONITOR_PROVIDER_OVERRIDE` | off | Test-only override for the pre-flight provider detector |
 | `MONITOR_RECENT_OOM_WINDOW_MS` | 5 min | Health-gate window for recent OOM-correlated anomalies |
 | `MONITOR_RECENT_FAILOVER_WINDOW_MS` | 2 min | Health-gate window for replication-role changes |
-| `MONITOR_REPLICATION_LAG_BYTES` | 10 MB | Health-gate limit on how far the furthest-behind replica's acked offset is from the primary offset about a second earlier |
-| `MONITOR_REPLICA_IO_STALE_SEC` | 30 s | Health-gate limit on `master_last_io_seconds_ago`; a link is unhealthy when the value is strictly greater, so keep this comfortably above `repl-ping-replica-period` |
+| `MONITOR_MEMORY_PCT_THRESHOLD` | 85 | Health-gate limit on `used_memory` as a percentage of `maxmemory` |
+| `MONITOR_REPLICATION_LAG_BYTES` | 10 MB | Health-gate limit on how far the furthest-behind replica's acked offset is from the primary offset |
+| `MONITOR_REPLICA_IO_STALE_SEC` | 30 s | Health-gate limit on `master_last_io_seconds_ago` on a replica and on each replica's `lag` on a primary; a link is unhealthy when the value is strictly greater, so keep this comfortably above `repl-ping-replica-period` |

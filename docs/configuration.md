@@ -246,6 +246,18 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
 
+### Monitor Health Gate
+
+These thresholds decide when anomaly-triggered and scheduled MONITOR captures are skipped. See [Monitor](monitor.md) for how each signal is read.
+
+| Variable                            | Required | Default    | Description                                                                                                                                            |
+| ----------------------------------- | -------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MONITOR_MEMORY_PCT_THRESHOLD`      | No       | `85`       | Skip when `used_memory` reaches this percentage of `maxmemory`                                                                                         |
+| `MONITOR_RECENT_OOM_WINDOW_MS`      | No       | `300000`   | Skip when an OOM-correlated anomaly occurred within this window (milliseconds)                                                                         |
+| `MONITOR_RECENT_FAILOVER_WINDOW_MS` | No       | `120000`   | Skip when a replication role change occurred within this window (milliseconds)                                                                         |
+| `MONITOR_REPLICATION_LAG_BYTES`     | No       | `10485760` | Skip when the furthest-behind replica's acked offset is at least this many bytes from the primary offset                                               |
+| `MONITOR_REPLICA_IO_STALE_SEC`      | No       | `30`       | Skip when `master_last_io_seconds_ago` on a replica, or a replica's `lag` on a primary, is greater than this; keep it above `repl-ping-replica-period` |
+
 ### Prometheus Metrics
 
 | Variable                      | Required | Default           | Description                                                                                                                                                                           |
