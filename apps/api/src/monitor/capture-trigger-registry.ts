@@ -23,6 +23,8 @@ export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
+const LATE_ANOMALY_LOOKBACK_MS = 70 * 60 * 1000;
+
 export interface CreateTriggerInput {
   connectionId: string;
   metricType: string;
@@ -53,6 +55,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CaptureTriggerRegistry.name);
   private pollHandle?: NodeJS.Timeout;
   private lastAnomalyAt: number;
+  private readonly seenAnomalies = new Map<string, number>();
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
   private ticking = false;
@@ -63,8 +66,8 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly healthGate: HealthGateService,
     private readonly webhookDispatcher: WebhookDispatcherService,
   ) {
-    // Seed the watermark to "now" so a process restart never replays
-    // historical anomalies as if they just arrived. The trigger.createdAt
+    // Seed the watermark to "now" so a process restart reads only the
+    // late-save lookback rather than all history. The trigger.createdAt
     // guard in processNewAnomalies() blocks events older than each trigger
     // anyway, but starting from 0 still means an unbounded scan on first
     // tick. Tests can reset via the test seam below.
@@ -194,7 +197,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processNewAnomalies(): Promise<void> {
-    const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
+    const startTime = Math.max(0, this.lastAnomalyAt - LATE_ANOMALY_LOOKBACK_MS);
     const pageSize = 200;
     // Drain pagination by walking offset until storage returns fewer rows
     // than requested. Cap total work per tick so a runaway backlog can't
@@ -226,6 +229,10 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (evt.timestamp > maxTs) {
         maxTs = evt.timestamp;
       }
+      if (this.seenAnomalies.has(evt.id)) {
+        continue;
+      }
+      this.seenAnomalies.set(evt.id, evt.timestamp);
       if (!evt.connectionId) {
         continue;
       }
@@ -239,6 +246,12 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.lastAnomalyAt = maxTs;
+    const oldestLive = maxTs - LATE_ANOMALY_LOOKBACK_MS;
+    for (const [id, timestamp] of this.seenAnomalies) {
+      if (timestamp < oldestLive) {
+        this.seenAnomalies.delete(id);
+      }
+    }
   }
 
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
