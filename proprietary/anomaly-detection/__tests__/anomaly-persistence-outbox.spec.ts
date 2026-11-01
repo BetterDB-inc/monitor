@@ -109,7 +109,7 @@ describe('PersistenceOutbox', () => {
   });
 
   it('drops the oldest entry when full', () => {
-    for (let i = 0; i <= OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`id-${i}`, 1, 0);
+    for (let i = 0; i <= OUTBOX_MAX_ENTRIES; i++) outbox.enqueueSave(event(`id-${i}`), undefined, 0);
 
     expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES);
     expect(outbox.has('id-0')).toBe(false);
@@ -168,6 +168,40 @@ describe('PersistenceOutbox', () => {
       outbox.enqueueSave(event('new'), undefined, 1);
 
       expect(outbox.has('close')).toBe(true);
+    });
+
+    describe('with only closes left', () => {
+      const fillWithCloses = () => {
+        for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`close-${i}`, 100, 0);
+      };
+
+      it('keeps every close that has no callback', () => {
+        fillWithCloses();
+        outbox.enqueueResolve('late', 100, 0);
+
+        expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES + 1);
+        expect(dropped).toEqual([]);
+      });
+
+      it('turns away a new save', () => {
+        fillWithCloses();
+        const reRaise = jest.fn();
+        outbox.enqueueSave(event('late'), undefined, 0, reRaise);
+
+        expect(outbox.has('late')).toBe(false);
+        expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES);
+        expect(dropped).toEqual([['late', 'full']]);
+      });
+
+      it('evicts a close with a callback before an older one without', () => {
+        fillWithCloses();
+        outbox.settle('close-999');
+        outbox.enqueueResolve('raised-again', 100, 0, jest.fn());
+        outbox.enqueueResolve('late', 100, 0);
+
+        expect(dropped).toEqual([['raised-again', 'full']]);
+        expect(outbox.has('close-0')).toBe(true);
+      });
     });
 
     it('runs the callback of a resolve evicted from a full outbox of resolves', () => {
@@ -244,17 +278,16 @@ describe('PersistenceOutbox', () => {
         expect(dropped).toEqual([['save-0', 'full']]);
       });
 
-      it('never re-arms when a full outbox of closes evicts it', () => {
+      it('stays in a full outbox of closes', () => {
         const onDrop = jest.fn();
         unsaved('a', onDrop).resolved = true;
         for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
 
         outbox.enqueueResolve('new', 100, 1);
-        outbox.settle('new');
         outbox.due(0);
 
-        expect(outbox.has('a')).toBe(false);
-        expect(dropped).toEqual([['a', 'full']]);
+        expect(outbox.has('a')).toBe(true);
+        expect(dropped).toEqual([]);
         expect(onDrop).not.toHaveBeenCalled();
       });
 
@@ -366,6 +399,37 @@ describe('PersistenceOutbox', () => {
 
       outbox.due(0);
       expect(onDrop).toHaveBeenCalledTimes(1);
+    });
+
+    describe('when the event moved on while the drop was held', () => {
+      const holdDrop = (anomaly: AnomalyEvent, reRaise: () => void) => {
+        outbox.enqueueSave(anomaly, undefined, 0, reRaise);
+        for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`close-${i}`, 100, 0);
+        outbox.settle('close-0');
+        outbox.settle('close-1');
+      };
+
+      it('leaves an event that was saved since', () => {
+        const anomaly = event('a');
+        const reRaise = jest.fn();
+        holdDrop(anomaly, reRaise);
+        anomaly.persisted = true;
+
+        outbox.due(0);
+
+        expect(reRaise).not.toHaveBeenCalled();
+      });
+
+      it('leaves an event that was queued again', () => {
+        const anomaly = event('a');
+        const reRaise = jest.fn();
+        holdDrop(anomaly, reRaise);
+        outbox.enqueueRewrite(anomaly, 0);
+
+        outbox.due(0);
+
+        expect(reRaise).not.toHaveBeenCalled();
+      });
     });
 
     it('cannot turn eviction into a chain of re-emits while the outbox stays full', () => {

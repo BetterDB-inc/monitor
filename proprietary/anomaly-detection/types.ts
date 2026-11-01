@@ -168,10 +168,8 @@ export interface AnomalyEvent {
   syntheticPattern?: AnomalyPattern;
   /**
    * Transient (not persisted): whether this cached event was durably written to
-   * storage. Deterministic string-id events (failover/promotion/cluster/
-   * persistence/dup-primary) can't be stored on Postgres (UUID PK), so they stay
-   * memory-only and are resolved by flipping the cache — a storage-backed poll
-   * can never resurface a row that was never written.
+   * storage. An event whose save has not landed is resolved by flipping the cache
+   * and carrying the close on its pending save.
    */
   persisted?: boolean;
 }

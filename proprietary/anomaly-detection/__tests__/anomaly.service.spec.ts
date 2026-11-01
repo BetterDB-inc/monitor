@@ -4851,6 +4851,60 @@ describe('AnomalyService', () => {
 
       expect((service as any).persistenceOutbox.has('outage-1')).toBe(true);
     });
+
+    describe('draining the outbox', () => {
+      const queueSave = (id: string) =>
+        (service as any).persistenceOutbox.enqueueSave(
+          { ...cached(id), connectionId: 'conn-1', persisted: false },
+          undefined,
+          Date.now(),
+        );
+
+      it('stops the pass at the first storage failure', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        queueSave('first');
+        queueSave('second');
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+        expect((service as any).persistenceOutbox.size).toBe(2);
+      });
+
+      it('stops the pass when a resolve cannot reach storage', async () => {
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        (service as any).persistenceOutbox.enqueueResolve('first', 100, 0);
+        (service as any).persistenceOutbox.enqueueResolve('second', 100, 0);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(1);
+      });
+
+      it('reaches the next entry past a failed one on the following pass', async () => {
+        storage.saveAnomalyEvent.mockImplementation(async (event: { id: string }) => {
+          if (event.id === 'first') throw new Error('rejected row');
+        });
+        queueSave('first');
+        queueSave('second');
+
+        await (service as any).drainPersistenceOutbox();
+        await (service as any).drainPersistenceOutbox();
+
+        expect((service as any).persistenceOutbox.has('second')).toBe(false);
+      });
+
+      it('carries on past a resolve whose row is missing', async () => {
+        (service as any).recentAnomalies.push(cached('missing'));
+        storage.resolveAnomaly.mockResolvedValue(false);
+        (service as any).persistenceOutbox.enqueueResolve('missing', 100, 0);
+        (service as any).persistenceOutbox.enqueueResolve('next', 100, 0);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   describe('sweeping removed connections', () => {
@@ -8734,18 +8788,16 @@ describe('AnomalyService', () => {
           );
         });
 
-        it('does not raise it again when a full outbox evicts it', async () => {
+        it('does not raise it again while a full outbox of closes holds it', async () => {
           failSaves();
           await pollWith(clients(85));
           const [first] = events();
           await service.resolveAnomaly(first.id);
 
           fillOutbox((i) => (service as any).persistenceOutbox.enqueueResolve(`r-${i}`, 1, 1));
-          (service as any).persistenceOutbox.settle('r-0');
           (service as any).persistenceOutbox.due(Date.now());
 
-          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
-          expect((service as any).latchHolders.size).toBe(0);
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(true);
           healSaves();
           await pollWith(clients(85));
           expect(events()).toHaveLength(1);
