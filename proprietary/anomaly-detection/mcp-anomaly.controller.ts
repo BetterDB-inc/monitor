@@ -72,6 +72,7 @@ export class McpAnomalyController {
   ) {
     const now = Date.now();
     try {
+      this.registry.get(id);
       const [replicas, events] = await Promise.all([
         this.anomalyService.getReplicationDivergenceHistory(
           id,

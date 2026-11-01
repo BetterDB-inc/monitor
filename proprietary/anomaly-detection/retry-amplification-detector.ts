@@ -73,6 +73,7 @@ export interface RetryAmplificationWindow {
   errorRate: number | null;
   churnPerSec: number | null;
   latencyEvent: boolean;
+  latencyOnset: boolean;
   saturationMetrics: MetricType[];
 }
 
@@ -98,6 +99,7 @@ interface OpenWindow {
   churnSum: number;
   churnCount: number;
   latencyEvent: boolean;
+  latencyOnset: boolean;
   saturationMetrics: Set<MetricType>;
 }
 
@@ -137,6 +139,7 @@ export interface RetryAmplificationState {
   closing: OpenWindow | null;
   coldWindows: RetryAmplificationWindow[];
   hotRun: RetryAmplificationWindow[];
+  pendingCold: RetryAmplificationWindow[];
   droppedHotWindows: number;
   coldStreak: number;
   episodeLevel: RetryAmplificationLevel;
@@ -190,6 +193,7 @@ export function createRetryAmplificationState(
     closing: null,
     coldWindows: [],
     hotRun: [],
+    pendingCold: [],
     droppedHotWindows: 0,
     coldStreak: 0,
     episodeLevel: 'none',
@@ -216,6 +220,7 @@ function openWindow(start: number): OpenWindow {
     churnSum: 0,
     churnCount: 0,
     latencyEvent: false,
+    latencyOnset: false,
     saturationMetrics: new Set(),
   };
 }
@@ -253,6 +258,7 @@ function summarize(open: OpenWindow): RetryAmplificationWindow | null {
     errorRate: open.errorsMs > 0 ? open.errors / (open.errorsMs / 1000) : null,
     churnPerSec: open.churnCount > 0 ? open.churnSum / open.churnCount : null,
     latencyEvent: open.latencyEvent,
+    latencyOnset: open.latencyOnset,
     saturationMetrics: [...open.saturationMetrics],
   };
 }
@@ -362,7 +368,7 @@ function findTrigger(
   base: WindowBaseline,
 ): RetryAmplificationTrigger {
   for (const w of run) {
-    if (w.latencyEvent) return 'latency';
+    if (w.latencyOnset) return 'latency';
     if (hasErrorStress(w, base)) return 'errors';
     if (hasChurnStress(w, base)) return 'churn';
   }
@@ -474,6 +480,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
     };
   }
   state.hotRun = [];
+  state.pendingCold = [];
   state.droppedHotWindows = 0;
   state.coldStreak = 0;
   state.episodeLevel = 'none';
@@ -507,20 +514,24 @@ function evaluateWindow(
       return;
     }
     state.coldStreak += 1;
+    state.pendingCold.push(w);
     const amplifying = state.hotRun.length >= RETRY_AMP_MIN_WINDOWS;
     if (!amplifying || state.coldStreak >= RETRY_AMP_REARM_COLD_WINDOWS) {
       const lastHot = state.hotRun[state.hotRun.length - 1];
+      const settled = state.pendingCold;
       closeEpisode(state, lastHot.start + RETRY_AMP_WINDOW_MS, base);
-      pushCold(state, w);
+      for (const cold of settled) pushCold(state, cold);
     }
     return;
   }
 
   state.coldStreak = 0;
+  state.pendingCold = [];
   state.hotRun.push(w);
   if (state.hotRun.length > RETRY_AMP_MAX_HOT_WINDOWS) {
-    state.hotRun.splice(1, 1);
+    const [aged] = state.hotRun.splice(1, 1);
     state.droppedHotWindows += 1;
+    if (state.episodeLevel === 'none') pushCold(state, aged);
   }
   state.pending = null;
   const finding = classifyRun(state, base, timestamp);
@@ -541,7 +552,10 @@ function markEvents(open: OpenWindow, events: RetryAmplificationEventRef[]): voi
   const end = open.start + RETRY_AMP_WINDOW_MS;
   for (const e of events) {
     if (e.timestamp < open.start || e.timestamp >= end) continue;
-    if (RETRY_AMP_STRESS_METRICS.includes(e.metricType)) open.latencyEvent = true;
+    if (RETRY_AMP_STRESS_METRICS.includes(e.metricType)) {
+      open.latencyEvent = true;
+      open.latencyOnset = true;
+    }
     if (RETRY_AMP_SATURATION_METRICS.includes(e.metricType))
       open.saturationMetrics.add(e.metricType);
   }

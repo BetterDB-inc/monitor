@@ -47,6 +47,15 @@ describe('McpAnomalyController', () => {
     );
   });
 
+  it('replication divergence returns 404 for an unregistered instance', async () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    await expect(controller.getReplicationDivergence('ghost')).rejects.toMatchObject({ status: 404 });
+    expect(svc.getReplicationDivergenceHistory).not.toHaveBeenCalled();
+  });
+
   it('replication divergence returns per-replica series with divergence events', async () => {
     jest.spyOn(Date, 'now').mockReturnValue(10_000_000);
     const res = await controller.getReplicationDivergence('inst1', '5', undefined);

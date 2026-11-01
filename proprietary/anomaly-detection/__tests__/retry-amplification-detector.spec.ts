@@ -9,6 +9,8 @@ import {
   RetryAmplificationFinding,
   RetryAmplificationState,
   RETRY_AMP_ARM_WINDOWS,
+  RETRY_AMP_MAX_HOT_WINDOWS,
+  RETRY_AMP_REARM_COLD_WINDOWS,
   RETRY_AMP_WINDOW_MS,
 } from '../retry-amplification-detector';
 import { MetricType } from '../types';
@@ -344,7 +346,6 @@ describe('retry amplification detector', () => {
     d.baseline();
     d.ramp(4, { p99: false, stressActive: true });
     expect(d.findings).toHaveLength(1);
-    expect(d.findings[0].trigger).toBe('latency');
     expect(d.findings[0].message).toContain('load is rising with stress');
   });
 
@@ -622,6 +623,80 @@ describe('retry amplification detector', () => {
     expect(d.findings[0].trigger).toBe('latency');
   });
 
+  it('names the errors behind a storm while an older latency verdict is held', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6, { p99: false, stressActive: true });
+    expect(d.findings[0].trigger).toBe('errors');
+  });
+
+  it('names churn behind a storm while an older latency verdict is held', () => {
+    const d = new Driver();
+    d.baseline();
+    for (let i = 0; i < 6; i++) {
+      d.window(
+        hot(1.5 + i * 0.15, {
+          p99: false,
+          stressActive: true,
+          errorsPerSec: 0.1,
+          churn: 5 + i * 5,
+        }),
+      );
+    }
+    expect(d.findings[0].trigger).toBe('churn');
+  });
+
+  it('names latency when a held verdict is the only stress', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6, { p99: false, stressActive: true, errorsPerSec: 0.1 });
+    d.windows(BASE, RETRY_AMP_REARM_COLD_WINDOWS + 1);
+
+    expect(d.state.lastEpisode?.trigger).toBe('latency');
+  });
+
+  it('moves the baseline once a run that never amplified outlives the hot cap', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), RETRY_AMP_MAX_HOT_WINDOWS + 5);
+
+    expect(d.findings).toHaveLength(0);
+    expect(d.state.coldWindows.some((w) => w.cmdsPerClient > 11)).toBe(true);
+  });
+
+  it('keeps an amplifying run out of the baseline past the hot cap', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6);
+    d.windows(storm(2.5), RETRY_AMP_MAX_HOT_WINDOWS + 5);
+
+    expect(d.state.coldWindows.some((w) => w.cmdsPerClient > 11)).toBe(false);
+  });
+
+  it('adds every cold window after an episode to the baseline', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6);
+    expect(d.findings).toHaveLength(1);
+
+    d.windows({ ...BASE, cmdsPerClient: 10.5 }, RETRY_AMP_REARM_COLD_WINDOWS + 1);
+
+    expect(d.state.coldWindows.filter((w) => w.cmdsPerClient > 10.4)).toHaveLength(
+      RETRY_AMP_REARM_COLD_WINDOWS,
+    );
+  });
+
+  it('leaves a cold window out of the baseline when the run turns hot again', () => {
+    const d = new Driver();
+    d.baseline();
+    d.ramp(6);
+    d.window({ ...BASE, cmdsPerClient: 10.5 });
+    d.windows(storm(2.5), 2);
+    d.windows(BASE, RETRY_AMP_REARM_COLD_WINDOWS + 1);
+
+    expect(d.state.coldWindows.some((w) => w.cmdsPerClient > 10.4)).toBe(false);
+  });
+
   it('names the earliest stress leg as the trigger', () => {
     const d = new Driver();
     d.baseline();
@@ -872,6 +947,7 @@ describe('retry amplification detector', () => {
         errorRate: null,
         churnPerSec: null,
         latencyEvent: false,
+        latencyOnset: false,
         saturationMetrics: [],
       }));
 

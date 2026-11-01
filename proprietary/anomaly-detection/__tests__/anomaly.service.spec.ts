@@ -3579,6 +3579,7 @@ describe('AnomalyService', () => {
           ts += 1_000;
         }
       }
+      await new Promise((resolve) => setImmediate(resolve));
       return { recorded, errorsCaught };
     }
 
@@ -3853,6 +3854,72 @@ describe('AnomalyService', () => {
       expect(outcome).toBe('returned');
     });
 
+    describe('CLIENT LIST reads', () => {
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      };
+      const poll = async (ts: number) => {
+        await (service as any).detectRetryAmplification(info, mockCtx, ts);
+        await new Promise((resolve) => setImmediate(resolve));
+      };
+
+      it('stops once the server reports no per-client command counts', async () => {
+        dbClient.getClients = jest.fn().mockResolvedValue([{ id: '1', addr: '10.0.0.1:1' }]);
+
+        await poll(1_000_000);
+        await poll(1_060_000);
+
+        expect(dbClient.getClients).toHaveBeenCalledTimes(1);
+      });
+
+      it('keeps trying after a failed read', async () => {
+        dbClient.getClients = jest.fn().mockRejectedValue(new Error('LOADING'));
+
+        await poll(1_000_000);
+        await poll(1_060_000);
+
+        expect(dbClient.getClients).toHaveBeenCalledTimes(2);
+      });
+
+      it('starts no new read while a timed out one is still running', async () => {
+        (service as unknown as { infoTimeoutMs: number }).infoTimeoutMs = 1;
+        dbClient.getClients = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+        await poll(1_000_000);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        await poll(1_060_000);
+
+        expect(dbClient.getClients).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('does not hold the poll while attribution reads storage', async () => {
+      dbClient.getClients = jest.fn().mockRejectedValue(new Error('NOPERM'));
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      storage.getNewClientConnections = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+      const { recorded } = await runRetry();
+
+      expect(storage.getNewClientConnections).toHaveBeenCalledTimes(1);
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('reports a connection on its own recent events', () => {
+      const event = (id: string, connectionId: string) => ({ id, connectionId, timestamp: 1 });
+      (service as any).recentAnomalies.push(event('a', 'conn-1'), event('b', 'conn-2'));
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['a']);
+
+      (service as any).recentAnomalies.push(event('c', 'conn-1'));
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['a', 'c']);
+
+      (service as any).recentAnomalies = [event('c', 'conn-1')];
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['c']);
+      expect((service as any).recentEventsOf('conn-2')).toEqual([]);
+    });
+
     it('reads CLIENT LIST at most once a window and skips while a read is pending', async () => {
       let answer: (clients: unknown[]) => void = () => undefined;
       dbClient.getClients = jest.fn().mockImplementation(
@@ -4105,6 +4172,7 @@ describe('AnomalyService', () => {
           total_error_replies: '0',
         };
         await (service as any).detectRetryAmplification(info, mockCtx, 900_000);
+        await new Promise((resolve) => setImmediate(resolve));
         return { state, info };
       };
 
@@ -8102,6 +8170,26 @@ describe('AnomalyService', () => {
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
         expect.objectContaining({ correlationIds: ['grp-own'], limit: 1000 }),
+      );
+    });
+
+    it('caps the member rows read for a page of groups', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue(
+        Array.from({ length: 500 }, (_, i) => ({
+          correlationId: `grp-${i}`,
+          timestamp: 1_000_000 + i,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        })),
+      );
+      storage.getAnomalyEvents.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 500, 'node-2');
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 10_000 }),
       );
     });
 
