@@ -197,9 +197,7 @@ function readReplication(
 
   return {
     replicationLagBytes: furthestReplicaGap(replication),
-    replicaLinkDown: REPLICA_ROLES.has(replication.role)
-      ? readReplicaLinkDown(replication, replicaIoStaleSeconds)
-      : null,
+    replicaLinkDown: readReplicaLinkDown(replication, replicaIoStaleSeconds),
     infoFailoverInProgress,
   };
 }
@@ -208,13 +206,17 @@ function readReplicaLinkDown(
   replication: Record<string, string>,
   replicaIoStaleSeconds: number,
 ): boolean | null {
-  const links = readMasterPrefixes(replication).map((prefix) =>
-    isMasterLinkDown(replication, prefix, replicaIoStaleSeconds),
-  );
+  const masterPrefixes = REPLICA_ROLES.has(replication.role) ? readMasterPrefixes(replication) : [];
+  const links = [
+    ...masterPrefixes.map((prefix) => isMasterLinkDown(replication, prefix, replicaIoStaleSeconds)),
+    ...readReplicaLines(replication).map(([, fields]) =>
+      isReplicaLinkDown(fields, replicaIoStaleSeconds),
+    ),
+  ];
   if (links.includes(true)) {
     return true;
   }
-  return links.includes(null) ? null : false;
+  return links.length === 0 || links.includes(null) ? null : false;
 }
 
 function readMasterPrefixes(replication: Record<string, string>): string[] {
@@ -243,6 +245,23 @@ function isMasterLinkDown(
   return linkStatus === undefined || syncInProgress === undefined || lastIoSeconds === null
     ? null
     : false;
+}
+
+function isReplicaLinkDown(
+  fields: Record<string, string>,
+  replicaIoStaleSeconds: number,
+): boolean | null {
+  if (fields.state === undefined) {
+    return null;
+  }
+  if (fields.state !== 'online') {
+    return true;
+  }
+  const lagSeconds = parseNumber(fields.lag);
+  if (readAckedOffset(fields) === null || lagSeconds === null) {
+    return null;
+  }
+  return lagSeconds > replicaIoStaleSeconds;
 }
 
 function furthestReplicaGap(replication: Record<string, string>): number | null {
@@ -276,18 +295,25 @@ function parseAckSample(replication: Record<string, string>): ReplicaAckSample |
 
 function readAcks(replication: Record<string, string>): Map<string, number> {
   const acks = new Map<string, number>();
-  for (const [key, value] of Object.entries(replication)) {
-    if (!REPLICA_LINE_KEY.test(key)) {
-      continue;
-    }
-    const fields = InfoParser.parseKvLine(value, ',');
-    const offset = parseNumber(fields.offset);
-    if (fields.state === 'online' && offset !== null && offset > 0) {
+  for (const [key, fields] of readReplicaLines(replication)) {
+    const offset = readAckedOffset(fields);
+    if (offset !== null) {
       const id = fields.ip === undefined ? key : `${fields.ip}:${fields.port}`;
       acks.set(id, Math.min(offset, acks.get(id) ?? offset));
     }
   }
   return acks;
+}
+
+function readReplicaLines(replication: Record<string, string>): [string, Record<string, string>][] {
+  return Object.entries(replication)
+    .filter(([key]) => REPLICA_LINE_KEY.test(key))
+    .map(([key, value]) => [key, InfoParser.parseKvLine(value, ',')]);
+}
+
+function readAckedOffset(fields: Record<string, string>): number | null {
+  const offset = parseNumber(fields.offset);
+  return fields.state === 'online' && offset !== null && offset > 0 ? offset : null;
 }
 
 function parseNumber(raw: string | undefined): number | null {

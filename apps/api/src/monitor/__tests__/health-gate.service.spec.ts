@@ -505,7 +505,7 @@ describe('HealthGateService', () => {
     expect(result.signals.replicaLinkDown).toBeNull();
   });
 
-  it('ignores replicas still in their initial sync', async () => {
+  it('leaves replicas still in their initial sync out of the lag', async () => {
     const { service } = makeService({
       info: makeInfo({
         role: 'master',
@@ -518,7 +518,6 @@ describe('HealthGateService', () => {
     });
     const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(0);
-    expect(result.allow).toBe(true);
   });
 
   it.each([
@@ -554,7 +553,6 @@ describe('HealthGateService', () => {
     });
     const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBeNull();
-    expect(result.allow).toBe(true);
   });
 
   it('reports lag as unavailable when connected replicas have no slaveN lines', async () => {
@@ -729,6 +727,100 @@ describe('HealthGateService', () => {
       });
       const result = await evaluateSettled(service);
       expect(result.signals.replicaLinkDown).toBeNull();
+    });
+  });
+
+  describe('replica links seen from the primary', () => {
+    const replicaLine = (fields: string) => ({ slave0: `ip=10.0.0.2,port=6379,${fields}` });
+    const HEALTHY = 'ip=10.0.0.3,port=6379,state=online,offset=1000,lag=0';
+
+    it.each(['wait_bgsave', 'send_bulk', 'send_bulk_and_stream'])(
+      'skips when a replica is in %s',
+      async (state) => {
+        const { service, client } = makeService({
+          info: makeInfo({
+            role: 'master',
+            replicas: { ...replicaLine(`state=${state},offset=0,lag=0`), slave1: HEALTHY },
+          }),
+        });
+        const result = await service.evaluate(CONNECTION_ID);
+        expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+        expect(result.signals.replicaLinkDown).toBe(true);
+        expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+      },
+    );
+
+    it('skips when an online replica has stopped acking', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'primary',
+          replicas: replicaLine('state=online,offset=1000,lag=31'),
+        }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(true);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
+    });
+
+    it('reports the link as healthy at the stale limit', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'master',
+          replicas: replicaLine('state=online,offset=1000,lag=30'),
+        }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(false);
+      expect(result.allow).toBe(true);
+    });
+
+    it('uses the configured stale limit', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'master',
+          replicas: replicaLine('state=online,offset=1000,lag=45'),
+        }),
+        config: { MONITOR_REPLICA_IO_STALE_SEC: 60 },
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(false);
+    });
+
+    it.each([
+      ['a SYNC consumer that never acks', 'state=online,offset=0,lag=500'],
+      ['a line with no lag', 'state=online,offset=1000'],
+      ['a line with an unreadable lag', 'state=online,offset=1000,lag=soon'],
+      ['a line with no state', 'offset=1000,lag=0'],
+    ])('reports the link as unknown for %s', async (_name, fields) => {
+      const { service } = makeService({
+        info: makeInfo({ role: 'master', replicas: replicaLine(fields) }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBeNull();
+      expect(result.allow).toBe(true);
+    });
+
+    it('reports the link as unknown when connected replicas have no lines', async () => {
+      const { service } = makeService({
+        info: makeInfo({ role: 'master', connected_slaves: '2' }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBeNull();
+    });
+
+    it('skips a chained replica whose own replica is in a resync', async () => {
+      const { service } = makeService({
+        info: makeInfo({
+          role: 'slave',
+          master_link_status: 'up',
+          master_sync_in_progress: '0',
+          master_last_io_seconds_ago: '1',
+          replicas: replicaLine('state=send_bulk,offset=0,lag=0'),
+        }),
+      });
+      const result = await evaluateSettled(service);
+      expect(result.signals.replicaLinkDown).toBe(true);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replica_link_unhealthy' });
     });
   });
 
