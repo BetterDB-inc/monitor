@@ -104,23 +104,38 @@ export class HealthGateService {
   ): Promise<number> {
     const gaps = readReplicaGaps(baseline);
     const threshold = this.thresholds.replicationLagThresholdBytes;
-    const pending = new Map(
-      [...baseline.acks].filter(([, ack]) => baseline.primaryOffset - ack >= threshold),
-    );
     const deadline = Date.now() + REPLICA_ACK_TIMEOUT_MS;
-    let previous = baseline;
+    const firstSample = await this.readAckSample(connectionId);
+    if (firstSample === null) {
+      return Math.max(...gaps.values());
+    }
 
+    const pending = new Map<string, number>();
+    for (const [id, gap] of gaps) {
+      const ack = firstSample.acks.get(id);
+      if (ack === undefined || gap < threshold) {
+        continue;
+      }
+      const freshGap = Math.max(0, firstSample.primaryOffset - ack);
+      if (freshGap >= threshold) {
+        pending.set(id, ack);
+      } else {
+        gaps.set(id, freshGap);
+      }
+    }
+
+    let previous = firstSample;
     while (pending.size > 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, REPLICA_ACK_POLL_INTERVAL_MS));
       const sample = await this.readAckSample(connectionId);
       if (sample === null) {
         break;
       }
-      for (const [id, baselineAck] of pending) {
+      for (const [id, lastAck] of pending) {
         const ack = sample.acks.get(id);
         if (ack === undefined) {
           pending.delete(id);
-        } else if (ack > baselineAck) {
+        } else if (ack > lastAck) {
           gaps.set(id, Math.max(0, previous.primaryOffset - ack));
           pending.delete(id);
         }

@@ -157,12 +157,14 @@ describe('HealthGateService', () => {
   );
 
   it('counts a replica that is far behind even when it acked within the last second', async () => {
+    const info = makeInfo({
+      role: 'master',
+      master_repl_offset: '600000000',
+      replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=90000000,lag=0' },
+    });
     const { service } = makeService({
-      info: makeInfo({
-        role: 'master',
-        master_repl_offset: '600000000',
-        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=90000000,lag=0' },
-      }),
+      info,
+      samples: [info],
       nextInfo: makeInfo({
         role: 'master',
         master_repl_offset: '610000000',
@@ -177,12 +179,14 @@ describe('HealthGateService', () => {
   it.each(['0', '1', '2'])(
     'does not count in-flight writes on a busy primary when a replica acked %ss ago',
     async (lag) => {
+      const info = makeInfo({
+        role: 'master',
+        master_repl_offset: '100000000',
+        replicas: { slave0: `ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=${lag}` },
+      });
       const { service } = makeService({
-        info: makeInfo({
-          role: 'master',
-          master_repl_offset: '100000000',
-          replicas: { slave0: `ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=${lag}` },
-        }),
+        info,
+        samples: [info],
         nextInfo: makeInfo({
           role: 'master',
           master_repl_offset: '130000000',
@@ -196,12 +200,14 @@ describe('HealthGateService', () => {
   );
 
   it('reports no negative lag once a replica passes the first primary offset', async () => {
+    const info = makeInfo({
+      role: 'master',
+      master_repl_offset: '100000000',
+      replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=0' },
+    });
     const { service } = makeService({
-      info: makeInfo({
-        role: 'master',
-        master_repl_offset: '100000000',
-        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=70000000,lag=0' },
-      }),
+      info,
+      samples: [info],
       nextInfo: makeInfo({
         role: 'master',
         master_repl_offset: '130000000',
@@ -227,6 +233,27 @@ describe('HealthGateService', () => {
     });
     const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
+  });
+
+  it('measures the first ack against a primary sample taken just before the polls', async () => {
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [primaryInfo(150_000_000, 130_000_000), primaryInfo(160_000_000, 131_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(19_000_000);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('stops once the sample before the polls puts a replica under the limit', async () => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [primaryInfo(150_000_000, 149_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(result.signals.replicationLagBytes).toBe(1_000_000);
+    expect(result.allow).toBe(true);
   });
 
   it('keeps sampling until a late ack lands', async () => {
@@ -369,7 +396,6 @@ describe('HealthGateService', () => {
   it('asks a fresh client for the replication section on each later sample', async () => {
     const { service, client, registry } = makeService({
       info: primaryInfo(100_000_000, 50_000_000),
-      nextInfo: primaryInfo(101_000_000, 100_000_000),
     });
     const replacement = {
       getInfoParsed: jest.fn().mockResolvedValue(primaryInfo(101_000_000, 100_000_000)),
@@ -379,8 +405,9 @@ describe('HealthGateService', () => {
     (registry.get as jest.Mock).mockReturnValue(replacement);
     await jest.runAllTimersAsync();
     await pending;
-    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
-    expect(client.getInfoParsed).toHaveBeenCalledWith();
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(client.getInfoParsed).toHaveBeenNthCalledWith(1);
+    expect(client.getInfoParsed).toHaveBeenNthCalledWith(2, ['replication']);
     expect(replacement.getInfoParsed).toHaveBeenCalledWith(['replication']);
   });
 
@@ -388,7 +415,7 @@ describe('HealthGateService', () => {
     const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation();
     const { service } = makeService({
       info: primaryInfo(100_000_000, 50_000_000),
-      samples: [primaryInfo(101_000_000, 60_000_000)],
+      samples: [primaryInfo(100_000_000, 50_000_000), primaryInfo(101_000_000, 60_000_000)],
     });
     await evaluateSettled(service);
     expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
