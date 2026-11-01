@@ -117,6 +117,7 @@ export class Correlator {
           MetricType.SLOWLOG_LAST_ID,
           MetricType.CLUSTER_STATE,
           MetricType.OPS_PER_SEC,
+          MetricType.CONNECTION_CHURN,
         ],
         check: (anomalies) => {
           return anomalies.some((a) => a.metricType === MetricType.REPLICATION_ROLE);
@@ -222,6 +223,7 @@ export class Correlator {
       {
         pattern: AnomalyPattern.CONNECTION_LEAK,
         requiredMetrics: [MetricType.CONNECTIONS],
+        optionalMetrics: [MetricType.CONNECTION_CHURN],
         check: (anomalies) => {
           const connAnomaly = anomalies.find((a) => a.metricType === MetricType.CONNECTIONS);
           if (!connAnomaly || connAnomaly.anomalyType !== AnomalyType.SPIKE) return false;
@@ -356,6 +358,17 @@ export class Correlator {
           'Check for connection pool exhaustion',
           'Monitor idle connections',
           'Verify connection cleanup in client applications',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.CONNECTION_LEAK,
+        requiredMetrics: [MetricType.CONNECTION_CHURN],
+        diagnosis: 'Clients are reconnecting instead of reusing connections',
+        recommendations: [
+          'Check client pools for short-lived connections or a recent config change',
+          'Look for a timeout or network fault that is closing connections',
+          'Review maxclients and TLS handshake CPU cost during the storm',
+          'Check for a failover or restart that forced clients to reconnect',
         ],
       },
       {

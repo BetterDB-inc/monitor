@@ -3,6 +3,7 @@ import { AnomalyPattern, MetricType } from './types';
 export interface SequenceRule {
   pattern: AnomalyPattern;
   steps: MetricType[][];
+  optionalMetrics?: MetricType[];
   maxSpanMs: number;
   sameConnection?: boolean;
   diagnosis: string;

@@ -138,7 +138,16 @@ export function matchSequence(
       if (!next) break;
       matched.push(next);
     }
-    if (matched.length === rule.steps.length) return matched;
+    if (matched.length === rule.steps.length) {
+      const optional = entries.filter(
+        (e) =>
+          !matched.includes(e) &&
+          rule.optionalMetrics?.includes(e.metricType) &&
+          (!rule.sameConnection || e.connectionId === first.connectionId) &&
+          Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
+      );
+      return [...matched, ...optional];
+    }
   }
   return null;
 }

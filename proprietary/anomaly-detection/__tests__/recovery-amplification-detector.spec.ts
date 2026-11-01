@@ -518,6 +518,37 @@ describe('recovery amplification rule', () => {
     expect(matchSequence(entries, rule())).toHaveLength(2);
   });
 
+  it('adds reconnect churn on the same connection to the match', () => {
+    const churn = entry(MetricType.CONNECTION_CHURN, T0 - 30_000);
+    const entries = [
+      churn,
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 60_000),
+    ];
+
+    expect(matchSequence(entries, rule())).toContain(churn);
+  });
+
+  it('does not match on reconnect churn without a cost', () => {
+    const entries = [
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      entry(MetricType.CONNECTION_CHURN, T0 + 60_000),
+    ];
+
+    expect(matchSequence(entries, rule())).toBeNull();
+  });
+
+  it('leaves out reconnect churn from another connection or outside the span', () => {
+    const entries = [
+      { ...entry(MetricType.CONNECTION_CHURN, T0), connectionId: 'other-shard' },
+      entry(MetricType.CONNECTION_CHURN, T0 - 11 * 60_000),
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 60_000),
+    ];
+
+    expect(matchSequence(entries, rule())).toHaveLength(2);
+  });
+
   it('records every repeat of the pattern in one incident', () => {
     const entries = [
       entry(MetricType.RESYNC_ESCALATION, T0),

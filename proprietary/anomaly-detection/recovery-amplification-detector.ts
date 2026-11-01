@@ -244,6 +244,7 @@ registerSequenceRule({
       MetricType.OUTPUT_KBPS,
     ],
   ],
+  optionalMetrics: [MetricType.CONNECTION_CHURN],
   maxSpanMs: RECOVERY_AMPLIFICATION_MAX_SPAN_MS,
   sameConnection: true,
   diagnosis:
