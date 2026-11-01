@@ -531,6 +531,83 @@ describe('CaptureTriggerRegistry', () => {
   });
 
   describe('tick - concurrency', () => {
+    async function createFiringTrigger(
+      registry: CaptureTriggerRegistry,
+      storage: MemoryAdapter,
+      connectionId: string,
+      metricType: string,
+    ): Promise<void> {
+      await registry.createTrigger({ connectionId, metricType, anomalyType: ANOMALY });
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ connectionId, metricType, timestamp: Date.now() + 1 }),
+        connectionId,
+      );
+    }
+
+    async function settle(): Promise<void> {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    it('evaluates the health gates of different connections at the same time', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const finishGates: Array<(value: unknown) => void> = [];
+      healthGate.evaluate.mockImplementation(
+        () => new Promise((resolve) => finishGates.push(resolve)),
+      );
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, 'conn-1', METRIC);
+      await createFiringTrigger(registry, storage, 'conn-2', METRIC);
+      await createFiringTrigger(registry, storage, 'conn-3', METRIC);
+
+      const tick = registry.tick();
+      await settle();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(3);
+      for (const finishGate of finishGates) {
+        finishGate({ allow: true, signals: {}, thresholds: {} });
+      }
+      await tick;
+      expect(captureService.startSession).toHaveBeenCalledTimes(3);
+    });
+
+    it('evaluates one connection once per tick', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(false, 'replication_lag_elevated');
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'connections');
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'memory_used');
+      const queued = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: 'ops',
+        anomalyType: ANOMALY,
+      });
+      await storage.updateCaptureTrigger(queued.id, { status: 'queued' });
+
+      await registry.tick();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+      const triggers = await registry.listTriggers({ connectionId: CONNECTION_ID });
+      expect(triggers.map((t) => t.status)).toEqual(['skipped', 'skipped', 'skipped']);
+    });
+
+    it('leaves no gate rejection unhandled when an earlier trigger fails the tick', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new Error('Connection not found'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, 'conn-1', METRIC);
+      await createFiringTrigger(registry, storage, 'conn-2', METRIC);
+      const unhandled = jest.fn();
+      process.on('unhandledRejection', unhandled);
+
+      await expect(registry.tick()).rejects.toThrow('Connection not found');
+      await settle();
+
+      process.off('unhandledRejection', unhandled);
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
     it('queues a second matching trigger when the first fire occupies the connection', async () => {
       const startCalls: Array<{ resolve: () => void; promise: Promise<unknown> }> = [];
       const captureService: FakeCaptureService = {
@@ -558,9 +635,7 @@ describe('CaptureTriggerRegistry', () => {
       );
 
       const firstTick = registry.tick();
-      for (let i = 0; i < 10; i++) {
-        await Promise.resolve();
-      }
+      await settle();
       expect(startCalls.length).toBe(1);
       startCalls[0].resolve();
       await firstTick;

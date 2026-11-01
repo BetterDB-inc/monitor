@@ -15,6 +15,7 @@ import {
 } from '@betterdb/shared';
 import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
+import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
 
@@ -22,6 +23,8 @@ import { MonitorCaptureService } from './monitor-capture.service';
 export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+
+type TickGates = Map<string, Promise<HealthGateResult>>;
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -162,9 +165,10 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
     this.ticking = true;
     try {
+      const gates: TickGates = new Map();
       await this.sweepExpired();
-      await this.processQueued();
-      await this.processNewAnomalies();
+      await this.processQueued(gates);
+      await this.processNewAnomalies(gates);
     } finally {
       this.ticking = false;
     }
@@ -183,17 +187,12 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async processQueued(): Promise<void> {
+  private async processQueued(gates: TickGates): Promise<void> {
     const queued = await this.storage.getCaptureTriggers({ status: 'queued' });
-    for (const trigger of queued) {
-      if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
-        continue;
-      }
-      await this.tryFire(trigger);
-    }
+    await this.fireAll(queued, gates);
   }
 
-  private async processNewAnomalies(): Promise<void> {
+  private async processNewAnomalies(gates: TickGates): Promise<void> {
     const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
     const pageSize = 200;
     // Drain pagination by walking offset until storage returns fewer rows
@@ -222,6 +221,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     // drain still leaves a coherent watermark.
     const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
     let maxTs = this.lastAnomalyAt;
+    const matched = new Map<string, StoredCaptureTrigger>();
     for (const evt of sorted) {
       if (evt.timestamp > maxTs) {
         maxTs = evt.timestamp;
@@ -235,20 +235,43 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         evt.anomalyType,
       );
       if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
-        await this.tryFire(match);
+        matched.set(match.id, match);
       }
     }
+    await this.fireAll([...matched.values()], gates);
     this.lastAnomalyAt = maxTs;
   }
 
-  private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
+  private async fireAll(triggers: StoredCaptureTrigger[], gates: TickGates): Promise<void> {
+    for (const { connectionId } of triggers) {
+      if (!this.captureService.hasActiveSessionOn(connectionId)) {
+        void this.evaluateGate(connectionId, gates);
+      }
+    }
+    for (const trigger of triggers) {
+      await this.tryFire(trigger, gates);
+    }
+  }
+
+  private evaluateGate(connectionId: string, gates: TickGates): Promise<HealthGateResult> {
+    const known = gates.get(connectionId);
+    if (known !== undefined) {
+      return known;
+    }
+    const gate = this.healthGate.evaluate(connectionId);
+    gate.catch(() => undefined);
+    gates.set(connectionId, gate);
+    return gate;
+  }
+
+  private async tryFire(trigger: StoredCaptureTrigger, gates: TickGates): Promise<void> {
     if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
       if (trigger.status !== 'queued') {
         await this.patch(trigger.id, { status: 'queued' });
       }
       return;
     }
-    const gate = await this.healthGate.evaluate(trigger.connectionId);
+    const gate = await this.evaluateGate(trigger.connectionId, gates);
     if (!gate.allow) {
       const reason = gate.skipReason ?? 'health_gate_blocked';
       await this.patch(trigger.id, { status: 'skipped', skipReason: reason });
