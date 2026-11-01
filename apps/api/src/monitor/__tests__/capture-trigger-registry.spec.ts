@@ -247,6 +247,48 @@ describe('CaptureTriggerRegistry', () => {
       expect(updated?.firedAt).toBeGreaterThan(0);
     });
 
+    it('fires for an event saved late with an older timestamp', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const createdAt = Date.now();
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ metricType: 'other', timestamp: createdAt + 60_000 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: createdAt + 30_000 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('handles each event once across ticks', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      const event = makeAnomaly({ timestamp: Date.now() + 60_000 });
+      await storage.saveAnomalyEvent(event, CONNECTION_ID);
+      await registry.tick();
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+
+      await registry.tick();
+
+      expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+
     it('only fires a trigger once for repeated matching anomalies', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(true);

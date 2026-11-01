@@ -1,4 +1,5 @@
 import {
+  DIVERGENCE_RECOVERED_WINDOWS,
   ClosedDivergenceWindow,
   DIVERGENCE_MIN_WINDOW_MS,
   DIVERGENCE_PERSIST_BACKLOG,
@@ -546,6 +547,35 @@ describe('observeDivergence', () => {
     expect(stale[0]).toMatchObject({ level: 'critical', reason: 'not_acking', gapBytes: 10 * MiB });
   });
 
+  it('recovers a not-acking alert once a stale replica is no longer behind', () => {
+    const h = new Harness();
+    const opened = divergences(
+      h.windows(Array.from({ length: 8 }, (_, i) => ({ gap: 40 * MiB, rate: MiB, lagSec: climbingLag(i) }))),
+    );
+    expect(opened.map((f) => f.reason)).toContain('not_acking');
+
+    const recovered = h
+      .windows(Array.from({ length: DIVERGENCE_RECOVERED_WINDOWS + 1 }, (_, i) => ({ gap: 0, rate: MiB, lagSec: climbingLag(8 + i) })))
+      .flat();
+
+    expect(recovered.map((o) => o.kind)).toEqual(['recovered']);
+  });
+
+  it('keeps a not-acking alert open while one window dips under the floor', () => {
+    const h = new Harness();
+    h.windows(Array.from({ length: 8 }, (_, i) => ({ gap: 40 * MiB, rate: MiB, lagSec: climbingLag(i) })));
+
+    const outcomes = h
+      .windows([
+        { gap: 0, rate: MiB, lagSec: climbingLag(8) },
+        { gap: 40 * MiB, rate: MiB, lagSec: climbingLag(9) },
+        { gap: 0, rate: MiB, lagSec: climbingLag(10) },
+      ])
+      .flat();
+
+    expect(outcomes.map((o) => o.kind)).not.toContain('recovered');
+  });
+
   it('flags a replica that stops acking while it looked healthy', () => {
     const h = new Harness();
     const rate = 0.2 * MiB;
@@ -945,13 +975,32 @@ describe('observeDivergence', () => {
       expect(replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000)).toBe('warning');
     });
 
-    it('is unobserved while the replica stops acknowledging, before any alert', () => {
+    it('stays observed while a connected replica stops acknowledging', () => {
       const { h, last } = quiet();
 
       h.windows([{ gap: 0, rate: MiB, lagSec: 30 }]);
 
       expect(h.state.replicas.get(ADDR)?.level ?? 'none').toBe('none');
-      expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('unobserved');
+      expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('none');
+    });
+
+    it('is behind while a connected replica stops acknowledging with a gap', () => {
+      const h = new Harness();
+      h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
+
+      h.windows([{ gap: 40 * MiB, rate: MiB, lagSec: 30 }]);
+      const last = h.state.lastObservedAt as number;
+
+      expect(h.state.replicas.get(ADDR)?.level ?? 'none').toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('behind');
+    });
+
+    it('is unobserved once the samples of a stale replica stop', () => {
+      const h = new Harness();
+      h.windows([{ gap: 40 * MiB, rate: MiB, lagSec: 30 }]);
+      const last = h.state.lastObservedAt as number;
+
+      expect(replicaObservedLevel(h.state, ADDR, last + 30_001, 30_000)).toBe('unobserved');
     });
 
     it('gives the current gap of a stale replica, not its last window', () => {

@@ -25,6 +25,7 @@ export interface PendingSave extends RetrySchedule {
 export interface PendingResolve extends RetrySchedule {
   kind: 'resolve';
   resolvedAt: number;
+  rowMissingSince?: number;
 }
 
 export type OutboxEntry = PendingSave | PendingResolve;
@@ -32,6 +33,15 @@ export type OutboxDropReason = 'full' | 'expired';
 
 function closesEvent(entry: OutboxEntry): boolean {
   return entry.kind === 'resolve' || entry.anomaly.resolved;
+}
+
+function isExpired(entry: OutboxEntry, now: number): boolean {
+  if (entry.kind === 'resolve') {
+    return (
+      entry.rowMissingSince !== undefined && now - entry.rowMissingSince > OUTBOX_MAX_AGE_MS
+    );
+  }
+  return !entry.anomaly.resolved && now - entry.enqueuedAt > OUTBOX_MAX_AGE_MS;
 }
 
 export class PersistenceOutbox {
@@ -94,6 +104,11 @@ export class PersistenceOutbox {
     return entry?.kind === 'resolve' ? entry.resolvedAt : undefined;
   }
 
+  markRowMissing(id: string, now: number): void {
+    const entry = this.pending.get(id);
+    if (entry?.kind === 'resolve') entry.rowMissingSince ??= now;
+  }
+
   settle(id: string): void {
     this.pending.delete(id);
   }
@@ -119,7 +134,7 @@ export class PersistenceOutbox {
 
   due(now: number): OutboxEntry[] {
     for (const entry of this.pending.values()) {
-      if (closesEvent(entry) || now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) continue;
+      if (!isExpired(entry, now)) continue;
       this.pending.delete(entry.id);
       this.onDrop(entry, 'expired');
       entry.onDrop?.();

@@ -60,6 +60,7 @@ export interface ReplicaDivergenceState {
   subside: SubsideTracking | null;
   belowFloorStreak: number;
   staleWindows: number;
+  staleClearWindows: number;
   staleSince: number | null;
   clearing: boolean;
 }
@@ -185,6 +186,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     subside: null,
     belowFloorStreak: 0,
     staleWindows: 0,
+    staleClearWindows: 0,
     staleSince: null,
     clearing: false,
   };
@@ -325,13 +327,17 @@ function staleAckFinding(
   gapBytes: number,
   start: number,
   rate: number | null,
-): DivergenceFinding | null {
+): DivergenceOutcome | null {
   const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
   if (!isBehind({ gapBytes, secondsBehind })) {
     replica.staleWindows = 0;
     replica.staleSince = null;
-    return null;
+    if (replica.level === 'none') return null;
+    replica.staleClearWindows++;
+    if (replica.staleClearWindows < DIVERGENCE_RECOVERED_WINDOWS) return null;
+    return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes };
   }
+  replica.staleClearWindows = 0;
   if (replica.staleWindows === 0) replica.staleSince = start;
   replica.staleWindows++;
   const target: DivergenceLevel =
@@ -367,6 +373,7 @@ function dropReplica(
   replica.subside = null;
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
+  replica.staleClearWindows = 0;
   replica.staleSince = null;
   replica.clearing = true;
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
@@ -405,6 +412,7 @@ function closeWindow(
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
     replica.staleWindows = 0;
+    replica.staleClearWindows = 0;
     replica.staleSince = null;
     const gapBytes = median(acc.gaps);
     const bytesPerSec = rate === 0 ? 0 : acc.lastRate;
@@ -485,6 +493,7 @@ export function observeDivergence(
     state.windowStart = null;
     for (const replica of state.replicas.values()) {
       replica.staleWindows = 0;
+      replica.staleClearWindows = 0;
       replica.staleSince = null;
     }
   }
@@ -531,11 +540,9 @@ export function replicaObservedLevel(
   const replica = state?.replicas.get(addr);
   const level = replica ? replica.level : 'none';
   if (level !== 'none') return level;
-  if (!state?.observed.has(addr) || state.staleAcks.has(addr) || state.lastObservedAt === null) {
-    return 'unobserved';
-  }
+  if (!state?.observed.has(addr) || state.lastObservedAt === null) return 'unobserved';
   if (now - state.lastObservedAt > staleAfterMs) return 'unobserved';
-  const last = replica?.windows[replica.windows.length - 1];
+  const last = staleAckWindow(state, addr) ?? replica?.windows[replica.windows.length - 1];
   return last && isBehind(last) ? 'behind' : 'none';
 }
 
@@ -593,6 +600,7 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.subside = null;
   replica.belowFloorStreak = 0;
   replica.staleWindows = 0;
+  replica.staleClearWindows = 0;
   replica.staleSince = null;
   replica.clearing = false;
 }

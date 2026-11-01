@@ -116,6 +116,35 @@ describe('PersistenceOutbox', () => {
     expect(dropped).toEqual([['id-0', 'full']]);
   });
 
+  describe('a resolve whose row is missing', () => {
+    it('expires once the row has been missing past the age limit', () => {
+      const onDrop = jest.fn();
+      const entryDrop = jest.fn();
+      const outbox = new PersistenceOutbox(onDrop);
+      outbox.enqueueResolve('a', 100, 0, entryDrop);
+
+      outbox.markRowMissing('a', 5);
+      expect(outbox.due(5 + OUTBOX_MAX_AGE_MS).map((entry) => entry.id)).toEqual(['a']);
+
+      outbox.due(5 + OUTBOX_MAX_AGE_MS + 1);
+      expect(outbox.size).toBe(0);
+      expect(onDrop).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), 'expired');
+      expect(entryDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts the age from the first missing read', () => {
+      const outbox = new PersistenceOutbox(jest.fn());
+      outbox.enqueueResolve('a', 100, 0);
+
+      outbox.markRowMissing('a', OUTBOX_MAX_AGE_MS * 3);
+      outbox.markRowMissing('a', OUTBOX_MAX_AGE_MS * 3 + 1000);
+
+      expect(outbox.due(OUTBOX_MAX_AGE_MS * 4).map((entry) => entry.id)).toEqual(['a']);
+      outbox.due(OUTBOX_MAX_AGE_MS * 4 + 1);
+      expect(outbox.size).toBe(0);
+    });
+  });
+
   describe('entries that close an event', () => {
     const fill = (count: number) => {
       for (let i = 0; i < count; i++) outbox.enqueueSave(event(`save-${i}`), undefined, i);
