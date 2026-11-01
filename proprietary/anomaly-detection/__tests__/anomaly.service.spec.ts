@@ -1697,6 +1697,21 @@ describe('AnomalyService', () => {
       expect(skewEvents()[0].message).toContain('(source)');
     });
 
+    it('leaves the event unmarked without a write P99 deviation', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+      expect(skewEvents()[0].syntheticPattern).toBeUndefined();
+    });
+
+    it('marks the event as reshard pressure when the source write P99 deviates', async () => {
+      storage.getLatencyStatsHistory = jest.fn(async ({ connectionId }) => [
+        { command: 'set', p99Us: connectionId === 'conn-a' ? 9000 : 1000, capturedAt: BASE },
+      ]);
+
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      expect(skewEvents()[0].syntheticPattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
     it('stays quiet when the same skew has no reshard behind it', async () => {
       for (let i = 0; i < 4; i += 1) await pollCluster(18_000, false);
 

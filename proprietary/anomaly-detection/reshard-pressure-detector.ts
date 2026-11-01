@@ -7,6 +7,8 @@ export const RESHARD_PERSIST_POLLS = 3;
 export const RESHARD_STALE_POLLS = 5;
 export const RESHARD_MARKER_STALL_MS = 30 * 60_000;
 
+const WRITE_P99_METRIC = 'write P99';
+
 export interface ReshardShardSnapshot {
   connectionId: string;
   clusterKey: string;
@@ -49,7 +51,7 @@ const SKEW_RULES: SkewRule[] = [
   { metric: 'ops/sec', read: (s) => s.opsPerSec, factor: 2, floor: 500 },
   { metric: 'CPU', read: (s) => s.cpuUtilization, factor: 1.5, floor: 60 },
   { metric: 'memory', read: (s) => s.usedMemory, factor: 1.3, floor: 256 * 1024 * 1024 },
-  { metric: 'write P99', read: (s) => s.writeP99Us, factor: 3, floor: 1000 },
+  { metric: WRITE_P99_METRIC, read: (s) => s.writeP99Us, factor: 3, floor: 1000 },
 ];
 
 export function reshardMarkerSignature(
@@ -114,6 +116,13 @@ export function evaluateReshardSkew(
     role: reshardRole(self),
     deviations,
   };
+}
+
+export function isReshardPressure(finding: ReshardSkewFinding): boolean {
+  return (
+    finding.role !== 'bystander' &&
+    finding.deviations.some((deviation) => deviation.metric === WRITE_P99_METRIC)
+  );
 }
 
 export function reshardSkewSignature(finding: Pick<ReshardSkewFinding, 'shardId'>): string {

@@ -4,6 +4,7 @@ import {
   evaluateReshardSkew,
   isMarkerStalled,
   isReshardActive,
+  isReshardPressure,
   reshardMarkerSignature,
   reshardRole,
 } from '../reshard-pressure-detector';
@@ -84,6 +85,32 @@ describe('reshardRole', () => {
       'source and target',
     );
     expect(reshardRole(shard('a'))).toBe('bystander');
+  });
+});
+
+describe('isReshardPressure', () => {
+  const latency = { metric: 'write P99', value: 9000, median: 1000, ratio: 9, threshold: 3 };
+  const ops = { metric: 'ops/sec', value: 18_000, median: 6000, ratio: 3, threshold: 2 };
+  const finding = (role: string, deviations = [ops, latency]) => ({
+    clusterKey: 'cluster:a',
+    shardId: 'a',
+    role,
+    deviations,
+  });
+
+  it.each(['source', 'target', 'source and target'])(
+    'holds for a %s shard with a write P99 deviation',
+    (role) => {
+      expect(isReshardPressure(finding(role))).toBe(true);
+    },
+  );
+
+  it('does not hold for a bystander that was already hot', () => {
+    expect(isReshardPressure(finding('bystander'))).toBe(false);
+  });
+
+  it('does not hold without the write P99 leg', () => {
+    expect(isReshardPressure(finding('source', [ops]))).toBe(false);
   });
 });
 

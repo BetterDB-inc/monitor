@@ -82,19 +82,32 @@ describe('Correlator', () => {
   });
 
   describe('RESHARD_PRESSURE pattern', () => {
-    it('needs only the skew event', () => {
+    const pressure = (overrides: Partial<AnomalyEvent> = {}) =>
+      makeAnomaly({
+        metricType: MetricType.RESHARD_SHARD_SKEW,
+        syntheticPattern: AnomalyPattern.RESHARD_PRESSURE,
+        ...overrides,
+      });
+
+    it('matches a skew event the detector confirmed as pressure', () => {
+      const groups = correlator.correlate([pressure()]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it('does not blame the reshard for a skew event without the marker', () => {
       const groups = correlator.correlate([
         makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW }),
       ]);
 
-      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+      expect(groups[0].pattern).toBe(AnomalyPattern.UNKNOWN);
     });
 
     it('wins over a latency pattern in the same window', () => {
       const now = Date.now();
       const groups = correlator.correlate([
         makeAnomaly({ metricType: MetricType.COMMAND_P99, timestamp: now }),
-        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now + 100 }),
+        pressure({ timestamp: now + 100 }),
       ]);
 
       expect(groups).toHaveLength(1);
@@ -106,7 +119,7 @@ describe('Correlator', () => {
       (metricType) => {
         const now = Date.now();
         const groups = correlator.correlate([
-          makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW, timestamp: now }),
+          pressure({ timestamp: now }),
           makeAnomaly({ metricType, timestamp: now + 100 }),
         ]);
 

@@ -55,6 +55,7 @@ import {
   ReshardShardSnapshot,
   ReshardSkewFinding,
   evaluateReshardSkew,
+  isReshardPressure,
   isMarkerStalled,
   isReshardActive,
   reshardMarkerSignature,
@@ -4877,6 +4878,7 @@ export class AnomalyService
         `${deviations} of the cluster's primaries during an active reshard`,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(isReshardPressure(finding) ? { syntheticPattern: AnomalyPattern.RESHARD_PRESSURE } : {}),
     };
   }
 

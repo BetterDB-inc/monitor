@@ -154,6 +154,8 @@ export class Correlator {
           MetricType.MEMORY_USED,
           MetricType.OPS_PER_SEC,
         ],
+        check: (anomalies) =>
+          anomalies.some((a) => a.syntheticPattern === AnomalyPattern.RESHARD_PRESSURE),
         diagnosis:
           'Slot migration is concentrating load on one shard while the cluster aggregate looks healthy',
         recommendations: [
