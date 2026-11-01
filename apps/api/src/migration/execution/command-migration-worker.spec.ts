@@ -133,6 +133,18 @@ describe('runCommandMigration source clients', () => {
     expect(clients.filter((c) => c.host !== 'cache.internal').every((c) => c.quit.mock.calls.length > 0)).toBe(true);
   });
 
+  it('tears down the cluster discovery client when its first dial fails', async () => {
+    failingHosts = new Set(['cache.internal']);
+
+    await expect(
+      runCommandMigration({ sourceConfig, targetConfig, sourceIsCluster: true, targetIsCluster: false, job: makeJob(), maxLogLines: 50 }),
+    ).rejects.toThrow('Connection is closed.');
+
+    const discovery = clients.find((c) => c.options.connectionName === 'BetterDB-Migration-Discovery');
+    expect(discovery).toBeDefined();
+    expect(discovery!.disconnect).toHaveBeenCalled();
+  });
+
   it('tears down a standalone source client whose connect fails instead of leaving it reconnecting', async () => {
     failingHosts = new Set(['cache.internal']);
 

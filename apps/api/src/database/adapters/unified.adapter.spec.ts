@@ -850,6 +850,31 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     }
   });
 
+  it('does not record a fingerprint for unusable material, so a plain refresh re-reads it', () => {
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const adapter = fileAdapter();
+      const internals = adapter as unknown as {
+        tlsMaterialFingerprint: string | undefined;
+        tlsMaterialCheckedAt: number;
+        tlsMaterial: { cert?: Buffer | string; key?: Buffer | string };
+        refreshTlsMaterial(force?: boolean): void;
+      };
+      expect(internals.tlsMaterialFingerprint).toBeUndefined();
+
+      // Simulate the race: the key landed after the read, so the files on disk
+      // are now complete and a fingerprint taken now would match them.
+      fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+      internals.tlsMaterialCheckedAt = 0;
+      internals.refreshTlsMaterial();
+      expect(internals.tlsMaterial.key?.toString()).toBe(pairB.key);
+      expect(internals.tlsMaterialFingerprint).toBeDefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
     const adapter = fileAdapter();
     const client = adapter.getClient();

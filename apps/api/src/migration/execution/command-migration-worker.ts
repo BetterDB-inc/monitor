@@ -33,9 +33,11 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
 
     // Build source clients (one per cluster master, or single standalone)
     if (sourceIsCluster) {
-      const discoveryClient = createClient(sourceConfig, 'BetterDB-Migration-Discovery');
-      await discoveryClient.connect();
+      const discoveryClient = createClient(sourceConfig, 'BetterDB-Migration-Discovery', onTlsRefreshError);
       try {
+        // Inside the try so a failed first dial still reaches the cleanup below
+        // and stops iovalkey's reconnect loop.
+        await discoveryClient.connect();
         const nodesRaw = await discoveryClient.call('CLUSTER', 'NODES') as string;
         const masters = parseClusterMasters(nodesRaw);
         log(job, maxLogLines, `Cluster mode: ${masters.length} master(s) detected`);
@@ -61,7 +63,11 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
           }
         }
       } finally {
-        await discoveryClient.quit();
+        if (discoveryClient.status === 'ready') {
+          await discoveryClient.quit().catch(() => discoveryClient.disconnect());
+        } else {
+          discoveryClient.disconnect();
+        }
       }
     } else {
       const client = createClient(sourceConfig, 'BetterDB-Migration-Source', onTlsRefreshError);

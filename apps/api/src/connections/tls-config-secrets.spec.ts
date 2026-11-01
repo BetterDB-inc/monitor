@@ -30,12 +30,23 @@ describe('sanitizeTlsConfigInput', () => {
       keyPath: 'c.key',
       secretsEncrypted: false,
     });
-    expect(sanitizeTlsConfigInput({ ca: 'CA', caPath: 'ca.pem', passphrase: 'pw' })).toEqual({
+    expect(sanitizeTlsConfigInput({ ca: 'CA', caPath: 'ca.pem', cert: 'C', key: 'K', passphrase: 'pw' })).toEqual({
       source: 'inline',
       ca: 'CA',
+      cert: 'C',
+      key: 'K',
       passphrase: 'pw',
       secretsEncrypted: false,
     });
+  });
+
+  it('drops a passphrase that has no private key to unlock', () => {
+    expect(sanitizeTlsConfigInput({ ca: 'CA', passphrase: 'pw' })).toEqual({
+      source: 'inline',
+      ca: 'CA',
+      secretsEncrypted: false,
+    });
+    expect(sanitizeTlsConfigInput({ source: 'file', caPath: 'ca.pem', keyPath: 'c.key', certPath: 'c.crt', passphrase: 'pw' })?.passphrase).toBe('pw');
   });
 });
 
@@ -77,6 +88,18 @@ describe('encryptTlsConfig / decryptTlsConfig', () => {
     const out = decryptTlsConfig(encryptTlsConfig(plain, cipher), null, (m) => errors.push(m));
     expect(out).toEqual({ ...plain, key: undefined, passphrase: undefined, secretsEncrypted: false });
     expect(errors[0]).toMatch(/ENCRYPTION_KEY/);
+  });
+
+  it('opens a CA-only record that was saved with an encrypted passphrase without needing the key', () => {
+    const errors: string[] = [];
+    const legacy = { source: 'inline' as const, ca: 'CA', passphrase: 'enc(pw)', secretsEncrypted: true };
+    expect(decryptTlsConfig(legacy, null, (m) => errors.push(m))).toEqual({
+      ...legacy,
+      passphrase: undefined,
+      key: undefined,
+      secretsEncrypted: false,
+    });
+    expect(errors).toEqual([]);
   });
 
   it('drops the secrets when decryption fails', () => {

@@ -22,6 +22,8 @@ export interface NodeConnection {
   client: Valkey;
   lastHealthCheck: number;
   healthy: boolean;
+  connectionId?: string;
+  host?: string;
 }
 
 export interface NodeHealth {
@@ -182,6 +184,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       // Not ready — revive it in place before falling back to a brand-new client.
       try {
+        this.refreshNodeTls(existingConnection);
         await existingConnection.client.connect();
         existingConnection.lastHealthCheck = Date.now();
         existingConnection.healthy = true;
@@ -231,8 +234,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
-    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryClient.options.tls ?? {};
-    const tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
+    const tls = this.nodeTlsOptions(connectionId, host, node.hostname);
 
     const client = new Valkey({
       host,
@@ -244,6 +246,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       connectTimeout: this.CONNECTION_TIMEOUT,
       enableOfflineQueue: false,
       connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
+    });
+
+    // Node clients are long-lived, so pick up rotated client cert/key material
+    // from the primary adapter before every reconnect.
+    client.on('reconnecting', () => {
+      this.refreshNodeTls({ node, client, connectionId, host });
     });
 
     // Add error handler to prevent unhandled error events
@@ -276,6 +284,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         client,
         lastHealthCheck: Date.now(),
         healthy: true,
+        connectionId,
+        host,
       };
 
       // Quit any stale client we're about to replace so the overwrite never
@@ -310,6 +320,36 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       await client.quit().catch(() => {});
 
       throw error;
+    }
+  }
+
+  /**
+   * TLS options for a discovered node, built from the primary adapter's current
+   * material. getClient() re-reads file-sourced material when it has rotated.
+   */
+  private nodeTlsOptions(
+    connectionId: string | undefined,
+    host: string,
+    hostname: string | undefined,
+  ): Valkey['options']['tls'] {
+    const primaryTls = this.connectionRegistry.get(connectionId).getClient().options.tls;
+    if (!primaryTls) return undefined;
+    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryTls;
+    return { ...nodeTls, ...tlsIdentityOptions(host, hostname) };
+  }
+
+  private refreshNodeTls(connection: Pick<NodeConnection, 'node' | 'client' | 'connectionId' | 'host'>): void {
+    if (!connection.host || !connection.client.options?.tls) return;
+    try {
+      connection.client.options.tls = this.nodeTlsOptions(
+        connection.connectionId,
+        connection.host,
+        connection.node.hostname,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Keeping previous TLS material for node ${connection.node.id.substring(0, 12)}: ${error instanceof Error ? error.message : error}`,
+      );
     }
   }
 

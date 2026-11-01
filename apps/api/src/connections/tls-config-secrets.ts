@@ -36,6 +36,9 @@ export function sanitizeTlsConfigInput(input: TlsConfigInput | undefined): TlsCo
   };
   const hasMaterial = !!(out.ca || out.cert || out.key || out.caPath || out.certPath || out.keyPath);
   if (!hasMaterial) return undefined;
+  // A passphrase only unlocks a private key; without one it would still be
+  // encrypted and make a CA-only config depend on ENCRYPTION_KEY.
+  if (!out.key && !out.keyPath) out.passphrase = undefined;
   for (const field of Object.keys(out) as (keyof TlsConfig)[]) {
     if (out[field] === undefined) delete out[field];
   }
@@ -82,6 +85,11 @@ export function decryptTlsConfig(
     return config;
   }
   const dropped: TlsConfig = { ...config, key: undefined, passphrase: undefined, secretsEncrypted: false };
+  // Records saved before passphrases were tied to a key can hold an encrypted
+  // passphrase with no key. Nothing secret is needed, so don't report an error.
+  if (!config.key && !config.keyPath) {
+    return dropped;
+  }
   if (!cipher) {
     onError('ENCRYPTION_KEY not set but TLS client key is encrypted; client certificate unavailable');
     return dropped;

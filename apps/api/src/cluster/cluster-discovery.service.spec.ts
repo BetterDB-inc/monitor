@@ -287,6 +287,57 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('re-reads the seed TLS material before a node client reconnects', async () => {
+      let seedTls: Record<string, unknown> = { servername: 'seed.example', ca: 'seed-ca', cert: 'cert-a', key: 'key-a' };
+      mockDbClient.getClient.mockImplementation(() => ({ options: { username: 'u', password: 'p', tls: seedTls } }));
+      const handlers: Record<string, () => void> = {};
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, fn: () => void) => {
+          handlers[event] = fn;
+        }),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-a', key: 'key-a' });
+
+      // The adapter rotated its client certificate.
+      seedTls = { ...seedTls, cert: 'cert-b', key: 'key-b' };
+      handlers.reconnecting();
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-b', key: 'key-b' });
+    });
+
+    it('re-reads the seed TLS material before reviving a cached node client', async () => {
+      let seedTls: Record<string, unknown> = { ca: 'seed-ca', cert: 'cert-a' };
+      mockDbClient.getClient.mockImplementation(() => ({ options: { username: 'u', password: 'p', tls: seedTls } }));
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+
+      nodeClient.status = 'end';
+      seedTls = { ...seedTls, cert: 'cert-b' };
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-b' });
+    });
+
     it('leaves TLS off for node clients when the seed has none', async () => {
       mockDbClient.getClient.mockReturnValue({ options: { username: 'u', password: 'p' } });
       await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
