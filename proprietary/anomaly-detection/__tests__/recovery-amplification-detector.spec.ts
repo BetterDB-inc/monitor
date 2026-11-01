@@ -422,6 +422,27 @@ describe('observeResyncEscalation', () => {
       expect(a).toEqual([]);
     });
 
+    it('counts a failed partial sync of a reconnect next to a new replica', () => {
+      const state = createResyncEscalationState();
+      observeResyncEscalation(state, at(T0, line(REPLICA_A, 'online')), counters(), 40);
+      observeResyncEscalation(state, at(T0 + 1000), counters(), null);
+      observeResyncEscalation(
+        state,
+        at(T0 + 2000, line(REPLICA_B, 'wait_bgsave')),
+        counters(1),
+        null,
+      );
+
+      const a = observeResyncEscalation(
+        state,
+        at(T0 + 3000, line(REPLICA_A, 'online'), line(REPLICA_B, 'send_bulk')),
+        counters(1, 0, 1),
+        null,
+      );
+
+      expect(a).toEqual([expect.objectContaining({ fullSyncs: 0, partialSyncErrors: 1 })]);
+    });
+
     it('does not blame a reconnect on a new replica that finished syncing between polls', () => {
       const state = createResyncEscalationState();
       observeResyncEscalation(state, at(T0, line(REPLICA_A, 'online')), counters(), 40);

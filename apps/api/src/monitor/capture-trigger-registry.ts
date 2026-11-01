@@ -30,6 +30,7 @@ interface AnomalyScan {
   offset: number;
   insertedSince: number;
   newestInsert: number;
+  oldestFailedInsert: number;
 }
 
 export interface CreateTriggerInput {
@@ -215,12 +216,15 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processNewAnomalies(): Promise<void> {
-    const startTime =
-      this.lastAnomalyAt === 0
-        ? 0
-        : Math.max(this.replayFloor, this.lastAnomalyAt + 1 - LATE_ANOMALY_LOOKBACK_MS);
-    for (const [id, timestamp] of this.seenAnomalies) {
-      if (timestamp < startTime) this.seenAnomalies.delete(id);
+    const configured = await this.storage.getCaptureTriggers({ status: 'configured' });
+    const lookback = Math.min(
+      this.lastAnomalyAt + 1 - LATE_ANOMALY_LOOKBACK_MS,
+      ...configured.map((trigger) => trigger.createdAt),
+    );
+    const startTime = this.lastAnomalyAt === 0 ? 0 : Math.max(this.replayFloor, lookback);
+    const seenFloor = Math.max(startTime, this.insertedWatermark);
+    for (const [id, lastRead] of this.seenAnomalies) {
+      if (lastRead < seenFloor) this.seenAnomalies.delete(id);
     }
     const pageSize = 200;
     const maxScannedPerTick = 5000;
@@ -229,9 +233,10 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       offset: 0,
       insertedSince: this.insertedWatermark,
       newestInsert: 0,
+      oldestFailedInsert: Infinity,
     };
     const resuming = this.anomalyScan !== null;
-    let resumeAt: AnomalyScan | null = null;
+    let resumeOffset: number | null = null;
     const sorted: StoredAnomalyEvent[] = [];
     for (let read = 0; ; read += pageSize) {
       const page = await this.storage.getAnomalyEvents({
@@ -251,7 +256,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         break;
       }
       if (read + pageSize >= maxScannedPerTick) {
-        resumeAt = { ...scan, offset: scan.offset + read + pageSize };
+        resumeOffset = scan.offset + read + pageSize;
         break;
       }
     }
@@ -274,17 +279,21 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
             await this.tryFire(match);
           }
         }
-        this.seenAnomalies.set(evt.id, evt.timestamp);
+        this.seenAnomalies.set(evt.id, Math.max(evt.timestamp, evt.insertedAt ?? 0));
       } catch (err) {
         this.logger.error(`Failed to match anomaly ${evt.id}: ${(err as Error).message}`);
+        const insertedAt = evt.insertedAt ?? 0;
+        if (insertedAt >= Date.now() - LATE_ANOMALY_LOOKBACK_MS) {
+          scan.oldestFailedInsert = Math.min(scan.oldestFailedInsert, insertedAt);
+        }
       }
     }
     this.lastAnomalyAt = maxTs;
-    this.anomalyScan = resumeAt;
-    if (!resumeAt) {
+    this.anomalyScan = resumeOffset === null ? null : { ...scan, offset: resumeOffset };
+    if (resumeOffset === null) {
       this.insertedWatermark = Math.max(
         this.insertedWatermark,
-        scan.newestInsert - INSERTED_WATERMARK_MARGIN_MS,
+        Math.min(scan.newestInsert - INSERTED_WATERMARK_MARGIN_MS, scan.oldestFailedInsert),
       );
     }
   }

@@ -302,6 +302,8 @@ interface ConnectionPersistenceState {
 }
 
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
+const SEED_RETRY_BASE_MS = 30_000;
+const SEED_RETRY_MAX_MS = 5 * 60_000;
 const OPEN_EVENTS_MAX_RETRY_MS = 60_000;
 
 const ADOPTED_METRICS: MetricType[] = [
@@ -312,6 +314,11 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
 ];
+
+interface SeedBackoff {
+  failures: number;
+  retryAt: number;
+}
 
 interface TrackedResyncEvent {
   id: string;
@@ -351,8 +358,10 @@ export class AnomalyService
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
   private incidentBoundarySeed: Promise<boolean> | null = null;
+  private readonly sequenceDedupeBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
+  private readonly incidentBoundaryBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
+  private scopeSeeds: Map<string, string> | null = null;
   private liveBoundaries: StoredIncidentBoundary[] = [];
-  private tickingIncidentTimelines = false;
   private incidentsDirty = true;
   private liveEventsById = new Map<string, AnomalyEvent>();
   private incidentsBuiltAt = 0;
@@ -4748,7 +4757,8 @@ export class AnomalyService
   ): Promise<void> {
     try {
       const self = nodes.find((n) => n.flags.includes('myself'));
-      const clusterKey = clusterKeyFromNodes(nodes);
+      const clusterKey =
+        this.connectionClusterKeys.get(ctx.connectionId) ?? clusterKeyFromNodes(nodes);
       if (self) this.claimAdoptedReshardEvent(ctx.connectionId, self.id);
       const findings: ReshardSkewFinding[] = [];
       if (self?.flags.includes('master')) {
@@ -6119,12 +6129,14 @@ export class AnomalyService
   private async correlationTick(): Promise<void> {
     if (!this.correlationTicking) {
       this.correlationTicking = true;
+      this.scopeSeeds = this.seedsByClusterKey();
       try {
         await this.correlateAnomalies();
         await this.tickIncidentTimelines().catch((err) => {
           this.logger.error('Failed to build incident timelines:', err);
         });
       } finally {
+        this.scopeSeeds = null;
         this.correlationTicking = false;
       }
     }
@@ -6270,7 +6282,7 @@ export class AnomalyService
     const clusterKey = this.connectionClusterKeys.get(connectionId);
     if (!clusterKey) return connectionId;
     if (this.connectionRegistry.listMembers(connectionId).length > 0) return connectionId;
-    return (seeds ?? this.seedsByClusterKey()).get(clusterKey) ?? clusterKey;
+    return (seeds ?? this.scopeSeeds ?? this.seedsByClusterKey()).get(clusterKey) ?? clusterKey;
   }
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, true);
@@ -6401,21 +6413,31 @@ export class AnomalyService
     }
   }
 
-  private async tickIncidentTimelines(now = Date.now()): Promise<void> {
-    if (this.tickingIncidentTimelines) return;
-    this.tickingIncidentTimelines = true;
-    try {
-      await this.refreshIncidentTimelines(now);
-    } finally {
-      this.tickingIncidentTimelines = false;
-    }
+  private async runSeed(
+    backoff: SeedBackoff,
+    now: number,
+    seed: () => Promise<boolean>,
+  ): Promise<boolean> {
+    if (now < backoff.retryAt) return false;
+    const seeded = await seed();
+    if (seeded) return true;
+    const delay = SEED_RETRY_BASE_MS * 2 ** backoff.failures;
+    backoff.failures += 1;
+    backoff.retryAt = now + Math.min(delay, SEED_RETRY_MAX_MS);
+    return false;
   }
 
-  private async refreshIncidentTimelines(now: number): Promise<void> {
+  private async tickIncidentTimelines(now = Date.now()): Promise<void> {
     const windowMs = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    const seeded = await (this.sequenceDedupeSeed ??= this.seedSequenceDedupe(now - windowMs));
-    const boundariesSeeded = await (this.incidentBoundarySeed ??= this.seedIncidentBoundaries(
-      now - windowMs,
+    const seeded = await (this.sequenceDedupeSeed ??= this.runSeed(
+      this.sequenceDedupeBackoff,
+      now,
+      () => this.seedSequenceDedupe(now - windowMs),
+    ));
+    const boundariesSeeded = await (this.incidentBoundarySeed ??= this.runSeed(
+      this.incidentBoundaryBackoff,
+      now,
+      () => this.seedIncidentBoundaries(now - windowMs),
     ));
     if (this.incidentsDirty || now - this.incidentsBuiltAt >= INCIDENT_REBUILD_INTERVAL_MS) {
       const known = [...[...this.incidentEvents.values()].flat(), ...this.recentAnomalies];
@@ -6971,68 +6993,26 @@ export class AnomalyService
       return groups.sort((a, b) => b.timestamp - a.timestamp).slice(0, boundedLimit);
     }
 
-    const sequencePatterns = getSequenceRules()
-      .map((r) => r.pattern as string)
-      .filter((p) => !pattern || p === pattern);
-    const [direct, sequence] = await Promise.all([
-      this.storage.getCorrelatedGroups({
-        startTime,
-        endTime,
-        pattern: pattern as string,
-        limit: boundedLimit,
-        involvingConnectionId: connectionId,
-      }),
-      connectionId && sequencePatterns.length > 0
-        ? this.storage.getCorrelatedGroups({
-            startTime,
-            endTime,
-            patterns: sequencePatterns,
-            scope: this.scopeFilter(connectionId),
-            limit: MAX_CORRELATED_GROUP_RESULTS,
-          })
-        : [],
-    ]);
-    const stored = [
-      ...new Map([...direct, ...sequence].map((s) => [s.correlationId, s])).values(),
-    ].sort((a, b) => b.timestamp - a.timestamp);
-    const groups: CorrelatedAnomalyGroup[] = [];
-    let start = 0;
-    for (
-      let pageSize = boundedLimit;
-      start < stored.length && groups.length < boundedLimit;
-      pageSize *= 2
-    ) {
-      const page = stored.slice(start, start + pageSize);
-      start += page.length;
-      const members = await this.readGroupMembers(page);
-
-      for (const s of page) {
-        if (groups.length >= boundedLimit) break;
-        const ids = new Set(s.anomalyIds);
-        const anomalies = members.filter(
-          (a) => a.correlationId === s.correlationId || ids.has(a.id),
-        );
-        if (
-          connectionId &&
-          s.connectionId !== connectionId &&
-          !anomalies.some((a) => a.connectionId === connectionId)
-        ) {
-          continue;
-        }
-
-        groups.push({
-          correlationId: s.correlationId,
-          timestamp: s.timestamp,
-          pattern: s.pattern as AnomalyPattern,
-          severity: s.severity as AnomalySeverity,
-          diagnosis: s.diagnosis,
-          recommendations: s.recommendations,
-          anomalies,
-        });
-      }
-    }
-
-    return groups;
+    const stored = await this.storage.getCorrelatedGroups({
+      startTime,
+      endTime,
+      pattern: pattern as string,
+      limit: boundedLimit,
+      involvingConnectionId: connectionId,
+    });
+    const members = await this.readGroupMembers(stored);
+    return stored.map((s) => {
+      const ids = new Set(s.anomalyIds);
+      return {
+        correlationId: s.correlationId,
+        timestamp: s.timestamp,
+        pattern: s.pattern as AnomalyPattern,
+        severity: s.severity as AnomalySeverity,
+        diagnosis: s.diagnosis,
+        recommendations: s.recommendations,
+        anomalies: members.filter((a) => a.correlationId === s.correlationId || ids.has(a.id)),
+      };
+    });
   }
 
   private async readGroupMembers(page: StoredCorrelatedGroup[]): Promise<AnomalyEvent[]> {

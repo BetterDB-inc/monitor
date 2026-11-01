@@ -544,6 +544,86 @@ describe('CaptureTriggerRegistry', () => {
         expect(await rowsRead(reads)).toBe(1);
       });
 
+      it('fires for an event saved past the look-back while its trigger is live', async () => {
+        const captureService = makeCaptureService();
+        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+        const trigger = await registry.createTrigger(anyTrigger);
+        await registry.tick();
+
+        clock += 120 * MINUTE;
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: 'memory_used', timestamp: clock }),
+          CONNECTION_ID,
+        );
+        await registry.tick();
+
+        clock += MINUTE;
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
+          CONNECTION_ID,
+        );
+        await registry.tick();
+
+        expect(captureService.startSession).toHaveBeenCalledTimes(1);
+      });
+
+      it('forgets rows the watermark has passed', async () => {
+        const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
+        await registry.createTrigger(anyTrigger);
+        const unrelated = () => makeAnomaly({ metricType: 'memory_used', timestamp: clock });
+        await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
+        await registry.tick();
+
+        clock += 120 * MINUTE;
+        await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
+        await registry.tick();
+        await registry.tick();
+
+        expect((registry as any).seenAnomalies.size).toBe(1);
+      });
+
+      describe('with an event that fails', () => {
+        const unrelated = () => makeAnomaly({ metricType: 'memory_used', timestamp: clock });
+
+        const setup = async () => {
+          const captureService = makeCaptureService();
+          const healthGate = makeHealthGate(true);
+          const allow = healthGate.evaluate.getMockImplementation();
+          healthGate.evaluate.mockRejectedValue(new Error('storage down'));
+          const { registry, storage } = makeRegistry(captureService, healthGate);
+          await registry.createTrigger(anyTrigger);
+          await storage.saveAnomalyEvent(makeAnomaly({ timestamp: clock + 1 }), CONNECTION_ID);
+          await registry.tick();
+          return { captureService, healthGate, allow, registry, storage };
+        };
+
+        it('retries it after later inserts moved the watermark', async () => {
+          const { captureService, healthGate, registry, storage } = await setup();
+          for (let i = 0; i < 2; i++) {
+            clock += MINUTE;
+            await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
+            await registry.tick();
+          }
+
+          healthGate.evaluate.mockResolvedValue({ allow: true, signals: {}, thresholds: {} });
+          await registry.tick();
+
+          expect(captureService.startSession).toHaveBeenCalledTimes(1);
+        });
+
+        it('stops holding the watermark once it is older than the look-back', async () => {
+          const { registry, storage } = await setup();
+          clock += 62 * MINUTE;
+          await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
+          await registry.tick();
+
+          const reads = jest.spyOn(storage, 'getAnomalyEvents');
+          await registry.tick();
+
+          expect(await rowsRead(reads)).toBe(1);
+        });
+      });
+
       it('fires for an event saved late after the watermark has moved', async () => {
         const captureService = makeCaptureService();
         const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
@@ -876,7 +956,7 @@ describe('CaptureTriggerRegistry', () => {
       );
 
       const firstTick = registry.tick();
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 20; i++) {
         await Promise.resolve();
       }
       expect(startCalls.length).toBe(1);

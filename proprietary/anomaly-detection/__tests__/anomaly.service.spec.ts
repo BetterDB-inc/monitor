@@ -1722,6 +1722,24 @@ describe('AnomalyService', () => {
       expect((service as any).scopeConnectionIds('conn-a')).not.toContain('conn-b');
     });
 
+    it('judges skew while one view flags a node as failing', async () => {
+      await pollCluster(18_000, true);
+      for (let i = 0; i < 3; i += 1) {
+        clock += 1000;
+        const flagged = shardCtx('a', 18_000, true);
+        (flagged.client.getClusterNodes as jest.Mock).mockResolvedValue(
+          shardNodes('a', true).map((node) =>
+            node.id === 'c0000000' ? { ...node, flags: ['master', 'fail?'] } : node,
+          ),
+        );
+        await poll(flagged);
+        await poll(shardCtx('b', 6000, false));
+        await poll(shardCtx('c', 6000, false));
+      }
+
+      expect(skewEvents()).toHaveLength(1);
+    });
+
     it('alerts once when a shard stays above the cluster median during a reshard', async () => {
       await pollCluster(18_000, true);
       await pollCluster(18_000, true);
@@ -7431,6 +7449,30 @@ describe('AnomalyService', () => {
       });
     });
 
+    it('builds the cluster seeds once per correlation tick', async () => {
+      const keys = (service as any).connectionClusterKeys;
+      keys.set('conn-1', 'cluster:a');
+      keys.set('conn-2', 'cluster:a');
+      (service as any).connectionRegistry.listMembers.mockReturnValue([]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        ...['conn-1', 'conn-2', 'conn-1'].map((connectionId, i) => ({
+          id: `evt-${i}`,
+          connectionId,
+          timestamp: now - 1000 + i,
+          metricType: MetricType.CONNECTIONS,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          resolved: false,
+        })),
+      );
+      const seeds = jest.spyOn(service as any, 'seedsByClusterKey');
+
+      await (service as any).correlationTick();
+
+      expect(seeds).toHaveBeenCalledTimes(1);
+    });
+
     it('groups cluster members under their seed connection', () => {
       (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
         id === 'node-2' ? { id, membership: { seedId: 'seed-1' } } : { id },
@@ -7542,20 +7584,6 @@ describe('AnomalyService', () => {
       expect(bare).not.toHaveProperty('relatedMetrics', expect.anything());
     });
 
-    it('skips groups from other members that do not involve the caller', async () => {
-      storage.getCorrelatedGroups.mockResolvedValue([
-        storedGroup('grp-other', 1_000_000, { connectionId: 'node-1' }),
-      ]);
-      storage.getCorrelatedGroupMembers.mockResolvedValue([
-        { ...member('a', 'node-1'), correlationId: 'grp-other' },
-      ]);
-
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      expect(groups).toEqual([]);
-      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledTimes(1);
-    });
-
     it('rebuilds a group by its correlation id rather than the newest page of events', async () => {
       storage.getCorrelatedGroups.mockResolvedValue([
         storedGroup('grp-own', 1_000_000, { connectionId: 'node-2' }),
@@ -7564,23 +7592,6 @@ describe('AnomalyService', () => {
       await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
 
       expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(['grp-own'], [], 1000);
-    });
-
-    it('finds an older group from a busy sibling the caller took part in', async () => {
-      storage.getCorrelatedGroups.mockResolvedValue([
-        ...Array.from({ length: 1500 }, (_, i) =>
-          storedGroup(`noise-${i}`, 1_000_000 + i, { connectionId: 'node-1' }),
-        ),
-        storedGroup('grp-1', 1_000_000, { connectionId: 'node-1' }),
-      ]);
-      storage.getCorrelatedGroupMembers.mockResolvedValue([
-        member('a', 'node-1'),
-        member('b', 'node-2'),
-      ]);
-
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
     });
 
     it('finds a pattern-filtered sibling group behind newer groups of other patterns', async () => {
@@ -7634,40 +7645,6 @@ describe('AnomalyService', () => {
       ...over,
     });
 
-    describe('sequence candidates', () => {
-      const candidates = (connectionId: string) =>
-        Array.from({ length: 1000 }, (_, i) =>
-          storedGroup(`grp-${i}`, 1_000_000 - i, { connectionId }),
-        );
-      const stubGroups = (rows: unknown[]) =>
-        storage.getCorrelatedGroups.mockImplementation(async ({ patterns }: any) =>
-          patterns ? rows : [],
-        );
-
-      it('loads members only for the groups it returns', async () => {
-        stubGroups(candidates('node-2'));
-        storage.getCorrelatedGroupMembers.mockResolvedValue([]);
-
-        const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 5, 'node-2');
-
-        expect(groups).toHaveLength(5);
-        expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledTimes(1);
-        expect(storage.getCorrelatedGroupMembers.mock.calls[0][0]).toHaveLength(5);
-      });
-
-      it('keeps reading until the limit is filled by groups the connection took part in', async () => {
-        stubGroups(candidates('node-1'));
-        storage.getCorrelatedGroupMembers.mockImplementation(async (ids: string[]) =>
-          ids.includes('grp-7') ? [{ ...member('b', 'node-2'), correlationId: 'grp-7' }] : [],
-        );
-
-        const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 5, 'node-2');
-
-        expect(groups.map((g) => g.correlationId)).toContain('grp-7');
-        expect(storage.getCorrelatedGroupMembers.mock.calls.length).toBeLessThan(200);
-      });
-    });
-
     it('reads groups and members in one query each, whatever the group count', async () => {
       storage.getCorrelatedGroups.mockResolvedValue(
         Array.from({ length: 50 }, (_, i) => storedGroup(`grp-${i}`, 1_000_000 + i)),
@@ -7675,12 +7652,9 @@ describe('AnomalyService', () => {
 
       await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
 
-      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(2);
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(1);
       expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
         expect.objectContaining({ involvingConnectionId: 'node-2', limit: 50 }),
-      );
-      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({ patterns: [AnomalyPattern.RECOVERY_AMPLIFICATION] }),
       );
       expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledTimes(1);
       expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
@@ -7737,32 +7711,6 @@ describe('AnomalyService', () => {
         ['grp-2', ['b']],
         ['grp-1', ['a']],
       ]);
-    });
-
-    it('lists sibling sequence groups only when the caller took part', async () => {
-      const sequence = { pattern: AnomalyPattern.RECOVERY_AMPLIFICATION };
-      storage.getCorrelatedGroups.mockImplementation(async ({ patterns }: any) =>
-        patterns
-          ? [
-              storedGroup('seq-in', 2_000_000, { ...sequence, anomalyIds: ['x', 'b'] }),
-              storedGroup('seq-out', 1_000_000, { ...sequence, anomalyIds: ['y'] }),
-            ]
-          : [],
-      );
-      storage.getCorrelatedGroupMembers.mockResolvedValue([
-        { ...member('x', 'node-1'), correlationId: undefined },
-        { ...member('y', 'node-1'), correlationId: undefined },
-        { ...member('b', 'node-2'), correlationId: undefined },
-      ]);
-
-      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
-
-      expect(groups.map((g) => g.correlationId)).toEqual(['seq-in']);
-      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
-        expect.objectContaining({
-          scope: expect.objectContaining({ connectionIds: expect.arrayContaining(['node-1']) }),
-        }),
-      );
     });
 
     it('caps the groups read from storage', async () => {
@@ -8295,7 +8243,7 @@ describe('AnomalyService', () => {
       (service as any).recentAnomalies.push(...members);
 
       await (service as any).tickIncidentTimelines(now);
-      await (service as any).tickIncidentTimelines(now + 1000);
+      await (service as any).tickIncidentTimelines(now + 30_000);
 
       expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(2);
       expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
@@ -8337,6 +8285,51 @@ describe('AnomalyService', () => {
       await (service as any).tickIncidentTimelines(now);
 
       expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+    });
+
+    it('backs off a failing dedupe seed', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      storage.getCorrelatedGroups.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+      const scans = () => storage.getCorrelatedGroups.mock.calls.length;
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5_000);
+      expect(scans()).toBe(1);
+
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      expect(scans()).toBe(2);
+
+      await (service as any).tickIncidentTimelines(now + 85_000);
+      expect(scans()).toBe(2);
+
+      await (service as any).tickIncidentTimelines(now + 90_000);
+      expect(scans()).toBe(3);
+    });
+
+    it('backs off a failing boundary seed', async () => {
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5_000);
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(1);
+
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(2);
+    });
+
+    it('caps the wait between seed attempts', async () => {
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+      const attempts = 6;
+      let at = now;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        await (service as any).tickIncidentTimelines(at);
+        at += 5 * MIN;
+      }
+
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(attempts);
     });
 
     it('emits sequence groups unseeded once the dedupe seed keeps failing', async () => {
@@ -8741,7 +8734,7 @@ describe('AnomalyService', () => {
 
       await (service as any).tickIncidentTimelines(now);
       storage.getAnomalyEvents.mockResolvedValue([row]);
-      await (service as any).tickIncidentTimelines(now + 1000);
+      await (service as any).tickIncidentTimelines(now + 30_000);
 
       expect((service as any).liveIncidents.map((i: any) => i.entries[0].anomalyId)).toEqual([
         'stored',
@@ -8760,8 +8753,8 @@ describe('AnomalyService', () => {
 
       await (service as any).tickIncidentTimelines(now);
       storage.getIncidentBoundaries.mockResolvedValue([]);
-      await (service as any).tickIncidentTimelines(now + 1000);
-      await (service as any).tickIncidentTimelines(now + 2000);
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      await (service as any).tickIncidentTimelines(now + 31_000);
 
       expect((service as any).liveIncidents).toHaveLength(1);
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(2);
@@ -8884,10 +8877,8 @@ describe('AnomalyService', () => {
       const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
       let release!: (seeded: boolean) => void;
       (service as any).sequenceDedupeSeed = new Promise<boolean>((resolve) => (release = resolve));
-      const now = Date.now();
-
-      const first = (service as any).tickIncidentTimelines(now);
-      const second = (service as any).tickIncidentTimelines(now + 60_000);
+      const first = (service as any).correlationTick();
+      const second = (service as any).correlationTick();
       release(true);
       await Promise.all([first, second]);
 
