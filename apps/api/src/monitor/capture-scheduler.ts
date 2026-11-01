@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   Logger,
@@ -239,13 +240,13 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
         lastSkipReason: undefined,
       });
     } catch (err) {
-      const message = (err as Error).message ?? 'unknown';
-      if (message.includes('already active')) {
+      if (err instanceof ConflictException) {
         await this.storage.updateScheduledCapture(schedule.id, {
           lastSkipReason: 'session_already_active',
         });
         return;
       }
+      const message = (err as Error).message ?? 'unknown';
       this.logger.error(`Schedule ${schedule.id} start failed: ${message}`);
       await this.storage.updateScheduledCapture(schedule.id, {
         lastSkipReason: `start_failed: ${message}`,

@@ -100,6 +100,53 @@ describe('MonitorCaptureService', () => {
       await service.stopSession((await service.listSessions())[0].id);
     });
 
+    it('lets only one of two concurrent starts open MONITOR', async () => {
+      const { service, source } = makeService();
+      const openMonitor = jest.fn().mockResolvedValue(source);
+      service.setMonitorSourceFactory(openMonitor);
+
+      const [first, second] = await Promise.allSettled([
+        service.startSession({ connectionId: CONNECTION_ID }),
+        service.startSession({ connectionId: CONNECTION_ID }),
+      ]);
+
+      expect(first.status).toBe('fulfilled');
+      expect(second).toMatchObject({ status: 'rejected', reason: expect.any(ConflictException) });
+      expect(openMonitor).toHaveBeenCalledTimes(1);
+      await service.stopSession((await service.listSessions())[0].id);
+    });
+
+    it('reports the connection as busy while a session is starting', async () => {
+      const { service, source } = makeService();
+      let finishOpening: (value: MonitorSource) => void = () => undefined;
+      service.setMonitorSourceFactory(
+        () => new Promise<MonitorSource>((resolve) => (finishOpening = resolve)),
+      );
+
+      const starting = service.startSession({ connectionId: CONNECTION_ID });
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(true);
+      await new Promise((resolve) => setImmediate(resolve));
+      finishOpening(source);
+      const session = await starting;
+
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(true);
+      await service.stopSession(session.id);
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+    });
+
+    it('frees the connection when MONITOR fails to open', async () => {
+      const { service, source } = makeService();
+      service.setMonitorSourceFactory(async () => {
+        throw new Error('NOPERM');
+      });
+      await expect(service.startSession({ connectionId: CONNECTION_ID })).rejects.toThrow('NOPERM');
+      expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+
+      service.setMonitorSourceFactory(async () => source);
+      const session = await service.startSession({ connectionId: CONNECTION_ID });
+      await service.stopSession(session.id);
+    });
+
     it('allows a new session on the same connection after the previous one ends', async () => {
       const { service } = makeService();
       const first = await service.startSession({ connectionId: CONNECTION_ID });

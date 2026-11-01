@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import { CaptureScheduler } from '../capture-scheduler';
@@ -293,9 +293,7 @@ describe('CaptureScheduler', () => {
 
     it('records session_already_active when a session starts during the health gate', async () => {
       const captureService = makeCaptureService({
-        throwOnStart: new Error(
-          `A capture session is already active on connection ${CONNECTION_ID}`,
-        ),
+        throwOnStart: new ConflictException('connection busy'),
       });
       const healthGate = makeHealthGate(true);
       const { scheduler, storage } = makeScheduler(captureService, healthGate);

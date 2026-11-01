@@ -85,6 +85,7 @@ export type MonitorSourceFactory = (
 export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
+  private readonly starting = new Set<string>();
   private monitorSourceFactory: MonitorSourceFactory;
 
   constructor(
@@ -128,12 +129,22 @@ export class MonitorCaptureService {
    */
   async startSession(input: StartSessionInput): Promise<StoredCaptureSession> {
     const { connectionId } = input;
-    if (this.active.has(connectionId)) {
+    if (this.hasActiveSessionOn(connectionId)) {
       throw new ConflictException(
         `A capture session is already active on connection ${connectionId}`,
       );
     }
 
+    this.starting.add(connectionId);
+    try {
+      return await this.openSession(input);
+    } finally {
+      this.starting.delete(connectionId);
+    }
+  }
+
+  private async openSession(input: StartSessionInput): Promise<StoredCaptureSession> {
+    const { connectionId } = input;
     const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
     const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
     const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
@@ -459,7 +470,7 @@ export class MonitorCaptureService {
   }
 
   hasActiveSessionOn(connectionId: string): boolean {
-    return this.active.has(connectionId);
+    return this.active.has(connectionId) || this.starting.has(connectionId);
   }
 
   private findActiveById(sessionId: string): ActiveSession | undefined {

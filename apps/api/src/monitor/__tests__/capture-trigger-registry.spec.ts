@@ -323,6 +323,24 @@ describe('CaptureTriggerRegistry', () => {
   });
 
   describe('tick - queue when busy', () => {
+    it('queues the trigger when a session starts during the health gate', async () => {
+      const captureService = makeCaptureService({
+        throwOnStart: new ConflictException('connection busy'),
+      });
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+
+      expect((await storage.getCaptureTrigger(trigger.id))?.status).toBe('queued');
+    });
+
     it('queues the trigger when a session is already active on the connection', async () => {
       const captureService = makeCaptureService({ active: true });
       const healthGate = makeHealthGate(true);

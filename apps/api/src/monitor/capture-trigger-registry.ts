@@ -267,11 +267,11 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         firedSessionId: session.id,
       });
     } catch (err) {
-      const message = (err as Error).message ?? 'unknown';
-      if (message.includes('already active')) {
+      if (err instanceof ConflictException) {
         await this.patch(trigger.id, { status: 'queued' });
         return;
       }
+      const message = (err as Error).message ?? 'unknown';
       this.logger.error(`Failed to start triggered session: ${message}`);
       await this.patch(trigger.id, {
         status: 'skipped',
