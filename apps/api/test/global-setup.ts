@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
 
@@ -181,6 +181,7 @@ export default async function globalSetup() {
       // Ignore log errors
     }
 
+    rmSync(process.env.BETTERDB_TEST_TMP_DIR!, { recursive: true, force: true });
     throw error;
   }
 }
