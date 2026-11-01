@@ -89,6 +89,13 @@ describe('AnomalyController incident limit', () => {
     expect(service.getIncidentTimelines).not.toHaveBeenCalled();
   });
 
+  it('caps the limit at 1000', async () => {
+    await controller.getIncidents('c1', '999999');
+    await controller.getIncidents('c1', '1000');
+
+    expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([1000, 1000]);
+  });
+
   it('passes a valid limit and defaults to 50', async () => {
     await controller.getIncidents('c1', '10');
     await controller.getIncidents('c1');

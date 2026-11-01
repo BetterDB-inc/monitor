@@ -46,13 +46,15 @@ function parseTimeRange(
   return { parsedStartTime, parsedEndTime };
 }
 
+const MAX_INCIDENT_LIMIT = 1000;
+
 function parseLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
   if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new BadRequestException('limit must be a positive integer');
   }
-  return parsed;
+  return Math.min(parsed, MAX_INCIDENT_LIMIT);
 }
 
 @Controller('anomaly')
