@@ -8769,6 +8769,26 @@ describe('AnomalyService', () => {
         ...overrides,
       });
 
+      it('answers a history read without keeping what it observed', () => {
+        withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+        const history = (service as any).incidentHistoryProbe;
+
+        expect(history(signal())).toBe(T + 2 * MIN);
+        expect(history(signal({ until: null }))).toBe(T + 2 * MIN);
+
+        expect((service as any).observedRecoveries.size).toBe(0);
+        expect((service as any).observedOpenThrough.size).toBe(0);
+      });
+
+      it('leaves an open event out of the shared memory on a history read', () => {
+        withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 900], [T + 2.5 * MIN, 900]]);
+        const history = (service as any).incidentHistoryProbe;
+
+        history(signal({ until: null, now: T + 2.5 * MIN }));
+
+        expect((service as any).observedOpenThrough.size).toBe(0);
+      });
+
       it('recovers at the first sample back in band after the settle time', () => {
         withBuffer([
           ...baseline(T - 30_000),
@@ -9175,7 +9195,7 @@ describe('AnomalyService', () => {
         ),
       );
       const probe = jest.fn().mockReturnValue(null);
-      (service as any).incidentRecoveryProbe = probe;
+      (service as any).incidentHistoryProbe = probe;
       const [, listed] = await service.getIncidentTimelines('conn-1', t);
 
       probe.mockClear();
@@ -9266,7 +9286,7 @@ describe('AnomalyService', () => {
         })),
       ]);
       const probe = jest.fn().mockReturnValue(null);
-      (service as any).incidentRecoveryProbe = probe;
+      (service as any).incidentHistoryProbe = probe;
       const listed = await service.getIncidentTimelines('conn-1', t);
       const first = listed.find((i) => i.startedAt === t)!;
 

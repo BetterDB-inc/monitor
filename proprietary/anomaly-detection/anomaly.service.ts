@@ -6243,7 +6243,13 @@ export class AnomalyService
     return (seeds ?? this.seedsByClusterKey()).get(clusterKey) ?? clusterKey;
   }
 
-  private incidentRecoveryProbe: RecoveryProbe = (signal) => {
+  private incidentRecoveryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, true);
+  private incidentHistoryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, false);
+
+  private probeRecovery(
+    signal: Parameters<RecoveryProbe>[0],
+    remember: boolean,
+  ): ReturnType<RecoveryProbe> {
     const settledAt = signal.since + DEFAULT_INCIDENT_TIMELINE_OPTIONS.settleMs;
     const key = `${signal.connectionId}\u0000${signal.metricType}\u0000${signal.since}`;
     const recovered = this.observedRecoveries.get(key);
@@ -6283,8 +6289,10 @@ export class AnomalyService
         inBand(s.value),
     );
     if (backInBand) {
-      this.observedOpenThrough.delete(key);
-      this.rememberIncidentObservation(this.observedRecoveries, key, backInBand.timestamp);
+      if (remember) {
+        this.observedOpenThrough.delete(key);
+        this.rememberIncidentObservation(this.observedRecoveries, key, backInBand.timestamp);
+      }
       return backInBand.timestamp;
     }
     const newest = samples[samples.length - 1].timestamp;
@@ -6292,11 +6300,11 @@ export class AnomalyService
     if (!this.observedWithoutGap(samples, gapFrom, signal.until ?? signal.now)) {
       return undefined;
     }
-    if (signal.until === null) {
+    if (remember && signal.until === null) {
       this.rememberIncidentObservation(this.observedOpenThrough, key, newest);
     }
     return null;
-  };
+  }
 
   private observedWithoutGap(samples: readonly MetricSample[], from: number, end: number): boolean {
     const maxGapMs = MAX_MISSED_RECOVERY_POLLS * this.getIntervalMs();
@@ -6496,7 +6504,7 @@ export class AnomalyService
       endTime,
     );
     return this.incidentTimelineBuilder
-      .build(events, Date.now(), this.incidentRecoveryProbe, boundaries)
+      .build(events, Date.now(), this.incidentHistoryProbe, boundaries)
       .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
@@ -6527,7 +6535,7 @@ export class AnomalyService
     );
     const find = (all: AnomalyEvent[]) =>
       this.incidentTimelineBuilder
-        .build(all, Date.now(), this.incidentRecoveryProbe, boundaries)
+        .build(all, Date.now(), this.incidentHistoryProbe, boundaries)
         .find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
