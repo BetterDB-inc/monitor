@@ -30,6 +30,25 @@ describe('parseReplicaLines', () => {
     ]);
   });
 
+  it('reads replicaN lines the same way as slaveN lines', () => {
+    const info = {
+      role: 'master',
+      replica0: 'ip=10.0.0.2,port=6379,state=online,offset=9000,lag=0',
+      replica_read_only: '1',
+    };
+    expect(parseReplicaLines(info)).toEqual([
+      { key: 'replica0', addr: '10.0.0.2:6379', state: 'online', offset: 9000, lagSec: 0 },
+    ]);
+  });
+
+  it('orders mixed slaveN and replicaN lines by index', () => {
+    const info = {
+      replica1: 'ip=10.0.0.3,port=6379,state=online,offset=1,lag=0',
+      slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1,lag=0',
+    };
+    expect(parseReplicaLines(info).map((r) => r.key)).toEqual(['slave0', 'replica1']);
+  });
+
   it('skips malformed lines and keys that only look like slaveN', () => {
     const info = primaryInfo({
       slave2: 'garbage',
@@ -57,6 +76,16 @@ describe('parseReplicaLines', () => {
 });
 
 describe('ReplicationStreamTracker', () => {
+  it.each(['slave', 'replica', 'active-replica'])('treats role %s as a replica', (role) => {
+    const sample = new ReplicationStreamTracker().observe('conn', primaryInfo({ role }), T0);
+    expect(sample).toMatchObject({ role: 'replica', replicas: [] });
+  });
+
+  it('takes no sample from a Sentinel, whose INFO carries no replication offset', () => {
+    const info = { redis_mode: 'sentinel', sentinel_masters: '1' };
+    expect(new ReplicationStreamTracker().observe('conn', info, T0)).toBeNull();
+  });
+
   it('returns null when the node reports no master_repl_offset', () => {
     const tracker = new ReplicationStreamTracker();
     expect(tracker.observe('c1', { role: 'master' }, T0)).toBeNull();
