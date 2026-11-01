@@ -111,16 +111,19 @@ export class HealthGateService {
   private shareLagMeasurement(connectionId: string, baseline: ReplicaAckSample): Promise<number> {
     const replicas = this.replicasBehindLimit(baseline);
     const inFlight = this.lagMeasurements.get(connectionId);
-    if (inFlight === undefined) {
-      const lag = this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
-        this.lagMeasurements.delete(connectionId);
-      });
-      this.lagMeasurements.set(connectionId, { lag, replicas });
-      return lag;
+    if (inFlight && [...replicas].every((id) => inFlight.replicas.has(id))) {
+      return inFlight.lag;
     }
-    return [...replicas].every((id) => inFlight.replicas.has(id))
-      ? inFlight.lag
-      : this.measureLagAtNextAcks(connectionId, baseline);
+    const measurement: LagMeasurement = {
+      lag: this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
+        if (this.lagMeasurements.get(connectionId) === measurement) {
+          this.lagMeasurements.delete(connectionId);
+        }
+      }),
+      replicas: new Set([...(inFlight?.replicas ?? []), ...replicas]),
+    };
+    this.lagMeasurements.set(connectionId, measurement);
+    return measurement.lag;
   }
 
   private replicasBehindLimit(sample: ReplicaAckSample): Set<string> {

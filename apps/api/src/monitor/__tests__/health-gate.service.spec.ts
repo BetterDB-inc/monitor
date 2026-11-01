@@ -479,6 +479,20 @@ describe('HealthGateService', () => {
       expect(second.signals.replicationLagBytes).toBe(60_000_000);
     });
 
+    it('share the measurement started for a replica the first lacks', async () => {
+      const laterReading = primaryInfo(100_000_000, 100_000_000, 40_000_000);
+      const { service } = makeService({
+        info: primaryInfo(100_000_000, 50_000_000, 100_000_000),
+        samples: [laterReading],
+        nextInfo: laterReading,
+      });
+      const measure = jest.spyOn(service as any, 'measureLagAtNextAcks');
+      const pending = [1, 2, 3].map(() => service.evaluate(CONNECTION_ID));
+      await jest.runAllTimersAsync();
+      await Promise.all(pending);
+      expect(measure).toHaveBeenCalledTimes(2);
+    });
+
     it('measure each connection on its own', async () => {
       const { service, client } = makeService({ info: lagging() });
       const pending = [service.evaluate('conn-1'), service.evaluate('conn-2')];
