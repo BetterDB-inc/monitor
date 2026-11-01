@@ -1670,6 +1670,34 @@ describe('AnomalyService', () => {
       ]);
     });
 
+    it('keeps the scope when a node fails over mid-incident', async () => {
+      await pollCluster(6000, false);
+      const before = (service as any).correlationScopeOf('conn-a');
+      const ctx = shardCtx('a', 6000, false) as any;
+      ctx.client.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          shardNodes('a', false).map((node) =>
+            node.id.startsWith('c') ? { ...node, flags: ['master', 'fail'] } : node,
+          ),
+        );
+
+      await poll(ctx);
+      await poll(shardCtx('b', 6000, false));
+
+      expect((service as any).correlationScopeOf('conn-a')).toBe(before);
+      expect((service as any).correlationScopeOf('conn-b')).toBe(before);
+      expect((service as any).correlationScopeOf('conn-c')).toBe(before);
+    });
+
+    it('forgets the node keys once no connection holds the cluster', async () => {
+      await pollCluster(6000, false);
+
+      ['conn-a', 'conn-b', 'conn-c'].forEach((id) => (service as any).onConnectionRemoved(id));
+
+      expect((service as any).clusterKeyByNode.size).toBe(0);
+    });
+
     it('leaves the scope of a removed connection', async () => {
       await pollCluster(6000, false);
 
@@ -8156,6 +8184,47 @@ describe('AnomalyService', () => {
       const incidents = await service.getIncidentTimelines('conn-1');
 
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('splits history at boundaries stored under an earlier cluster key', async () => {
+      const t = Date.now() - 20 * MIN;
+      const rows = ['a', 'b'].map((id, i) => ({
+        ...anomaly({ id, timestamp: t + i * MIN, scopeId: 'cluster:old' }),
+        anomalyType: 'spike',
+      }));
+      const older = [
+        { scopeId: 'cluster:old', startedAt: t, anomalyId: 'a' },
+        { scopeId: 'cluster:old', startedAt: t + MIN, anomalyId: 'b' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) =>
+        scopeIds?.includes('cluster:old') ? older : [],
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('keeps the history when the earlier cluster key boundaries cannot be read', async () => {
+      const t = Date.now() - 20 * MIN;
+      const row = {
+        ...anomaly({ id: 'a', timestamp: t, scopeId: 'cluster:old' }),
+        anomalyType: 'spike',
+      };
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : [row],
+      );
+      storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) => {
+        if (scopeIds?.includes('cluster:old')) throw new Error('down');
+        return [];
+      });
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents).toHaveLength(1);
     });
 
     it('anchors the default window on endTime', async () => {

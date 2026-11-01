@@ -393,6 +393,7 @@ export class AnomalyService
   private activeStuckReplicas = new Map<string, Set<string>>();
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
+  private readonly clusterKeyByNode = new Map<string, string>();
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
@@ -875,7 +876,7 @@ export class AnomalyService
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
     this.reshardSnapshot.delete(connectionId);
-    this.connectionClusterKeys.delete(connectionId);
+    this.forgetClusterKey(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
@@ -6166,9 +6167,25 @@ export class AnomalyService
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
-    const clusterKey = clusterKeyFromNodes(nodes);
-    if (clusterKey) this.connectionClusterKeys.set(connectionId, clusterKey);
-    else this.connectionClusterKeys.delete(connectionId);
+    const liveKey = clusterKeyFromNodes(nodes);
+    if (!liveKey) {
+      this.forgetClusterKey(connectionId);
+      return;
+    }
+    const nodeIds = nodes.map((node) => node.id);
+    const known = nodeIds.map((id) => this.clusterKeyByNode.get(id)).find(Boolean);
+    const clusterKey = known ?? liveKey;
+    nodeIds.forEach((id) => this.clusterKeyByNode.set(id, clusterKey));
+    this.connectionClusterKeys.set(connectionId, clusterKey);
+  }
+
+  private forgetClusterKey(connectionId: string): void {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    this.connectionClusterKeys.delete(connectionId);
+    if (!clusterKey || [...this.connectionClusterKeys.values()].includes(clusterKey)) return;
+    for (const [nodeId, key] of this.clusterKeyByNode) {
+      if (key === clusterKey) this.clusterKeyByNode.delete(nodeId);
+    }
   }
 
   private seedIdOf(connectionId: string): string | undefined {
@@ -6535,7 +6552,15 @@ export class AnomalyService
       loadFrom,
       ...boundaries.map((b) => b.startedAt).filter((at) => at >= reach),
     );
-    return { events: await this.loadIncidentEvents(connectionId, earliest, endTime), boundaries };
+    const events = await this.loadIncidentEvents(connectionId, earliest, endTime);
+    if (!connectionId) return { events, boundaries };
+    const scope = this.correlationScopeOf(connectionId);
+    const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
+      (id): id is string => id !== undefined && id !== scope,
+    );
+    if (earlierScopes.length === 0) return { events, boundaries };
+    const earlier = await this.readBoundariesOf(earlierScopes, loadFrom, endTime);
+    return { events, boundaries: [...boundaries, ...earlier] };
   }
 
   private async readIncidentBoundaries(
@@ -6543,12 +6568,20 @@ export class AnomalyService
     startTime: number,
     endTime: number | undefined,
   ): Promise<StoredIncidentBoundary[]> {
+    return this.readBoundariesOf(
+      connectionId ? [this.correlationScopeOf(connectionId)] : undefined,
+      startTime,
+      endTime,
+    );
+  }
+
+  private async readBoundariesOf(
+    scopeIds: string[] | undefined,
+    startTime: number,
+    endTime: number | undefined,
+  ): Promise<StoredIncidentBoundary[]> {
     try {
-      return await this.storage.getIncidentBoundaries({
-        scopeIds: connectionId ? [this.correlationScopeOf(connectionId)] : undefined,
-        startTime,
-        endTime,
-      });
+      return await this.storage.getIncidentBoundaries({ scopeIds, startTime, endTime });
     } catch (err) {
       this.logger.warn(`Failed to read incident boundaries: ${err}`);
       return [];
