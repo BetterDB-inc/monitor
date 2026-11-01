@@ -166,6 +166,102 @@ describe('PersistenceOutbox', () => {
       expect(outbox.due(OUTBOX_MAX_AGE_MS * 24).map((entry) => entry.id)).toEqual(['close']);
     });
 
+    describe('a pending save whose event was resolved', () => {
+      const unsaved = (id: string, onDrop?: () => void) => {
+        const anomaly = event(id);
+        outbox.enqueueSave(anomaly, undefined, 0, onDrop);
+        return anomaly;
+      };
+
+      it('does not expire', () => {
+        const onDrop = jest.fn();
+        unsaved('a', onDrop).resolved = true;
+
+        expect(outbox.due(OUTBOX_MAX_AGE_MS * 24).map((entry) => entry.id)).toEqual(['a']);
+        expect(dropped).toEqual([]);
+        expect(onDrop).not.toHaveBeenCalled();
+      });
+
+      it('is evicted after unresolved saves', () => {
+        unsaved('a').resolved = true;
+        fill(OUTBOX_MAX_ENTRIES - 1);
+
+        outbox.enqueueSave(event('new'), undefined, 1);
+
+        expect(outbox.has('a')).toBe(true);
+        expect(dropped).toEqual([['save-0', 'full']]);
+      });
+
+      it('never re-arms when a full outbox of closes evicts it', () => {
+        const onDrop = jest.fn();
+        unsaved('a', onDrop).resolved = true;
+        for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
+
+        outbox.enqueueResolve('new', 100, 1);
+        outbox.settle('new');
+        outbox.due(0);
+
+        expect(outbox.has('a')).toBe(false);
+        expect(dropped).toEqual([['a', 'full']]);
+        expect(onDrop).not.toHaveBeenCalled();
+      });
+
+      it('never re-arms when it was resolved after being held', () => {
+        const onDrop = jest.fn();
+        const anomaly = unsaved('a', onDrop);
+        for (let i = 1; i <= OUTBOX_MAX_ENTRIES; i++) outbox.enqueueSave(event(`s-${i}`), undefined, 0);
+        expect(outbox.has('a')).toBe(false);
+
+        anomaly.resolved = true;
+        outbox.settle('s-1');
+        outbox.due(0);
+
+        expect(onDrop).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('a close carried by a pending save', () => {
+      const evictFirst = () => {
+        for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
+        outbox.enqueueResolve('new', 100, 1);
+      };
+
+      it('reports when there is no save to carry it', () => {
+        expect(outbox.carryResolve('a', 100)).toBe(false);
+      });
+
+      it('resolves the pending event', () => {
+        const anomaly = event('a');
+        outbox.enqueueRewrite(anomaly, 0);
+
+        expect(outbox.carryResolve('a', 100)).toBe(true);
+
+        expect(anomaly).toMatchObject({ resolved: true, resolvedAt: 100 });
+      });
+
+      it('runs its callback, not the re-arm, when the save is evicted', () => {
+        const rearm = jest.fn();
+        const onCloseDrop = jest.fn();
+        outbox.enqueueSave(event('a'), undefined, 0, rearm);
+        outbox.carryResolve('a', 100, onCloseDrop);
+
+        evictFirst();
+
+        expect(onCloseDrop).toHaveBeenCalledTimes(1);
+        expect(rearm).not.toHaveBeenCalled();
+      });
+
+      it('keeps the callback of a resolve folded into a rewrite', () => {
+        const onCloseDrop = jest.fn();
+        outbox.enqueueResolve('a', 100, 0, onCloseDrop);
+        outbox.enqueueRewrite(event('a'), 0);
+
+        evictFirst();
+
+        expect(onCloseDrop).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it('still expires an unresolved rewrite', () => {
       outbox.enqueueRewrite(event('a'), 0);
 

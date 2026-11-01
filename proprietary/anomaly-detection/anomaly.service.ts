@@ -455,6 +455,7 @@ export class AnomalyService
   private removedDivergenceSweeps = new Set<string>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
+    if (entry.kind === 'save' && entry.anomaly.resolved) this.releaseLatch(entry.anomaly);
   });
   private correlationTicking = false;
   private outboxDraining = false;
@@ -6902,12 +6903,7 @@ export class AnomalyService
   }
 
   private queueResolve(anomalyId: string, resolvedAt: number, onDrop?: () => void): void {
-    const pendingSave = this.persistenceOutbox.unsavedAnomaly(anomalyId);
-    if (pendingSave) {
-      pendingSave.resolved = true;
-      pendingSave.resolvedAt = resolvedAt;
-      return;
-    }
+    if (this.persistenceOutbox.carryResolve(anomalyId, resolvedAt, onDrop)) return;
     this.persistenceOutbox.enqueueResolve(anomalyId, resolvedAt, Date.now(), onDrop);
   }
 
