@@ -1,3 +1,7 @@
+import { mkdtempSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
 process.env.STORAGE_TYPE = 'memory';
 
 if (!process.env.DB_HOST) {
@@ -15,6 +19,10 @@ if (!process.env.DB_PASSWORD) {
 
 if (!process.env.AI_ENABLED) {
   process.env.AI_ENABLED = 'false';
+}
+
+if (!process.env.BETTERDB_DATA_DIR) {
+  process.env.BETTERDB_DATA_DIR = mkdtempSync(join(tmpdir(), 'betterdb-test-'));
 }
 
 // Disable telemetry during tests
