@@ -9204,6 +9204,8 @@ describe('AnomalyService', () => {
       replicaState?: string;
       syncFull?: number;
       backlogSize?: number;
+      memory?: Record<string, string>;
+      persistence?: Record<string, string>;
     }): Promise<void> {
       clock += 1000;
       offset += stats.bytes;
@@ -9220,7 +9222,8 @@ describe('AnomalyService', () => {
             : { slave0: REPLICA.replace('online', stats.replicaState ?? 'online') }),
         },
         clients: { connected_clients: '10', blocked_clients: '0' },
-        memory: { used_memory: '1000000' },
+        memory: stats.memory ?? { used_memory: '1000000' },
+        persistence: stats.persistence ?? {},
         stats: { sync_full: String(stats.syncFull ?? 0), sync_partial_ok: '0', sync_partial_err: '0' },
       });
       await (service as any).pollConnection(mockCtx);
@@ -9318,6 +9321,42 @@ describe('AnomalyService', () => {
       expect(rest).toEqual([]);
       expect(escalation.message).toContain('10.0.0.2:6379');
       expect(escalation.message).toContain('sync_full +1');
+    });
+
+    it('turns a disconnect, a full resync and its fork into one incident', async () => {
+      const GB = 1024 ** 3;
+      const forking = {
+        bytes: 2000,
+        syncFull: 1,
+        replicaState: 'send_bulk',
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1, replicaState: 'wait_bgsave' });
+      await pollPrimary(forking);
+      await pollPrimary(forking);
+      await (service as any).tickIncidentTimelines(clock);
+
+      const [resync] = events(MetricType.RESYNC_ESCALATION);
+      const [fork] = events(MetricType.FORK_MEMORY_RISK);
+      const incidents = (service as any).liveIncidents;
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([AnomalyPattern.RECOVERY_AMPLIFICATION]);
+      expect(incidents[0].sequenceMatches[0].anomalyIds).toEqual([resync.id, fork.id]);
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pattern: AnomalyPattern.RECOVERY_AMPLIFICATION,
+          anomalyIds: [resync.id, fork.id],
+        }),
+        'conn-1',
+      );
     });
 
     it('stays quiet when a short disconnect is covered by the backlog', async () => {
