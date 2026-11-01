@@ -247,6 +247,24 @@ describe('CaptureTriggerRegistry', () => {
       expect(updated?.firedAt).toBeGreaterThan(0);
     });
 
+    it('matches an event again after a tick failed on it', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValueOnce(new Error('storage down'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+
+      await expect(registry.tick()).rejects.toThrow('storage down');
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
     it('fires for an event saved late with an older timestamp', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
@@ -543,7 +561,7 @@ describe('CaptureTriggerRegistry', () => {
         clock += MINUTE;
         await registry.tick();
 
-        expect(captureService.startSession).toHaveBeenCalledTimes(1);
+        expect(captureService.startSession).toHaveBeenCalledTimes(2);
       });
     });
 
