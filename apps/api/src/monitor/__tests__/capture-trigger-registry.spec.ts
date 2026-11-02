@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
@@ -571,7 +571,7 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(3);
     });
 
-    it('evaluates one connection once per tick', async () => {
+    it('leaves sharing a reading to the gate', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(false, 'replication_lag_elevated');
       const { registry, storage } = makeRegistry(captureService, healthGate);
@@ -586,7 +586,7 @@ describe('CaptureTriggerRegistry', () => {
 
       await registry.tick();
 
-      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(3);
       const triggers = await registry.listTriggers({ connectionId: CONNECTION_ID });
       expect(triggers.map((t) => t.status)).toEqual(['skipped', 'skipped', 'skipped']);
     });
@@ -698,21 +698,96 @@ describe('CaptureTriggerRegistry', () => {
       });
     });
 
-    it('leaves no gate rejection unhandled when an earlier trigger fails the tick', async () => {
+    it('queues a trigger whose gate failed and still fires the others', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(true);
-      healthGate.evaluate.mockRejectedValue(new Error('Connection not found'));
+      const allowed = await healthGate.evaluate();
+      healthGate.evaluate.mockImplementation(async (connectionId: string) => {
+        if (connectionId === 'conn-1') {
+          throw new Error('INFO timed out');
+        }
+        return allowed;
+      });
       const { registry, storage } = makeRegistry(captureService, healthGate);
       await createFiringTrigger(registry, storage, 'conn-1', METRIC);
       await createFiringTrigger(registry, storage, 'conn-2', METRIC);
-      const unhandled = jest.fn();
-      process.on('unhandledRejection', unhandled);
 
-      await expect(registry.tick()).rejects.toThrow('Connection not found');
+      await registry.tick();
+
+      expect((await registry.listTriggers({ connectionId: 'conn-1' }))[0].status).toBe('queued');
+      expect((await registry.listTriggers({ connectionId: 'conn-2' }))[0].status).toBe('fired');
+    });
+
+    it('fires a queued trigger once its gate recovers', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValueOnce(new Error('INFO timed out'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
+
+      await registry.tick();
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips a trigger whose connection was removed', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new NotFoundException('Connection not found'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
+
+      await registry.tick();
+
+      expect((await registry.listTriggers({ connectionId: CONNECTION_ID }))[0]).toMatchObject({
+        status: 'skipped',
+        skipReason: 'connection_not_found',
+      });
+    });
+
+    it('does not make a connection wait for the gate of another', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const allowed = await healthGate.evaluate();
+      let release: (result: unknown) => void = () => undefined;
+      healthGate.evaluate.mockImplementation((connectionId: string) =>
+        connectionId === 'conn-1'
+          ? new Promise((resolve) => {
+              release = resolve;
+            })
+          : Promise.resolve(allowed),
+      );
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, 'conn-1', METRIC);
+      await createFiringTrigger(registry, storage, 'conn-2', METRIC);
+
+      const tick = registry.tick();
       await settle();
 
-      process.off('unhandledRejection', unhandled);
-      expect(unhandled).not.toHaveBeenCalled();
+      expect(captureService.startSession).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: 'conn-2' }),
+      );
+      release(allowed);
+      await tick;
+    });
+
+    it('loads the triggers once however many events arrived', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
+      for (const offset of [2, 3, 4]) {
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: METRIC, timestamp: Date.now() + offset }),
+          CONNECTION_ID,
+        );
+      }
+      const load = jest.spyOn(storage, 'getCaptureTriggers');
+
+      await registry.tick();
+
+      expect(load).toHaveBeenCalledTimes(5);
     });
 
     it('queues a second matching trigger when the first fire occupies the connection', async () => {

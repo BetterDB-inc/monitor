@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
@@ -24,7 +25,9 @@ export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-type TickGates = Map<string, Promise<HealthGateResult>>;
+function triggerKey(connectionId: string, metricType: string, anomalyType: string): string {
+  return JSON.stringify([connectionId, metricType, anomalyType]);
+}
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -165,10 +168,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
     this.ticking = true;
     try {
-      const gates: TickGates = new Map();
       await this.sweepExpired();
-      await this.processQueued(gates);
-      await this.processNewAnomalies(gates);
+      await this.processQueued();
+      await this.processNewAnomalies();
     } finally {
       this.ticking = false;
     }
@@ -187,12 +189,12 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async processQueued(gates: TickGates): Promise<void> {
+  private async processQueued(): Promise<void> {
     const queued = await this.storage.getCaptureTriggers({ status: 'queued' });
-    await this.fireAll(queued, gates);
+    await this.fireAll(queued);
   }
 
-  private async processNewAnomalies(gates: TickGates): Promise<void> {
+  private async processNewAnomalies(): Promise<void> {
     const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
     const pageSize = 200;
     // Drain pagination by walking offset until storage returns fewer rows
@@ -220,6 +222,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     // Storage returns DESC by timestamp; iterate oldest-first so a partial
     // drain still leaves a coherent watermark.
     const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
+    const active = await this.loadActiveTriggers();
     let maxTs = this.lastAnomalyAt;
     const matched = new Map<string, StoredCaptureTrigger>();
     for (const evt of sorted) {
@@ -229,50 +232,81 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
       if (!evt.connectionId) {
         continue;
       }
-      const match = await this.findActiveTrigger(
-        evt.connectionId,
-        evt.metricType,
-        evt.anomalyType,
-      );
+      const match = active.get(triggerKey(evt.connectionId, evt.metricType, evt.anomalyType));
       if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
         matched.set(match.id, match);
       }
     }
-    await this.fireAll([...matched.values()], gates);
+    await this.fireAll([...matched.values()]);
     this.lastAnomalyAt = maxTs;
   }
 
-  private async fireAll(triggers: StoredCaptureTrigger[], gates: TickGates): Promise<void> {
-    for (const { connectionId } of triggers) {
-      if (!this.captureService.hasActiveSessionOn(connectionId)) {
-        void this.evaluateGate(connectionId, gates);
-      }
+  private async loadActiveTriggers(): Promise<Map<string, StoredCaptureTrigger>> {
+    const [configured, queued] = await Promise.all([
+      this.storage.getCaptureTriggers({ status: 'configured' }),
+      this.storage.getCaptureTriggers({ status: 'queued' }),
+    ]);
+    const active = new Map<string, StoredCaptureTrigger>();
+    for (const trigger of [...queued, ...configured]) {
+      active.set(triggerKey(trigger.connectionId, trigger.metricType, trigger.anomalyType), trigger);
     }
+    return active;
+  }
+
+  private async fireAll(triggers: StoredCaptureTrigger[]): Promise<void> {
+    const byConnection = new Map<string, StoredCaptureTrigger[]>();
     for (const trigger of triggers) {
-      await this.tryFire(trigger, gates);
+      byConnection.set(trigger.connectionId, [
+        ...(byConnection.get(trigger.connectionId) ?? []),
+        trigger,
+      ]);
+    }
+    const outcomes = await Promise.allSettled(
+      [...byConnection.values()].map((group) => this.fireInOrder(group)),
+    );
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (failed !== undefined) {
+      throw failed.reason;
     }
   }
 
-  private evaluateGate(connectionId: string, gates: TickGates): Promise<HealthGateResult> {
-    const known = gates.get(connectionId);
-    if (known !== undefined) {
-      return known;
+  private async fireInOrder(triggers: StoredCaptureTrigger[]): Promise<void> {
+    for (const trigger of triggers) {
+      await this.tryFire(trigger);
     }
-    const gate = this.healthGate.evaluate(connectionId);
-    gate.catch(() => undefined);
-    gates.set(connectionId, gate);
-    return gate;
   }
 
-  private async tryFire(trigger: StoredCaptureTrigger, gates: TickGates): Promise<void> {
+  private async evaluateGate(trigger: StoredCaptureTrigger): Promise<HealthGateResult | null> {
+    try {
+      return await this.healthGate.evaluate(trigger.connectionId);
+    } catch (err) {
+      await this.holdAfterGateFailure(trigger, err as Error);
+      return null;
+    }
+  }
+
+  private async holdAfterGateFailure(trigger: StoredCaptureTrigger, err: Error): Promise<void> {
+    this.logger.warn(`Health gate failed for trigger ${trigger.id}: ${err.message}`);
+    if (!(await this.canStillFire(trigger.id))) {
+      return;
+    }
+    if (err instanceof NotFoundException) {
+      await this.patch(trigger.id, { status: 'skipped', skipReason: 'connection_not_found' });
+      void this.dispatchSessionSkipped(trigger, 'connection_not_found');
+    } else if (trigger.status !== 'queued') {
+      await this.patch(trigger.id, { status: 'queued' });
+    }
+  }
+
+  private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
     if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
       if (trigger.status !== 'queued' && (await this.canStillFire(trigger.id))) {
         await this.patch(trigger.id, { status: 'queued' });
       }
       return;
     }
-    const gate = await this.evaluateGate(trigger.connectionId, gates);
-    if (!(await this.canStillFire(trigger.id))) {
+    const gate = await this.evaluateGate(trigger);
+    if (gate === null || !(await this.canStillFire(trigger.id))) {
       return;
     }
     if (!gate.allow) {
@@ -303,8 +337,6 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
         status: 'skipped',
         skipReason: `start_failed: ${message}`,
       });
-    } finally {
-      gates.delete(trigger.connectionId);
     }
   }
 

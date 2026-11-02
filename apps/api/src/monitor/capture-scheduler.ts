@@ -217,6 +217,10 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
     }
 
     const gate = await this.healthGate.evaluate(schedule.connectionId);
+    const current = await this.storage.getScheduledCapture(schedule.id);
+    if (current?.status !== 'enabled') {
+      return;
+    }
     if (!gate.allow) {
       this.logger.debug(
         `Schedule ${schedule.id} skipped by health gate: ${gate.skipReason}`,

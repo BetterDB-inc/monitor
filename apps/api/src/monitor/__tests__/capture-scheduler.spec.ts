@@ -68,6 +68,27 @@ describe('CaptureScheduler', () => {
     jest.useRealTimers();
   });
 
+  it('starts nothing when the schedule is deleted during the gate', async () => {
+    const captureService = makeCaptureService();
+    const healthGate = makeHealthGate(true);
+    const allowed = await healthGate.evaluate();
+    const { scheduler, storage } = makeScheduler(captureService, healthGate);
+    const schedule = await scheduler.createSchedule({
+      connectionId: CONNECTION_ID,
+      intervalSeconds: 30,
+      durationMs: 5000,
+    });
+    healthGate.evaluate.mockImplementation(async () => {
+      await scheduler.deleteSchedule(schedule.id);
+      return allowed;
+    });
+
+    await (scheduler as any).tick(schedule);
+
+    expect(captureService.startSession).not.toHaveBeenCalled();
+    expect(await storage.getScheduledCapture(schedule.id)).toBeNull();
+  });
+
   describe('createSchedule', () => {
     it('persists an enabled schedule and registers a Nest interval', async () => {
       const captureService = makeCaptureService();
