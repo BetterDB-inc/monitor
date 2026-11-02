@@ -8,6 +8,7 @@ import {
   StoredCaptureSession,
 } from '../common/interfaces/storage-port.interface';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
+import { withTimeout } from '../common/utils/with-timeout';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
@@ -55,6 +56,8 @@ export interface StartSessionInput {
  * per writer is far beyond any realistic session.
  */
 const CHUNK_INDEX_NAMESPACE = 10_000_000;
+
+const START_STEP_TIMEOUT_MS = 10_000;
 
 interface ActiveSession {
   session: StoredCaptureSession;
@@ -149,12 +152,14 @@ export class MonitorCaptureService {
     const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
     const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
-    const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
+    const fanOutNodes = input.fanOut
+      ? await this.boundStartStep(this.resolveFanOutNodes(connectionId))
+      : [];
     const isFanOut = fanOutNodes.length > 0;
 
     const targetNode = isFanOut
       ? undefined
-      : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+      : await this.boundStartStep(this.resolveTargetNodeAddress(connectionId, input.targetNodeId));
 
     const initialSegments: CaptureNodeSegment[] = isFanOut
       ? fanOutNodes.map((n) => ({
@@ -183,13 +188,48 @@ export class MonitorCaptureService {
       nodeSegments: isFanOut ? initialSegments : undefined,
     };
 
-    await this.storage.saveCaptureSession(session, connectionId);
+    await this.saveStartingSession(session);
 
     if (isFanOut) {
       return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
     }
 
     return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+  }
+
+  private boundStartStep<T>(step: Promise<T>): Promise<T> {
+    return withTimeout(step, START_STEP_TIMEOUT_MS, 'Capture session start timed out');
+  }
+
+  private async saveStartingSession(session: StoredCaptureSession): Promise<void> {
+    const saving = this.storage.saveCaptureSession(session, session.connectionId);
+    try {
+      await this.boundStartStep(saving);
+    } catch (err) {
+      saving
+        .then(() =>
+          this.storage.updateCaptureSession(session.id, {
+            status: 'failed',
+            endedAt: Date.now(),
+            terminationReason: `start_failed: ${(err as Error).message}`,
+          }),
+        )
+        .catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async openMonitorSource(
+    connectionId: string,
+    targetNodeId?: string,
+  ): Promise<MonitorSource> {
+    const opening = this.monitorSourceFactory(connectionId, targetNodeId);
+    try {
+      return await this.boundStartStep(opening);
+    } catch (err) {
+      opening.then((source) => source.stop()).catch(() => undefined);
+      throw err;
+    }
   }
 
   private async startSingleSession(
@@ -201,16 +241,18 @@ export class MonitorCaptureService {
   ): Promise<StoredCaptureSession> {
     let monitorSource: MonitorSource;
     try {
-      monitorSource = await this.monitorSourceFactory(session.connectionId, targetNodeId);
+      monitorSource = await this.openMonitorSource(session.connectionId, targetNodeId);
     } catch (err) {
       this.logger.error(
         `Failed to open MONITOR on ${session.connectionId}: ${(err as Error).message}`,
       );
-      await this.storage.updateCaptureSession(session.id, {
-        status: 'failed',
-        endedAt: Date.now(),
-        terminationReason: `monitor_open_failed: ${(err as Error).message}`,
-      });
+      await this.boundStartStep(
+        this.storage.updateCaptureSession(session.id, {
+          status: 'failed',
+          endedAt: Date.now(),
+          terminationReason: `monitor_open_failed: ${(err as Error).message}`,
+        }),
+      );
       throw err;
     }
 
@@ -269,7 +311,7 @@ export class MonitorCaptureService {
       const node = nodes[i];
       let source: MonitorSource;
       try {
-        source = await this.monitorSourceFactory(session.connectionId, node.id);
+        source = await this.openMonitorSource(session.connectionId, node.id);
       } catch (err) {
         // Failing to open MONITOR on ONE node does not kill the session — mark
         // that segment failed up front and keep going with the others.

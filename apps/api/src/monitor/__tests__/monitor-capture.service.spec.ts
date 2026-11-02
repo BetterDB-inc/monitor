@@ -147,6 +147,74 @@ describe('MonitorCaptureService', () => {
       await service.stopSession(session.id);
     });
 
+    describe('when a start step hangs', () => {
+      beforeEach(() => jest.useFakeTimers());
+      afterEach(() => jest.useRealTimers());
+
+      async function expectStartToTimeOut(service: MonitorCaptureService): Promise<void> {
+        const start = service.startSession({ connectionId: CONNECTION_ID });
+        const failure = expect(start).rejects.toThrow('timed out');
+        await jest.advanceTimersByTimeAsync(10_000);
+        await failure;
+      }
+
+      it('frees the connection when saving the row hangs', async () => {
+        const { service, storage } = makeService();
+        jest.spyOn(storage, 'saveCaptureSession').mockReturnValue(new Promise(() => undefined));
+
+        await expectStartToTimeOut(service);
+
+        expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+      });
+
+      it('fails a row saved after the start gave up', async () => {
+        const { service, storage } = makeService();
+        const save = storage.saveCaptureSession.bind(storage);
+        let finishSave: () => void = () => undefined;
+        jest.spyOn(storage, 'saveCaptureSession').mockImplementation(async (session, id) => {
+          await new Promise<void>((resolve) => {
+            finishSave = resolve;
+          });
+          return save(session, id);
+        });
+
+        await expectStartToTimeOut(service);
+        finishSave();
+        await jest.advanceTimersByTimeAsync(0);
+
+        const [row] = await storage.getCaptureSessions({ connectionId: CONNECTION_ID });
+        expect(row.status).toBe('failed');
+      });
+
+      it('frees the connection when opening MONITOR hangs', async () => {
+        const { service, storage } = makeService();
+        service.setMonitorSourceFactory(() => new Promise(() => undefined));
+
+        await expectStartToTimeOut(service);
+
+        expect(service.hasActiveSessionOn(CONNECTION_ID)).toBe(false);
+        const [row] = await storage.getCaptureSessions({ connectionId: CONNECTION_ID });
+        expect(row.status).toBe('failed');
+      });
+
+      it('stops a MONITOR source that opens after the start gave up', async () => {
+        const { service, source } = makeService();
+        let open: (opened: MonitorSource) => void = () => undefined;
+        service.setMonitorSourceFactory(
+          () =>
+            new Promise((resolve) => {
+              open = resolve;
+            }),
+        );
+
+        await expectStartToTimeOut(service);
+        open(source);
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(source.stopped).toBe(true);
+      });
+    });
+
     it('allows a new session on the same connection after the previous one ends', async () => {
       const { service } = makeService();
       const first = await service.startSession({ connectionId: CONNECTION_ID });
