@@ -1383,13 +1383,21 @@ describe('AnomalyService', () => {
       expect((service as any).persistenceOutbox.has('cached')).toBe(false);
     });
 
-    it('queues an uncached real event id through a storage outage', async () => {
+    it('keeps an operator-supplied uncached id out of the outbox', async () => {
       const id = '6f1c2f0e-3f6b-4a53-9b4e-0d8a4f6f2a11';
       storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
 
       expect(await service.resolveAnomaly(id)).toBe(false);
 
-      expect((service as any).persistenceOutbox.has(id)).toBe(true);
+      expect((service as any).persistenceOutbox.has(id)).toBe(false);
+    });
+
+    it('queues an uncached string id a detector closes through a storage outage', async () => {
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await (service as any).resolveAnomalyOutcome('failover:1')).toBe('retry');
+
+      expect((service as any).persistenceOutbox.has('failover:1')).toBe(true);
     });
 
     it('keeps retrying a queued id through a later outage', async () => {

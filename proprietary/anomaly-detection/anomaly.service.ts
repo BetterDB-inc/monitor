@@ -1,7 +1,6 @@
 import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { isUUID } from 'class-validator';
 import {
   StoragePort,
   StoredAnomalyEvent,
@@ -3908,7 +3907,7 @@ export class AnomalyService
     for (const ev of active) {
       let ok = false;
       try {
-        ok = await this.resolveAnomaly(ev.id);
+        ok = (await this.resolveAnomalyOutcome(ev.id)) === 'resolved';
       } catch {
         ok = false;
       }
@@ -6510,7 +6509,7 @@ export class AnomalyService
   }
 
   async resolveAnomaly(anomalyId: string): Promise<boolean> {
-    return (await this.resolveAnomalyOutcome(anomalyId)) === 'resolved';
+    return (await this.resolveAnomalyOutcome(anomalyId, undefined, false)) === 'resolved';
   }
 
   /**
@@ -6529,6 +6528,7 @@ export class AnomalyService
   private async resolveAnomalyOutcome(
     anomalyId: string,
     onDrop?: () => void,
+    trustedId = true,
   ): Promise<'resolved' | 'retry' | 'gone'> {
     const anomaly =
       this.recentAnomalies.find((a) => a.id === anomalyId) ??
@@ -6554,9 +6554,9 @@ export class AnomalyService
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
       const realEvent =
+        trustedId ||
         anomaly !== undefined ||
-        this.persistenceOutbox.resolvedAt(anomalyId) !== undefined ||
-        isUUID(anomalyId);
+        this.persistenceOutbox.resolvedAt(anomalyId) !== undefined;
       if (!realEvent || isPostgresDataException(err)) return 'gone';
       this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
