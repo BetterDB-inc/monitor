@@ -218,7 +218,7 @@ function growthStreak(windows: DivergenceWindow[], recoveredAt: number | null): 
 
 function gapClosing(gapBytes: number, previousGap: number | null): boolean {
   if (gapBytes < DIVERGENCE_FLOOR_BYTES) return true;
-  return previousGap !== null && gapBytes < previousGap;
+  return previousGap !== null && gapBytes <= previousGap;
 }
 
 function behindRun(windows: DivergenceWindow[]): number {
