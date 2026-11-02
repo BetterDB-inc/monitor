@@ -712,6 +712,98 @@ describe('observeDivergence', () => {
     });
   });
 
+  describe('recovery while the write rate spikes', () => {
+    const SPIKE = 100 * MiB;
+    const growing = [20, 22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: MiB }));
+    const recoveries = (outcomes: DivergenceOutcome[][]) =>
+      outcomes.flat().filter((o) => o.kind === 'recovered');
+
+    it('keeps the alert open while the gap grows behind a rate spike', () => {
+      const h = new Harness();
+      const opened = h.windows(growing);
+      const spike = h.windows([30, 32, 34].map((m) => ({ gap: m * MiB, rate: SPIKE })));
+      const after = h.windows([{ gap: 36 * MiB, rate: MiB }]);
+
+      expect(divergences(opened)).toHaveLength(1);
+      expect(recoveries([...spike, ...after])).toEqual([]);
+      expect(divergences([...spike, ...after])).toEqual([]);
+    });
+
+    it('does not count a window of growth toward recovery', () => {
+      const h = new Harness();
+      h.windows(growing);
+      const outcomes = h.windows([
+        { gap: 27 * MiB, rate: SPIKE },
+        { gap: 29 * MiB, rate: SPIKE },
+        { gap: 28 * MiB, rate: SPIKE },
+      ]);
+
+      expect(recoveries(outcomes)).toEqual([]);
+    });
+
+    it('recovers above the floor once the gap shrinks', () => {
+      const h = new Harness();
+      h.windows(growing);
+      const outcomes = h.windows([
+        { gap: 27 * MiB, rate: SPIKE },
+        { gap: 26 * MiB, rate: SPIKE },
+        { gap: 25 * MiB, rate: SPIKE },
+      ]);
+
+      expect(recoveries(outcomes)).toHaveLength(1);
+    });
+
+    it('keeps a not-acking alert open while its stale gap grows', () => {
+      const h = new Harness();
+      const opened = h.windows(
+        Array.from({ length: 8 }, (_, i) => ({ gap: 40 * MiB, rate: MiB, lagSec: climbingLag(i) })),
+      );
+      const spike = h.windows(
+        [42, 44, 46].map((m, i) => ({ gap: m * MiB, rate: SPIKE, lagSec: climbingLag(8 + i) })),
+      );
+
+      expect(divergences(opened).map((f) => f.reason)).toContain('not_acking');
+      expect(recoveries(spike)).toEqual([]);
+    });
+
+    it('does not count growth from before a recovery toward the next alert', () => {
+      const h = new Harness();
+      h.windows(growing);
+      const recovered = h.windows([0.1, 0.2, 0.3].map((m) => ({ gap: m * MiB, rate: MiB })));
+      const regrowth = h.windows([2, 3, 4].map((m) => ({ gap: m * MiB, rate: 0.1 * MiB })));
+
+      expect(recoveries(recovered)).toHaveLength(1);
+      expect(divergences(regrowth)).toEqual([]);
+    });
+  });
+
+  describe('a replica draining after writes stop', () => {
+    const drain = (from: number, step: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ gap: (from - step * i) * MiB, rate: 0 }));
+
+    it('does not call a steady slow drain not applying', () => {
+      const h = new Harness();
+
+      expect(divergences(h.windows(drain(100, 5, 19)))).toEqual([]);
+    });
+
+    it('keeps an open alert below critical through a slow drain', () => {
+      const h = new Harness();
+      const opened = h.windows([20, 22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: MiB })));
+      const draining = h.windows(drain(28, 1, 12));
+
+      expect(divergences(opened)).toHaveLength(1);
+      expect(divergences(draining)).toEqual([]);
+    });
+
+    it('calls a drain that stalls not applying', () => {
+      const h = new Harness();
+      const out = h.windows([...drain(100, 5, 3), ...drain(90, 0, 6)]);
+
+      expect(divergences(out).map((f) => f.reason)).toEqual(['not_applying']);
+    });
+  });
+
   describe('the write-rate baseline', () => {
     const history = (h: Harness) => h.state.rateHistory;
     const demoted = (t: number): ReplicationStreamSample => ({
