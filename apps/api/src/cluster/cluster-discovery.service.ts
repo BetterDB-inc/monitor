@@ -214,7 +214,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       }
     }
 
-    const nodes = await this.discoverNodes(connectionId);
+    // Bind the node client to the connection that owns it now, so a later
+    // default-connection change can't swap in another connection's TLS identity.
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
     if (!node) {
@@ -230,11 +233,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Invalid node address: ${node.address}`);
     }
 
-    const dbClient = this.connectionRegistry.get(connectionId);
+    const dbClient = this.connectionRegistry.get(ownerId);
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
-    const tls = this.nodeTlsOptions(connectionId, host, node.hostname);
+    const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
 
     const client = new Valkey({
       host,
@@ -251,7 +254,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Node clients are long-lived, so pick up rotated client cert/key material
     // from the primary adapter before every reconnect.
     client.on('reconnecting', () => {
-      this.refreshNodeTls({ node, client, connectionId, host });
+      this.refreshNodeTls({ node, client, connectionId: ownerId, host });
     });
 
     // Add error handler to prevent unhandled error events
@@ -284,7 +287,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         client,
         lastHealthCheck: Date.now(),
         healthy: true,
-        connectionId,
+        connectionId: ownerId,
         host,
       };
 

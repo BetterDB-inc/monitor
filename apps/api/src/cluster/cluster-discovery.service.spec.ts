@@ -338,6 +338,41 @@ describe('ClusterDiscoveryService', () => {
       expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-b' });
     });
 
+    it('keeps a node client bound to the default connection it was created through', async () => {
+      const clientFor = (cert: string) => ({
+        ...mockDbClient,
+        getClient: () => ({ options: { username: 'u', password: 'p', tls: { ca: 'ca', cert } } }),
+      });
+      const clients: Record<string, unknown> = { 'conn-a': clientFor('cert-a'), 'conn-b': clientFor('cert-b') };
+      let defaultId = 'conn-a';
+      mockConnectionRegistry.getDefaultId.mockImplementation(() => defaultId);
+      mockConnectionRegistry.get.mockImplementation((id?: string) => clients[id ?? defaultId]);
+      const handlers: Record<string, () => void> = {};
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, fn: () => void) => {
+          handlers[event] = fn;
+        }),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+
+      await service.getNodeConnection('node2-id-def456');
+      defaultId = 'conn-b';
+      handlers.reconnecting();
+      expect(nodeClient.options.tls).toEqual({ ca: 'ca', cert: 'cert-a' });
+
+      nodeClient.status = 'end';
+      await service.getNodeConnection('node2-id-def456');
+      expect(nodeClient.options.tls).toEqual({ ca: 'ca', cert: 'cert-a' });
+    });
+
     it('leaves TLS off for node clients when the seed has none', async () => {
       mockDbClient.getClient.mockReturnValue({ options: { username: 'u', password: 'p' } });
       await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);
