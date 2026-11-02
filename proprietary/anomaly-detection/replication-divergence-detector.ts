@@ -64,6 +64,8 @@ export interface ReplicaDivergenceState {
   baselineRate: number | null;
   subside: SubsideTracking | null;
   belowFloorStreak: number;
+  recoveredAt: number | null;
+  staleGap: number | null;
   staleWindows: number;
   staleClearWindows: number;
   staleSince: number | null;
@@ -190,6 +192,8 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     baselineRate: null,
     subside: null,
     belowFloorStreak: 0,
+    recoveredAt: null,
+    staleGap: null,
     staleWindows: 0,
     staleClearWindows: 0,
     staleSince: null,
@@ -201,13 +205,20 @@ function contiguous(previous: DivergenceWindow, next: DivergenceWindow): boolean
   return previous.end === next.start;
 }
 
-function growthStreak(windows: DivergenceWindow[]): number {
+function growthStreak(windows: DivergenceWindow[], recoveredAt: number | null): number {
   let streak = 1;
   for (let i = windows.length - 1; i > 0; i--) {
-    if (contiguous(windows[i - 1], windows[i]) && windows[i].gapBytes > windows[i - 1].gapBytes) streak++;
+    const previous = windows[i - 1];
+    const sinceRecovery = recoveredAt === null || previous.start >= recoveredAt;
+    if (sinceRecovery && contiguous(previous, windows[i]) && windows[i].gapBytes > previous.gapBytes) streak++;
     else break;
   }
   return streak;
+}
+
+function gapClosing(gapBytes: number, previousGap: number | null): boolean {
+  if (gapBytes < DIVERGENCE_FLOOR_BYTES) return true;
+  return previousGap !== null && gapBytes < previousGap;
 }
 
 function behindRun(windows: DivergenceWindow[]): number {
@@ -252,6 +263,11 @@ function windowsToDrain(subside: SubsideTracking, gapBytes: number): number {
   return drainedPerWindow > 0 ? gapBytes / drainedPerWindow : Infinity;
 }
 
+function drainStalled(windows: DivergenceWindow[]): boolean {
+  const last = windows[windows.length - 1];
+  return last.gapBytes >= windows[windows.length - 1 - DIVERGENCE_RECOVERY_GRACE_WINDOWS].gapBytes;
+}
+
 function evaluateReplica(
   replica: ReplicaDivergenceState,
   rateHistory: number[],
@@ -266,13 +282,18 @@ function evaluateReplica(
   if (!isBehind(last)) {
     replica.subside = null;
     if (replica.level === 'none') return null;
+    const previous = windows[windows.length - 2];
+    if (!gapClosing(last.gapBytes, previous && contiguous(previous, last) ? previous.gapBytes : null)) {
+      replica.belowFloorStreak = 0;
+      return null;
+    }
     replica.belowFloorStreak++;
     if (replica.belowFloorStreak < DIVERGENCE_RECOVERED_WINDOWS) return null;
     return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes: last.gapBytes };
   }
   replica.belowFloorStreak = 0;
 
-  const streak = growthStreak(windows);
+  const streak = growthStreak(windows, replica.recoveredAt);
   let target: DivergenceLevel = 'none';
   let reason: DivergenceReason = 'growth';
 
@@ -297,12 +318,17 @@ function evaluateReplica(
       replica.subside = { referenceGap: last.gapBytes, windows: 0 };
     } else {
       replica.subside.windows++;
-      if (
-        replica.subside.windows >= DIVERGENCE_RECOVERY_GRACE_WINDOWS &&
-        windowsToDrain(replica.subside, last.gapBytes) > DIVERGENCE_RECOVERY_HORIZON_WINDOWS
-      ) {
-        target = 'critical';
-        reason = stopped ? 'not_applying' : 'not_catching_up';
+      if (replica.subside.windows >= DIVERGENCE_RECOVERY_GRACE_WINDOWS) {
+        if (stopped && drainStalled(windows)) {
+          target = 'critical';
+          reason = 'not_applying';
+        } else if (
+          !stopped &&
+          windowsToDrain(replica.subside, last.gapBytes) > DIVERGENCE_RECOVERY_HORIZON_WINDOWS
+        ) {
+          target = 'critical';
+          reason = 'not_catching_up';
+        }
       }
     }
   } else {
@@ -335,10 +361,16 @@ function staleAckFinding(
   rate: number | null,
 ): DivergenceOutcome | null {
   const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
+  const previousGap = replica.staleGap;
+  replica.staleGap = gapBytes;
   if (!isBehind({ gapBytes, secondsBehind })) {
     replica.staleWindows = 0;
     replica.staleSince = null;
     if (replica.level === 'none') return null;
+    if (!gapClosing(gapBytes, previousGap)) {
+      replica.staleClearWindows = 0;
+      return null;
+    }
     replica.staleClearWindows++;
     if (replica.staleClearWindows < DIVERGENCE_RECOVERED_WINDOWS) return null;
     return { kind: 'recovered', addr: replica.addr, eventId: replica.eventId, gapBytes };
@@ -368,6 +400,7 @@ function staleAckFinding(
 }
 
 function clearStaleStreak(replica: ReplicaDivergenceState): void {
+  replica.staleGap = null;
   replica.staleWindows = 0;
   replica.staleClearWindows = 0;
   replica.staleSince = null;
@@ -631,6 +664,7 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
   replica.baselineRate = null;
   replica.subside = null;
   replica.belowFloorStreak = 0;
+  replica.recoveredAt = replica.windows[replica.windows.length - 1]?.end ?? null;
   replica.announced = false;
   clearStaleStreak(replica);
 }
