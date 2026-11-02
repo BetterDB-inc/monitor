@@ -550,7 +550,7 @@ export function divergenceWindowsHeld(
   startTime: number,
 ): boolean {
   const heldSince = state?.windowsHeldSince ?? null;
-  return heldSince !== null && startTime >= heldSince;
+  return heldSince !== null && startTime > heldSince;
 }
 
 export function staleAckWindow(
