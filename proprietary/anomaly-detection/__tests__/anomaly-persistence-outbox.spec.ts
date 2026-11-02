@@ -1,5 +1,6 @@
 import { AnomalyEvent } from '../types';
 import {
+  OUTBOX_CLOSE_MAX_AGE_MS,
   OUTBOX_MAX_AGE_MS,
   OUTBOX_MAX_ENTRIES,
   OUTBOX_RETRY_BASE_MS,
@@ -175,12 +176,13 @@ describe('PersistenceOutbox', () => {
         for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`close-${i}`, 100, 0);
       };
 
-      it('keeps every close that has no callback', () => {
+      it('evicts the oldest close to stay within the cap', () => {
         fillWithCloses();
         outbox.enqueueResolve('late', 100, 0);
 
-        expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES + 1);
-        expect(dropped).toEqual([]);
+        expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES);
+        expect(outbox.has('late')).toBe(true);
+        expect(dropped).toEqual([['close-0', 'full']]);
       });
 
       it('turns away a new save', () => {
@@ -238,18 +240,22 @@ describe('PersistenceOutbox', () => {
       expect(onDrop).toHaveBeenCalledTimes(1);
     });
 
-    it('does not expire a resolve', () => {
-      outbox.enqueueResolve('close', 100, 0);
+    it('keeps a resolve until the close age limit', () => {
+      const reRaise = jest.fn();
+      outbox.enqueueResolve('close', 100, 0, reRaise);
 
-      expect(outbox.due(OUTBOX_MAX_AGE_MS * 24).map((entry) => entry.id)).toEqual(['close']);
-      expect(dropped).toEqual([]);
+      expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS).map((entry) => entry.id)).toEqual(['close']);
+      expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS + 1)).toEqual([]);
+      expect(dropped).toEqual([['close', 'expired']]);
+      expect(reRaise).toHaveBeenCalledTimes(1);
     });
 
-    it('does not expire a rewrite that carries a resolve', () => {
+    it('keeps a rewrite that carries a resolve until the close age limit', () => {
       const resolved = { ...event('close'), resolved: true } as AnomalyEvent;
       outbox.enqueueRewrite(resolved, 0);
 
-      expect(outbox.due(OUTBOX_MAX_AGE_MS * 24).map((entry) => entry.id)).toEqual(['close']);
+      expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS).map((entry) => entry.id)).toEqual(['close']);
+      expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS + 1)).toEqual([]);
     });
 
     describe('a pending save whose event was resolved', () => {
@@ -259,12 +265,13 @@ describe('PersistenceOutbox', () => {
         return anomaly;
       };
 
-      it('does not expire', () => {
+      it('expires at the close age limit without re-arming', () => {
         const onDrop = jest.fn();
         unsaved('a', onDrop).resolved = true;
 
-        expect(outbox.due(OUTBOX_MAX_AGE_MS * 24).map((entry) => entry.id)).toEqual(['a']);
-        expect(dropped).toEqual([]);
+        expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS).map((entry) => entry.id)).toEqual(['a']);
+        expect(outbox.due(OUTBOX_CLOSE_MAX_AGE_MS + 1)).toEqual([]);
+        expect(dropped).toEqual([['a', 'expired']]);
         expect(onDrop).not.toHaveBeenCalled();
       });
 
@@ -278,7 +285,7 @@ describe('PersistenceOutbox', () => {
         expect(dropped).toEqual([['save-0', 'full']]);
       });
 
-      it('stays in a full outbox of closes', () => {
+      it('goes first from a full outbox of closes without re-arming', () => {
         const onDrop = jest.fn();
         unsaved('a', onDrop).resolved = true;
         for (let i = 1; i < OUTBOX_MAX_ENTRIES; i++) outbox.enqueueResolve(`r-${i}`, 100, 0);
@@ -286,8 +293,8 @@ describe('PersistenceOutbox', () => {
         outbox.enqueueResolve('new', 100, 1);
         outbox.due(0);
 
-        expect(outbox.has('a')).toBe(true);
-        expect(dropped).toEqual([]);
+        expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES);
+        expect(dropped).toEqual([['a', 'full']]);
         expect(onDrop).not.toHaveBeenCalled();
       });
 
@@ -381,6 +388,21 @@ describe('PersistenceOutbox', () => {
 
       outbox.due(OUTBOX_MAX_AGE_MS + 1);
 
+      expect(onDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops waiting once the outbox has stayed full past the age limit', () => {
+      const onDrop = jest.fn();
+      outbox.enqueueSave(event('a'), undefined, 0, onDrop);
+      for (let i = 1; i <= OUTBOX_MAX_ENTRIES; i++) {
+        outbox.enqueueSave(event(`s-${i}`), undefined, OUTBOX_MAX_AGE_MS);
+      }
+
+      outbox.due(OUTBOX_MAX_AGE_MS);
+      expect(onDrop).not.toHaveBeenCalled();
+
+      outbox.due(OUTBOX_MAX_AGE_MS + 1);
+      expect(outbox.size).toBe(OUTBOX_MAX_ENTRIES);
       expect(onDrop).toHaveBeenCalledTimes(1);
     });
 

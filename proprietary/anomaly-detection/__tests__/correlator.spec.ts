@@ -643,7 +643,7 @@ describe('Correlator', () => {
       expect(group.pattern).toBe(pattern);
     });
 
-    it.each([MetricType.PERSISTENCE_CHILD, MetricType.SLOWLOG_LAST_ID, MetricType.CONNECTIONS])(
+    it.each([MetricType.SLOWLOG_LAST_ID, MetricType.CONNECTIONS])(
       'keeps the divergence diagnosis alongside %s',
       (metricType) => {
         const now = Date.now();
@@ -665,7 +665,7 @@ describe('Correlator', () => {
       expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
     });
 
-    it('names CPU saturation when it shares the window', () => {
+    it('yields to control-plane saturation', () => {
       const now = Date.now();
       const [group] = correlator.correlate([
         divergence({ timestamp: now }),
@@ -676,8 +676,61 @@ describe('Correlator', () => {
           connectionId: 'c1',
         }),
       ]);
+      expect(group.pattern).toBe(AnomalyPattern.CONTROL_PLANE_SATURATION);
+    });
+
+    it('yields to a stalled persistence child', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.PERSISTENCE_CHILD,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
+      expect(group.pattern).toBe(AnomalyPattern.PERSISTENCE_STALL);
+    });
+
+    it('does not claim a cluster topology disagreement', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
+      expect(group.pattern).not.toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+    });
+
+    it('names CPU saturation when it shares the window', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
       expect(group.pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
       expect(group.diagnosis).toContain('alongside CPU saturation');
+    });
+
+    it('does not read a drop in CPU as saturation', () => {
+      const now = Date.now();
+      const [group] = correlator.correlate([
+        divergence({ timestamp: now, severity: AnomalySeverity.CRITICAL }),
+        makeAnomaly({
+          metricType: MetricType.CPU_UTILIZATION,
+          anomalyType: AnomalyType.DROP,
+          timestamp: now + 100,
+          connectionId: 'c1',
+        }),
+      ]);
+      expect(group.diagnosis).not.toContain('CPU saturation');
     });
 
     it('leaves a saturation window with a failover to saturation', () => {
@@ -702,7 +755,7 @@ describe('Correlator', () => {
         }),
       ]);
       expect(group.diagnosis).toContain('replica output-buffer pressure');
-      expect(group.diagnosis).toContain('slot migration');
+      expect(group.diagnosis).toContain('cluster topology disagreement');
     });
 
     it('keeps stamped related metrics after grouping', () => {

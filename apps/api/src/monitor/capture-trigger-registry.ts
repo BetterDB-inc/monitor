@@ -13,7 +13,8 @@ import {
   StoredCaptureTrigger,
   WebhookEventType,
 } from '@betterdb/shared';
-import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { AnomalySavedBus, SavedAnomaly } from '../common/services/anomaly-saved-bus';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
@@ -22,16 +23,9 @@ import { MonitorCaptureService } from './monitor-capture.service';
 export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
-const LATE_ANOMALY_LOOKBACK_MS = 61 * 60_000;
-const INSERTED_WATERMARK_MARGIN_MS = 5_000;
 
-interface AnomalyScan {
-  from: number;
-  offset: number;
-  insertedSince: number;
-  newestInsert: number;
-  oldestFailedInsert: number;
-}
+export const MAX_PENDING_ANOMALIES = 1000;
+export const PENDING_ANOMALY_MAX_AGE_MS = 60 * 60 * 1000;
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -52,7 +46,8 @@ export interface CaptureTriggerRegistryOptions {
  * drives a polling loop that:
  *   1. expires stale triggers (now &gt; expiresAt),
  *   2. retries previously queued triggers when the connection frees up,
- *   3. matches new anomaly events against configured triggers and fires them.
+ *   3. matches anomalies announced on first save against configured triggers
+ *      and fires them.
  *
  * The deep-module test seam is {@link tick}: callers can drive iterations
  * manually without timers. `setOptions` lets specs override the poll interval
@@ -62,11 +57,11 @@ export interface CaptureTriggerRegistryOptions {
 export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CaptureTriggerRegistry.name);
   private pollHandle?: NodeJS.Timeout;
-  private lastAnomalyAt: number;
-  private replayFloor: number;
-  private insertedWatermark = 0;
-  private anomalyScan: AnomalyScan | null = null;
-  private readonly seenAnomalies = new Map<string, number>();
+  private readonly pendingAnomalies = new Map<
+    string,
+    { event: SavedAnomaly; receivedAt: number }
+  >();
+  private readonly unsubscribeAnomalySaved: () => void;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
   private ticking = false;
@@ -76,22 +71,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     private readonly healthGate: HealthGateService,
     private readonly webhookDispatcher: WebhookDispatcherService,
+    anomalySaved: AnomalySavedBus,
   ) {
-    // Seed the watermark to "now" so a process restart never replays
-    // historical anomalies as if they just arrived. The trigger.createdAt
-    // guard in processNewAnomalies() blocks events older than each trigger
-    // anyway, but starting from 0 still means an unbounded scan on first
-    // tick. Tests can reset via the test seam below.
-    this.lastAnomalyAt = Date.now();
-    this.replayFloor = this.lastAnomalyAt + 1;
-  }
-
-  /** Test seam — reset the anomaly watermark so specs see all stored events. */
-  resetAnomalyWatermark(): void {
-    this.lastAnomalyAt = 0;
-    this.replayFloor = 0;
-    this.insertedWatermark = 0;
-    this.anomalyScan = null;
+    this.unsubscribeAnomalySaved = anomalySaved.subscribe((event) => this.enqueueAnomaly(event));
   }
 
   setOptions(options: CaptureTriggerRegistryOptions): void {
@@ -115,6 +97,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.unsubscribeAnomalySaved();
     if (this.pollHandle) {
       clearInterval(this.pollHandle);
       this.pollHandle = undefined;
@@ -215,86 +198,38 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private enqueueAnomaly(event: SavedAnomaly): void {
+    if (this.pendingAnomalies.size >= MAX_PENDING_ANOMALIES) {
+      const oldest = this.pendingAnomalies.keys().next().value as string;
+      this.pendingAnomalies.delete(oldest);
+      this.logger.warn(`Dropping pending anomaly ${oldest}: queue is full`);
+    }
+    this.pendingAnomalies.set(event.id, { event, receivedAt: Date.now() });
+  }
+
   private async processNewAnomalies(): Promise<void> {
-    const configured = await this.storage.getCaptureTriggers({ status: 'configured' });
-    const lookback = Math.min(
-      this.lastAnomalyAt + 1 - LATE_ANOMALY_LOOKBACK_MS,
-      ...configured.map((trigger) => trigger.createdAt),
-    );
-    const startTime = this.lastAnomalyAt === 0 ? 0 : Math.max(this.replayFloor, lookback);
-    const seenFloor = Math.max(startTime, this.insertedWatermark);
-    for (const [id, lastRead] of this.seenAnomalies) {
-      if (lastRead < seenFloor) this.seenAnomalies.delete(id);
-    }
-    const pageSize = 200;
-    const maxScannedPerTick = 5000;
-    const scan = this.anomalyScan ?? {
-      from: startTime,
-      offset: 0,
-      insertedSince: this.insertedWatermark,
-      newestInsert: 0,
-      oldestFailedInsert: Infinity,
-    };
-    const resuming = this.anomalyScan !== null;
-    let resumeOffset: number | null = null;
-    const sorted: StoredAnomalyEvent[] = [];
-    for (let read = 0; ; read += pageSize) {
-      const page = await this.storage.getAnomalyEvents({
-        startTime: scan.from,
-        insertedSince: scan.insertedSince,
-        order: 'asc',
-        limit: pageSize,
-        offset: scan.offset + read,
-      });
-      if (!resuming) {
-        for (const evt of page) {
-          scan.newestInsert = Math.max(scan.newestInsert, evt.insertedAt ?? 0);
-        }
-      }
-      sorted.push(...page.filter((evt) => !this.seenAnomalies.has(evt.id)));
-      if (page.length < pageSize) {
-        break;
-      }
-      if (read + pageSize >= maxScannedPerTick) {
-        resumeOffset = scan.offset + read + pageSize;
-        break;
-      }
-    }
-    let maxTs = this.lastAnomalyAt;
-    for (const evt of sorted) {
-      if (evt.timestamp > maxTs) {
-        maxTs = evt.timestamp;
-      }
-      if (this.seenAnomalies.has(evt.id)) {
+    const now = Date.now();
+    for (const [id, { event, receivedAt }] of this.pendingAnomalies) {
+      if (now - receivedAt > PENDING_ANOMALY_MAX_AGE_MS) {
+        this.pendingAnomalies.delete(id);
+        this.logger.warn(`Giving up on pending anomaly ${id}: too old`);
         continue;
       }
       try {
-        if (evt.connectionId) {
+        if (event.connectionId) {
           const match = await this.findActiveTrigger(
-            evt.connectionId,
-            evt.metricType,
-            evt.anomalyType,
+            event.connectionId,
+            event.metricType,
+            event.anomalyType,
           );
-          if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
+          if (match && match.status === 'configured' && event.timestamp >= match.createdAt) {
             await this.tryFire(match);
           }
         }
-        this.seenAnomalies.set(evt.id, Math.max(evt.timestamp, evt.insertedAt ?? 0));
+        this.pendingAnomalies.delete(id);
       } catch (err) {
-        this.logger.error(`Failed to match anomaly ${evt.id}: ${(err as Error).message}`);
-        const insertedAt = evt.insertedAt ?? 0;
-        if (insertedAt >= Date.now() - LATE_ANOMALY_LOOKBACK_MS) {
-          scan.oldestFailedInsert = Math.min(scan.oldestFailedInsert, insertedAt);
-        }
+        this.logger.error(`Failed to match anomaly ${id}: ${(err as Error).message}`);
       }
-    }
-    this.lastAnomalyAt = maxTs;
-    this.anomalyScan = resumeOffset === null ? null : { ...scan, offset: resumeOffset };
-    if (resumeOffset === null) {
-      this.insertedWatermark = Math.max(
-        this.insertedWatermark,
-        Math.min(scan.newestInsert - INSERTED_WATERMARK_MARGIN_MS, scan.oldestFailedInsert),
-      );
     }
   }
 

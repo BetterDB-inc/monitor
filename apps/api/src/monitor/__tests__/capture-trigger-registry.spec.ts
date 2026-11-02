@@ -1,11 +1,14 @@
 import { ConflictException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
+import { AnomalySavedBus } from '../../common/services/anomaly-saved-bus';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import {
   CaptureTriggerRegistry,
   DEFAULT_TRIGGER_EXPIRY_MS,
+  MAX_PENDING_ANOMALIES,
+  PENDING_ANOMALY_MAX_AGE_MS,
 } from '../capture-trigger-registry';
 import type { HealthGateService } from '../health-gate.service';
 import type { MonitorCaptureService } from '../monitor-capture.service';
@@ -76,16 +79,21 @@ function makeRegistry(
   dispatcher: FakeDispatcher;
 } {
   const storage = new MemoryAdapter();
+  const bus = new AnomalySavedBus();
+  const save = storage.saveAnomalyEvent.bind(storage);
+  storage.saveAnomalyEvent = async (event, connectionId) => {
+    const id = await save(event, connectionId);
+    bus.publish({ ...event, connectionId });
+    return id;
+  };
   const registry = new CaptureTriggerRegistry(
     storage,
     captureService as unknown as MonitorCaptureService,
     healthGate as unknown as HealthGateService,
     dispatcher as unknown as WebhookDispatcherService,
+    bus,
   );
   registry.setOptions({ autoStart: false });
-  // Tests want to see all stored anomaly events; the constructor seeds the
-  // watermark to Date.now() to avoid replaying history on real restarts.
-  registry.resetAnomalyWatermark();
   return { registry, storage, dispatcher };
 }
 
@@ -342,6 +350,77 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('fires for an event the outbox saved nearly an hour after it happened', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 59 * 60_000);
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: trigger.createdAt + 1 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+      clock.mockRestore();
+
+      expect((await registry.getTrigger(trigger.id))?.status).toBe('fired');
+    });
+
+    it('reads no anomalies from storage while nothing new was saved', async () => {
+      const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
+      const read = jest.spyOn(storage, 'getAnomalyEvents');
+
+      await registry.tick();
+
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('gives up on an event that keeps failing once it is too old', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new Error('storage down'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+      await registry.tick();
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+
+      const clock = jest
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + PENDING_ANOMALY_MAX_AGE_MS + 1);
+      await registry.tick();
+      clock.mockRestore();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds a bounded number of unmatched events', async () => {
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new Error('storage down'));
+      const { registry, storage } = makeRegistry(makeCaptureService(), healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      const timestamp = Date.now() + 1;
+      for (let i = 0; i <= MAX_PENDING_ANOMALIES; i++) {
+        await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), CONNECTION_ID);
+      }
+
+      await registry.tick();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(MAX_PENDING_ANOMALIES);
+    });
+
     it('handles each event once across ticks', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(true);
@@ -410,327 +489,6 @@ describe('CaptureTriggerRegistry', () => {
       });
       await storage.saveAnomalyEvent(makeAnomaly({ connectionId: 'conn-other' }), 'conn-other');
       await registry.tick();
-      expect(captureService.startSession).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('tick - events saved late', () => {
-    const anyTrigger = { connectionId: CONNECTION_ID, metricType: METRIC, anomalyType: ANOMALY };
-
-    it('fires for an event saved behind the watermark', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const trigger = await registry.createTrigger(anyTrigger);
-      const unrelated = { metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 };
-      await storage.saveAnomalyEvent(makeAnomaly(unrelated), CONNECTION_ID);
-      await registry.tick();
-
-      const late = makeAnomaly({ timestamp: trigger.createdAt + 1_000 });
-      await storage.saveAnomalyEvent(late, CONNECTION_ID);
-      await registry.tick();
-
-      expect(captureService.startSession).toHaveBeenCalledTimes(1);
-    });
-
-    it('fires for an event the outbox saved nearly an hour after it happened', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const trigger = await registry.createTrigger(anyTrigger);
-      const hour = 60 * 60_000;
-      const unrelated = { metricType: 'memory_used', timestamp: trigger.createdAt + hour };
-      await storage.saveAnomalyEvent(makeAnomaly(unrelated), CONNECTION_ID);
-      await registry.tick();
-
-      const late = makeAnomaly({ timestamp: trigger.createdAt + 1_000 });
-      await storage.saveAnomalyEvent(late, CONNECTION_ID);
-      await registry.tick();
-
-      expect(captureService.startSession).toHaveBeenCalledTimes(1);
-    });
-
-    it('fires for a late event in a lookback busier than one tick can read', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const trigger = await registry.createTrigger(anyTrigger);
-      for (let i = 0; i < 5_300; i++) {
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 + i }),
-          CONNECTION_ID,
-        );
-      }
-      await registry.tick();
-      await registry.tick();
-
-      await storage.saveAnomalyEvent(
-        makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
-        CONNECTION_ID,
-      );
-      await registry.tick();
-
-      expect(captureService.startSession).toHaveBeenCalledTimes(1);
-    });
-
-    it('bounds each tick and still reaches a new event past a busy lookback', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const trigger = await registry.createTrigger(anyTrigger);
-      for (let i = 0; i < 5_300; i++) {
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 + i }),
-          CONNECTION_ID,
-        );
-      }
-      await registry.tick();
-      await registry.tick();
-
-      await storage.saveAnomalyEvent(
-        makeAnomaly({ timestamp: trigger.createdAt + 20_000 }),
-        CONNECTION_ID,
-      );
-      const reads = jest.spyOn(storage, 'getAnomalyEvents');
-      await registry.tick();
-      expect(reads.mock.calls.length).toBeLessThanOrEqual(25);
-      await registry.tick();
-
-      expect(captureService.startSession).toHaveBeenCalledTimes(1);
-    });
-
-    it('scans past more rows in one millisecond than a tick can read', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const trigger = await registry.createTrigger(anyTrigger);
-      const timestamp = trigger.createdAt + 10_000;
-      for (let i = 0; i < 5_300; i++) {
-        await storage.saveAnomalyEvent(makeAnomaly({ metricType: 'memory_used', timestamp }), CONNECTION_ID);
-      }
-      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: timestamp + 1 }), CONNECTION_ID);
-
-      await registry.tick();
-      await registry.tick();
-
-      expect(captureService.startSession).toHaveBeenCalledTimes(1);
-    });
-
-    describe('with an insertion watermark', () => {
-      const MINUTE = 60_000;
-      let clock: number;
-
-      beforeEach(() => {
-        clock = Date.now();
-        jest.spyOn(Date, 'now').mockImplementation(() => clock);
-      });
-
-      afterEach(() => {
-        jest.restoreAllMocks();
-      });
-
-      const rowsRead = async (reads: jest.SpyInstance): Promise<number> => {
-        const pages = await Promise.all(reads.mock.results.map((result) => result.value));
-        return pages.reduce((total, page) => total + page.length, 0);
-      };
-
-      it('reads only rows saved around the last tick', async () => {
-        const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
-        for (let i = 0; i < 300; i++) {
-          await storage.saveAnomalyEvent(makeAnomaly({ timestamp: clock + i }), CONNECTION_ID);
-        }
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(makeAnomaly({ timestamp: clock }), CONNECTION_ID);
-        await registry.tick();
-
-        const reads = jest.spyOn(storage, 'getAnomalyEvents');
-        await registry.tick();
-
-        expect(await rowsRead(reads)).toBe(1);
-      });
-
-      it('fires for an event saved past the look-back while its trigger is live', async () => {
-        const captureService = makeCaptureService();
-        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-        const trigger = await registry.createTrigger(anyTrigger);
-        await registry.tick();
-
-        clock += 120 * MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'memory_used', timestamp: clock }),
-          CONNECTION_ID,
-        );
-        await registry.tick();
-
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
-          CONNECTION_ID,
-        );
-        await registry.tick();
-
-        expect(captureService.startSession).toHaveBeenCalledTimes(1);
-      });
-
-      it('forgets rows the watermark has passed', async () => {
-        const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
-        await registry.createTrigger(anyTrigger);
-        const unrelated = () => makeAnomaly({ metricType: 'memory_used', timestamp: clock });
-        await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
-        await registry.tick();
-
-        clock += 120 * MINUTE;
-        await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
-        await registry.tick();
-        await registry.tick();
-
-        expect((registry as any).seenAnomalies.size).toBe(1);
-      });
-
-      describe('with an event that fails', () => {
-        const unrelated = () => makeAnomaly({ metricType: 'memory_used', timestamp: clock });
-
-        const setup = async () => {
-          const captureService = makeCaptureService();
-          const healthGate = makeHealthGate(true);
-          const allow = healthGate.evaluate.getMockImplementation();
-          healthGate.evaluate.mockRejectedValue(new Error('storage down'));
-          const { registry, storage } = makeRegistry(captureService, healthGate);
-          await registry.createTrigger(anyTrigger);
-          await storage.saveAnomalyEvent(makeAnomaly({ timestamp: clock + 1 }), CONNECTION_ID);
-          await registry.tick();
-          return { captureService, healthGate, allow, registry, storage };
-        };
-
-        it('retries it after later inserts moved the watermark', async () => {
-          const { captureService, healthGate, registry, storage } = await setup();
-          for (let i = 0; i < 2; i++) {
-            clock += MINUTE;
-            await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
-            await registry.tick();
-          }
-
-          healthGate.evaluate.mockResolvedValue({ allow: true, signals: {}, thresholds: {} });
-          await registry.tick();
-
-          expect(captureService.startSession).toHaveBeenCalledTimes(1);
-        });
-
-        it('stops holding the watermark once it is older than the look-back', async () => {
-          const { registry, storage } = await setup();
-          clock += 62 * MINUTE;
-          await storage.saveAnomalyEvent(unrelated(), CONNECTION_ID);
-          await registry.tick();
-
-          const reads = jest.spyOn(storage, 'getAnomalyEvents');
-          await registry.tick();
-
-          expect(await rowsRead(reads)).toBe(1);
-        });
-      });
-
-      it('fires for an event saved late after the watermark has moved', async () => {
-        const captureService = makeCaptureService();
-        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-        const trigger = await registry.createTrigger(anyTrigger);
-        const unrelated = { metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 };
-        await storage.saveAnomalyEvent(makeAnomaly(unrelated), CONNECTION_ID);
-        await registry.tick();
-
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
-          CONNECTION_ID,
-        );
-        await registry.tick();
-
-        expect(captureService.startSession).toHaveBeenCalledTimes(1);
-      });
-
-      it('finds a row saved behind a resumed scan', async () => {
-        const captureService = makeCaptureService();
-        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-        const trigger = await registry.createTrigger(anyTrigger);
-        for (let i = 0; i < 5_300; i++) {
-          await storage.saveAnomalyEvent(
-            makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 10_000 + i }),
-            CONNECTION_ID,
-          );
-        }
-        await registry.tick();
-
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ timestamp: trigger.createdAt + 1_000 }),
-          CONNECTION_ID,
-        );
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'memory_used', timestamp: trigger.createdAt + 20_000 }),
-          CONNECTION_ID,
-        );
-        await registry.tick();
-        await registry.tick();
-
-        expect(captureService.startSession).toHaveBeenCalledTimes(1);
-      });
-
-      it('reads again the rows left unprocessed when a tick fails', async () => {
-        const captureService = makeCaptureService();
-        const healthGate = makeHealthGate(true);
-        const { registry, storage } = makeRegistry(captureService, healthGate);
-        await registry.createTrigger(anyTrigger);
-        await registry.createTrigger({ ...anyTrigger, metricType: 'memory_used' });
-        clock += MINUTE;
-        const timestamp = clock;
-        await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), CONNECTION_ID);
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'memory_used', timestamp: timestamp + 1 }),
-          CONNECTION_ID,
-        );
-        clock += MINUTE;
-        await storage.saveAnomalyEvent(
-          makeAnomaly({ metricType: 'ops_per_sec', timestamp: timestamp + 2 }),
-          CONNECTION_ID,
-        );
-        healthGate.evaluate.mockRejectedValueOnce(new Error('gate down'));
-        await registry.tick().catch(() => undefined);
-
-        clock += MINUTE;
-        await registry.tick();
-
-        expect(captureService.startSession).toHaveBeenCalledTimes(2);
-      });
-    });
-
-    it('does not act twice on an event inside the lookback', async () => {
-      const captureService = makeCaptureService();
-      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
-      const seen = makeAnomaly({ timestamp: Date.now() + 1_000 });
-      await storage.saveAnomalyEvent(seen, CONNECTION_ID);
-      await registry.tick();
-      await storage.saveAnomalyEvent(
-        makeAnomaly({ metricType: 'memory_used', timestamp: seen.timestamp + 1 }),
-        CONNECTION_ID,
-      );
-
-      await registry.createTrigger(anyTrigger);
-      await registry.tick();
-
-      expect(captureService.startSession).not.toHaveBeenCalled();
-    });
-
-    it('does not replay history after a restart', async () => {
-      const captureService = makeCaptureService();
-      const healthGate = makeHealthGate(true);
-      const { registry, storage, dispatcher } = makeRegistry(captureService, healthGate);
-      const trigger = await registry.createTrigger(anyTrigger);
-      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: trigger.createdAt }), CONNECTION_ID);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-
-      const restarted = new CaptureTriggerRegistry(
-        storage,
-        captureService as unknown as MonitorCaptureService,
-        healthGate as unknown as HealthGateService,
-        dispatcher as unknown as WebhookDispatcherService,
-      );
-      await restarted.tick();
-
       expect(captureService.startSession).not.toHaveBeenCalled();
     });
   });
@@ -956,7 +714,7 @@ describe('CaptureTriggerRegistry', () => {
       );
 
       const firstTick = registry.tick();
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 10; i++) {
         await Promise.resolve();
       }
       expect(startCalls.length).toBe(1);

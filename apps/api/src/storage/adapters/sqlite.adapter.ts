@@ -2835,10 +2835,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('timestamp <= ?');
       params.push(options.endTime);
     }
-    if (options.insertedSince) {
-      conditions.push('created_at >= ?');
-      params.push(options.insertedSince);
-    }
     if (options.severity) {
       conditions.push('severity = ?');
       params.push(options.severity);

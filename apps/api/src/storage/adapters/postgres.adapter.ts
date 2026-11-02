@@ -2887,10 +2887,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`timestamp <= $${paramIndex++}`);
       params.push(options.endTime);
     }
-    if (options.insertedSince) {
-      conditions.push(`created_at >= to_timestamp($${paramIndex++}::double precision / 1000)`);
-      params.push(options.insertedSince);
-    }
     if (options.severity) {
       conditions.push(`severity = $${paramIndex++}`);
       params.push(options.severity);
@@ -2927,7 +2923,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id, scope_id, created_at
+        source_host, source_port, connection_id, scope_id
       FROM anomaly_events
       ${whereClause}
       ORDER BY timestamp ${direction}, id ${direction}

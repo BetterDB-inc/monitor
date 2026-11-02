@@ -73,7 +73,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `slowlog.threshold` | Slow query detected | Slowlog count exceeds configured threshold |
 | `replication.lag` | Replication lag detected | Replica lag exceeds acceptable threshold |
 | `replication.divergence` | Replica falling behind | A replica's byte gap to the primary keeps growing, stays far behind, or stops draining |
-| `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds or went away, or a divergence left open by a restart was resolved |
+| `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. Sent when the event is first saved, so it waits for storage if a save has to be retried. `command_p99` and `replication_divergence` are excluded; they send `latency.regression.detected` and `replication.divergence` instead |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
