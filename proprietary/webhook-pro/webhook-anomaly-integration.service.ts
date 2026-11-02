@@ -25,13 +25,6 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
    */
   async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
-      // command_p99 regressions and replication divergence each have a dedicated event
-      // (latency.regression.detected, replication.divergence); skip the generic
-      // anomaly.detected here so one incident doesn't produce two Pro webhook deliveries.
-      if (anomaly.metricType === 'command_p99' || anomaly.metricType === 'replication_divergence') {
-        return;
-      }
-
       const data = {
         anomalyId: anomaly.id,
         metricType: anomaly.metricType,

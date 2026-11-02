@@ -251,60 +251,6 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
-  describe('command_p99 (latency regression)', () => {
-    it('does not dispatch the generic anomaly.detected for command_p99 (dedicated event owns it)', async () => {
-      const anomalies: StoredAnomalyEvent[] = [
-        {
-          id: 'lr-1',
-          timestamp: Date.now(),
-          metricType: 'command_p99',
-          anomalyType: 'spike',
-          severity: 'critical',
-          value: 6000,
-          baseline: 2000,
-          stdDev: 0,
-          zScore: 0,
-          threshold: 3.0,
-          message: 'P99 latency regression after upgrade',
-          resolved: false,
-          sourceHost: 'localhost',
-          sourcePort: 6379,
-        },
-      ];
-
-      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('replication_divergence', () => {
-    it('does not dispatch the generic anomaly.detected (replication.divergence owns it)', async () => {
-      const anomalies: StoredAnomalyEvent[] = [
-        {
-          id: 'rd-1',
-          timestamp: Date.now(),
-          metricType: 'replication_divergence',
-          anomalyType: 'spike',
-          severity: 'warning',
-          value: 8 * 1024 * 1024,
-          baseline: 0,
-          stdDev: 0,
-          zScore: 0,
-          threshold: 0,
-          message: 'Replica 10.0.0.2:6379 is diverging',
-          resolved: false,
-          sourceHost: 'localhost',
-          sourcePort: 6379,
-        },
-      ];
-
-      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-  });
-
   describe('error handling', () => {
     it('should continue processing if webhook dispatch fails', async () => {
       const anomalies: StoredAnomalyEvent[] = [
