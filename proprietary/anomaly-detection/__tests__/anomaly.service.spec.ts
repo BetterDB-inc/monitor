@@ -78,6 +78,7 @@ describe('AnomalyService', () => {
     storage = {
       saveAnomalyEvent: jest.fn().mockResolvedValue(undefined),
       saveReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
+      pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
       getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getNewClientConnections: jest.fn().mockResolvedValue([]),
@@ -8176,15 +8177,33 @@ describe('AnomalyService', () => {
       connectionId: 'conn-1',
     });
 
-    it('adds the event to the correlator input without re-persisting or re-counting it', () => {
+    it('adds the event to the correlator input without re-persisting it', () => {
       service.ingestExternalAnomaly(p99Event());
 
       const recent = (service as any).recentAnomalies;
       expect(recent).toHaveLength(1);
       expect(recent[0]).toEqual(expect.objectContaining({ id: 'p99-1', persisted: true }));
       expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
-      expect(prometheusService.incrementAnomalyEvent).not.toHaveBeenCalled();
-      expect(otelEvents.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('counts the event once in Prometheus and OTLP under its connection', () => {
+      const event = p99Event();
+      service.ingestExternalAnomaly(event);
+      service.ingestExternalAnomaly(event);
+
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledTimes(1);
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledWith(
+        event.severity,
+        event.metricType,
+        event.anomalyType,
+        'conn-1',
+      );
+      expect(otelEvents.dispatch).toHaveBeenCalledTimes(1);
+      expect(otelEvents.dispatch).toHaveBeenCalledWith(
+        WebhookEventType.ANOMALY_DETECTED,
+        expect.objectContaining({ metricType: event.metricType }),
+        'conn-1',
+      );
     });
 
     it('ignores the same event delivered twice', () => {
@@ -9169,6 +9188,46 @@ describe('AnomalyService', () => {
         .flatMap(([rows]: [Array<{ gapBytes: number }>]) => rows.map((r) => r.gapBytes));
       expect(saved).toEqual([2 * MiB, 4 * MiB]);
       expect((await divergenceHistory())[0].windows).toHaveLength(2);
+    });
+
+    describe('window retention', () => {
+      const HOUR = 60 * 60 * 1000;
+      const DAY = 24 * HOUR;
+      const prune = () => storage.pruneOldReplicationDivergenceWindows;
+      const trimAfterAnHour = async () => {
+        await feed([2], T0);
+        await feed([2], T0 + 2 * HOUR);
+      };
+
+      it('leaves the first poll to the sweep', async () => {
+        await feed([2, 4], T0);
+
+        expect(prune()).not.toHaveBeenCalled();
+      });
+
+      it('trims this connection to seven days when no window is configured', async () => {
+        await trimAfterAnHour();
+
+        expect(prune()).toHaveBeenCalledTimes(1);
+        const [cutoff, connectionId] = prune().mock.calls[0];
+        expect(connectionId).toBe('conn-1');
+        expect(Math.abs(T0 + 2 * HOUR - 7 * DAY - cutoff)).toBeLessThan(HOUR);
+      });
+
+      it('follows a configured sample window', async () => {
+        (service as any).retentionPolicy = { getSampleRetentionMs: () => 30 * DAY };
+
+        await trimAfterAnHour();
+
+        const [cutoff] = prune().mock.calls[0];
+        expect(Math.abs(T0 + 2 * HOUR - 30 * DAY - cutoff)).toBeLessThan(HOUR);
+      });
+
+      it('keeps detecting when a trim fails', async () => {
+        prune().mockRejectedValueOnce(new Error('disk full'));
+
+        await expect(trimAfterAnHour()).resolves.toBeUndefined();
+      });
     });
 
     it('serves the stored gap series with the live level per replica', async () => {
