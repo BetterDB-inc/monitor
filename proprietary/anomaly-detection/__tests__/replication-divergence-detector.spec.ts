@@ -14,6 +14,7 @@ import {
   drainClosedWindows,
   observeDivergence,
   staleAckWindow,
+  divergenceWindowsHeld,
   replicaObservedLevel,
   requeueClosedWindows,
   assessOrphanedReplica,
@@ -100,6 +101,16 @@ const climbingLag = (window: number): number => 20 + window * (WINDOW_MS / 1000)
 function divergences(outcomes: DivergenceOutcome[][]): DivergenceFinding[] {
   return outcomes.flat().filter((o): o is DivergenceFinding => o.kind === 'divergence');
 }
+
+describe('divergenceWindowsHeld', () => {
+  it('sends a start on the eviction boundary to storage', () => {
+    const h = new Harness();
+    h.state.windowsHeldSince = h.t;
+
+    expect(divergenceWindowsHeld(h.state, h.t)).toBe(false);
+    expect(divergenceWindowsHeld(h.state, h.t + 1)).toBe(true);
+  });
+});
 
 describe('baseline and outage handling', () => {
   it('keeps a ceiling alert below critical while the burst behind it continues', () => {
