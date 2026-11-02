@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { StoredAnomalyEvent } from '../interfaces/storage-port.interface';
 
 export type SavedAnomaly = Pick<
@@ -10,6 +10,7 @@ type SavedAnomalyListener = (event: SavedAnomaly) => void;
 
 @Injectable()
 export class AnomalySavedBus {
+  private readonly logger = new Logger(AnomalySavedBus.name);
   private readonly listeners = new Set<SavedAnomalyListener>();
 
   subscribe(listener: SavedAnomalyListener): () => void {
@@ -20,6 +21,12 @@ export class AnomalySavedBus {
   }
 
   publish(event: SavedAnomaly): void {
-    for (const listener of this.listeners) listener(event);
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        this.logger.error(`Saved anomaly listener failed for ${event.id}`, err);
+      }
+    }
   }
 }

@@ -4,12 +4,6 @@ import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
 import type { AnomalyWebhookSink } from '../anomaly-detection/types';
 
-const DEDICATED_EVENT_METRICS = new Set([
-  'command_p99',
-  'retry_amplification',
-  'replication_divergence',
-]);
-
 /**
  * Webhook Anomaly Integration Service
  *
@@ -31,14 +25,6 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
    */
   async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
-      // command_p99 regressions, retry amplification and replication divergence each have
-      // a dedicated event (latency.regression.detected, retry_amplification.detected,
-      // replication.divergence); skip the generic anomaly.detected here so one incident
-      // doesn't produce two Pro webhook deliveries.
-      if (DEDICATED_EVENT_METRICS.has(anomaly.metricType)) {
-        return;
-      }
-
       const data = {
         anomalyId: anomaly.id,
         metricType: anomaly.metricType,
