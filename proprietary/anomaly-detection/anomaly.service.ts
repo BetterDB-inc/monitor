@@ -6401,11 +6401,14 @@ export class AnomalyService
     const warningZ =
       this.detectors.get(signal.connectionId)?.get(signal.metricType)?.getConfig().warningZScore ??
       2;
-    const inBand = (value: number) =>
-      signal.stdDev > 0
-        ? Math.abs(value - signal.baseline) / signal.stdDev < warningZ
-        : Math.abs(value - signal.baseline) <=
-          Math.abs(signal.baseline) * FLAT_BASELINE_RECOVERY_TOLERANCE;
+    const inBand = (value: number) => {
+      if (signal.stdDev > 0) return Math.abs(value - signal.baseline) / signal.stdDev < warningZ;
+      if (signal.baseline === 0 && signal.threshold > 0) return value < signal.threshold;
+      return (
+        Math.abs(value - signal.baseline) <=
+        Math.abs(signal.baseline) * FLAT_BASELINE_RECOVERY_TOLERANCE
+      );
+    };
     const backInBand = samples.find(
       (s) =>
         s.timestamp >= settledAt &&

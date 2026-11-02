@@ -70,6 +70,7 @@ export interface RecoverySignal {
   until: number | null;
   baseline: number;
   stdDev: number;
+  threshold: number;
   now: number;
   message: string;
 }
@@ -471,6 +472,7 @@ export class IncidentTimelineBuilder {
       until,
       baseline: first.baseline,
       stdDev: first.stdDev,
+      threshold: first.threshold,
       now,
       message: event.message,
     });

@@ -9174,6 +9174,17 @@ describe('AnomalyService', () => {
         expect((service as any).observedOpenThrough.size).toBe(0);
       });
 
+      it('recovers a signal with no baseline once it falls under its threshold', () => {
+        withBuffer([
+          ...outOfBand(T - 30_000),
+          [T + MIN, 950],
+          [T + 2 * MIN, 95],
+          [T + 2.5 * MIN, 40],
+        ]);
+
+        expect(probe()(signal({ baseline: 0, stdDev: 0, threshold: 90 }))).toBe(T + 2.5 * MIN);
+      });
+
       it('recovers at the first sample back in band after the settle time', () => {
         withBuffer([
           ...baseline(T - 30_000),
