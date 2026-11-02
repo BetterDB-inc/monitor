@@ -59,6 +59,7 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  CaptureTriggerStatus,
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
@@ -2349,9 +2350,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return trigger.id;
   }
 
-  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+  async updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean> {
     const existing = this.captureTriggers.get(id);
-    if (!existing) {
+    if (!existing || (fromStatuses && !fromStatuses.includes(existing.status))) {
       return false;
     }
     this.captureTriggers.set(id, { ...existing, ...patch });

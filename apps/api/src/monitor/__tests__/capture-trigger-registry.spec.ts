@@ -677,6 +677,58 @@ describe('CaptureTriggerRegistry', () => {
         expect(captureService.startSession).not.toHaveBeenCalled();
       });
 
+      it('keeps a cancel that lands after the status was read', async () => {
+        const captureService = makeCaptureService();
+        const healthGate = makeHealthGate(false);
+        const dispatcher = makeDispatcher();
+        const { registry, storage } = makeRegistry(captureService, healthGate, dispatcher);
+        const trigger = await firingTrigger(registry, storage);
+        const update = storage.updateCaptureTrigger.bind(storage);
+        jest.spyOn(storage, 'updateCaptureTrigger').mockImplementationOnce(async (...args) => {
+          await update(trigger.id, { status: 'cancelled' });
+          return update(...args);
+        });
+
+        await registry.tick();
+        await settle();
+
+        expect((await registry.getTrigger(trigger.id))?.status).toBe('cancelled');
+        expect(dispatcher.calls.map((c) => c.event)).not.toContain(
+          WebhookEventType.MONITOR_SESSION_SKIPPED,
+        );
+      });
+
+      it('cannot be cancelled once the fire has claimed it', async () => {
+        const captureService = makeCaptureService();
+        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+        const trigger = await firingTrigger(registry, storage);
+        let cancelled: boolean | undefined;
+        captureService.startSession.mockImplementation(async () => {
+          cancelled = await registry.cancelTrigger(trigger.id);
+          return { id: 'sess-1', status: 'running' };
+        });
+
+        await registry.tick();
+
+        expect(cancelled).toBe(false);
+        expect(await registry.getTrigger(trigger.id)).toMatchObject({
+          status: 'fired',
+          firedSessionId: 'sess-1',
+        });
+      });
+
+      it('records no fire time for a start that failed', async () => {
+        const captureService = makeCaptureService({ throwOnStart: new Error('boom') });
+        const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+        const trigger = await firingTrigger(registry, storage);
+
+        await registry.tick();
+
+        const stored = await registry.getTrigger(trigger.id);
+        expect(stored).toMatchObject({ status: 'skipped', skipReason: 'start_failed: boom' });
+        expect(stored?.firedAt).toBeUndefined();
+      });
+
       it('does not queue one cancelled while an earlier fire ran', async () => {
         const captureService = makeCaptureService();
         const healthGate = makeHealthGate(true);
@@ -731,19 +783,84 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
-    it('skips a trigger whose connection was removed', async () => {
+    it('retries a trigger whose connection went away until it returns', async () => {
       const captureService = makeCaptureService();
       const healthGate = makeHealthGate(true);
-      healthGate.evaluate.mockRejectedValue(new NotFoundException('Connection not found'));
+      healthGate.evaluate.mockRejectedValueOnce(new NotFoundException('Connection not found'));
       const { registry, storage } = makeRegistry(captureService, healthGate);
       await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
 
       await registry.tick();
+      expect((await registry.listTriggers({ connectionId: CONNECTION_ID }))[0].status).toBe(
+        'queued',
+      );
 
-      expect((await registry.listTriggers({ connectionId: CONNECTION_ID }))[0]).toMatchObject({
-        status: 'skipped',
-        skipReason: 'connection_not_found',
+      await registry.tick();
+      expect((await registry.listTriggers({ connectionId: CONNECTION_ID }))[0].status).toBe(
+        'fired',
+      );
+    });
+
+    it('retries a trigger whose connection went away as the session started', async () => {
+      const captureService = makeCaptureService();
+      captureService.startSession.mockRejectedValueOnce(
+        new NotFoundException('Connection not found'),
+      );
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      await createFiringTrigger(registry, storage, CONNECTION_ID, METRIC);
+
+      await registry.tick();
+
+      expect((await registry.listTriggers({ connectionId: CONNECTION_ID }))[0].status).toBe(
+        'queued',
+      );
+    });
+
+    it('matches an old event behind more events than one page holds', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
       });
+      const start = Date.now() + 1;
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: start }), CONNECTION_ID);
+      for (let i = 1; i <= 5_100; i++) {
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: 'memory_used', timestamp: start + i }),
+          CONNECTION_ID,
+        );
+      }
+
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads no events while no trigger is waiting for one', async () => {
+      const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
+      const read = jest.spyOn(storage, 'getAnomalyEvents');
+
+      await registry.tick();
+
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('groups many triggers by connection in the order they load', async () => {
+      const fired: string[] = [];
+      const captureService = makeCaptureService();
+      captureService.startSession.mockImplementation(async ({ triggerId }) => {
+        fired.push(triggerId);
+        return { id: `sess-${fired.length}`, status: 'running' };
+      });
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'connections');
+      await createFiringTrigger(registry, storage, CONNECTION_ID, 'memory_used');
+
+      await registry.tick();
+
+      expect(fired).toHaveLength(2);
     });
 
     it('does not make a connection wait for the gate of another', async () => {
@@ -787,7 +904,7 @@ describe('CaptureTriggerRegistry', () => {
 
       await registry.tick();
 
-      expect(load).toHaveBeenCalledTimes(5);
+      expect(load).toHaveBeenCalledTimes(2);
     });
 
     it('queues a second matching trigger when the first fire occupies the connection', async () => {

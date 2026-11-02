@@ -11,10 +11,11 @@ import { randomUUID } from 'crypto';
 import {
   CaptureTriggerPatch,
   CaptureTriggerQueryOptions,
+  CaptureTriggerStatus,
   StoredCaptureTrigger,
   WebhookEventType,
 } from '@betterdb/shared';
-import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
@@ -24,6 +25,8 @@ import { MonitorCaptureService } from './monitor-capture.service';
 export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const ANOMALY_PAGE_SIZE = 200;
+const ACTIVE_STATUSES: readonly CaptureTriggerStatus[] = ['configured', 'queued'];
 
 function triggerKey(connectionId: string, metricType: string, anomalyType: string): string {
   return JSON.stringify([connectionId, metricType, anomalyType]);
@@ -137,15 +140,8 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     return trigger;
   }
 
-  async cancelTrigger(id: string): Promise<boolean> {
-    const existing = await this.storage.getCaptureTrigger(id);
-    if (!existing) {
-      return false;
-    }
-    if (existing.status !== 'configured' && existing.status !== 'queued') {
-      return false;
-    }
-    return this.storage.updateCaptureTrigger(id, { status: 'cancelled' });
+  cancelTrigger(id: string): Promise<boolean> {
+    return this.transition(id, { status: 'cancelled' });
   }
 
   listTriggers(
@@ -168,98 +164,74 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
     this.ticking = true;
     try {
-      await this.sweepExpired();
-      await this.processQueued();
-      await this.processNewAnomalies();
+      const active = await this.sweepExpired();
+      await this.fireAll(active.filter((trigger) => trigger.status === 'queued'));
+      await this.processNewAnomalies(active.filter((trigger) => trigger.status === 'configured'));
     } finally {
       this.ticking = false;
     }
   }
 
-  private async sweepExpired(): Promise<void> {
+  private async sweepExpired(): Promise<StoredCaptureTrigger[]> {
     const now = Date.now();
     const [configured, queued] = await Promise.all([
       this.storage.getCaptureTriggers({ status: 'configured' }),
       this.storage.getCaptureTriggers({ status: 'queued' }),
     ]);
+    const active: StoredCaptureTrigger[] = [];
     for (const trigger of [...configured, ...queued]) {
       if (trigger.expiresAt <= now) {
-        await this.storage.updateCaptureTrigger(trigger.id, { status: 'expired' });
+        await this.transition(trigger.id, { status: 'expired' });
+      } else {
+        active.push(trigger);
       }
     }
+    return active;
   }
 
-  private async processQueued(): Promise<void> {
-    const queued = await this.storage.getCaptureTriggers({ status: 'queued' });
-    await this.fireAll(queued);
-  }
-
-  private async processNewAnomalies(): Promise<void> {
-    const startTime = this.lastAnomalyAt === 0 ? 0 : this.lastAnomalyAt + 1;
-    const pageSize = 200;
-    // Drain pagination by walking offset until storage returns fewer rows
-    // than requested. Cap total work per tick so a runaway backlog can't
-    // starve other tick steps.
-    const maxPerTick = 5000;
-    const collected: StoredAnomalyEvent[] = [];
-    for (let offset = 0; offset < maxPerTick; offset += pageSize) {
-      const page = await this.storage.getAnomalyEvents({
-        startTime,
-        limit: pageSize,
-        offset,
-      });
-      if (page.length === 0) {
-        break;
-      }
-      collected.push(...page);
-      if (page.length < pageSize) {
-        break;
-      }
-    }
-    if (collected.length === 0) {
+  private async processNewAnomalies(configured: StoredCaptureTrigger[]): Promise<void> {
+    if (configured.length === 0) {
       return;
     }
-    // Storage returns DESC by timestamp; iterate oldest-first so a partial
-    // drain still leaves a coherent watermark.
-    const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
-    const active = await this.loadActiveTriggers();
+    const waiting = new Map(
+      configured.map((t) => [triggerKey(t.connectionId, t.metricType, t.anomalyType), t]),
+    );
+    const oldestTrigger = Math.min(...configured.map((t) => t.createdAt));
+    const startTime = Math.max(this.lastAnomalyAt + 1, oldestTrigger);
     let maxTs = this.lastAnomalyAt;
     const matched = new Map<string, StoredCaptureTrigger>();
-    for (const evt of sorted) {
-      if (evt.timestamp > maxTs) {
-        maxTs = evt.timestamp;
+    for (let offset = 0; ; offset += ANOMALY_PAGE_SIZE) {
+      const page = await this.storage.getAnomalyEvents({
+        startTime,
+        limit: ANOMALY_PAGE_SIZE,
+        offset,
+      });
+      for (const evt of page) {
+        maxTs = Math.max(maxTs, evt.timestamp);
+        const match = evt.connectionId
+          ? waiting.get(triggerKey(evt.connectionId, evt.metricType, evt.anomalyType))
+          : undefined;
+        if (match && evt.timestamp >= match.createdAt) {
+          matched.set(match.id, match);
+        }
       }
-      if (!evt.connectionId) {
-        continue;
-      }
-      const match = active.get(triggerKey(evt.connectionId, evt.metricType, evt.anomalyType));
-      if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
-        matched.set(match.id, match);
+      if (page.length < ANOMALY_PAGE_SIZE) {
+        break;
       }
     }
     await this.fireAll([...matched.values()]);
     this.lastAnomalyAt = maxTs;
   }
 
-  private async loadActiveTriggers(): Promise<Map<string, StoredCaptureTrigger>> {
-    const [configured, queued] = await Promise.all([
-      this.storage.getCaptureTriggers({ status: 'configured' }),
-      this.storage.getCaptureTriggers({ status: 'queued' }),
-    ]);
-    const active = new Map<string, StoredCaptureTrigger>();
-    for (const trigger of [...queued, ...configured]) {
-      active.set(triggerKey(trigger.connectionId, trigger.metricType, trigger.anomalyType), trigger);
-    }
-    return active;
-  }
-
   private async fireAll(triggers: StoredCaptureTrigger[]): Promise<void> {
     const byConnection = new Map<string, StoredCaptureTrigger[]>();
     for (const trigger of triggers) {
-      byConnection.set(trigger.connectionId, [
-        ...(byConnection.get(trigger.connectionId) ?? []),
-        trigger,
-      ]);
+      const group = byConnection.get(trigger.connectionId);
+      if (group) {
+        group.push(trigger);
+      } else {
+        byConnection.set(trigger.connectionId, [trigger]);
+      }
     }
     const outcomes = await Promise.allSettled(
       [...byConnection.values()].map((group) => this.fireInOrder(group)),
@@ -280,73 +252,64 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.healthGate.evaluate(trigger.connectionId);
     } catch (err) {
-      await this.holdAfterGateFailure(trigger, err as Error);
+      this.logger.warn(`Health gate failed for trigger ${trigger.id}: ${(err as Error).message}`);
+      await this.queue(trigger);
       return null;
     }
   }
 
-  private async holdAfterGateFailure(trigger: StoredCaptureTrigger, err: Error): Promise<void> {
-    this.logger.warn(`Health gate failed for trigger ${trigger.id}: ${err.message}`);
-    if (!(await this.canStillFire(trigger.id))) {
-      return;
-    }
-    if (err instanceof NotFoundException) {
-      await this.patch(trigger.id, { status: 'skipped', skipReason: 'connection_not_found' });
-      void this.dispatchSessionSkipped(trigger, 'connection_not_found');
-    } else if (trigger.status !== 'queued') {
-      await this.patch(trigger.id, { status: 'queued' });
+  private async queue(trigger: StoredCaptureTrigger): Promise<void> {
+    if (trigger.status !== 'queued') {
+      await this.transition(trigger.id, { status: 'queued' });
     }
   }
 
   private async tryFire(trigger: StoredCaptureTrigger): Promise<void> {
     if (this.captureService.hasActiveSessionOn(trigger.connectionId)) {
-      if (trigger.status !== 'queued' && (await this.canStillFire(trigger.id))) {
-        await this.patch(trigger.id, { status: 'queued' });
-      }
+      await this.queue(trigger);
       return;
     }
     const gate = await this.evaluateGate(trigger);
-    if (gate === null || !(await this.canStillFire(trigger.id))) {
+    if (gate === null || trigger.expiresAt <= Date.now()) {
       return;
     }
     if (!gate.allow) {
       const reason = gate.skipReason ?? 'health_gate_blocked';
-      await this.patch(trigger.id, { status: 'skipped', skipReason: reason });
-      void this.dispatchSessionSkipped(trigger, reason);
+      if (await this.transition(trigger.id, { status: 'skipped', skipReason: reason })) {
+        void this.dispatchSessionSkipped(trigger, reason);
+      }
       return;
     }
+    if (await this.transition(trigger.id, { status: 'fired' })) {
+      await this.startClaimedSession(trigger);
+    }
+  }
+
+  private async startClaimedSession(trigger: StoredCaptureTrigger): Promise<void> {
     try {
       const session = await this.captureService.startSession({
         connectionId: trigger.connectionId,
         source: 'trigger',
         triggerId: trigger.id,
       });
-      await this.patch(trigger.id, {
-        status: 'fired',
-        firedAt: Date.now(),
-        firedSessionId: session.id,
-      });
+      await this.transition(
+        trigger.id,
+        { firedAt: Date.now(), firedSessionId: session.id },
+        ['fired'],
+      );
     } catch (err) {
-      if (err instanceof ConflictException) {
-        await this.patch(trigger.id, { status: 'queued' });
+      if (err instanceof ConflictException || err instanceof NotFoundException) {
+        await this.transition(trigger.id, { status: 'queued' }, ['fired']);
         return;
       }
       const message = (err as Error).message ?? 'unknown';
       this.logger.error(`Failed to start triggered session: ${message}`);
-      await this.patch(trigger.id, {
-        status: 'skipped',
-        skipReason: `start_failed: ${message}`,
-      });
+      await this.transition(
+        trigger.id,
+        { status: 'skipped', skipReason: `start_failed: ${message}` },
+        ['fired'],
+      );
     }
-  }
-
-  private async canStillFire(id: string): Promise<boolean> {
-    const current = await this.storage.getCaptureTrigger(id);
-    return (
-      current !== null &&
-      (current.status === 'configured' || current.status === 'queued') &&
-      current.expiresAt > Date.now()
-    );
   }
 
   private async findActiveTrigger(
@@ -365,8 +328,12 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     return match ?? null;
   }
 
-  private patch(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
-    return this.storage.updateCaptureTrigger(id, patch);
+  private transition(
+    id: string,
+    patch: CaptureTriggerPatch,
+    from: readonly CaptureTriggerStatus[] = ACTIVE_STATUSES,
+  ): Promise<boolean> {
+    return this.storage.updateCaptureTrigger(id, patch, from);
   }
 
   private async dispatchTriggerCreated(trigger: StoredCaptureTrigger): Promise<void> {
