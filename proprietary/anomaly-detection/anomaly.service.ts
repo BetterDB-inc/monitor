@@ -7300,19 +7300,22 @@ export class AnomalyService
         this.backlogCoverageEventIds.delete(ctx.connectionId);
       }
     });
-    if (previous && (await this.resolveAnomalyOutcome(previous)) === 'retry') {
-      this.staleBacklogEventIds.set(ctx.connectionId, [
-        ...(this.staleBacklogEventIds.get(ctx.connectionId) ?? []),
-        previous,
-      ]);
-    }
+    if (previous) await this.closeBacklogEvent(ctx.connectionId, previous);
   }
 
   private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
     const id = this.backlogCoverageEventIds.get(connectionId);
     if (!id) return;
     this.backlogCoverageEventIds.delete(connectionId);
-    await this.resolveAnomalyOutcome(id);
+    await this.closeBacklogEvent(connectionId, id);
+  }
+
+  private async closeBacklogEvent(connectionId: string, id: string): Promise<void> {
+    if ((await this.resolveAnomalyOutcome(id)) !== 'retry') return;
+    this.staleBacklogEventIds.set(connectionId, [
+      ...(this.staleBacklogEventIds.get(connectionId) ?? []),
+      id,
+    ]);
   }
 
   private buildResyncEscalationEvent(

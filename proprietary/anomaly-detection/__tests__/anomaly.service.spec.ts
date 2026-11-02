@@ -9992,6 +9992,20 @@ describe('AnomalyService', () => {
       expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
     });
 
+    it('keeps tracking a backlog event whose close failed until a later close lands', async () => {
+      const id = '11111111-1111-4111-8111-111111111111';
+      (service as any).backlogCoverageEventIds.set('conn-1', id);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await (service as any).settleBacklogCoverageEvent('conn-1');
+
+      expect((service as any).staleBacklogEventIds.get('conn-1')).toEqual([id]);
+
+      await (service as any).settleEvents((service as any).staleBacklogEventIds, 'conn-1');
+
+      expect((service as any).staleBacklogEventIds.has('conn-1')).toBe(false);
+    });
+
     const events = (metricType: MetricType) =>
       service.getRecentEvents().filter((e) => e.metricType === metricType);
 
