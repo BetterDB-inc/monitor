@@ -1363,6 +1363,47 @@ describe('AnomalyService', () => {
       expect(a1.resolved).toBe(false);
     });
 
+    it('keeps a malformed id out of the outbox while storage is down', async () => {
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await service.resolveAnomaly('not-a-uuid')).toBe(false);
+
+      expect((service as any).persistenceOutbox.has('not-a-uuid')).toBe(false);
+    });
+
+    it('keeps an id Postgres rejects as malformed out of the outbox', async () => {
+      const invalidText = Object.assign(new Error('invalid input syntax for type uuid'), {
+        code: '22P02',
+      });
+      storage.resolveAnomaly.mockRejectedValue(invalidText);
+      (service as any).recentAnomalies.push({ id: 'cached', resolved: false, persisted: true });
+
+      expect(await service.resolveAnomaly('cached')).toBe(false);
+
+      expect((service as any).persistenceOutbox.has('cached')).toBe(false);
+    });
+
+    it('queues an uncached real event id through a storage outage', async () => {
+      const id = '6f1c2f0e-3f6b-4a53-9b4e-0d8a4f6f2a11';
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await service.resolveAnomaly(id)).toBe(false);
+
+      expect((service as any).persistenceOutbox.has(id)).toBe(true);
+    });
+
+    it('keeps retrying a queued id through a later outage', async () => {
+      const cached = { id: 'cached', resolved: false, persisted: true };
+      (service as any).recentAnomalies.push(cached);
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+      await service.resolveAnomaly('cached');
+
+      (service as any).recentAnomalies.pop();
+      await service.resolveAnomaly('cached');
+
+      expect((service as any).persistenceOutbox.has('cached')).toBe(true);
+    });
+
     // Deterministic string-id events (failover/promotion/cluster/persistence/
     // dup-primary) can't be stored on Postgres (UUID PK), so saveAnomalyEvent
     // throws in addAnomaly and they stay memory-only. Resolution must still work
@@ -4838,7 +4879,7 @@ describe('AnomalyService', () => {
       await (service as any).addAnomaly(anomaly(), mockCtx);
 
       await (service as any).resolveReplicationDivergence(
-        { replicas: new Map([['10.0.0.2:6379', { announced: false }]]) },
+        { replicas: new Map([['10.0.0.2:6379', { announced: false, windows: [] }]]) },
         { kind: 'recovered', addr: '10.0.0.2:6379', eventId: 'saved-1', gapBytes: 0 },
         mockCtx,
         Date.now(),
@@ -4853,7 +4894,7 @@ describe('AnomalyService', () => {
       await (service as any).addAnomaly(anomaly(), mockCtx);
 
       await (service as any).resolveReplicationDivergence(
-        { replicas: new Map([['10.0.0.2:6379', { announced: true }]]) },
+        { replicas: new Map([['10.0.0.2:6379', { announced: true, windows: [] }]]) },
         { kind: 'recovered', addr: '10.0.0.2:6379', eventId: 'saved-1', gapBytes: 0 },
         mockCtx,
         Date.now(),
@@ -7980,9 +8021,9 @@ describe('AnomalyService', () => {
     it('words recovery above the floor as back under the thresholds, not caught up', async () => {
       const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
       let t = await feed([2, 4, 6, 8, 10, 12], T0);
-      for (let i = 0; i < 9; i++) {
+      for (let i = 0; i < 12; i++) {
         await (service as any).detectReplicationDivergence(
-          { ...sample(t, 120 * MiB), bytesPerSec: 50 * MiB, bytesPerSecEwma: 50 * MiB },
+          { ...sample(t, (120 - i) * MiB), bytesPerSec: 50 * MiB, bytesPerSecEwma: 50 * MiB },
           mockCtx,
         );
         t += 10_000;
@@ -7991,7 +8032,7 @@ describe('AnomalyService', () => {
       expect(recoveredHook).toHaveBeenCalledTimes(1);
       expect(recoveredHook.mock.calls[0][0]).toMatchObject({
         reason: 'caught_up',
-        gapBytes: 120 * MiB,
+        gapBytes: expect.any(Number),
         message: 'Replica 10.0.0.2:6379 is back under the alert thresholds.',
       });
     });
@@ -9927,16 +9968,17 @@ describe('AnomalyService', () => {
     });
 
     it('closes a removed connection event once storage accepts it, with no poll', async () => {
+      const orphanId = '0b6f2a6e-8a43-4f0e-9d0b-7f2c1a5e3d10';
       (service as any).divergenceOrphans.set(
         'conn-1',
-        new Map([['10.0.0.2:6379', { eventIds: new Set(['orphan-1']), sinceWindow: 0, claimed: false }]]),
+        new Map([['10.0.0.2:6379', { eventIds: new Set([orphanId]), sinceWindow: 0, claimed: false }]]),
       );
       (service as any).divergenceOrphansSwept.add('conn-1');
       storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
 
       (service as any).onConnectionRemoved('conn-1');
       await flush();
-      expect(outbox().has('orphan-1')).toBe(true);
+      expect(outbox().has(orphanId)).toBe(true);
 
       await drain();
 

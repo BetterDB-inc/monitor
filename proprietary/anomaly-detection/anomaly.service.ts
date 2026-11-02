@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { isUUID } from 'class-validator';
 import {
   StoragePort,
   StoredAnomalyEvent,
@@ -258,6 +259,12 @@ const CORRELATION_ID_CHUNK_SIZE = 500;
 const ANOMALY_ANNOUNCE_MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
+const POSTGRES_DATA_EXCEPTION_CLASS = '22';
+
+function isPostgresDataException(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && code.startsWith(POSTGRES_DATA_EXCEPTION_CLASS);
+}
 
 @Injectable()
 export class AnomalyService
@@ -6514,7 +6521,8 @@ export class AnomalyService
    *                 momentarily couldn't confirm. The outbox keeps retrying it.
    *   - `gone`:     the event exists in neither the cache nor storage, so it can
    *                 never be resolved (e.g. a save the outbox gave up on, since
-   *                 evicted from recentAnomalies). Callers
+   *                 evicted from recentAnomalies), or the id is not one storage
+   *                 can hold. Callers
    *                 must STOP retrying, or the id mapping is retried every poll
    *                 forever and grows unbounded.
    */
@@ -6545,6 +6553,11 @@ export class AnomalyService
       persisted = await this.storage.resolveAnomaly(anomalyId, resolvedAt);
     } catch (err) {
       this.logger.error(`Failed to persist resolution for anomaly ${anomalyId}:`, err);
+      const realEvent =
+        anomaly !== undefined ||
+        this.persistenceOutbox.resolvedAt(anomalyId) !== undefined ||
+        isUUID(anomalyId);
+      if (!realEvent || isPostgresDataException(err)) return 'gone';
       this.queueResolve(anomalyId, resolvedAt, onDrop);
       return 'retry';
     }
