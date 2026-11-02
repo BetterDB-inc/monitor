@@ -108,9 +108,14 @@ export function fillDefaults(
   };
 }
 
+export const WARNING_ZSCORE_ONLY_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set([
+  'error_replies',
+]);
+
 export function validateForm(
   form: DetectorFormState,
   defaults: AnomalyDetectorConfigEntry,
+  metric?: AnomalyDetectorMetric,
 ): DetectorFormErrors {
   const filled = fillDefaults(form, defaults);
   const errors: DetectorFormErrors = {};
@@ -118,7 +123,9 @@ export function validateForm(
   const warnZ = parse(filled.warningZScore);
   const critZ = parse(filled.criticalZScore);
   if (!inRange(warnZ, 0.5, 10)) errors.warningZScore = 'Must be between 0.5 and 10';
-  if (!inRange(critZ, 1, 15)) errors.criticalZScore = 'Must be between 1 and 15';
+  if (metric !== undefined && WARNING_ZSCORE_ONLY_METRICS.has(metric)) {
+    if (!errors.warningZScore && warnZ >= critZ) errors.warningZScore = `Must be below ${critZ}`;
+  } else if (!inRange(critZ, 1, 15)) errors.criticalZScore = 'Must be between 1 and 15';
   else if (!errors.warningZScore && critZ <= warnZ) {
     errors.criticalZScore = 'Must be greater than the warning z-score';
   }
@@ -178,10 +185,6 @@ export function isCustomized(
 ): boolean {
   return ENTRY_FIELDS.some((key) => resolved[key] !== defaults[key]);
 }
-
-export const WARNING_ZSCORE_ONLY_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set([
-  'error_replies',
-]);
 
 export function summarize(
   resolved: AnomalyDetectorConfigEntry,

@@ -84,7 +84,7 @@ export function DetectorPanel({
   }
 
   const dirty = isDirty(form, baseline);
-  const errors = validateForm(form, defaults);
+  const errors = validateForm(form, defaults, metric);
   const hasErrors = Object.keys(errors).length > 0;
   const summary = summarize(resolved, defaults, metric);
 
