@@ -235,7 +235,6 @@ import {
   retryAmplificationMaxPollGap,
 } from './retry-amplification-detector';
 import {
-  ClientListEntry,
   ClientCommandSnapshot,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
@@ -311,6 +310,7 @@ interface RetryAmplificationReport {
   ctx: ConnectionContext;
   state: RetryAmplificationState;
   finding: RetryAmplificationFinding;
+  clientSnapshots: ClientCommandSnapshot[];
   attributionStart: number;
   closedAt: number | undefined;
   timestamp: number;
@@ -903,7 +903,6 @@ export class AnomalyService
     this.retryAmplificationReports.delete(connectionId);
     this.retryAmplificationClients.delete(connectionId);
     this.retryAmplificationDispatched.delete(connectionId);
-    this.clientListCache?.forget(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -3258,6 +3257,7 @@ export class AnomalyService
           {
             minValue: ERROR_REPLIES_MIN_PER_SEC,
             zScoreCritical: false,
+            absoluteBelowMean: true,
           },
         ),
       );
@@ -3410,7 +3410,7 @@ export class AnomalyService
       activeSaturation: [...activeSaturation],
     });
 
-    this.refreshClientSnapshots(ctx, state, info.run_id);
+    const clientSnapshots = this.refreshClientSnapshots(ctx, state, info.run_id);
     if (finding === null) return;
 
     const attributionStart =
@@ -3420,6 +3420,7 @@ export class AnomalyService
       ctx,
       state,
       finding,
+      clientSnapshots,
       attributionStart,
       closedAt,
       timestamp,
@@ -3446,6 +3447,7 @@ export class AnomalyService
     ctx,
     state,
     finding,
+    clientSnapshots,
     attributionStart,
     closedAt,
     timestamp,
@@ -3453,6 +3455,7 @@ export class AnomalyService
   }: RetryAmplificationReport): Promise<void> {
     const contributors = await this.attributeRetryAmplification(
       ctx,
+      clientSnapshots,
       attributionStart,
       closedAt ?? timestamp,
     );
@@ -3524,9 +3527,12 @@ export class AnomalyService
       else events.push(anomaly);
     }
     const excess = this.recentAnomalies.length - this.maxRecentEvents;
-    if (excess > 0) {
-      const dropped = new Set(this.recentAnomalies.slice(0, excess));
-      this.keepRecentAnomalies((anomaly) => !dropped.has(anomaly));
+    if (excess <= 0) return;
+    for (const dropped of this.recentAnomalies.splice(0, excess)) {
+      if (dropped.connectionId === undefined) continue;
+      const events = this.recentAnomaliesByConnection.get(dropped.connectionId);
+      events?.shift();
+      if (events?.length === 0) this.recentAnomaliesByConnection.delete(dropped.connectionId);
     }
   }
 
@@ -3546,7 +3552,7 @@ export class AnomalyService
     ctx: ConnectionContext,
     state: RetryAmplificationState,
     runId: string | undefined,
-  ): void {
+  ): ClientCommandSnapshot[] {
     let history = this.retryAmplificationClients.get(ctx.connectionId);
     if (history === undefined) {
       history = { snapshots: [], readAt: null, runId };
@@ -3557,28 +3563,30 @@ export class AnomalyService
       const restarted = history.runId !== undefined;
       history.runId = runId;
       if (restarted) {
+        const beforeRestart = history.snapshots;
         history.snapshots = [];
         history.readAt = capture?.takenAt ?? null;
-        return;
+        return beforeRestart;
       }
     }
-    if (capture === undefined) return;
+    if (capture === undefined) return history.snapshots;
     if (history.readAt !== null && capture.takenAt - history.readAt < CLIENT_SNAPSHOT_MIN_GAP_MS) {
-      return;
+      return history.snapshots;
     }
     history.readAt = capture.takenAt;
     const snapshot = readClientCommandCounts(capture.clients, capture.takenAt);
-    if (snapshot === null) return;
+    if (snapshot === null) return history.snapshots;
     history.snapshots = pushClientSnapshot(history.snapshots, snapshot, openEpisodeStart(state));
+    return history.snapshots;
   }
 
   private async attributeRetryAmplification(
     ctx: ConnectionContext,
+    clientSnapshots: ClientCommandSnapshot[],
     episodeStart: number,
     until: number,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const history = this.retryAmplificationClients.get(ctx.connectionId)?.snapshots ?? [];
-    const snapshots = selectClientSnapshots(history, episodeStart, until);
+    const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until);
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];

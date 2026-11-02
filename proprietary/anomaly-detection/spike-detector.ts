@@ -11,6 +11,7 @@ import {
 export interface SpikeDetectorOptions {
   minValue?: number;
   zScoreCritical?: boolean;
+  absoluteBelowMean?: boolean;
 }
 
 interface ConsecutiveCounter {
@@ -33,6 +34,7 @@ export class SpikeDetector {
     this.options = {
       minValue: options.minValue ?? Number.NEGATIVE_INFINITY,
       zScoreCritical: options.zScoreCritical ?? true,
+      absoluteBelowMean: options.absoluteBelowMean ?? false,
     };
     // Set defaults
     this.config = {
@@ -69,6 +71,7 @@ export class SpikeDetector {
     const isDrop = zScore < 0;
 
     const exceedsAbsolute =
+      (!isDrop || this.options.absoluteBelowMean) &&
       currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
 
     if (currentValue < this.options.minValue && !exceedsAbsolute) {

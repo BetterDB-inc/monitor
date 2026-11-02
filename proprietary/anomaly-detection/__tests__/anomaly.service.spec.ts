@@ -3520,6 +3520,8 @@ describe('AnomalyService', () => {
         realEmit?: boolean;
         cpuEvent?: Record<string, unknown>;
         saturated?: (window: number) => boolean;
+        windows?: number;
+        runId?: string;
       } = {},
     ) {
       const recorded: any[] = [];
@@ -3533,7 +3535,7 @@ describe('AnomalyService', () => {
       let commands = 1_000_000;
       let errors = 0;
       const errorsCaught: unknown[] = [];
-      for (let w = 0; w < 18 + (opts.coolWindows ?? 0); w++) {
+      for (let w = 0; w < (opts.windows ?? 18) + (opts.coolWindows ?? 0); w++) {
         const hot = w >= 12 && w < 18;
         const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
         if (captureClients) clientListCache.record('conn-1', await captureClients(), ts);
@@ -3567,6 +3569,7 @@ describe('AnomalyService', () => {
           try {
             await (service as any).detectRetryAmplification(
               {
+                ...(opts.runId ? { run_id: opts.runId } : {}),
                 instantaneous_ops_per_sec: String(1000 * factor),
                 connected_clients: '100',
                 total_commands_processed: String(Math.round(commands)),
@@ -3582,7 +3585,7 @@ describe('AnomalyService', () => {
         }
       }
       await new Promise((resolve) => setImmediate(resolve));
-      return { recorded, errorsCaught };
+      return { recorded, errorsCaught, ts };
     }
 
     it('emits one warning with the trigger and related metrics', async () => {
@@ -3840,6 +3843,7 @@ describe('AnomalyService', () => {
 
         const attribution = (service as any).attributeRetryAmplification(
           { connectionId: 'conn-1', connectionName: 'conn' },
+          [],
           1,
           2,
         );
@@ -3849,6 +3853,46 @@ describe('AnomalyService', () => {
       } finally {
         jest.useRealTimers();
       }
+    });
+
+    it('keeps command growth on a finding raised by a restart', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      const { recorded, ts } = await runRetry({ windows: 15, runId: 'run-a' });
+      expect(recorded).toHaveLength(0);
+
+      await (service as any).detectRetryAmplification(
+        {
+          run_id: 'run-b',
+          instantaneous_ops_per_sec: '100',
+          connected_clients: '100',
+          total_commands_processed: '1',
+          total_error_replies: '0',
+        },
+        mockCtx,
+        ts,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+    });
+
+    it('trims the event index without rebuilding it when the ring is full', () => {
+      const add = (id: string, connectionId: string) =>
+        (service as any).addRecentAnomaly({ id, connectionId });
+      for (let i = 0; i < 1000; i++) add(`a-${i}`, i === 0 ? 'only-old' : 'conn-1');
+      const rebuild = jest.spyOn(service as any, 'keepRecentAnomalies');
+
+      add('newest', 'conn-1');
+      add('newest-2', 'conn-1');
+
+      expect(rebuild).not.toHaveBeenCalled();
+      const ids = (service as any).recentAnomalies.map((a: any) => a.id);
+      expect(ids).toHaveLength(1000);
+      expect(ids[0]).toBe('a-2');
+      expect((service as any).recentEventsOf('conn-1').map((a: any) => a.id)).toEqual(ids);
+      expect((service as any).recentAnomaliesByConnection.has('only-old')).toBe(false);
     });
 
     it('forgets the report chain of a removed connection', () => {
@@ -3943,6 +3987,7 @@ describe('AnomalyService', () => {
           ctx: mockCtx,
           state,
           finding: { level, trigger: 'latency', windows: 2, loadRatio: 2, message: 'm' },
+          clientSnapshots: [],
           attributionStart: 1_000,
           closedAt: undefined,
           timestamp: 2_000,
@@ -3964,7 +4009,7 @@ describe('AnomalyService', () => {
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
       storage.getNewClientConnections = jest.fn().mockResolvedValue([]);
 
-      await (service as any).attributeRetryAmplification(mockCtx, 600_000, 780_000);
+      await (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
 
       expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 600_000, 780_000);
       expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 420_000, 599_999);
@@ -4016,7 +4061,7 @@ describe('AnomalyService', () => {
         { capturedAt, name: 'worker', user: 'default', ip: '10.0.0.1', count: 2, ageSum: 7 },
       ]);
       storage.getNewClientConnections = reconnectsOnlyDuringEpisode([
-        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 2 },
+        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 3 },
       ]);
 
       await runRetry();
@@ -4046,12 +4091,12 @@ describe('AnomalyService', () => {
         { capturedAt: end, name: 'worker', user: 'default', ip: '10.0.0.1', count: 2, ageSum: 7 },
       ]);
       storage.getNewClientConnections = reconnectsOnlyDuringEpisode([
-        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 2 },
+        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 3 },
       ]);
 
       const { recorded } = await runRetry();
 
-      expect(recorded[0].message).toContain('Top clients: name worker (2 reconnects).');
+      expect(recorded[0].message).toContain('Top clients: name worker (3 reconnects).');
     });
 
     it('counts early reconnects next to a later capture of older clients', async () => {
@@ -4084,7 +4129,7 @@ describe('AnomalyService', () => {
           connectionId: 'conn-1',
         });
         await history.saveClientSnapshot(
-          [row('early-1', 'retrier', 0, startTime), row('early-2', 'retrier', 0, startTime)],
+          ['early-1', 'early-2', 'early-3'].map((id) => row(id, 'retrier', 0, startTime)),
           'conn-1',
         );
         const pool = Array.from({ length: 5 }, (_, i) =>
@@ -4110,7 +4155,7 @@ describe('AnomalyService', () => {
 
       const { recorded } = await runRetry();
 
-      expect(recorded[0].message).toContain('Top clients: name retrier (2 reconnects).');
+      expect(recorded[0].message).toContain('Top clients: name retrier (3 reconnects).');
     });
 
     it('still emits when both attribution sources fail', async () => {

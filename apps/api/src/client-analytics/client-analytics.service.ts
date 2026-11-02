@@ -54,6 +54,10 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     return true;
   }
 
+  protected onConnectionRemoved(connectionId: string): void {
+    this.clientListCache?.forget(connectionId);
+  }
+
   async onModuleInit(): Promise<void> {
     this.start();
   }

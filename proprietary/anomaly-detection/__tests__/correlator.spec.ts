@@ -381,6 +381,8 @@ describe('Correlator', () => {
       clusterState: { metricType: MetricType.CLUSTER_STATE },
       retry: { metricType: MetricType.RETRY_AMPLIFICATION },
       divergence: { metricType: MetricType.REPLICATION_DIVERGENCE },
+      persistence: { metricType: MetricType.PERSISTENCE_CHILD },
+      slowlog: { metricType: MetricType.SLOWLOG_LAST_ID },
     };
 
     it.each([
@@ -396,6 +398,8 @@ describe('Correlator', () => {
       ['role', 'divergence', AnomalyPattern.NODE_FAILOVER],
       ['clusterState', 'divergence', AnomalyPattern.NODE_FAILOVER],
       ['retry', 'divergence', AnomalyPattern.RETRY_AMPLIFICATION],
+      ['retry', 'slowlog', AnomalyPattern.RETRY_AMPLIFICATION],
+      ['persistence', 'retry', AnomalyPattern.PERSISTENCE_STALL],
     ])('%s wins over %s', (winner, loser, pattern) => {
       const t = 1_000_000;
       const groups = correlator.correlate([
@@ -406,6 +410,24 @@ describe('Correlator', () => {
       expect(groups).toHaveLength(1);
       expect(groups[0].pattern).toBe(pattern);
       expect(groups[0].anomalies).toHaveLength(2);
+    });
+
+    it('names memory pressure over the retries it drives', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', ...signals.retry }),
+        makeAnomaly({
+          timestamp: t + 500,
+          connectionId: 'a',
+          metricType: MetricType.MEMORY_USED,
+          anomalyType: AnomalyType.SPIKE,
+        }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', metricType: MetricType.EVICTED_KEYS }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+      expect(groups[0].anomalies).toHaveLength(3);
     });
 
     it('keeps divergence over a plain CPU move without the saturation marker', () => {

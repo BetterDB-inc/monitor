@@ -3,7 +3,9 @@ import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
-export const RETRY_AMP_CLIENT_SNAPSHOTS = 4;
+export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
+export const RETRY_AMP_MIN_COMMAND_RATE = 1;
+export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
@@ -21,8 +23,7 @@ export interface ClientListEntry {
   addr: string;
   name: string;
   user: string;
-  age: number;
-  [field: string]: unknown;
+  'tot-cmds'?: unknown;
 }
 
 interface ClientCommandCount {
@@ -218,10 +219,14 @@ export function rankRetryAmplificationContributors(
     }),
   );
 
-  const byGrowth = [...contributorOf.values()]
+  const byGrowth = [...contributorOf.entries()]
     .filter(
-      (c) => c.commandRateGrowth !== null && c.commandRateGrowth >= RETRY_AMP_CONTRIBUTOR_GROWTH,
+      ([acc, c]) =>
+        acc.episodeRate >= RETRY_AMP_MIN_COMMAND_RATE &&
+        c.commandRateGrowth !== null &&
+        c.commandRateGrowth >= RETRY_AMP_CONTRIBUTOR_GROWTH,
     )
+    .map(([, contributor]) => contributor)
     .sort((a, b) => {
       const diff = (b.commandRateGrowth ?? 0) - (a.commandRateGrowth ?? 0);
       return diff !== 0 ? diff : a.key.localeCompare(b.key);
@@ -231,7 +236,7 @@ export function rankRetryAmplificationContributors(
   const byReconnects = [...map.values()]
     .filter(
       (acc) =>
-        acc.newConnections > 0 &&
+        acc.newConnections >= RETRY_AMP_MIN_NEW_CONNECTIONS &&
         acc.newConnections >= RETRY_AMP_CONTRIBUTOR_GROWTH * acc.baselineConnections,
     )
     .sort((a, b) => {

@@ -52,6 +52,13 @@ function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent
 
 const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
 
+function isMemoryGrowthWithEvictions(anomalies: AnomalyEvent[]): boolean {
+  const hasMemorySpike = anomalies.some(
+    (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
+  );
+  return hasMemorySpike && anomalies.some((a) => a.metricType === MetricType.EVICTED_KEYS);
+}
+
 export class Correlator {
   private readonly correlationWindowMs: number;
   private readonly patternRules: PatternRule[];
@@ -134,18 +141,6 @@ export class Correlator {
         ],
       },
       {
-        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
-        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
-        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
-        recommendations: [
-          'Add exponential backoff with jitter and a retry budget to the client retry policy',
-          'Put a circuit breaker in front of the instance so failing calls stop retrying',
-          'Set client timeouts above the observed P99 so slow replies are not retried',
-          'Throttle or inspect the clients whose command rate grew the most',
-          'Shed load until latency and error rates recover',
-        ],
-      },
-      {
         pattern: AnomalyPattern.PERSISTENCE_STALL,
         requiredMetrics: [MetricType.PERSISTENCE_CHILD],
         diagnosis:
@@ -155,6 +150,19 @@ export class Correlator {
           'Inspect the server log for fork or allocator errors',
           'Consider BGSAVE CANCEL if the save is wedged',
           'Verify disk space and I/O on the persistence target',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
+        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
+        check: (anomalies) => !isMemoryGrowthWithEvictions(anomalies),
+        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
+        recommendations: [
+          'Add exponential backoff with jitter and a retry budget to the client retry policy',
+          'Put a circuit breaker in front of the instance so failing calls stop retrying',
+          'Set client timeouts above the observed P99 so slow replies are not retried',
+          'Throttle or inspect the clients whose command rate grew the most',
+          'Shed load until latency and error rates recover',
         ],
       },
       {
@@ -189,8 +197,7 @@ export class Correlator {
           const hasMemorySpike = anomalies.some(
             (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasEvictions = anomalies.some((a) => a.metricType === MetricType.EVICTED_KEYS);
-          return hasMemorySpike && (hasEvictions || anomalies.length === 1);
+          return isMemoryGrowthWithEvictions(anomalies) || (hasMemorySpike && anomalies.length === 1);
         },
         diagnosis: 'Memory pressure detected with potential evictions',
         recommendations: [

@@ -70,6 +70,7 @@ interface CorrelatedGroup {
   recommendations: string[];
   severity: 'info' | 'warning' | 'critical';
   anomalies: AnomalyEvent[];
+  truncated?: boolean;
 }
 
 interface AnomalySummary {
@@ -176,6 +177,10 @@ function formatTime(ts: number): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
+  return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
 }
 
 export function formatValue(value: number, metric: string): string {
@@ -549,7 +554,7 @@ export function AnomalyDashboard() {
                             </span>
                           </div>
                           <p className="text-sm text-muted-foreground">
-                            {formatTime(group.timestamp)} · {group.anomalies.length} related
+                            {formatTime(group.timestamp)} · {formatRelatedCount(group)} related
                             anomalies
                           </p>
                         </div>

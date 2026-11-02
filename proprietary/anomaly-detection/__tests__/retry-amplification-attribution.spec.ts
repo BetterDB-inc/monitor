@@ -1,18 +1,21 @@
 import type { ClientSnapshotGroupRow } from '@betterdb/shared';
 import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
+import { RETRY_AMP_EVENT_GRACE_MS, RETRY_AMP_WINDOW_MS } from '../retry-amplification-detector';
 import {
+  ClientCommandSnapshot,
   ClientListEntry,
   contributorKey,
   describeRetryAmplificationContributors,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   RETRY_AMP_CLIENT_SNAPSHOTS,
+  RETRY_AMP_MIN_NEW_CONNECTIONS,
   readClientCommandCounts,
   selectClientSnapshots,
 } from '../retry-amplification-attribution';
 
 function client(overrides: Partial<ClientListEntry> & { id: string }): ClientListEntry {
-  return { addr: '10.0.0.1:5000', name: '', user: 'default', age: 1000, ...overrides };
+  return { addr: '10.0.0.1:5000', name: '', user: 'default', ...overrides };
 }
 
 function snapshot(takenAt: number, clients: ClientListEntry[]) {
@@ -128,13 +131,13 @@ describe('retry amplification attribution', () => {
 
     it('ignores a long lifetime average when the client was already busy', () => {
       const before = snapshot(0, [
-        client({ id: '1', name: 'nightly', age: 1_000_000, 'tot-cmds': '1000' }),
+        client({ id: '1', name: 'nightly', 'tot-cmds': '1000' }),
       ]);
       const first = snapshot(60_000, [
-        client({ id: '1', name: 'nightly', age: 1_000_060, 'tot-cmds': '7000' }),
+        client({ id: '1', name: 'nightly', 'tot-cmds': '7000' }),
       ]);
       const latest = snapshot(120_000, [
-        client({ id: '1', name: 'nightly', age: 1_000_120, 'tot-cmds': '13000' }),
+        client({ id: '1', name: 'nightly', 'tot-cmds': '13000' }),
       ]);
 
       expect(
@@ -152,8 +155,8 @@ describe('retry amplification attribution', () => {
       const before = snapshot(0, [client({ id: '1', name: 'storm', 'tot-cmds': '1000' })]);
       const first = snapshot(60_000, [client({ id: '1', name: 'storm', 'tot-cmds': '1600' })]);
       const latest = snapshot(120_000, [
-        client({ id: '41', name: 'storm', age: 5, 'tot-cmds': '1500' }),
-        client({ id: '42', name: 'storm', age: 3, 'tot-cmds': '1500' }),
+        client({ id: '41', name: 'storm', 'tot-cmds': '1500' }),
+        client({ id: '42', name: 'storm', 'tot-cmds': '1500' }),
       ]);
 
       const [storm] = rankRetryAmplificationContributors({
@@ -177,7 +180,7 @@ describe('retry amplification attribution', () => {
         first,
         latest,
         capture: [],
-        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
+        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 3 }],
       });
 
       expect(ranked[0].commandRateGrowth).toBeNull();
@@ -190,8 +193,8 @@ describe('retry amplification attribution', () => {
         group({ ip: '10.9.9.9' }),
       ];
       const newConnections = [
-        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 3 },
-        { name: '', user: 'default', ip: '10.9.9.9', count: 1 },
+        { name: 'worker', user: 'default', ip: '10.0.0.1', count: 4 },
+        { name: '', user: 'default', ip: '10.9.9.9', count: 3 },
       ];
 
       const ranked = rankRetryAmplificationContributors({
@@ -207,14 +210,14 @@ describe('retry amplification attribution', () => {
           key: 'worker',
           keyKind: 'name',
           commandRateGrowth: null,
-          newConnections: 3,
+          newConnections: 4,
           connections: 2,
         },
         {
           key: '10.9.9.9',
           keyKind: 'ip',
           commandRateGrowth: null,
-          newConnections: 1,
+          newConnections: 3,
           connections: 1,
         },
       ]);
@@ -246,15 +249,15 @@ describe('retry amplification attribution', () => {
         newConnections: [
           { name: 'api', user: 'default', ip: '10.0.0.1', count: 2 },
           { name: 'api', user: 'default', ip: '10.0.0.2', count: 3 },
-          { name: '', user: 'svc', ip: '10.0.0.3', count: 1 },
-          { name: '', user: 'default', ip: '[::1]', count: 1 },
+          { name: '', user: 'svc', ip: '10.0.0.3', count: 3 },
+          { name: '', user: 'default', ip: '[::1]', count: 3 },
         ],
       });
 
       expect(ranked.map((c) => [c.key, c.keyKind, c.newConnections])).toEqual([
         ['api', 'name', 5],
-        ['[::1]', 'ip', 1],
-        ['svc', 'user', 1],
+        ['[::1]', 'ip', 3],
+        ['svc', 'user', 3],
       ]);
     });
 
@@ -264,7 +267,7 @@ describe('retry amplification attribution', () => {
         first: null,
         latest: null,
         capture: [group({ name: 'api', count: 2 }), group({ name: 'api', ip: '10.0.0.2' })],
-        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 1 }],
+        newConnections: [{ name: 'api', user: 'default', ip: '10.0.0.1', count: 3 }],
       });
 
       expect(ranked[0].connections).toBe(3);
@@ -311,12 +314,12 @@ describe('retry amplification attribution', () => {
         first: pool(60_000, () => 1000),
         latest: pool(120_000, (id) => 1000 + 600 * (2 + Number(id))),
         capture,
-        newConnections: [{ name: 'retrier', user: 'default', ip: '10.0.0.1', count: 2 }],
+        newConnections: [{ name: 'retrier', user: 'default', ip: '10.0.0.1', count: 3 }],
       });
 
       expect(ranked).toHaveLength(5);
       expect(ranked[1]).toEqual(
-        expect.objectContaining({ key: 'retrier', commandRateGrowth: null, newConnections: 2 }),
+        expect.objectContaining({ key: 'retrier', commandRateGrowth: null, newConnections: 3 }),
       );
     });
 
@@ -333,6 +336,41 @@ describe('retry amplification attribution', () => {
           newConnections: [],
         }),
       ).toEqual([]);
+    });
+
+    it('leaves a near-idle client out of the growth ranking', () => {
+      const reading = (takenAt: number, idle: number, api: number) =>
+        snapshot(takenAt, [
+          client({ id: '1', name: 'idle', 'tot-cmds': String(idle) }),
+          client({ id: '2', name: 'api', 'tot-cmds': String(api) }),
+        ]);
+      const before = reading(0, 0, 0);
+      const first = reading(100_000, 2, 10_000);
+      const latest = reading(200_000, 52, 30_000);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+    });
+
+    it('needs a few new connections before a client with no baseline counts', () => {
+      const reconnects = (count: number) =>
+        rankRetryAmplificationContributors({
+          before: null,
+          first: null,
+          latest: null,
+          capture: [],
+          newConnections: [{ name: 'worker', user: 'default', ip: '10.0.0.1', count }],
+        });
+
+      expect(reconnects(RETRY_AMP_MIN_NEW_CONNECTIONS - 1)).toEqual([]);
+      expect(reconnects(RETRY_AMP_MIN_NEW_CONNECTIONS).map((c) => c.key)).toEqual(['worker']);
     });
 
     it('returns nothing when neither source has data', () => {
@@ -357,6 +395,29 @@ describe('retry amplification attribution', () => {
 
       expect(history).toHaveLength(RETRY_AMP_CLIENT_SNAPSHOTS);
       expect(history[history.length - 1].takenAt).toBe(540_000);
+    });
+
+    it('keeps the rate pair when a run opens a window and its grace after it started', () => {
+      const cadence = 30_000;
+      const openDelay = RETRY_AMP_WINDOW_MS + RETRY_AMP_EVENT_GRACE_MS;
+      for (let offset = 1_000; offset < cadence; offset += 1_000) {
+        const episodeStart = 600_000 + offset;
+        let history: ClientCommandSnapshot[] = [];
+        for (let t = 0; t <= episodeStart + openDelay + 3 * cadence; t += cadence) {
+          const open = t >= episodeStart + openDelay ? episodeStart : null;
+          history = pushClientSnapshot(history, at(t), open);
+        }
+
+        const { before, first, latest } = selectClientSnapshots(
+          history,
+          episodeStart,
+          episodeStart + openDelay + 3 * cadence,
+        );
+
+        expect(before).not.toBeNull();
+        expect(first).not.toBeNull();
+        expect(latest).not.toBeNull();
+      }
     });
 
     it('keeps the two snapshots before the episode however long it runs', () => {

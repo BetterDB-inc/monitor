@@ -175,11 +175,25 @@ describe('SpikeDetector', () => {
       expect(result!.severity).toBe(AnomalySeverity.WARNING);
     });
 
+    it('leaves a below-mean value alone unless the detector opts in', () => {
+      const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ACL_DENIED, {
+        warningThreshold: 10,
+        criticalThreshold: 50,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
+
+      expect(detector.detect(buffer, 60, 50000)).toBeNull();
+    });
+
     it('fires the absolute threshold when the value is above it but below the mean', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(
         MetricType.ACL_DENIED,
         { warningThreshold: 10, criticalThreshold: 50, consecutiveRequired: 1, cooldownMs: 0 },
+        { absoluteBelowMean: true },
       );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const result = detector.detect(buffer, 60, 50000);
@@ -222,6 +236,7 @@ describe('SpikeDetector', () => {
       const detector = new SpikeDetector(
         MetricType.ERROR_REPLIES,
         { warningThreshold: 200, criticalThreshold: 2000, consecutiveRequired: 2, cooldownMs: 0 },
+        { absoluteBelowMean: true },
       );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       expect(detector.detect(buffer, 300, 50000)).toBeNull();
@@ -240,6 +255,7 @@ describe('SpikeDetector', () => {
           consecutiveRequired: 1,
           cooldownMs: 0,
         },
+        { absoluteBelowMean: true },
       );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const result = detector.detect(buffer, 60, 50000);
@@ -301,6 +317,7 @@ describe('SpikeDetector', () => {
       const detector = new SpikeDetector(
         MetricType.ACL_DENIED,
         { warningThreshold: 10, criticalThreshold: 50, consecutiveRequired: 1, cooldownMs: 30000 },
+        { absoluteBelowMean: true },
       );
       for (let i = 0; i < 30; i++) buffer.addSample(1000 + (i % 2) * 100, i * 1000);
       const fired: number[] = [];
@@ -343,7 +360,7 @@ describe('SpikeDetector', () => {
           consecutiveRequired: 1,
           cooldownMs: 0,
         },
-        { minValue: 20 },
+        { minValue: 20, absoluteBelowMean: true },
       );
       for (let i = 0; i < 30; i++) buffer.addSample(30, i * 1000);
       buffer.addSample(15, 30000);
