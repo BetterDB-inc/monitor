@@ -8,6 +8,7 @@ import {
 } from '@app/common/interfaces/storage-port.interface';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
+import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { SettingsService } from '@app/settings/settings.service';
 import { SlowLogAnalyticsService } from '@app/slowlog-analytics/slowlog-analytics.service';
 import { CommandLogAnalyticsService } from '@app/commandlog-analytics/commandlog-analytics.service';
@@ -163,6 +164,8 @@ import {
   DIVERGENCE_COMPOUND_SIGNALS,
   DIVERGENCE_FLOOR_BYTES,
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_WINDOW_PRUNE_INTERVAL_MS,
+  DIVERGENCE_WINDOW_RETENTION_MS,
   DIVERGENCE_ORPHAN_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
@@ -416,6 +419,7 @@ export class AnomalyService
   private forkMemoryState = new Map<string, ForkMemoryState>();
   private forkMemLastChanges = new Map<string, { changes: number; ts: number }>();
   private replicationStream = new ReplicationStreamTracker();
+  private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
@@ -566,6 +570,8 @@ export class AnomalyService
     private readonly anomalyWebhookSink?: AnomalyWebhookSink,
     @Optional()
     private readonly anomalySaved?: AnomalySavedBus,
+    @Optional()
+    private readonly retentionPolicy?: RetentionPolicyService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -844,6 +850,7 @@ export class AnomalyService
     this.replicationStream.forget(connectionId);
     this.closeDivergenceEventsOnRemoval(connectionId);
     this.divergenceState.delete(connectionId);
+    this.lastDivergencePrune.delete(connectionId);
     this.divergenceOrphansSwept.delete(connectionId);
     this.divergenceOrphans.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
@@ -5482,7 +5489,7 @@ export class AnomalyService
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
 
-    this.countAnomaly(anomaly, ctx);
+    this.countAnomaly(anomaly, ctx?.connectionId);
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
 
     try {
@@ -5655,7 +5662,7 @@ export class AnomalyService
     }
   }
 
-  private countAnomaly(anomaly: AnomalyEvent, ctx?: ConnectionContext): void {
+  private countAnomaly(anomaly: AnomalyEvent, connectionId: string | undefined): void {
     // Metrics/telemetry emits are best-effort: a failure in the Prometheus counter
     // or the OTLP dispatch must never abort recording/persisting the anomaly, and
     // must never propagate out of addAnomaly (that would let one detector's emit
@@ -5666,7 +5673,7 @@ export class AnomalyService
         anomaly.severity,
         anomaly.metricType,
         anomaly.anomalyType,
-        ctx?.connectionId,
+        connectionId,
       );
     } catch (err) {
       this.logger.error('Failed to increment anomaly metric:', err);
@@ -5685,7 +5692,7 @@ export class AnomalyService
           metricType: anomaly.metricType,
           anomalyType: anomaly.anomalyType,
         },
-        ctx?.connectionId,
+        connectionId,
       );
     } catch (err) {
       this.logger.error('Failed to dispatch anomaly OTLP event:', err);
@@ -5698,6 +5705,7 @@ export class AnomalyService
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
+    this.countAnomaly(event, event.connectionId);
     this.announceSaved(event, event);
   }
 
@@ -6065,6 +6073,7 @@ export class AnomalyService
     }
     await this.settleOrphanedDivergenceEvents(state, ctx);
     await this.persistDivergenceWindows(state, ctx);
+    await this.pruneDivergenceWindows(ctx, sample.timestamp);
   }
 
   private async readOpenDivergenceEvents(connectionId: string): Promise<StoredAnomalyEvent[]> {
@@ -6157,6 +6166,27 @@ export class AnomalyService
       message: `Divergence on replica ${replica} was left open by a restart and has been resolved.`,
       timestamp: Date.now(),
     });
+  }
+
+  private async pruneDivergenceWindows(ctx: ConnectionContext, now: number): Promise<void> {
+    const lastPrune = this.lastDivergencePrune.get(ctx.connectionId);
+    if (lastPrune === undefined) {
+      this.lastDivergencePrune.set(ctx.connectionId, now);
+      return;
+    }
+    if (now - lastPrune <= DIVERGENCE_WINDOW_PRUNE_INTERVAL_MS) return;
+    this.lastDivergencePrune.set(ctx.connectionId, now);
+    const retentionMs =
+      this.retentionPolicy?.getSampleRetentionMs() ?? DIVERGENCE_WINDOW_RETENTION_MS;
+    try {
+      await this.storage.pruneOldReplicationDivergenceWindows(now - retentionMs, ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to prune replication divergence windows for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   private async persistDivergenceWindows(
