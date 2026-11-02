@@ -13,7 +13,8 @@ import {
   StoredCaptureTrigger,
   WebhookEventType,
 } from '@betterdb/shared';
-import { StoragePort, StoredAnomalyEvent } from '../common/interfaces/storage-port.interface';
+import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { AnomalySavedBus, SavedAnomaly } from '../common/services/anomaly-saved-bus';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { HealthGateService } from './health-gate.service';
 import { MonitorCaptureService } from './monitor-capture.service';
@@ -23,7 +24,8 @@ export const DEFAULT_TRIGGER_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-const LATE_ANOMALY_LOOKBACK_MS = 70 * 60 * 1000;
+export const MAX_PENDING_ANOMALIES = 1000;
+export const PENDING_ANOMALY_MAX_AGE_MS = 60 * 60 * 1000;
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -44,7 +46,8 @@ export interface CaptureTriggerRegistryOptions {
  * drives a polling loop that:
  *   1. expires stale triggers (now &gt; expiresAt),
  *   2. retries previously queued triggers when the connection frees up,
- *   3. matches new anomaly events against configured triggers and fires them.
+ *   3. matches anomalies announced on first save against configured triggers
+ *      and fires them.
  *
  * The deep-module test seam is {@link tick}: callers can drive iterations
  * manually without timers. `setOptions` lets specs override the poll interval
@@ -54,8 +57,11 @@ export interface CaptureTriggerRegistryOptions {
 export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CaptureTriggerRegistry.name);
   private pollHandle?: NodeJS.Timeout;
-  private lastAnomalyAt: number;
-  private readonly seenAnomalies = new Map<string, number>();
+  private readonly pendingAnomalies = new Map<
+    string,
+    { event: SavedAnomaly; receivedAt: number }
+  >();
+  private readonly unsubscribeAnomalySaved: () => void;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
   private ticking = false;
@@ -65,18 +71,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     private readonly healthGate: HealthGateService,
     private readonly webhookDispatcher: WebhookDispatcherService,
+    anomalySaved: AnomalySavedBus,
   ) {
-    // Seed the watermark to "now" so a process restart reads only the
-    // late-save lookback rather than all history. The trigger.createdAt
-    // guard in processNewAnomalies() blocks events older than each trigger
-    // anyway, but starting from 0 still means an unbounded scan on first
-    // tick. Tests can reset via the test seam below.
-    this.lastAnomalyAt = Date.now();
-  }
-
-  /** Test seam — reset the anomaly watermark so specs see all stored events. */
-  resetAnomalyWatermark(): void {
-    this.lastAnomalyAt = 0;
+    this.unsubscribeAnomalySaved = anomalySaved.subscribe((event) => this.enqueueAnomaly(event));
   }
 
   setOptions(options: CaptureTriggerRegistryOptions): void {
@@ -100,6 +97,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.unsubscribeAnomalySaved();
     if (this.pollHandle) {
       clearInterval(this.pollHandle);
       this.pollHandle = undefined;
@@ -200,63 +198,37 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private enqueueAnomaly(event: SavedAnomaly): void {
+    if (this.pendingAnomalies.size >= MAX_PENDING_ANOMALIES) {
+      const oldest = this.pendingAnomalies.keys().next().value as string;
+      this.pendingAnomalies.delete(oldest);
+      this.logger.warn(`Dropping pending anomaly ${oldest}: queue is full`);
+    }
+    this.pendingAnomalies.set(event.id, { event, receivedAt: Date.now() });
+  }
+
   private async processNewAnomalies(): Promise<void> {
-    const startTime = Math.max(0, this.lastAnomalyAt - LATE_ANOMALY_LOOKBACK_MS);
-    const pageSize = 200;
-    // Drain pagination by walking offset until storage returns fewer rows
-    // than requested. Cap total work per tick so a runaway backlog can't
-    // starve other tick steps.
-    const maxPerTick = 5000;
-    const collected: StoredAnomalyEvent[] = [];
-    for (let offset = 0; offset < maxPerTick; offset += pageSize) {
-      const page = await this.storage.getAnomalyEvents({
-        startTime,
-        limit: pageSize,
-        offset,
-      });
-      if (page.length === 0) {
-        break;
-      }
-      collected.push(...page);
-      if (page.length < pageSize) {
-        break;
-      }
-    }
-    if (collected.length === 0) {
-      return;
-    }
-    // Storage returns DESC by timestamp; iterate oldest-first so a partial
-    // drain still leaves a coherent watermark.
-    const sorted = collected.sort((a, b) => a.timestamp - b.timestamp);
-    let maxTs = this.lastAnomalyAt;
-    for (const evt of sorted) {
-      if (evt.timestamp > maxTs) {
-        maxTs = evt.timestamp;
-      }
-      if (this.seenAnomalies.has(evt.id)) {
+    const now = Date.now();
+    for (const [id, { event, receivedAt }] of this.pendingAnomalies) {
+      if (now - receivedAt > PENDING_ANOMALY_MAX_AGE_MS) {
+        this.pendingAnomalies.delete(id);
+        this.logger.warn(`Giving up on pending anomaly ${id}: too old`);
         continue;
       }
       try {
-        if (evt.connectionId) {
+        if (event.connectionId) {
           const match = await this.findActiveTrigger(
-            evt.connectionId,
-            evt.metricType,
-            evt.anomalyType,
+            event.connectionId,
+            event.metricType,
+            event.anomalyType,
           );
-          if (match && match.status === 'configured' && evt.timestamp >= match.createdAt) {
+          if (match && match.status === 'configured' && event.timestamp >= match.createdAt) {
             await this.tryFire(match);
           }
         }
-        this.seenAnomalies.set(evt.id, evt.timestamp);
+        this.pendingAnomalies.delete(id);
       } catch (err) {
-        this.logger.error(`Failed to match anomaly ${evt.id}: ${(err as Error).message}`);
-      }
-    }
-    this.lastAnomalyAt = maxTs;
-    const oldestLive = maxTs - LATE_ANOMALY_LOOKBACK_MS;
-    for (const [id, timestamp] of this.seenAnomalies) {
-      if (timestamp < oldestLive) {
-        this.seenAnomalies.delete(id);
+        this.logger.error(`Failed to match anomaly ${id}: ${(err as Error).message}`);
       }
     }
   }
