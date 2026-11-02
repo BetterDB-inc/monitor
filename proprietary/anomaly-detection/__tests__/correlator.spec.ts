@@ -291,6 +291,156 @@ describe('Correlator', () => {
     });
   });
 
+  describe('RETRY_AMPLIFICATION pattern', () => {
+    const message =
+      'WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while ' +
+      'connected clients stay flat at ~100; load is rising with stress (r=0.97). ' +
+      'Trigger: a latency regression (COMMAND_P99). Without client backoff the loop keeps feeding itself.';
+
+    it('names the trigger from the detector event in the diagnosis', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          retryTrigger: 'latency',
+          connectionId: 'a',
+        }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+      expect(groups[0].diagnosis).toContain('stepped up together with a latency regression (COMMAND_P99)');
+      expect(groups[0].recommendations.join(' ')).toContain('backoff');
+    });
+
+    it('takes precedence over a co-occurring P99 regression on the same node', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, metricType: MetricType.COMMAND_P99, connectionId: 'a' }),
+        makeAnomaly({
+          timestamp: t + 1000,
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          connectionId: 'a',
+        }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+    });
+
+    it('takes precedence over replication divergence in the same window', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: t,
+          metricType: MetricType.REPLICATION_DIVERGENCE,
+          connectionId: 'a',
+        }),
+        makeAnomaly({
+          timestamp: t + 1000,
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          connectionId: 'a',
+        }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RETRY_AMPLIFICATION);
+      expect(groups[0].recommendations.join(' ')).toContain('backoff');
+    });
+
+    it('falls back to the generic diagnosis when the event has no trigger', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message }),
+      ]);
+
+      expect(groups[0].diagnosis).toContain('stepped up together with a stress signal');
+    });
+
+    it('keeps the detector-stamped related metrics', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          relatedMetrics: [MetricType.COMMAND_P99],
+        }),
+      ]);
+
+      expect(groups[0].anomalies[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
+    });
+  });
+
+  describe('pattern precedence', () => {
+    const signals: Record<string, Partial<AnomalyEvent>> = {
+      saturation: {
+        metricType: MetricType.CPU_UTILIZATION,
+        syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+      },
+      auth: { metricType: MetricType.ACL_DENIED },
+      role: { metricType: MetricType.REPLICATION_ROLE },
+      clusterState: { metricType: MetricType.CLUSTER_STATE },
+      retry: { metricType: MetricType.RETRY_AMPLIFICATION },
+      divergence: { metricType: MetricType.REPLICATION_DIVERGENCE },
+      persistence: { metricType: MetricType.PERSISTENCE_CHILD },
+      slowlog: { metricType: MetricType.SLOWLOG_LAST_ID },
+    };
+
+    it.each([
+      ['saturation', 'divergence', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'retry', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'role', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'clusterState', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['saturation', 'auth', AnomalyPattern.CONTROL_PLANE_SATURATION],
+      ['auth', 'retry', AnomalyPattern.AUTH_ATTACK],
+      ['role', 'retry', AnomalyPattern.NODE_FAILOVER],
+      ['clusterState', 'retry', AnomalyPattern.NODE_FAILOVER],
+      ['auth', 'divergence', AnomalyPattern.AUTH_ATTACK],
+      ['role', 'divergence', AnomalyPattern.NODE_FAILOVER],
+      ['clusterState', 'divergence', AnomalyPattern.NODE_FAILOVER],
+      ['retry', 'divergence', AnomalyPattern.RETRY_AMPLIFICATION],
+      ['retry', 'slowlog', AnomalyPattern.RETRY_AMPLIFICATION],
+      ['persistence', 'retry', AnomalyPattern.PERSISTENCE_STALL],
+    ])('%s wins over %s', (winner, loser, pattern) => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', ...signals[loser] }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', ...signals[winner] }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(pattern);
+      expect(groups[0].anomalies).toHaveLength(2);
+    });
+
+    it('names memory pressure over the retries it drives', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', ...signals.retry }),
+        makeAnomaly({
+          timestamp: t + 500,
+          connectionId: 'a',
+          metricType: MetricType.MEMORY_USED,
+          anomalyType: AnomalyType.SPIKE,
+        }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', metricType: MetricType.EVICTED_KEYS }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+      expect(groups[0].anomalies).toHaveLength(3);
+    });
+
+    it('keeps divergence over a plain CPU move without the saturation marker', () => {
+      const t = 1_000_000;
+      const groups = correlator.correlate([
+        makeAnomaly({ timestamp: t, connectionId: 'a', metricType: MetricType.CPU_UTILIZATION }),
+        makeAnomaly({ timestamp: t + 1000, connectionId: 'a', ...signals.divergence }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.REPLICATION_DIVERGENCE);
+    });
+  });
+
   describe('scope partitioning', () => {
     it('keeps anomalies from different connections in separate groups', () => {
       const baseTime = 1000000;

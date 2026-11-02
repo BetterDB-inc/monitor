@@ -32,6 +32,8 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -977,6 +979,60 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const result = await this.pool.query(query, params);
     return result.rows.map((row) => this.mappers.mapClientRow(row));
+  }
+
+  async getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
+              ${PG_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
+          AND captured_at - age::bigint * 1000 >= $2
+          AND COALESCE(flags, '') !~ '[SM]'
+        GROUP BY COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
+      [connectionId, since, until],
+    );
+    return result.rows.map((row) => ({
+      name: row.name,
+      user: row.user_name,
+      ip: row.ip,
+      count: Number(row.count),
+    }));
+  }
+
+  async getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
+              ${PG_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldest_age,
+              MAX(CASE WHEN client_id::text ~ '^[0-9]+$' THEN client_id::text::bigint END) AS max_client_id
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
+          AND COALESCE(flags, '') !~ '[SM]'
+        GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
+      [connectionId, since, until],
+    );
+    return result.rows.map((row) => ({
+      capturedAt: Number(row.captured_at),
+      name: row.name,
+      user: row.user_name,
+      ip: row.ip,
+      oldestAge: Number(row.oldest_age),
+      maxClientId: Number(row.max_client_id ?? 0),
+    }));
   }
 
   async getClientTimeSeries(

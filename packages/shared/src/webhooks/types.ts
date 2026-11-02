@@ -37,6 +37,7 @@ export enum WebhookEventType {
   MONITOR_SESSION_TRUNCATED = 'monitor.session.truncated',
   MONITOR_SESSION_SKIPPED = 'monitor.session.skipped',
   MONITOR_TRIGGER_CREATED = 'monitor.trigger.created',
+  RETRY_AMPLIFICATION_DETECTED = 'retry_amplification.detected',
 }
 
 // Injection tokens for proprietary webhook services
@@ -80,6 +81,7 @@ export const PRO_EVENTS: WebhookEventType[] = [
   WebhookEventType.INFERENCE_SLA_BREACH,
   WebhookEventType.MONITOR_TRIGGER_CREATED,
   WebhookEventType.CVE_CRITICAL_DETECTED,
+  WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
 ];
 
 export const ENTERPRISE_EVENTS: WebhookEventType[] = [
@@ -139,6 +141,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
   [WebhookEventType.FAILOVER_COMPLETED]: Tier.pro,
   [WebhookEventType.DATA_LOSS_DETECTED]: Tier.pro,
   [WebhookEventType.LATENCY_REGRESSION_DETECTED]: Tier.pro,
+  [WebhookEventType.RETRY_AMPLIFICATION_DETECTED]: Tier.pro,
   [WebhookEventType.INFERENCE_SLA_BREACH]: Tier.pro,
   [WebhookEventType.MONITOR_TRIGGER_CREATED]: Tier.pro,
   [WebhookEventType.CVE_CRITICAL_DETECTED]: Tier.pro,
@@ -391,6 +394,28 @@ export interface LatencyRegressionDetectedData {
   connectionId?: string;
 }
 
+export interface RetryAmplificationContributorData {
+  key: string;
+  keyKind: 'name' | 'user' | 'ip';
+  commandRateGrowth: number | null;
+  newConnections: number;
+  connections: number;
+}
+
+export interface RetryAmplificationDetectedData {
+  level: 'warning' | 'critical';
+  trigger: 'latency' | 'errors' | 'churn';
+  windows: number;
+  loadRatio: number;
+  pattern: 'rising' | 'step';
+  correlation: number | null;
+  topContributors: RetryAmplificationContributorData[] | null;
+  message: string;
+  timestamp: number;
+  instance: WebhookInstanceInfo;
+  connectionId?: string;
+}
+
 /**
  * PRO tier webhook events service interface
  * Implemented by proprietary/webhook-pro/webhook-events-pro.service.ts
@@ -511,6 +536,8 @@ export interface IWebhookEventsProService {
   }): Promise<void>;
 
   dispatchLatencyRegressionDetected(data: LatencyRegressionDetectedData): Promise<void>;
+
+  dispatchRetryAmplificationDetected(data: RetryAmplificationDetectedData): Promise<void>;
 
   dispatchReplicationDivergence(data: ReplicationDivergenceData): Promise<void>;
 

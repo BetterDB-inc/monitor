@@ -124,15 +124,27 @@ interface SustainedState {
   lastFiredAt: number;
   /** capturedAt of the last sample counted toward `consecutive`. */
   lastCountedAt: number;
+  degraded: boolean | null;
+}
+
+interface FlaggedCommand {
+  healthySamples: number;
+  lastHealthyAt: number;
+}
+
+function hasRecovered(flagged: FlaggedCommand): boolean {
+  return flagged.healthySamples >= CONSECUTIVE_REQUIRED;
 }
 
 export class RegressionDetector {
   private lastVersion?: string;
   private upgrade?: UpgradeWindowState;
   private sustained = new Map<string, SustainedState>();
+  private flagged = new Map<string, FlaggedCommand>();
 
   evaluate(input: DetectorInput): RegressionFinding[] {
     const { nowMs, samples } = input;
+    for (const state of this.sustained.values()) state.degraded = null;
     if (samples.length === 0) return [];
 
     const latestByCommand = this.latestByCommand(samples);
@@ -158,7 +170,43 @@ export class RegressionDetector {
     // empty upgrade window can't silence sustained detection for up to 24h.
     findings.push(...this.evaluateSustained(input, latestByCommand, eligible, currentVersion));
 
+    for (const [command, flagged] of this.flagged) {
+      if (!eligible.has(command)) {
+        this.flagged.delete(command);
+        continue;
+      }
+      const degraded = this.sustained.get(command)?.degraded;
+      if (degraded === true) {
+        flagged.healthySamples = 0;
+      } else if (degraded === false) {
+        const capturedAt = latestByCommand.get(command)!.capturedAt;
+        if (capturedAt > flagged.lastHealthyAt) {
+          flagged.healthySamples += 1;
+          flagged.lastHealthyAt = capturedAt;
+        }
+      }
+    }
+    if (findings.length > 0) {
+      for (const [command, flagged] of this.flagged) {
+        if (hasRecovered(flagged)) this.flagged.delete(command);
+      }
+    }
+    for (const finding of findings) {
+      for (const { command } of finding.commands) {
+        this.flagged.set(command, { healthySamples: 0, lastHealthyAt: -1 });
+      }
+    }
+
     return findings;
+  }
+
+  isDegraded(): boolean | null {
+    const verdicts = [...this.flagged.keys()].map(
+      (command) => this.sustained.get(command)?.degraded,
+    );
+    if (verdicts.includes(true)) return true;
+    const flagged = [...this.flagged.values()];
+    return flagged.length > 0 && flagged.every(hasRecovered) ? false : null;
   }
 
   /**
@@ -385,8 +433,31 @@ export class RegressionDetector {
     }
 
     for (const command of eligible) {
-      const state = this.sustained.get(command) ?? { consecutive: 0, lastFiredAt: 0, lastCountedAt: -1 };
+      const state = this.sustained.get(command) ?? {
+        consecutive: 0,
+        lastFiredAt: 0,
+        lastCountedAt: -1,
+        degraded: null,
+      };
       this.sustained.set(command, state);
+
+      const baselineValues = byCommand.get(command);
+      const latest = latestByCommand.get(command);
+      const fresh = latest !== undefined && latest.capturedAt >= nowMs - STALE_SAMPLE_MS;
+      const usable =
+        fresh &&
+        baselineValues !== undefined &&
+        baselineValues.length >= SUSTAINED_MIN_BASELINE_SAMPLES;
+      const upgradeBaseline = this.upgrade?.baselines.get(command);
+      if (upgradeBaseline !== undefined) {
+        state.degraded = fresh
+          ? isDegraded(latest!.p99Us, upgradeBaseline, UPGRADE_DEGRADATION_FACTOR)
+          : null;
+      } else {
+        state.degraded = usable
+          ? isDegraded(latest!.p99Us, median(baselineValues!), SUSTAINED_DEGRADATION_FACTOR)
+          : null;
+      }
 
       // Owned by an open upgrade window (the upgrade rule fires once for it) — suppress
       // sustained for this command for the window's lifetime. Commands the window has no
@@ -396,11 +467,7 @@ export class RegressionDetector {
         continue;
       }
 
-      const baselineValues = byCommand.get(command);
-      const latest = latestByCommand.get(command);
-      const fresh = latest !== undefined && latest.capturedAt >= nowMs - STALE_SAMPLE_MS;
-
-      if (!fresh || !baselineValues || baselineValues.length < SUSTAINED_MIN_BASELINE_SAMPLES) {
+      if (!usable) {
         state.consecutive = 0;
         continue;
       }
@@ -410,7 +477,7 @@ export class RegressionDetector {
       if (latest!.capturedAt <= state.lastCountedAt) continue;
       state.lastCountedAt = latest!.capturedAt;
 
-      const baseline = median(baselineValues);
+      const baseline = median(baselineValues!);
       if (!isDegraded(latest!.p99Us, baseline, SUSTAINED_DEGRADATION_FACTOR)) {
         state.consecutive = 0;
         continue;

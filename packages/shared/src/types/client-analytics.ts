@@ -33,6 +33,22 @@ export interface ClientSnapshotQueryOptions {
   connectionId?: string;
 }
 
+export interface NewClientConnectionGroup {
+  name: string;
+  user: string;
+  ip: string;
+  count: number;
+}
+
+export interface ClientConnectionCaptureRow {
+  capturedAt: number;
+  name: string;
+  user: string;
+  ip: string;
+  oldestAge: number;
+  maxClientId: number;
+}
+
 export interface ClientTimeSeriesPoint {
   timestamp: number;
   totalConnections: number;

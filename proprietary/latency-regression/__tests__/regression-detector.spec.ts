@@ -359,6 +359,136 @@ describe('RegressionDetector — sustained degradation', () => {
     expect(f.commands[0]).toMatchObject({ command: 'hmget', baselineP99Us: 1000 });
   });
 
+  it('reports whether a flagged command is still degraded', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    expect(sim.detector.isDegraded()).toBeNull();
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBeNull();
+
+    sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(false);
+  });
+
+  it('restarts the recovery streak when the command degrades again', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    sim.tick(2500, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
+  it('counts physical samples toward recovery, not poll ticks', () => {
+    const sim = new Sim();
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    sim.tick(1000, '8.1.0');
+    sim.repoll();
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.evaluate();
+
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
+  it('keeps no verdict while the flagged command has none, even if others are healthy', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    sim.now += 5 * MINUTE;
+    sim.addSample(1000, '8.1.0', sim.now, 'get');
+    sim.evaluate();
+
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
+  it('ignores a degraded command that was never flagged', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) sim.tick(2500, '8.1.0');
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED - 1; i++) {
+      sim.addSample(2500, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(1000, '8.1.0');
+    }
+    sim.addSample(1000, '8.1.0', sim.now + MINUTE, 'get');
+    sim.tick(1000, '8.1.0');
+
+    expect(sim.detector.isDegraded()).toBe(false);
+  });
+
+  it('forgets an earlier recovery when a new regression is flagged', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    const step = (getP99: number, hmgetP99: number) => {
+      sim.addSample(getP99, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(hmgetP99, '8.1.0');
+    };
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(2500, 1000);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(1000, 1000);
+    expect(sim.detector.isDegraded()).toBe(false);
+
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) step(1000, 2500);
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    sim.callsPerMin.set('hmget', 0);
+    step(1000, 2500);
+
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
+  it('drops a flagged command from the verdict once it loses eligibility', () => {
+    const sim = new Sim();
+    sim.callsPerMin.set('get', 120);
+    for (let i = 0; i < 40; i++) {
+      sim.addSample(1000, '8.1.0', sim.now - (50 - i) * MINUTE, 'get');
+    }
+    seedBaseline(sim);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      sim.addSample(2500, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(2500, '8.1.0');
+    }
+    expect(sim.detector.isDegraded()).toBe(true);
+
+    sim.callsPerMin.set('hmget', 0);
+    for (let i = 0; i < CONSECUTIVE_REQUIRED; i++) {
+      sim.addSample(1000, '8.1.0', sim.now + MINUTE, 'get');
+      sim.tick(2500, '8.1.0');
+    }
+
+    expect(sim.detector.isDegraded()).toBe(false);
+  });
+
+  it('reports no verdict for a command without enough baseline', () => {
+    const sim = new Sim();
+    seedBaseline(sim, 20);
+    sim.tick(1000, '8.1.0');
+    expect(sim.detector.isDegraded()).toBeNull();
+  });
+
   it('does not fire below 2x baseline', () => {
     const sim = new Sim();
     seedBaseline(sim);

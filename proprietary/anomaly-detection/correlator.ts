@@ -9,6 +9,11 @@ import {
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
 import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
+import { RETRY_AMP_TRIGGER_LABEL } from './retry-amplification-detector';
+
+const RETRY_AMPLIFICATION_DIAGNOSIS =
+  'Retry amplification: load per client is rising or has stepped up together with {trigger} while the client ' +
+  'count stays flat — the retry loop is self-sustaining';
 
 interface PatternRule {
   pattern: AnomalyPattern;
@@ -46,6 +51,13 @@ function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent
 }
 
 const scopeByConnection: CorrelationScopeResolver = (anomaly) => anomaly.connectionId ?? '';
+
+function isMemoryGrowthWithEvictions(anomalies: AnomalyEvent[]): boolean {
+  const hasMemorySpike = anomalies.some(
+    (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
+  );
+  return hasMemorySpike && anomalies.some((a) => a.metricType === MetricType.EVICTED_KEYS);
+}
 
 export class Correlator {
   private readonly correlationWindowMs: number;
@@ -141,6 +153,19 @@ export class Correlator {
         ],
       },
       {
+        pattern: AnomalyPattern.RETRY_AMPLIFICATION,
+        requiredMetrics: [MetricType.RETRY_AMPLIFICATION],
+        check: (anomalies) => !isMemoryGrowthWithEvictions(anomalies),
+        diagnosis: RETRY_AMPLIFICATION_DIAGNOSIS.replace('{trigger}', 'a stress signal'),
+        recommendations: [
+          'Add exponential backoff with jitter and a retry budget to the client retry policy',
+          'Put a circuit breaker in front of the instance so failing calls stop retrying',
+          'Set client timeouts above the observed P99 so slow replies are not retried',
+          'Throttle or inspect the clients whose command rate grew the most',
+          'Shed load until latency and error rates recover',
+        ],
+      },
+      {
         pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
         requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
         check: (anomalies) => !anomalies.some((a) => a.metricType === MetricType.CLUSTER_TOPOLOGY),
@@ -172,8 +197,7 @@ export class Correlator {
           const hasMemorySpike = anomalies.some(
             (a) => a.metricType === MetricType.MEMORY_USED && a.anomalyType === AnomalyType.SPIKE,
           );
-          const hasEvictions = anomalies.some((a) => a.metricType === MetricType.EVICTED_KEYS);
-          return hasMemorySpike && (hasEvictions || anomalies.length === 1);
+          return isMemoryGrowthWithEvictions(anomalies) || (hasMemorySpike && anomalies.length === 1);
         },
         diagnosis: 'Memory pressure detected with potential evictions',
         recommendations: [
@@ -527,6 +551,15 @@ export class Correlator {
    * For NODE_FAILOVER, dynamically mention slowlog correlation if present.
    */
   private enrichDiagnosis(rule: PatternRule, anomalies: AnomalyEvent[]): string {
+    if (rule.pattern === AnomalyPattern.RETRY_AMPLIFICATION) {
+      const event = anomalies.find((a) => a.metricType === MetricType.RETRY_AMPLIFICATION);
+      return event?.retryTrigger
+        ? RETRY_AMPLIFICATION_DIAGNOSIS.replace(
+            '{trigger}',
+            RETRY_AMP_TRIGGER_LABEL[event.retryTrigger],
+          )
+        : rule.diagnosis;
+    }
     if (rule.pattern === AnomalyPattern.REPLICATION_DIVERGENCE) {
       return describeReplicationDivergence(rule.diagnosis, anomalies);
     }

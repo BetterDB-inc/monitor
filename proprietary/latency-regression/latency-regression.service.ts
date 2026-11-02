@@ -126,6 +126,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
 
     const input: DetectorInput = { nowMs, samples, callsPerMin, clusterRefreshDeltas };
     const findings = detector.evaluate(input);
+    this.anomalyEventSink?.reportLatencyDegraded?.(ctx.connectionId, detector.isDegraded());
 
     for (const finding of findings) {
       await this.handleFinding(finding, ctx, detector);
