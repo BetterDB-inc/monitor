@@ -245,6 +245,22 @@ describe('SpikeDetector', () => {
       expect(detector.detect(buffer, 300, 53000)).not.toBeNull();
     });
 
+    it('keeps the consecutive count across a below-mean sample without the opt-in', () => {
+      const buffer = new MetricBuffer(MetricType.FRAGMENTATION_RATIO, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.FRAGMENTATION_RATIO, {
+        warningThreshold: 1.5,
+        criticalThreshold: 3,
+        warningZScore: 999,
+        criticalZScore: 999,
+        consecutiveRequired: 2,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(1.7 + (i % 2) * 0.2, i * 1000);
+      expect(detector.detect(buffer, 1.9, 50000)).toBeNull();
+      expect(detector.detect(buffer, 1.7, 51000)).toBeNull();
+      expect(detector.detect(buffer, 1.9, 52000)).not.toBeNull();
+    });
+
     it('fires a below-mean value over the critical threshold when warning is disabled', () => {
       const buffer = new MetricBuffer(MetricType.ACL_DENIED, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(

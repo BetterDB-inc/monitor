@@ -219,6 +219,7 @@ export function rankRetryAmplificationContributors(
     }),
   );
 
+  const rateIncrease = (acc: ContributorAccumulator) => acc.episodeRate - acc.preEpisodeRate;
   const byGrowth = [...contributorOf.entries()]
     .filter(
       ([acc, c]) =>
@@ -226,11 +227,11 @@ export function rankRetryAmplificationContributors(
         c.commandRateGrowth !== null &&
         c.commandRateGrowth >= RETRY_AMP_CONTRIBUTOR_GROWTH,
     )
-    .map(([, contributor]) => contributor)
-    .sort((a, b) => {
-      const diff = (b.commandRateGrowth ?? 0) - (a.commandRateGrowth ?? 0);
-      return diff !== 0 ? diff : a.key.localeCompare(b.key);
-    });
+    .sort(([a, contributorA], [b, contributorB]) => {
+      const diff = rateIncrease(b) - rateIncrease(a);
+      return diff !== 0 ? diff : contributorA.key.localeCompare(contributorB.key);
+    })
+    .map(([, contributor]) => contributor);
   const excessConnections = (acc: ContributorAccumulator) =>
     acc.newConnections - acc.baselineConnections;
   const byReconnects = [...map.values()]

@@ -129,6 +129,31 @@ describe('retry amplification attribution', () => {
       expect(ranked[1].commandRateGrowth).toBeCloseTo(2, 5);
     });
 
+    it('ranks a large absolute increase over a small client with a higher ratio', () => {
+      const before = snapshot(0, [
+        client({ id: '1', name: 'api', 'tot-cmds': '1000' }),
+        client({ id: '2', name: 'health', 'tot-cmds': '1000' }),
+      ]);
+      const first = snapshot(60_000, [
+        client({ id: '1', name: 'api', 'tot-cmds': '61000' }),
+        client({ id: '2', name: 'health', 'tot-cmds': '1036' }),
+      ]);
+      const latest = snapshot(120_000, [
+        client({ id: '1', name: 'api', 'tot-cmds': '175000' }),
+        client({ id: '2', name: 'health', 'tot-cmds': '1126' }),
+      ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api', 'health']);
+    });
+
     it('ignores a long lifetime average when the client was already busy', () => {
       const before = snapshot(0, [
         client({ id: '1', name: 'nightly', 'tot-cmds': '1000' }),
