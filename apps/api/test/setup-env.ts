@@ -1,3 +1,6 @@
+import { mkdtempSync } from 'fs';
+import { join } from 'path';
+
 process.env.STORAGE_TYPE = 'memory';
 
 if (!process.env.DB_HOST) {
@@ -15,6 +18,29 @@ if (!process.env.DB_PASSWORD) {
 
 if (!process.env.AI_ENABLED) {
   process.env.AI_ENABLED = 'false';
+}
+
+const testTmpDir = process.env.BETTERDB_TEST_TMP_DIR;
+if (!testTmpDir) {
+  throw new Error('BETTERDB_TEST_TMP_DIR is set by global setup; run jest with that config');
+}
+process.env.BETTERDB_DATA_DIR = mkdtempSync(join(testTmpDir, 'betterdb-test-data-'));
+process.env.MIGRATION_VERDICT_DIR = join(process.env.BETTERDB_DATA_DIR, 'migration-analysis-verdicts');
+
+// Opt out to run against a real entitlement server or in cloud mode:
+// BETTERDB_TEST_KEEP_ENV=true CLOUD_MODE=true pnpm test
+if (process.env.BETTERDB_TEST_KEEP_ENV !== 'true') {
+  for (const key of [
+    'BETTERDB_LICENSE_KEY',
+    'BETTERDB_OFFLINE_LICENSE',
+    'BETTERDB_OFFLINE_LICENSE_FILE',
+    'CLOUD_MODE',
+    'ENTITLEMENT_URL',
+    'DB_SCHEMA',
+  ]) {
+    delete process.env[key];
+  }
+  process.env.ENTITLEMENT_URL = 'http://127.0.0.1:9/api/v1/entitlements';
 }
 
 // Disable telemetry during tests

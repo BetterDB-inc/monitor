@@ -17,6 +17,8 @@ describe('LicenseService', () => {
   let service: LicenseService;
   let mockFetch: jest.SpyInstance;
   let mockTelemetryClient: jest.Mocked<TelemetryPort>;
+  let testDataDir: string;
+  const startedServices: LicenseService[] = [];
 
   const originalEnv = process.env;
 
@@ -37,13 +39,7 @@ describe('LicenseService', () => {
     return { promise, resolve, reject };
   };
 
-  beforeEach(async () => {
-    jest.resetModules();
-    process.env = { ...originalEnv };
-    // These specs predate signed entitlement tokens and mock unsigned responses
-    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
-    mockTelemetryClient = createMockTelemetryClient();
-
+  const createService = async (): Promise<LicenseService> => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         LicenseService,
@@ -60,20 +56,43 @@ describe('LicenseService', () => {
       ],
     }).compile();
 
-    service = module.get<LicenseService>(LicenseService);
+    const created = module.get<LicenseService>(LicenseService);
+    startedServices.push(created);
+    return created;
+  };
+
+  const createServiceBeforeEach = () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env = { ...originalEnv };
+    delete process.env.BETTERDB_LICENSE_KEY;
+    delete process.env.BETTERDB_OFFLINE_LICENSE;
+    delete process.env.BETTERDB_OFFLINE_LICENSE_FILE;
+    // These specs predate signed entitlement tokens and mock unsigned responses
+    process.env.LICENSE_ALLOW_UNSIGNED = 'true';
+    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR || tmpdir(), 'license-'));
+    process.env.BETTERDB_DATA_DIR = testDataDir;
+    mockTelemetryClient = createMockTelemetryClient();
     mockFetch = jest.spyOn(global, 'fetch');
   });
 
   afterEach(() => {
+    startedServices.splice(0).forEach((started) => started.onModuleDestroy());
     process.env = originalEnv;
-    mockFetch.mockRestore();
+    mockFetch?.mockRestore();
+    rmSync(testDataDir, { recursive: true, force: true });
   });
 
   describe('keyless validation', () => {
     beforeEach(() => {
-      delete process.env.BETTERDB_LICENSE_KEY;
       process.env.BETTERDB_TELEMETRY = 'false';
     });
+    createServiceBeforeEach();
 
     it('should call entitlement server on startup even without license key', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
@@ -97,8 +116,6 @@ describe('LicenseService', () => {
     });
 
     it('should call entitlement server even when telemetry is disabled', async () => {
-      process.env.BETTERDB_TELEMETRY = 'false';
-
       mockFetch.mockResolvedValue(createMockResponse({
         valid: true,
         tier: 'community',
@@ -153,6 +170,8 @@ describe('LicenseService', () => {
   });
 
   describe('sendStartupError', () => {
+    createServiceBeforeEach();
+
     it('should send correct payload shape with eventType startup_error', async () => {
       mockFetch.mockResolvedValue({ ok: true });
 
@@ -221,7 +240,6 @@ describe('LicenseService', () => {
     let heartbeatMock: jest.Mocked<TelemetryPort>;
 
     beforeEach(async () => {
-      delete process.env.BETTERDB_LICENSE_KEY;
       delete process.env.BETTERDB_TELEMETRY;
       heartbeatMock = createMockTelemetryClient();
 
@@ -287,6 +305,8 @@ describe('LicenseService', () => {
   });
 
   describe('version info via validateLicense', () => {
+    createServiceBeforeEach();
+
     it('should store version info from entitlement response', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
         valid: true,
@@ -314,6 +334,8 @@ describe('LicenseService', () => {
   });
 
   describe('activateLicenseKey', () => {
+    createServiceBeforeEach();
+
     it('should keep previous key and entitlement when activation validation fails', async () => {
       const previousEntitlement = {
         valid: true,
@@ -413,26 +435,10 @@ describe('LicenseService', () => {
   });
 
   describe('keyed validation', () => {
-    let keyedService: LicenseService;
-
-    beforeEach(async () => {
-      // Set env before creating module so the service picks it up
+    beforeEach(() => {
       process.env.BETTERDB_LICENSE_KEY = 'valid-license-key-12345';
-
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          LicenseService,
-          {
-            provide: ConfigService,
-            useValue: {
-              get: jest.fn(),
-            },
-          },
-        ],
-      }).compile();
-
-      keyedService = module.get<LicenseService>(LicenseService);
     });
+    createServiceBeforeEach();
 
     it('should call entitlement server with license key', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
@@ -441,7 +447,7 @@ describe('LicenseService', () => {
         expiresAt: null,
       }));
 
-      await keyedService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
       expect(mockFetch).toHaveBeenCalled();
@@ -456,37 +462,28 @@ describe('LicenseService', () => {
         expiresAt: null,
       }));
 
-      await keyedService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
-      const tier = keyedService.getLicenseTier();
+      const tier = service.getLicenseTier();
       expect(tier).toBe('enterprise');
     });
   });
 
   describe('instanceId persistence', () => {
-    let dataDir: string;
-
     const makeService = () =>
       new LicenseService({ get: jest.fn() } as unknown as ConfigService, mockTelemetryClient);
 
     beforeEach(() => {
-      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
-      process.env.BETTERDB_DATA_DIR = dataDir;
       process.env.BETTERDB_TELEMETRY = 'false';
-      delete process.env.BETTERDB_LICENSE_KEY;
-    });
-
-    afterEach(() => {
-      rmSync(dataDir, { recursive: true, force: true });
     });
 
     it('persists the derived id and reuses it across restarts', () => {
       const first = makeService();
       const id1 = first.getInstanceId();
 
-      expect(existsSync(join(dataDir, 'instance-id'))).toBe(true);
-      expect(readFileSync(join(dataDir, 'instance-id'), 'utf-8')).toBe(id1);
+      expect(existsSync(join(testDataDir, 'instance-id'))).toBe(true);
+      expect(readFileSync(join(testDataDir, 'instance-id'), 'utf-8')).toBe(id1);
 
       // A fresh process with a totally different HOSTNAME (e.g. a redeployed
       // container) must still adopt the persisted id rather than derive a new one.
@@ -509,7 +506,7 @@ describe('LicenseService', () => {
 
       const idA = makeService().getInstanceId();
       // Wipe the persisted file: identical infra inputs must reproduce the hash.
-      rmSync(join(dataDir, 'instance-id'), { force: true });
+      rmSync(join(testDataDir, 'instance-id'), { force: true });
       const idB = makeService().getInstanceId();
 
       expect(idB).toBe(idA);
@@ -518,8 +515,6 @@ describe('LicenseService', () => {
   });
 
   describe('collectStats ephemerality signals', () => {
-    let dataDir: string;
-
     const makeService = () =>
       new LicenseService({ get: jest.fn() } as unknown as ConfigService, mockTelemetryClient);
 
@@ -532,17 +527,10 @@ describe('LicenseService', () => {
     };
 
     beforeEach(() => {
-      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
-      process.env.BETTERDB_DATA_DIR = dataDir;
       process.env.BETTERDB_TELEMETRY = 'false';
-      delete process.env.BETTERDB_LICENSE_KEY;
       mockFetch.mockResolvedValue(
         createMockResponse({ valid: true, tier: 'community', expiresAt: null }),
       );
-    });
-
-    afterEach(() => {
-      rmSync(dataDir, { recursive: true, force: true });
     });
 
     it('flags CI runs and container-id hostnames', async () => {
@@ -575,6 +563,8 @@ describe('LicenseService', () => {
   });
 
   describe('ensureValidated', () => {
+    createServiceBeforeEach();
+
     it('clears its timeout once validation settles', async () => {
       jest.useFakeTimers();
       try {
@@ -588,31 +578,10 @@ describe('LicenseService', () => {
   });
 
   describe('hasFeature tier safety', () => {
-    let dataDir: string;
-    let safetyService: LicenseService;
-
-    beforeEach(async () => {
-      // Isolate persisted state (no leaked token from another test's cwd/data
-      // can resurrect a paid tier under this keyless instance).
-      dataDir = mkdtempSync(join(tmpdir(), 'betterdb-license-'));
-      process.env.BETTERDB_DATA_DIR = dataDir;
+    beforeEach(() => {
       process.env.BETTERDB_TELEMETRY = 'false';
-      delete process.env.BETTERDB_LICENSE_KEY;
-
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          LicenseService,
-          { provide: ConfigService, useValue: { get: jest.fn() } },
-          { provide: 'TELEMETRY_CLIENT', useValue: mockTelemetryClient },
-        ],
-      }).compile();
-      safetyService = module.get<LicenseService>(LicenseService);
     });
-
-    afterEach(() => {
-      safetyService.onModuleDestroy();
-      rmSync(dataDir, { recursive: true, force: true });
-    });
+    createServiceBeforeEach();
 
     it('normalizes an unknown online tier to community before caching', async () => {
       // Version skew: the server reports a tier this build doesn't know.
@@ -620,24 +589,24 @@ describe('LicenseService', () => {
         createMockResponse({ valid: true, tier: 'suspended', expiresAt: null }),
       );
 
-      await safetyService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
-      expect(safetyService.getLicenseTier()).toBe(Tier.community);
-      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
+      expect(service.getLicenseTier()).toBe(Tier.community);
+      expect(service.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
     });
 
     it('degrades (not throws) when a cache predating normalization holds an unknown tier', () => {
       // Simulate a cache written by an older build, before checkOnline pinned
       // the tier — TIER_FEATURES['suspended'] is undefined and would otherwise
       // throw on .includes, crashing the process via unhandledRejection.
-      (safetyService as any).cache = {
+      (service as any).cache = {
         response: { valid: true, tier: 'suspended', expiresAt: null },
         cachedAt: Date.now(),
       };
 
-      expect(() => safetyService.hasFeature(Feature.KEY_ANALYTICS)).not.toThrow();
-      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
+      expect(() => service.hasFeature(Feature.KEY_ANALYTICS)).not.toThrow();
+      expect(service.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
     });
   });
 });
