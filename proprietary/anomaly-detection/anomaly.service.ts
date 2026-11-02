@@ -6039,7 +6039,13 @@ export class AnomalyService
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
-        const observed = replicaObservedLevel(state, replica, now, staleAfterMs);
+        const observed = replicaObservedLevel(
+          state,
+          replica,
+          now,
+          staleAfterMs,
+          windows[windows.length - 1],
+        );
         const level = observed === 'none' && orphans?.has(replica) ? 'behind' : observed;
         return {
           replica,
