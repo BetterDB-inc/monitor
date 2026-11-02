@@ -40,6 +40,7 @@ if (process.env.BETTERDB_TEST_KEEP_ENV !== 'true') {
   ]) {
     delete process.env[key];
   }
+  process.env.ENTITLEMENT_URL = 'http://127.0.0.1:9/api/v1/entitlements';
 }
 
 // Disable telemetry during tests
