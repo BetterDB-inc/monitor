@@ -10460,7 +10460,7 @@ describe('AnomalyService', () => {
         expect(prune()).not.toHaveBeenCalled();
       });
 
-      it('trims this connection to seven days when no window is configured', async () => {
+      it('trims this connection to seven days without a retention policy', async () => {
         await trimAfterAnHour();
 
         expect(prune()).toHaveBeenCalledTimes(1);
@@ -10476,6 +10476,14 @@ describe('AnomalyService', () => {
 
         const [cutoff] = prune().mock.calls[0];
         expect(Math.abs(T0 + 2 * HOUR - 30 * DAY - cutoff)).toBeLessThan(HOUR);
+      });
+
+      it('keeps every window when the sample window is keep-forever', async () => {
+        (service as any).retentionPolicy = { getSampleRetentionMs: () => null };
+
+        await trimAfterAnHour();
+
+        expect(prune()).not.toHaveBeenCalled();
       });
 
       it('keeps detecting when a trim fails', async () => {
