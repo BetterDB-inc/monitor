@@ -682,6 +682,19 @@ describe('observeDivergence', () => {
       replicas: [],
     });
 
+    it('finds a baseline once a burst running since the first window ends', () => {
+      const h = new Harness();
+      const outcomes = h.windows([
+        ...[20, 22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })),
+        ...Array.from({ length: 6 }, () => ({ gap: 28 * MiB, rate: MiB })),
+      ]);
+
+      expect(divergences(outcomes).at(-1)).toMatchObject({
+        level: 'critical',
+        reason: 'not_catching_up',
+      });
+    });
+
     it('starts over when the node stops being a primary', () => {
       const h = new Harness();
       h.windows([0, 0, 0].map(() => ({ gap: 0, rate: MiB })));

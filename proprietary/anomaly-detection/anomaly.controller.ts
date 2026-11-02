@@ -22,22 +22,14 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
-
-function parseTimeBound(name: string, value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const parsed = Math.floor(Number(value));
-  if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new BadRequestException(`${name} must be a timestamp in milliseconds`);
-  }
-  return parsed;
-}
+import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
 
 function parseTimeRange(
   startTime: string | undefined,
   endTime: string | undefined,
 ): { parsedStartTime: number | undefined; parsedEndTime: number | undefined } {
-  const parsedStartTime = parseTimeBound('startTime', startTime);
-  const parsedEndTime = parseTimeBound('endTime', endTime);
+  const parsedStartTime = parseOptionalInt(startTime, 'startTime');
+  const parsedEndTime = parseOptionalInt(endTime, 'endTime');
   if (parsedStartTime !== undefined && parsedEndTime !== undefined && parsedStartTime > parsedEndTime) {
     throw new BadRequestException('startTime must not be after endTime');
   }

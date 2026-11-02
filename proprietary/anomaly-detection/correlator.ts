@@ -21,17 +21,13 @@ interface PatternRule {
 
 export type CorrelationScopeResolver = (anomaly: AnomalyEvent) => string;
 
-const DIVERGENCE_YIELDS_TO: ReadonlySet<MetricType> = new Set([
-  MetricType.ACL_DENIED,
-  MetricType.REPLICATION_ROLE,
-  MetricType.CLUSTER_STATE,
-]);
-
 function describeReplicationDivergence(fallback: string, anomalies: AnomalyEvent[]): string {
   const divergence = anomalies.filter((a) => a.metricType === MetricType.REPLICATION_DIVERGENCE);
+  const isSpike = (a: AnomalyEvent) => a.anomalyType === AnomalyType.SPIKE;
+  const nonSpikes = new Set(anomalies.filter((a) => !isSpike(a)).map((a) => a.metricType));
   const metrics = new Set<MetricType>([
-    ...anomalies.map((a) => a.metricType),
-    ...divergence.flatMap((a) => a.relatedMetrics ?? []),
+    ...anomalies.filter(isSpike).map((a) => a.metricType),
+    ...divergence.flatMap((a) => a.relatedMetrics ?? []).filter((m) => !nonSpikes.has(m)),
   ]);
   const signals = [
     ...new Set(
@@ -67,18 +63,6 @@ export class Correlator {
 
   private initializePatternRules(): PatternRule[] {
     return [
-      {
-        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
-        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
-        check: (anomalies) => !anomalies.some((a) => DIVERGENCE_YIELDS_TO.has(a.metricType)),
-        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
-        recommendations: [
-          'Compare the replica offset gap with the primary write rate over the next few minutes',
-          'Check replica host CPU, disk and network for a slow apply path',
-          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
-          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
-        ],
-      },
       // Before failover so a window holding the saturation marker plus its side
       // effects (failover, cluster-state) resolves to saturation, not NODE_FAILOVER.
       {
@@ -154,6 +138,18 @@ export class Correlator {
           'Inspect the server log for fork or allocator errors',
           'Consider BGSAVE CANCEL if the save is wedged',
           'Verify disk space and I/O on the persistence target',
+        ],
+      },
+      {
+        pattern: AnomalyPattern.REPLICATION_DIVERGENCE,
+        requiredMetrics: [MetricType.REPLICATION_DIVERGENCE],
+        check: (anomalies) => !anomalies.some((a) => a.metricType === MetricType.CLUSTER_TOPOLOGY),
+        diagnosis: 'Replica falling behind the primary — watching whether it catches up',
+        recommendations: [
+          'Compare the replica offset gap with the primary write rate over the next few minutes',
+          'Check replica host CPU, disk and network for a slow apply path',
+          'Review client-output-buffer-limit replica and repl-backlog-size against the write rate',
+          'If bulk writes or resharding are driving it, throttle them until the replica catches up',
         ],
       },
       {

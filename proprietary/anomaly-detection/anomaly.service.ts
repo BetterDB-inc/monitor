@@ -22,6 +22,7 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
+import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -550,6 +551,8 @@ export class AnomalyService
     @Optional()
     @Inject(ANOMALY_WEBHOOK_SINK)
     private readonly anomalyWebhookSink?: AnomalyWebhookSink,
+    @Optional()
+    private readonly anomalySaved?: AnomalySavedBus,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -5536,6 +5539,7 @@ export class AnomalyService
     this.releaseLatch(anomaly);
     if (firstSave) {
       this.anomalySaveHooks.get(anomaly)?.();
+      this.anomalySaved?.publish({ ...stored, connectionId });
       if (!anomaly.resolved) {
         this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
           this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
@@ -5647,6 +5651,7 @@ export class AnomalyService
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
+    this.anomalySaved?.publish(event);
   }
 
   private correlationScopeOf(connectionId: string | undefined): string {
@@ -5803,9 +5808,9 @@ export class AnomalyService
       const storedEvents = stored.map((s) => this.storedToAnomalyEvent(s));
 
       // Union with in-memory unresolved events not yet in storage: a persist failure in
-      // addAnomaly() still leaves the incident in the cache (and still fires the Pro
-      // webhook), so the banner must surface it rather than wait for a later poll to make
-      // it durable. Dedupe by id (storage wins), apply the same filters.
+      // addAnomaly() still leaves the incident in the cache, so the banner must surface it
+      // rather than wait for the outbox to make it durable. Dedupe by id (storage wins),
+      // apply the same filters.
       const seen = new Set(storedEvents.map((e) => e.id));
       const inMemory = this.recentAnomalies.filter(
         (e) =>
@@ -5834,8 +5839,8 @@ export class AnomalyService
 
     // Union with the in-memory cache like the activeOnly branch above: the
     // cache can hold events whose persist failed, while storage holds events
-    // some producers (e.g. command_p99 latency regressions) write without ever
-    // entering the cache. Neither side alone is complete; storage wins on id.
+    // the cache has already evicted. Neither side alone is complete; storage
+    // wins on id.
     const cacheThreshold = Date.now() - this.cacheTtlMs;
     if (!startTime || startTime >= cacheThreshold) {
       const seen = new Set(storedEvents.map((e) => e.id));
@@ -6046,7 +6051,8 @@ export class AnomalyService
   ): Promise<void> {
     try {
       const seen = new Set([...state.replicas.values()].map((r) => r.eventId));
-      const orphans = new Map<string, OrphanedDivergence>();
+      const orphans =
+        this.divergenceOrphans.get(ctx.connectionId) ?? new Map<string, OrphanedDivergence>();
       for (const event of await this.readOpenDivergenceEvents(ctx.connectionId)) {
         if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
         seen.add(event.id);
@@ -6219,6 +6225,7 @@ export class AnomalyService
             (a) =>
               a.connectionId === ctx.connectionId &&
               a.timestamp >= finding.spanStart &&
+              a.anomalyType === AnomalyType.SPIKE &&
               DIVERGENCE_COMPOUND_SIGNALS.has(a.metricType),
           )
           .map((a) => a.metricType),
