@@ -79,6 +79,7 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  CaptureTriggerStatus,
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
@@ -6757,7 +6758,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return trigger.id;
   }
 
-  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+  async updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -6780,8 +6785,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (sets.length === 0) return false;
     params.push(id);
+    let where = `id = $${p++}`;
+    if (fromStatuses) {
+      where += ` AND status = ANY($${p}::text[])`;
+      params.push([...fromStatuses]);
+    }
     const result = await this.pool.query(
-      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = $${p}`,
+      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE ${where}`,
       params,
     );
     return (result.rowCount ?? 0) > 0;

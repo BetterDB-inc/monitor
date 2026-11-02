@@ -85,6 +85,7 @@ import {
   ScheduledCapturePatch,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  CaptureTriggerStatus,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   VectorIndexSnapshot,
@@ -6349,7 +6350,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return trigger.id;
   }
 
-  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+  async updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean> {
     if (!this.db) throw new Error('Database not initialized');
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -6371,8 +6376,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (sets.length === 0) return false;
     params.push(id);
+    let where = 'id = ?';
+    if (fromStatuses) {
+      where += ` AND status IN (${fromStatuses.map(() => '?').join(', ')})`;
+      params.push(...fromStatuses);
+    }
     const result = this.db
-      .prepare(`UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = ?`)
+      .prepare(`UPDATE capture_triggers SET ${sets.join(', ')} WHERE ${where}`)
       .run(...params);
     return result.changes > 0;
   }

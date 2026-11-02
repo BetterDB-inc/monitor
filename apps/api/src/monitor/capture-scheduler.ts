@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Inject,
   Injectable,
   Logger,
@@ -216,6 +217,10 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
     }
 
     const gate = await this.healthGate.evaluate(schedule.connectionId);
+    const current = await this.storage.getScheduledCapture(schedule.id);
+    if (current?.status !== 'enabled') {
+      return;
+    }
     if (!gate.allow) {
       this.logger.debug(
         `Schedule ${schedule.id} skipped by health gate: ${gate.skipReason}`,
@@ -239,6 +244,12 @@ export class CaptureScheduler implements OnModuleInit, OnModuleDestroy {
         lastSkipReason: undefined,
       });
     } catch (err) {
+      if (err instanceof ConflictException) {
+        await this.storage.updateScheduledCapture(schedule.id, {
+          lastSkipReason: 'session_already_active',
+        });
+        return;
+      }
       const message = (err as Error).message ?? 'unknown';
       this.logger.error(`Schedule ${schedule.id} start failed: ${message}`);
       await this.storage.updateScheduledCapture(schedule.id, {
