@@ -235,13 +235,13 @@ describe('HealthGateService', () => {
     expect(result.signals.replicationLagBytes).toBe(50_000_000);
   });
 
-  it('measures the first ack against a primary sample taken just before the polls', async () => {
+  it('settles a moved ack still over the limit at the next ack', async () => {
     const { service } = makeService({
       info: primaryInfo(100_000_000, 50_000_000),
       samples: [primaryInfo(150_000_000, 130_000_000), primaryInfo(160_000_000, 131_000_000)],
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(20_000_000);
+    expect(result.signals.replicationLagBytes).toBe(29_000_000);
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
@@ -432,16 +432,6 @@ describe('HealthGateService', () => {
     expect(replacement.getInfoParsed).toHaveBeenCalledWith(['replication']);
   });
 
-  it('stops at an ack that moved past the baseline', async () => {
-    const { service, client } = makeService({
-      info: primaryInfo(100_000_000, 50_000_000),
-      samples: [primaryInfo(100_000_000, 60_000_000)],
-    });
-    const result = await evaluateSettled(service);
-    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
-    expect(result.signals.replicationLagBytes).toBe(40_000_000);
-  });
-
   it('measures an ack against the primary offset read with it', async () => {
     const { service } = makeService({
       info: primaryInfo(100_000_000, 50_000_000),
@@ -457,11 +447,39 @@ describe('HealthGateService', () => {
     expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
   });
 
-  it('reports an unsettled gap as unmeasured on an advisory read', async () => {
-    const { service } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
+  it('keeps an unsettled gap visible and unconfirmed on an advisory read', async () => {
+    const { service } = makeService({ info: primaryInfo(600_000_000, 100_000_000) });
     const result = await service.evaluateAdvisory(CONNECTION_ID);
+    expect(result).toMatchObject({ allow: true, lagUnconfirmed: true });
+    expect(result.skipReason).toBeUndefined();
+    expect(result.signals.replicationLagBytes).toBe(500_000_000);
+  });
+
+  it('does not mark a gap under the limit as unconfirmed', async () => {
+    const { service } = makeService({ info: primaryInfo(100_000_000, 95_000_000) });
+    const result = await service.evaluateAdvisory(CONNECTION_ID);
+    expect(result.lagUnconfirmed).toBeUndefined();
+  });
+
+  it('waits for a fresh ack when a moved ack is still over the limit', async () => {
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 70_000_000),
+      samples: [primaryInfo(130_000_000, 100_000_000)],
+      nextInfo: primaryInfo(131_000_000, 130_000_000),
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(1_000_000);
     expect(result.allow).toBe(true);
-    expect(result.signals.replicationLagBytes).toBeNull();
+  });
+
+  it('keeps the latest gap when no fresh ack follows a moved ack', async () => {
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 70_000_000),
+      samples: [primaryInfo(130_000_000, 100_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(30_000_000);
+    expect(result.allow).toBe(false);
   });
 
   it('keeps other advisory findings when the gap is unsettled', async () => {

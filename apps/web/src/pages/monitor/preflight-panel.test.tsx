@@ -50,4 +50,13 @@ describe('PreflightPanel replica link', () => {
     render(<PreflightPanel preflight={makePreflight({ replicationLagBytes: null })} />);
     expect(screen.getByText('Replication lag').nextElementSibling?.textContent).toBe('n/a');
   });
+
+  it('warns about an unconfirmed gap instead of showing Healthy', () => {
+    const preflight = makePreflight({ replicationLagBytes: 500 * 1024 * 1024 });
+    preflight.health.lagUnconfirmed = true;
+    render(<PreflightPanel preflight={preflight} />);
+    expect(screen.queryByText('Healthy')).toBeNull();
+    expect(screen.getByText('Replica may be behind')).toBeTruthy();
+    expect(screen.getByText('Replication lag').nextElementSibling?.textContent).toBe('500.0 MB');
+  });
 });

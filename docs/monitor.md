@@ -61,8 +61,9 @@ opens. Surface findings:
   keeps its first gap. Lag or link state with nothing to measure, such
   as lag on a replica with no replicas of its own, or that can't be
   read, shows as n/a and does not block. This panel doesn't wait for
-  that ack, so a gap at or above the limit shows as n/a here, and only
-  a triggered or scheduled capture measures it. The gate only blocks
+  that ack, so it shows a gap at or above the limit with "Replica may
+  be behind", and only a triggered or scheduled capture confirms it.
+  The gate only blocks
   anomaly-triggered and scheduled captures; manual sessions surface the
   report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested

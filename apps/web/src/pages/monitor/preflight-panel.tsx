@@ -45,7 +45,9 @@ export function PreflightPanel({ preflight }: Props) {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Section title="Health gate">
-          {preflight.health.allow ? (
+          {preflight.health.lagUnconfirmed ? (
+            <Badge tone="warn">Replica may be behind</Badge>
+          ) : preflight.health.allow ? (
             <Badge tone="ok">Healthy</Badge>
           ) : (
             <Badge tone="warn">

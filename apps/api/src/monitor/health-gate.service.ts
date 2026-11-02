@@ -148,9 +148,15 @@ export class HealthGateService {
     if (result.skipReason !== 'replication_lag_elevated' || baseline === null) {
       return result;
     }
-    const replicationLagBytes = settle
-      ? await this.measureLagAtNextAcks(connectionId, baseline, readReplicaGaps(baseline))
-      : null;
+    if (!settle) {
+      const { signals, thresholds } = result;
+      return { allow: true, lagUnconfirmed: true, signals, thresholds };
+    }
+    const replicationLagBytes = await this.measureLagAtNextAcks(
+      connectionId,
+      baseline,
+      readReplicaGaps(baseline),
+    );
     return evaluateHealthGate({ ...result.signals, replicationLagBytes }, this.thresholds);
   }
 
@@ -172,10 +178,12 @@ export class HealthGateService {
         continue;
       }
       const freshGap = Math.max(0, firstSample.primaryOffset - ack);
-      if (ack === baseline.acks.get(id) && this.isBehindLimit(freshGap)) {
-        pending.set(id, ack);
-      } else {
+      const behind = this.isBehindLimit(freshGap);
+      if (ack !== baseline.acks.get(id) || !behind) {
         gaps.set(id, freshGap);
+      }
+      if (behind) {
+        pending.set(id, ack);
       }
     }
 

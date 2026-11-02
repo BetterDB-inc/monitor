@@ -21,6 +21,7 @@ export interface HealthGateThresholds {
 export interface HealthGateResult {
   allow: boolean;
   skipReason?: HealthGateSkipReason;
+  lagUnconfirmed?: boolean;
   signals: HealthGateSignals;
   thresholds: HealthGateThresholds;
 }

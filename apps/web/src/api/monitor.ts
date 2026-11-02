@@ -42,6 +42,7 @@ export interface PreflightProvider {
 export interface PreflightHealth {
   allow: boolean;
   skipReason?: string;
+  lagUnconfirmed?: boolean;
   signals: {
     memoryPct: number;
     oomEventsRecent: number;
