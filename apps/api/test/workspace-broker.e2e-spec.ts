@@ -4,7 +4,6 @@ import { Test } from '@nestjs/testing';
 import { generateKeyPairSync } from 'crypto';
 import { rmSync } from 'fs';
 import * as jwt from 'jsonwebtoken';
-import { tmpdir } from 'os';
 import { join } from 'path';
 
 const TRUSTED_ORIGIN = 'http://localhost:5173';
@@ -68,7 +67,7 @@ function nextIp(): string {
 describe('Workspace broker sign-in (E2E)', () => {
   let app: NestFastifyApplication;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-broker-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-broker-${Date.now()}.db`);
 
   function tokenFor(
     state: string,

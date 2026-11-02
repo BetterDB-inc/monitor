@@ -2,7 +2,6 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { READ_ONLY_MESSAGE } from '../src/auth/guards/mutation.guard';
 import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
@@ -56,7 +55,7 @@ describe('Workspace invitations (E2E)', () => {
   let inviteeCookie: string;
   let inviteeId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-invitations-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-invitations-${Date.now()}.db`);
 
   beforeAll(async () => {
     for (const key of TOUCHED) {

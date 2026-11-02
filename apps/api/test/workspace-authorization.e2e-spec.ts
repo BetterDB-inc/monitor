@@ -4,7 +4,6 @@ import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
 import { IncomingMessage, Server } from 'http';
 import { AddressInfo, Socket } from 'net';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import WebSocket from 'ws';
 import type { CliServerMessage } from '../src/cli/cli.types';
@@ -78,7 +77,7 @@ describe('Workspace authorization (E2E)', () => {
   let ownerCookie: string;
   let memberCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-authorization-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-authorization-${Date.now()}.db`);
   const openSockets: WebSocket[] = [];
 
   beforeAll(async () => {

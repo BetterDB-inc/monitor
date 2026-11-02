@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import { LicenseService } from '../license.service';
 import { Feature, Tier } from '../types';
@@ -62,7 +63,7 @@ describe('LicenseService', () => {
     process.env = { ...originalEnv };
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
-    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR!, 'license-'));
+    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR ?? tmpdir(), 'license-'));
     process.env.BETTERDB_DATA_DIR = testDataDir;
     mockTelemetryClient = createMockTelemetryClient();
     mockFetch = jest.spyOn(global, 'fetch');
@@ -70,6 +71,7 @@ describe('LicenseService', () => {
 
   afterEach(() => {
     service?.onModuleDestroy();
+    service = undefined as unknown as LicenseService;
     process.env = originalEnv;
     mockFetch?.mockRestore();
     rmSync(testDataDir, { recursive: true, force: true });
@@ -77,8 +79,8 @@ describe('LicenseService', () => {
 
   describe('keyless validation', () => {
     beforeEach(async () => {
-      service = await createService();
       process.env.BETTERDB_TELEMETRY = 'false';
+      service = await createService();
     });
 
     it('should call entitlement server on startup even without license key', async () => {
@@ -103,8 +105,6 @@ describe('LicenseService', () => {
     });
 
     it('should call entitlement server even when telemetry is disabled', async () => {
-      process.env.BETTERDB_TELEMETRY = 'false';
-
       mockFetch.mockResolvedValue(createMockResponse({
         valid: true,
         tier: 'community',
@@ -430,29 +430,10 @@ describe('LicenseService', () => {
   });
 
   describe('keyed validation', () => {
-    let keyedService: LicenseService;
-
     beforeEach(async () => {
       // Set env before creating module so the service picks it up
       process.env.BETTERDB_LICENSE_KEY = 'valid-license-key-12345';
-
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          LicenseService,
-          {
-            provide: ConfigService,
-            useValue: {
-              get: jest.fn(),
-            },
-          },
-        ],
-      }).compile();
-
-      keyedService = module.get<LicenseService>(LicenseService);
-    });
-
-    afterEach(() => {
-      keyedService?.onModuleDestroy();
+      service = await createService();
     });
 
     it('should call entitlement server with license key', async () => {
@@ -462,7 +443,7 @@ describe('LicenseService', () => {
         expiresAt: null,
       }));
 
-      await keyedService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
       expect(mockFetch).toHaveBeenCalled();
@@ -477,10 +458,10 @@ describe('LicenseService', () => {
         expiresAt: null,
       }));
 
-      await keyedService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
-      const tier = keyedService.getLicenseTier();
+      const tier = service.getLicenseTier();
       expect(tier).toBe('enterprise');
     });
   });
@@ -595,23 +576,9 @@ describe('LicenseService', () => {
   });
 
   describe('hasFeature tier safety', () => {
-    let safetyService: LicenseService;
-
     beforeEach(async () => {
       process.env.BETTERDB_TELEMETRY = 'false';
-
-      const module: TestingModule = await Test.createTestingModule({
-        providers: [
-          LicenseService,
-          { provide: ConfigService, useValue: { get: jest.fn() } },
-          { provide: 'TELEMETRY_CLIENT', useValue: mockTelemetryClient },
-        ],
-      }).compile();
-      safetyService = module.get<LicenseService>(LicenseService);
-    });
-
-    afterEach(() => {
-      safetyService.onModuleDestroy();
+      service = await createService();
     });
 
     it('normalizes an unknown online tier to community before caching', async () => {
@@ -620,24 +587,24 @@ describe('LicenseService', () => {
         createMockResponse({ valid: true, tier: 'suspended', expiresAt: null }),
       );
 
-      await safetyService.onModuleInit();
+      await service.onModuleInit();
       await flushPromises();
 
-      expect(safetyService.getLicenseTier()).toBe(Tier.community);
-      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
+      expect(service.getLicenseTier()).toBe(Tier.community);
+      expect(service.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
     });
 
     it('degrades (not throws) when a cache predating normalization holds an unknown tier', () => {
       // Simulate a cache written by an older build, before checkOnline pinned
       // the tier — TIER_FEATURES['suspended'] is undefined and would otherwise
       // throw on .includes, crashing the process via unhandledRejection.
-      (safetyService as any).cache = {
+      (service as any).cache = {
         response: { valid: true, tier: 'suspended', expiresAt: null },
         cachedAt: Date.now(),
       };
 
-      expect(() => safetyService.hasFeature(Feature.KEY_ANALYTICS)).not.toThrow();
-      expect(safetyService.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
+      expect(() => service.hasFeature(Feature.KEY_ANALYTICS)).not.toThrow();
+      expect(service.hasFeature(Feature.KEY_ANALYTICS)).toBe(false);
     });
   });
 });

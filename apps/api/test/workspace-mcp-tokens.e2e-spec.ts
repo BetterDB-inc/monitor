@@ -2,7 +2,6 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { SESSION_REQUIRED_MESSAGE } from '../src/auth/guards/require-session';
 
@@ -53,7 +52,7 @@ describe('Workspace MCP tokens (E2E)', () => {
   let ownerCookie: string;
   let ownerId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-mcp-tokens-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-mcp-tokens-${Date.now()}.db`);
 
   async function activity(): Promise<ActivityItem[]> {
     const response = await app.inject({

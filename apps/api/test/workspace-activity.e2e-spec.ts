@@ -2,7 +2,6 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { INVALID_CURSOR_MESSAGE } from '../src/activity/activity.service';
 
@@ -67,7 +66,7 @@ describe('Workspace activity log (E2E)', () => {
   let inviteeId: string;
   let invitationId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-activity-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-activity-${Date.now()}.db`);
 
   async function activity(cookie: string, query = ''): Promise<ActivityPageBody> {
     const response = await app.inject({

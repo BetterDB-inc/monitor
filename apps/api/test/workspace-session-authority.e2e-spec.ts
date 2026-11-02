@@ -2,7 +2,6 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { BETTER_AUTH, BetterAuthInstance } from '../src/auth/better-auth.factory';
 import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
@@ -48,7 +47,7 @@ describe('Workspace session authority (E2E)', () => {
   let adminId: string;
   let heirId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-session-authority-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-session-authority-${Date.now()}.db`);
 
   async function me(cookie: string): Promise<{ statusCode: number; body: MeBody }> {
     const response = await app.inject({

@@ -1,8 +1,7 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
@@ -10,6 +9,7 @@ const OWNER = { email: 'owner@example.com', password: 'correct horse battery', n
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
+  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -20,7 +20,8 @@ describe('Workspace boot smoke (E2E)', () => {
   let app: NestFastifyApplication;
   let sessionCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-boot-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-boot-${Date.now()}.db`);
+  const previousCwd = process.cwd();
 
   beforeAll(async () => {
     for (const key of TOUCHED) {
@@ -30,6 +31,8 @@ describe('Workspace boot smoke (E2E)', () => {
     delete process.env.AUTH_PUBLIC_URL;
     delete process.env.AUTH_SECRET;
     process.env.NODE_ENV = 'production';
+    process.chdir(mkdtempSync(join(process.env.BETTERDB_DATA_DIR!, 'workspace-boot-cwd-')));
+    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
 
@@ -53,6 +56,7 @@ describe('Workspace boot smoke (E2E)', () => {
     if (app !== undefined) {
       await app.close();
     }
+    process.chdir(previousCwd);
     for (const [key, value] of previous) {
       if (value === undefined) {
         delete process.env[key];
