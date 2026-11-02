@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { ClusterNode, ClusterShard } from '@app/common/types/metrics.types';
 
 /**
@@ -190,5 +191,6 @@ function sortedUnique(nums: number[]): number[] {
  * treated as a distinct observation.
  */
 export function replicaSlotSignature(a: ReplicaSlotAnomaly): string {
-  return `${a.replicaId}|${a.reason}|${a.affectedSlots.join(',')}`;
+  const slots = createHash('sha256').update(a.affectedSlots.join(',')).digest('hex').slice(0, 16);
+  return `${a.replicaId}|${a.reason}|${slots}`;
 }

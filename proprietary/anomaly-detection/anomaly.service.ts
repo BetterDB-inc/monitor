@@ -2033,7 +2033,7 @@ export class AnomalyService
     const tracked = new Set(eventIds.values());
     for (const event of [...open].sort((a, b) => a.timestamp - b.timestamp)) {
       if (tracked.has(event.id)) continue;
-      const signature = event.replicaAddr;
+      const signature = event.dedupeKey;
       const previous = signature === undefined ? undefined : eventIds.get(signature);
       if (signature === undefined || (previous && tracked.has(previous))) this.closeLater(event.id);
       else if (previous !== event.id) {
@@ -5554,7 +5554,8 @@ export class AnomalyService
           stdDev: 0,
           threshold: 0,
           message: this.buildReplicaSlotMessage(a),
-          replicaAddr: signature,
+          replicaAddr: this.clientAddress(a.replicaAddress),
+          dedupeKey: signature,
           resolved: false,
           connectionId: ctx.connectionId,
         }),
@@ -5999,6 +6000,7 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       replicaAddr: anomaly.replicaAddr,
+      dedupeKey: anomaly.dedupeKey,
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
       resolved: anomaly.resolved || false,
@@ -6926,6 +6928,7 @@ export class AnomalyService
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       replicaAddr: s.replicaAddr,
+      dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
       resolved: s.resolved,

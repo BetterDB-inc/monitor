@@ -56,6 +56,24 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows.map((r) => r.replicaAddr).sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
     });
 
+    it('stores the dedupe key', async () => {
+      await storage.saveAnomalyEvent(event({ dedupeKey: 'a' }), CONN);
+      await storage.saveAnomalyEvents([event({ id: randomUUID(), dedupeKey: 'b' })], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.dedupeKey).sort()).toEqual(['a', 'b']);
+    });
+
+    it('keeps the dedupe key when a later save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ dedupeKey: 'a' }), CONN);
+      await storage.saveAnomalyEvent(event(), CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.dedupeKey).toBe('a');
+    });
+
     it('stores the regressed commands and the event sequence', async () => {
       const fields = { commands: ['get', 'set'], eventSequence: 7 };
       await storage.saveAnomalyEvent(event(fields), CONN);

@@ -3155,7 +3155,8 @@ describe('AnomalyService', () => {
         .filter((event) => event.metricType === MetricType.REPLICA_SLOT_STATE);
       const [signature] = [...(service as any).replicaSlotEventIds.get(mockCtx.connectionId).keys()];
       expect(saved.id).toMatch(/^[0-9a-f-]{36}$/);
-      expect(saved.replicaAddr).toBe(signature);
+      expect(saved.dedupeKey).toBe(signature);
+      expect(saved.replicaAddr).toBe('10.0.0.2:6380');
 
       (service as any).replicaSlotEventIds.clear();
       (service as any).adoptReplicaSlotEvents(mockCtx.connectionId, [saved]);
@@ -11292,7 +11293,7 @@ describe('AnomalyService', () => {
             const row = (id: string, timestamp = T0) => ({ id, timestamp, message: 'msg' });
             const slotRow = (id: string, signature: string, timestamp = T0) => ({
               ...row(id, timestamp),
-              replicaAddr: signature,
+              dedupeKey: signature,
             });
             const ctx = { ...mockCtx, connectionId: 'conn-9' };
             const adopt = () => (service as any).adoptOpenEvents(ctx, T0);
