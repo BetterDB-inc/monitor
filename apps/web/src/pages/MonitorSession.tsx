@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, OctagonX } from 'lucide-react';
@@ -39,12 +39,17 @@ export function MonitorSession() {
     setStopping(true);
     setStopError(null);
     try {
-      await monitorApi.stopSession(sessionId);
+      const stopped = await monitorApi.stopSession(sessionId);
       await queryClient.invalidateQueries({ queryKey: ['monitor', 'session', sessionId] });
+      if (stopped.stopPending) {
+        // MONITOR is still opening: stay in "Stopping…" and let the session
+        // refetch close the dialog once the row leaves `running`.
+        return;
+      }
       setStopDialogOpen(false);
+      setStopping(false);
     } catch (err) {
       setStopError((err as Error).message);
-    } finally {
       setStopping(false);
     }
   };
@@ -56,9 +61,26 @@ export function MonitorSession() {
     refetchInterval: (q) => {
       const s = q.state.data;
       // Keep polling while running so the header reflects the live counters.
-      return s?.status === 'running' ? 2000 : false;
+      return s?.status === 'running' ? (stopping ? 1000 : 2000) : false;
     },
   });
+
+  // The cross-reference and capture-diff results are cached while the capture runs;
+  // refetch them once it leaves `running` so the counter deltas replace the placeholder.
+  const status = data?.status;
+  const previousStatus = useRef(status);
+  useEffect(() => {
+    const prev = previousStatus.current;
+    previousStatus.current = status;
+    if (status && status !== 'running') {
+      setStopping(false);
+      setStopDialogOpen(false);
+    }
+    if (sessionId && prev === 'running' && status && status !== 'running') {
+      void queryClient.invalidateQueries({ queryKey: ['monitor', 'cross-reference', sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ['monitor', 'session-diff', sessionId] });
+    }
+  }, [status, sessionId, queryClient]);
 
   if (!sessionId) {
     return <p className="text-sm text-destructive">Missing session id.</p>;

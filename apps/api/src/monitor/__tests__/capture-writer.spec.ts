@@ -511,3 +511,188 @@ describe('CaptureWriter', () => {
     });
   });
 });
+
+describe('CaptureWriter end-of-window counter sample', () => {
+  const OUTCOME = { sample: { capturedAt: 5, counters: { keyspace_hits: 1 } } };
+
+  function makeWriter(
+    source: FakeSource,
+    storage: FakeStorage,
+    extra: Partial<ConstructorParameters<typeof CaptureWriter>[0]> = {},
+  ): CaptureWriter {
+    return new CaptureWriter({
+      sessionId: SESSION_ID,
+      source,
+      storage,
+      byteCap: 10_000,
+      lineCap: 10_000,
+      durationMs: 60_000,
+      ...extra,
+    });
+  }
+
+  it('calls endSampler once, after source.stop()', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const stoppedAtCall: boolean[] = [];
+    const endSampler = jest.fn(async () => {
+      stoppedAtCall.push(source.stopped);
+      return OUTCOME;
+    });
+    const writer = makeWriter(source, storage, { endSampler });
+
+    const done = writer.start();
+    source.push('one');
+    writer.stop();
+    await done;
+
+    expect(endSampler).toHaveBeenCalledTimes(1);
+    expect(stoppedAtCall).toEqual([true]);
+  });
+
+  it('returns the outcome on the result', async () => {
+    const source = new FakeSource();
+    const writer = makeWriter(source, makeStorage(), { endSampler: async () => OUTCOME });
+
+    const done = writer.start();
+    source.end();
+
+    expect((await done).endSample).toEqual(OUTCOME);
+  });
+
+  it('merges buildFinalizePatch into the finalize update', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const snapshots = { version: 1 as const, nodes: [{ start: null, end: null }] };
+    const buildFinalizePatch = jest.fn(() => ({ counterSnapshots: snapshots }));
+    const writer = makeWriter(source, storage, {
+      endSampler: async () => OUTCOME,
+      buildFinalizePatch,
+    });
+
+    const done = writer.start();
+    source.push('one');
+    source.end();
+    await done;
+
+    expect(buildFinalizePatch).toHaveBeenCalledWith(OUTCOME);
+    expect(storage.updateCaptureSession).toHaveBeenCalledTimes(1);
+    expect(storage.updateCaptureSession).toHaveBeenCalledWith(
+      SESSION_ID,
+      expect.objectContaining({ status: 'completed', lineCount: 1, counterSnapshots: snapshots }),
+    );
+  });
+
+  it('ignores buildFinalizePatch with skipSessionFinalize', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const buildFinalizePatch = jest.fn(() => ({ counterSnapshots: undefined }));
+    const writer = makeWriter(source, storage, {
+      skipSessionFinalize: true,
+      endSampler: async () => OUTCOME,
+      buildFinalizePatch,
+    });
+
+    const done = writer.start();
+    source.end();
+    const result = await done;
+
+    expect(storage.updateCaptureSession).not.toHaveBeenCalled();
+    expect(buildFinalizePatch).not.toHaveBeenCalled();
+    expect(result.endSample).toEqual(OUTCOME);
+  });
+
+  it('a rejecting endSampler does not block finalize', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const writer = makeWriter(source, storage, {
+      endSampler: () => Promise.reject(new Error('x')),
+    });
+
+    const done = writer.start();
+    source.end();
+    const result = await done;
+
+    expect(storage.updateCaptureSession).toHaveBeenCalledTimes(1);
+    expect(result.endSample).toEqual({ sample: null, error: 'x' });
+  });
+
+  it('a throwing buildFinalizePatch still finalizes', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const writer = makeWriter(source, storage, {
+      endSampler: async () => OUTCOME,
+      buildFinalizePatch: () => {
+        throw new Error('bad builder');
+      },
+    });
+
+    const done = writer.start();
+    source.end();
+    await done;
+
+    expect(storage.updateCaptureSession).toHaveBeenCalledTimes(1);
+    const patch = storage.updateCaptureSession.mock.calls[0][1];
+    expect(patch).not.toHaveProperty('counterSnapshots');
+    expect(patch.status).toBe('completed');
+  });
+
+  it('takes endedAt right after source.stop(), before the end probe advances the clock', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    let clock = 100;
+    const writer = makeWriter(source, storage, {
+      now: () => clock,
+      endSampler: async () => {
+        clock = 5000;
+        return OUTCOME;
+      },
+    });
+
+    const done = writer.start();
+    writer.stop();
+    const result = await done;
+
+    expect(result.endedAt).toBe(100);
+    expect(storage.updateCaptureSession).toHaveBeenCalledWith(
+      SESSION_ID,
+      expect.objectContaining({ endedAt: 100 }),
+    );
+  });
+
+  it('bounds a hung endSampler and still finalizes', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const writer = makeWriter(source, storage, {
+      endSampleTimeoutMs: 20,
+      endSampler: () => new Promise(() => undefined),
+    });
+
+    const done = writer.start();
+    source.end();
+    const result = await done;
+
+    expect(storage.updateCaptureSession).toHaveBeenCalledTimes(1);
+    expect(result.endSample).toEqual({
+      sample: null,
+      error: 'End-of-window counter sample timed out after 20 ms',
+    });
+  });
+
+  it('no hooks means unchanged behavior', async () => {
+    const source = new FakeSource();
+    const storage = makeStorage();
+    const writer = makeWriter(source, storage);
+
+    const done = writer.start();
+    source.push('one');
+    source.end();
+    const result = await done;
+
+    expect(result.endSample).toBeUndefined();
+    const patch = storage.updateCaptureSession.mock.calls[0][1];
+    expect(Object.keys(patch).sort()).toEqual(
+      ['status', 'endedAt', 'durationMs', 'byteCount', 'lineCount', 'terminationReason'].sort(),
+    );
+  });
+});

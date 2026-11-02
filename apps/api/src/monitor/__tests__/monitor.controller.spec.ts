@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import type { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
 import { CaptureScheduler } from '../capture-scheduler';
@@ -16,6 +17,7 @@ describe('MonitorController', () => {
     startSession: jest.Mock;
     stopSession: jest.Mock;
     getSession: jest.Mock;
+    isSessionLive: jest.Mock;
   };
   let healthGateService: { evaluate: jest.Mock };
   let preflightService: { run: jest.Mock };
@@ -37,8 +39,12 @@ describe('MonitorController', () => {
     captureService = {
       listSessions: jest.fn().mockResolvedValue([]),
       startSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
-      stopSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'completed' }),
+      stopSession: jest.fn().mockResolvedValue({
+        session: { id: 'sess-1', status: 'completed' },
+        stopPending: false,
+      }),
       getSession: jest.fn().mockResolvedValue({ id: 'sess-1', status: 'running' }),
+      isSessionLive: jest.fn().mockReturnValue(true),
     };
     healthGateService = {
       evaluate: jest.fn().mockResolvedValue({ allow: true, signals: {}, thresholds: {} }),
@@ -245,15 +251,33 @@ describe('MonitorController', () => {
   });
 
   describe('stopSession', () => {
-    it('returns the updated session record', async () => {
-      const result = await controller.stopSession('sess-1');
-      expect(result).toMatchObject({ id: 'sess-1', status: 'completed' });
+    const makeReply = () =>
+      ({ status: jest.fn() }) as unknown as FastifyReply & { status: jest.Mock };
+
+    it('returns the plain session record with the default status', async () => {
+      const reply = makeReply();
+      const result = await controller.stopSession('sess-1', reply);
+      expect(result).toEqual({ id: 'sess-1', status: 'completed' });
+      expect(reply.status).not.toHaveBeenCalled();
       expect(captureService.stopSession).toHaveBeenCalledWith('sess-1');
     });
 
+    it('responds 202 with stopPending when MONITOR is still opening', async () => {
+      captureService.stopSession.mockResolvedValueOnce({
+        session: { id: 'sess-1', status: 'running' },
+        stopPending: true,
+      });
+      const reply = makeReply();
+      const result = await controller.stopSession('sess-1', reply);
+      expect(reply.status).toHaveBeenCalledWith(202);
+      expect(result).toEqual({ id: 'sess-1', status: 'running', stopPending: true });
+    });
+
     it('throws NotFound when the session does not exist', async () => {
-      captureService.stopSession.mockResolvedValueOnce(null);
-      await expect(controller.stopSession('missing')).rejects.toBeInstanceOf(NotFoundException);
+      captureService.stopSession.mockResolvedValueOnce({ session: null, stopPending: false });
+      await expect(controller.stopSession('missing', makeReply())).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
     });
   });
 
@@ -263,7 +287,21 @@ describe('MonitorController', () => {
       expect(crossReferenceEngine.compute).toHaveBeenCalledWith({
         sessionId: 'sess-1',
         baseline: '24h',
+        session: { id: 'sess-1', status: 'running' },
+        sessionLive: true,
       });
+    });
+
+    it('evaluates liveness before reading the session and passes both to the engine', async () => {
+      captureService.isSessionLive.mockReturnValueOnce(false);
+      await controller.crossReference('sess-1');
+      expect(captureService.isSessionLive).toHaveBeenCalledWith('sess-1');
+      expect(captureService.isSessionLive.mock.invocationCallOrder[0]).toBeLessThan(
+        captureService.getSession.mock.invocationCallOrder[0],
+      );
+      expect(crossReferenceEngine.compute).toHaveBeenCalledWith(
+        expect.objectContaining({ session: { id: 'sess-1', status: 'running' }, sessionLive: false }),
+      );
     });
 
     it('honors explicit baseline windows', async () => {
@@ -272,6 +310,8 @@ describe('MonitorController', () => {
         expect(crossReferenceEngine.compute).toHaveBeenLastCalledWith({
           sessionId: 'sess-1',
           baseline: window,
+          session: expect.objectContaining({ id: 'sess-1' }),
+          sessionLive: true,
         });
       }
     });
@@ -383,7 +423,20 @@ describe('MonitorController', () => {
       captureService.getSession.mockResolvedValueOnce({ id: 'sess-1' });
       captureService.getSession.mockResolvedValueOnce({ id: 'sess-2' });
       await controller.sessionDiff('sess-1', 'sess-2');
-      expect(crossReferenceEngine.computeCaptureDiff).toHaveBeenCalledWith('sess-1', 'sess-2');
+      expect(crossReferenceEngine.computeCaptureDiff).toHaveBeenCalledWith('sess-1', 'sess-2', {
+        session: { id: 'sess-1' },
+        baselineSession: { id: 'sess-2' },
+        sessionLive: true,
+        baselineLive: true,
+      });
+    });
+
+    it('evaluates liveness for both captures before reading them', async () => {
+      captureService.getSession.mockResolvedValueOnce({ id: 'sess-1' });
+      captureService.getSession.mockResolvedValueOnce({ id: 'sess-2' });
+      await controller.sessionDiff('sess-1', 'sess-2');
+      const lastLive = Math.max(...captureService.isSessionLive.mock.invocationCallOrder);
+      expect(lastLive).toBeLessThan(captureService.getSession.mock.invocationCallOrder[0]);
     });
 
     it('throws BadRequest when vs is missing', async () => {

@@ -1,6 +1,6 @@
 import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
+import { CaptureCounterSnapshots, CaptureNodeSegment, WebhookEventType } from '@betterdb/shared';
 import {
   CaptureSessionQueryOptions,
   CaptureSessionSource,
@@ -9,12 +9,24 @@ import {
 } from '../common/interfaces/storage-port.interface';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { withTimeout } from '../common/utils/with-timeout';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { CaptureWriter, CaptureWriterResult, MonitorSource } from './capture-writer';
-import { createIovalkeyMonitorSource } from './iovalkey-monitor-source';
+import { MONITOR_OPEN_TIMEOUT_MS, createIovalkeyMonitorSource } from './iovalkey-monitor-source';
+import {
+  CounterSampleOutcome,
+  CounterSampleReader,
+  buildStartSnapshots,
+  counterNodeKey,
+  readCounterSample,
+  sampleFromInfoText,
+  withEndSamples,
+} from './capture-counters';
 
 /** Default capture duration if the caller does not specify one. Matches the start-session modal default. */
 export const DEFAULT_DURATION_MS = 30_000;
+/** Longest a stop request waits for a session that is still opening MONITOR. */
+export const STOP_WAIT_FOR_START_MS = 5_000;
 
 /** Community-tier defaults; overridable per session and via env. PR 24 will resolve from license tier. */
 const COMMUNITY_BYTE_CAP = 50 * 1024 * 1024; // 50 MB
@@ -64,6 +76,14 @@ interface ActiveSession {
   donePromise: Promise<unknown>;
 }
 
+/** A start in flight for a connection: created before the row is saved, cleared when it settles. */
+interface PendingStart {
+  sessionId: string;
+  /** Resolves when startSession settles (started or failed). Never rejects. */
+  settled: Promise<void>;
+  stopRequested: boolean;
+}
+
 interface ActiveWriter {
   writer: CaptureWriter;
   nodeId?: string;
@@ -85,7 +105,10 @@ export type MonitorSourceFactory = (
 export class MonitorCaptureService {
   private readonly logger = new Logger(MonitorCaptureService.name);
   private readonly active = new Map<string, ActiveSession>();
+  /** connectionId → in-flight start. Created before the row is saved. */
+  private readonly pendingStarts = new Map<string, PendingStart>();
   private monitorSourceFactory: MonitorSourceFactory;
+  private counterSampleReader: CounterSampleReader;
 
   constructor(
     @Inject('STORAGE_CLIENT')
@@ -105,11 +128,64 @@ export class MonitorCaptureService {
       const port = this.connectionRegistry.get(connectionId);
       return createIovalkeyMonitorSource(port.getClient());
     };
+    this.counterSampleReader = async (connectionId, nodeId) => {
+      // Same client selection as the MONITOR source factory, so the INFO
+      // sample comes from the node whose traffic is being captured.
+      const client = nodeId
+        ? await this.clusterDiscovery.getNodeConnection(nodeId, connectionId)
+        : this.connectionRegistry.get(connectionId).getClient();
+      // Default INFO (no section argument) carries both # Stats and # Server
+      // (run_id, uptime_in_seconds, used for restart detection) in one command,
+      // on every server version.
+      // Timestamp before the command is sent: the reply reflects the server no
+      // earlier than this, so uptime never reads as older than capturedAt.
+      const capturedAt = Date.now();
+      const infoText = await client.info();
+      return sampleFromInfoText(infoText, capturedAt);
+    };
   }
 
   /** Test seam — overrides the default iovalkey-backed source factory. */
   setMonitorSourceFactory(factory: MonitorSourceFactory): void {
     this.monitorSourceFactory = factory;
+  }
+
+  /** Test seam — overrides how session-boundary INFO stats samples are read. */
+  setCounterSampleReader(reader: CounterSampleReader): void {
+    this.counterSampleReader = reader;
+  }
+
+  private sampleCounters(connectionId: string, nodeId?: string): Promise<CounterSampleOutcome> {
+    return readCounterSample(this.counterSampleReader, connectionId, nodeId);
+  }
+
+  /**
+   * Open a MONITOR source, bounded. The default source bounds itself; the
+   * backstop here also covers a custom factory that never settles, so a hung
+   * open can never hold the connection. A source that arrives after the
+   * backstop fired is stopped.
+   */
+  private openSource(connectionId: string, targetNodeId?: string): Promise<MonitorSource> {
+    const opening = Promise.resolve().then(() =>
+      this.monitorSourceFactory(connectionId, targetNodeId),
+    );
+    return withTimeout(
+      opening,
+      MONITOR_OPEN_TIMEOUT_MS + 1_000,
+      `MONITOR open timed out after ${MONITOR_OPEN_TIMEOUT_MS} ms`,
+    ).catch((err: Error) => {
+      opening.then(
+        (late) => {
+          try {
+            late.stop();
+          } catch {
+            // Ignore — the late source is being discarded.
+          }
+        },
+        () => undefined,
+      );
+      throw err;
+    });
   }
 
   listSessions(options: CaptureSessionQueryOptions = {}): Promise<StoredCaptureSession[]> {
@@ -128,57 +204,80 @@ export class MonitorCaptureService {
    */
   async startSession(input: StartSessionInput): Promise<StoredCaptureSession> {
     const { connectionId } = input;
-    if (this.active.has(connectionId)) {
+    if (this.active.has(connectionId) || this.pendingStarts.has(connectionId)) {
       throw new ConflictException(
         `A capture session is already active on connection ${connectionId}`,
       );
     }
+    // Reserve the connection synchronously, before any await. The id is fixed
+    // here so a stop for this session can find the pending start.
+    const sessionId = randomUUID();
+    let markSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      markSettled = resolve;
+    });
+    const pending: PendingStart = { sessionId, settled, stopRequested: false };
+    this.pendingStarts.set(connectionId, pending);
 
-    const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
-    const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
-    const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
+    try {
+      const durationMs = input.durationMs ?? DEFAULT_DURATION_MS;
+      const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
+      const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
-    const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
-    const isFanOut = fanOutNodes.length > 0;
+      const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
+      const isFanOut = fanOutNodes.length > 0;
 
-    const targetNode = isFanOut
-      ? undefined
-      : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
+      const targetNode = isFanOut
+        ? undefined
+        : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
 
-    const initialSegments: CaptureNodeSegment[] = isFanOut
-      ? fanOutNodes.map((n) => ({
-          nodeId: n.id,
-          address: n.address,
-          status: 'running',
-          byteCount: 0,
-          lineCount: 0,
-        }))
-      : [];
+      const initialSegments: CaptureNodeSegment[] = isFanOut
+        ? fanOutNodes.map((n) => ({
+            nodeId: n.id,
+            address: n.address,
+            status: 'running',
+            byteCount: 0,
+            lineCount: 0,
+          }))
+        : [];
 
-    const session: StoredCaptureSession = {
-      id: randomUUID(),
-      connectionId,
-      status: 'running',
-      source: input.source ?? 'manual',
-      triggerId: input.triggerId,
-      scheduleId: input.scheduleId,
-      requestedBy: input.requestedBy,
-      startedAt: Date.now(),
-      byteCount: 0,
-      lineCount: 0,
-      byteCap,
-      lineCap,
-      targetNode,
-      nodeSegments: isFanOut ? initialSegments : undefined,
-    };
+      const session: StoredCaptureSession = {
+        id: sessionId,
+        connectionId,
+        status: 'running',
+        source: input.source ?? 'manual',
+        triggerId: input.triggerId,
+        scheduleId: input.scheduleId,
+        requestedBy: input.requestedBy,
+        startedAt: Date.now(),
+        byteCount: 0,
+        lineCount: 0,
+        byteCap,
+        lineCap,
+        targetNode,
+        nodeSegments: isFanOut ? initialSegments : undefined,
+      };
 
-    await this.storage.saveCaptureSession(session, connectionId);
+      // Start counter samples are taken per node right before its own MONITOR
+      // open (see the start* methods); the finalize patch writes the snapshots.
+      // From here the row is visible to clients, so a stop for this id can
+      // arrive before MONITOR is open; stopSession waits on `pending.settled`.
+      await this.storage.saveCaptureSession(session, connectionId);
 
-    if (isFanOut) {
-      return this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap);
+      const started = isFanOut
+        ? await this.startFanOutSession(session, fanOutNodes, durationMs, byteCap, lineCap)
+        : await this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
+
+      // A stop that timed out waiting for this start is applied now that the
+      // writers are live.
+      if (pending.stopRequested) {
+        this.stopActive(this.findActiveById(sessionId));
+      }
+      return started;
+    } finally {
+      this.pendingStarts.delete(connectionId);
+      markSettled();
     }
-
-    return this.startSingleSession(session, input.targetNodeId, durationMs, byteCap, lineCap);
   }
 
   private async startSingleSession(
@@ -188,9 +287,15 @@ export class MonitorCaptureService {
     byteCap: number,
     lineCap: number,
   ): Promise<StoredCaptureSession> {
+    // Sampled immediately before this node's own open so the window matches its traffic.
+    const startOutcome = await this.sampleCounters(session.connectionId, targetNodeId);
+    const startSnapshots = buildStartSnapshots([
+      { nodeId: targetNodeId, address: session.targetNode, outcome: startOutcome },
+    ]);
+
     let monitorSource: MonitorSource;
     try {
-      monitorSource = await this.monitorSourceFactory(session.connectionId, targetNodeId);
+      monitorSource = await this.openSource(session.connectionId, targetNodeId);
     } catch (err) {
       this.logger.error(
         `Failed to open MONITOR on ${session.connectionId}: ${(err as Error).message}`,
@@ -199,6 +304,7 @@ export class MonitorCaptureService {
         status: 'failed',
         endedAt: Date.now(),
         terminationReason: `monitor_open_failed: ${(err as Error).message}`,
+        counterSnapshots: withEndSamples(startSnapshots, new Map()),
       });
       throw err;
     }
@@ -210,6 +316,13 @@ export class MonitorCaptureService {
       byteCap,
       lineCap,
       durationMs,
+      endSampler: () => this.sampleCounters(session.connectionId, targetNodeId),
+      buildFinalizePatch: (endSample) => ({
+        counterSnapshots: withEndSamples(
+          startSnapshots,
+          new Map(endSample === null ? [] : [[counterNodeKey(targetNodeId), endSample]]),
+        ),
+      }),
     });
 
     const finalize = writer
@@ -253,24 +366,39 @@ export class MonitorCaptureService {
     }
 
     const segmentPromises: Array<Promise<void>> = [];
+    const endSamples = new Map<string, CounterSampleOutcome>();
 
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      let source: MonitorSource;
-      try {
-        source = await this.monitorSourceFactory(session.connectionId, node.id);
-      } catch (err) {
+    // Per node: sample, then open. Nodes run in parallel so a slow node does not
+    // delay another node's window. Each node's start sample is taken immediately
+    // before its own MONITOR open, and its end sample immediately after its own
+    // stop, so each node's window matches its captured traffic.
+    const opened = await Promise.all(
+      nodes.map(async (node) => {
+        const startOutcome = await this.sampleCounters(session.connectionId, node.id);
+        try {
+          const source = await this.openSource(session.connectionId, node.id);
+          return { node, startOutcome, source, error: undefined };
+        } catch (err) {
+          return { node, startOutcome, source: undefined, error: err as Error };
+        }
+      }),
+    );
+    const startSnapshots = buildStartSnapshots(
+      opened.map((o) => ({ nodeId: o.node.id, address: o.node.address, outcome: o.startOutcome })),
+    );
+
+    for (let i = 0; i < opened.length; i++) {
+      const { node, source, error } = opened[i];
+      if (source === undefined) {
         // Failing to open MONITOR on ONE node does not kill the session — mark
         // that segment failed up front and keep going with the others.
         const seg = segments.get(node.id);
         if (seg) {
           seg.status = 'failed';
           seg.endedAt = Date.now();
-          seg.terminationReason = `monitor_open_failed: ${(err as Error).message}`;
+          seg.terminationReason = `monitor_open_failed: ${error?.message}`;
         }
-        this.logger.warn(
-          `Fan-out: failed to open MONITOR on ${node.address}: ${(err as Error).message}`,
-        );
+        this.logger.warn(`Fan-out: failed to open MONITOR on ${node.address}: ${error?.message}`);
         continue;
       }
 
@@ -284,6 +412,7 @@ export class MonitorCaptureService {
         nodeId: node.id,
         startChunkIndex: i * CHUNK_INDEX_NAMESPACE,
         skipSessionFinalize: true,
+        endSampler: () => this.sampleCounters(session.connectionId, node.id),
       });
 
       writers.push({ writer, nodeId: node.id, address: node.address });
@@ -292,6 +421,9 @@ export class MonitorCaptureService {
         writer
           .start()
           .then((result) => {
+            if (result.endSample) {
+              endSamples.set(counterNodeKey(node.id), result.endSample);
+            }
             const seg = segments.get(node.id);
             if (!seg) return;
             seg.status = result.status === 'failed' ? 'failed' : result.status;
@@ -314,7 +446,7 @@ export class MonitorCaptureService {
     }
 
     const finalize = Promise.all(segmentPromises)
-      .then(() => this.finalizeFanOutSession(session, segments))
+      .then(() => this.finalizeFanOutSession(session, segments, startSnapshots, endSamples))
       .finally(() => {
         this.active.delete(session.connectionId);
       });
@@ -333,6 +465,8 @@ export class MonitorCaptureService {
   private async finalizeFanOutSession(
     session: StoredCaptureSession,
     segments: Map<string, CaptureNodeSegment>,
+    startSnapshots: CaptureCounterSnapshots,
+    endSamples: ReadonlyMap<string, CounterSampleOutcome>,
   ): Promise<void> {
     const segmentList = Array.from(segments.values());
     const totalBytes = segmentList.reduce((s, x) => s + x.byteCount, 0);
@@ -353,6 +487,7 @@ export class MonitorCaptureService {
         lineCount: totalLines,
         terminationReason: reason,
         nodeSegments: segmentList,
+        counterSnapshots: withEndSamples(startSnapshots, endSamples),
       });
     } catch (err) {
       this.logger.error(`Fan-out finalize failed: ${(err as Error).message}`);
@@ -437,15 +572,38 @@ export class MonitorCaptureService {
    * Stop a running session by ID. If found in the active map, stops every
    * writer (fan-out captures have N) and awaits the aggregate finalize.
    */
-  async stopSession(id: string): Promise<StoredCaptureSession | null> {
+  async stopSession(
+    id: string,
+  ): Promise<{ session: StoredCaptureSession | null; stopPending: boolean }> {
+    // A stop that arrives while the session is still starting (MONITOR not open
+    // yet) waits for the start to settle and then stops it, instead of being
+    // dropped and letting the capture run its full duration. If the open is
+    // still stalled after the wait, the start applies the stop itself as soon
+    // as MONITOR opens (see startSession) and the caller is told it is pending.
+    const pending = this.findPendingBySessionId(id);
+    if (pending) {
+      pending.stopRequested = true;
+      try {
+        await withTimeout(pending.settled, STOP_WAIT_FOR_START_MS, 'stop wait timed out');
+      } catch {
+        this.logger.warn(
+          `Stop for ${id} requested while MONITOR is still opening; it will stop when the open completes`,
+        );
+        return { session: await this.storage.getCaptureSession(id), stopPending: true };
+      }
+    }
     const active = this.findActiveById(id);
     if (active) {
-      for (const w of active.writers) {
-        w.writer.stop('manual_stop');
-      }
+      this.stopActive(active);
       await active.donePromise;
     }
-    return this.storage.getCaptureSession(id);
+    return { session: await this.storage.getCaptureSession(id), stopPending: false };
+  }
+
+  private stopActive(active: ActiveSession | undefined): void {
+    for (const w of active?.writers ?? []) {
+      w.writer.stop('manual_stop');
+    }
   }
 
   /**
@@ -458,8 +616,25 @@ export class MonitorCaptureService {
     return this.active.get(connectionId)?.writers[0]?.writer;
   }
 
+  /** True while a session on the connection is active or still starting. */
   hasActiveSessionOn(connectionId: string): boolean {
-    return this.active.has(connectionId);
+    return this.active.has(connectionId) || this.pendingStarts.has(connectionId);
+  }
+
+  /**
+   * True when this process owns the session: it is starting or running here.
+   * A row still marked `running` that this returns false for was orphaned
+   * (for example the API restarted mid-capture).
+   */
+  isSessionLive(sessionId: string): boolean {
+    return this.findPendingBySessionId(sessionId) !== undefined || this.findActiveById(sessionId) !== undefined;
+  }
+
+  private findPendingBySessionId(sessionId: string): PendingStart | undefined {
+    for (const p of this.pendingStarts.values()) {
+      if (p.sessionId === sessionId) return p;
+    }
+    return undefined;
   }
 
   private findActiveById(sessionId: string): ActiveSession | undefined {

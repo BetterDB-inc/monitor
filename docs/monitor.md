@@ -19,8 +19,8 @@ diff, and export.
    background; close the tab and come back any time — the session keeps
    running until the duration cap, byte cap, line cap, or a manual stop.
 4. When the session finishes, the detail page surfaces filters, export
-   (JSON / CSV), a four-axis cross-reference against connection history,
-   and (Pro+) a capture-vs-capture diff.
+   (JSON / CSV), a four-axis cross-reference against connection history
+   plus INFO counter deltas for the capture window, and (Pro+) a capture-vs-capture diff.
 
 ## Tiers and feature gating
 
@@ -94,8 +94,81 @@ reference engine with another capture as the baseline source. The
 session detail page exposes this via the **Compare with another
 capture** card — pick any other completed capture on the same
 connection and the four-section panel populates with the new shapes
-and hot-key delta. Slowlog and ACL deltas are scoped to connection
-history and stay empty in this mode.
+and hot-key delta. Slowlog regressions and the audit-entry count are
+scoped to connection history and stay empty in this mode; INFO counter
+deltas are shown for both captures side by side.
+
+## Session-boundary INFO counters
+
+Every capture that opens MONITOR samples `INFO` on each captured node twice.
+Each node's start sample is taken immediately before its own MONITOR open, and
+its end sample immediately after its own stop (so the probe itself is never
+captured), so each node's window matches its captured traffic. If MONITOR fails
+to open, only the start sample is taken and the node is reported with no end
+sample. Each sample is one default `INFO` command, which carries both the
+`# Stats` counters and `# Server` `run_id` / `uptime_in_seconds`. The
+cross-reference panel shows the difference for 16 monotonic counters —
+commands processed, connections received/rejected, keyspace hits/misses,
+expired and evicted keys, network bytes in, error replies, ACL denials
+(auth / command / key / channel) and full/partial resyncs — plus
+commands/sec and the keyspace hit ratio over the window. Fan-out captures
+sum across primaries; commands/sec is the sum of each node's own rate
+(its delta over its own span).
+
+- Each sample has a 2 s budget and fails open: a slow or unreachable node
+  never fails the capture and is reported as not measured. In a fan-out
+  capture each node is sampled and then opened independently and in parallel,
+  so a slow node does not delay the others, and the session row is created
+  before any sampling. The end probe is additionally bounded by the writer
+  (3 s).
+- The MONITOR open is bounded at 10 s. A node that does not answer fails the
+  capture (or, in a fan-out, that node's segment) with
+  `monitor_open_failed: MONITOR open timed out after 10000 ms`, the duplicate
+  connection is closed, and the connection is free again for new starts,
+  schedules, triggers and stops.
+- A node is measured only when at least one counter appears in both of its
+  samples. A node with no parsable `# Stats` (a proxy, restricted `INFO`) is
+  not measured, so coverage is `partial` or `unavailable`, never `complete`.
+- Restarts and stat resets: a node whose `run_id` changed, or whose
+  `uptime_in_seconds` ended lower than its start uptime plus the elapsed
+  capture time, restarted during the window. Uptime is compared against the
+  elapsed capture time, so a restart is detected even when the node's uptime at
+  the end is higher than at the start. A node where
+  any counter went backwards ran `CONFIG RESETSTAT`. Either way the whole
+  node is excluded from every sum and from the hit ratio, and it is named
+  with the reason. A `CONFIG RESETSTAT` after which every counter climbs back
+  past its start value is not visible in `INFO` and cannot be detected.
+- Coverage is `complete`, `partial` (a node is missing a sample, or restarted
+  or reset its stats while at least one other node is measured, or a counter
+  is reported by only some nodes — e.g. `total_error_replies` during a rolling
+  upgrade from before Redis 6.2 — listed in `incompleteCounters`), or
+  `unavailable` (no node could be measured: none has both samples, or every
+  node that has them restarted or reset its stats during the capture).
+- A capture that is still running reports `pending: "capture_running"`; the
+  values appear when it ends. A row left `running` with no live capture
+  behind it (for example after an API restart) reports
+  `pending: "capture_interrupted"` and never gets an end sample.
+- `aclDeltas.counters.aclAccessDeniedAuthDelta` / `rejectedConnectionsDelta`
+  in the API response are populated from the same samples.
+- Self-measurement: each node's window includes the capture's own footprint.
+  That is the start `INFO`, the MONITOR connection's handshake (`AUTH` when
+  configured, the client's ready-check `INFO`, `SELECT` / `CLIENT SETNAME`
+  when configured) and `MONITOR` itself, so a few commands and 1 connection.
+  Other BetterDB polling of the same node during the window is counted too.
+  Outbound network bytes are not tracked because the server counts the
+  MONITOR stream itself in `total_net_output_bytes`.
+- Counters a server version does not report are shown as `—`, never as 0.
+- Stopping a capture while it is still starting (row created, MONITOR not
+  open yet) waits for the start to finish and then stops it. A stop requested
+  while MONITOR is still opening returns after at most 5 s; the capture stops
+  as soon as the open completes.
+  In that case `DELETE /api/monitor/sessions/:id` returns **202** with
+  `{ ...session, stopPending: true }` (the open finishes within 10 s), and the
+  UI keeps showing "Stopping…" until the session leaves `running`.
+- While a capture is starting, a second start on the same connection is
+  rejected with `409 Conflict`. Scheduled captures treat the connection as busy
+  and skip (recorded in `lastSkipReason`); triggered captures are queued and
+  retried, as described above.
 
 ## Value redaction
 
@@ -131,6 +204,7 @@ Manual lifecycle:
 - `GET  /api/monitor/sessions/:id`
 - `DELETE /api/monitor/sessions/:id`
 - `GET  /api/monitor/sessions/:id/cross-reference?baseline=<6h|24h|7d|same-hour-last-week>`
+  Response includes `counterDeltas` (and `baselineCounterDeltas` on the capture diff).
 - `GET  /api/monitor/sessions/:id/export?format=<json|csv>&command=&client=&key=&afterTs=&beforeTs=`
 
 Pro+:

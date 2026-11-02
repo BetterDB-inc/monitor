@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpStatus,
   Inject,
   NotFoundException,
   Param,
@@ -204,11 +205,22 @@ export class MonitorController {
     return session;
   }
 
+  /**
+   * Stop a session. Returns 202 with `stopPending: true` when MONITOR is still
+   * opening: the stop is recorded and applied as soon as the open completes.
+   */
   @Delete('sessions/:id')
-  async stopSession(@Param('id') id: string): Promise<StoredCaptureSession> {
-    const session = await this.captureService.stopSession(id);
+  async stopSession(
+    @Param('id') id: string,
+    @Res({ passthrough: true }) reply: FastifyReply,
+  ): Promise<StoredCaptureSession | (StoredCaptureSession & { stopPending: true })> {
+    const { session, stopPending } = await this.captureService.stopSession(id);
     if (!session) {
       throw new NotFoundException(`Session ${id} not found`);
+    }
+    if (stopPending) {
+      reply.status(HttpStatus.ACCEPTED);
+      return { ...session, stopPending: true };
     }
     return session;
   }
@@ -224,11 +236,19 @@ export class MonitorController {
         `baseline must be one of 6h, 24h, 7d, same-hour-last-week (got "${baseline}")`,
       );
     }
+    // Liveness is evaluated before the row is read: a capture that finalizes in
+    // between then reads as ended, never as interrupted.
+    const sessionLive = this.captureService.isSessionLive(id);
     const session = await this.captureService.getSession(id);
     if (!session) {
       throw new NotFoundException(`Session ${id} not found`);
     }
-    return this.crossReferenceEngine.compute({ sessionId: id, baseline: window });
+    return this.crossReferenceEngine.compute({
+      sessionId: id,
+      baseline: window,
+      session,
+      sessionLive,
+    });
   }
 
   @Get('sessions/:id/diff')
@@ -244,6 +264,8 @@ export class MonitorController {
     if (vs === id) {
       throw new BadRequestException('Cannot diff a capture against itself');
     }
+    const sessionLive = this.captureService.isSessionLive(id);
+    const baselineLive = this.captureService.isSessionLive(vs);
     const [session, baselineSession] = await Promise.all([
       this.captureService.getSession(id),
       this.captureService.getSession(vs),
@@ -254,7 +276,12 @@ export class MonitorController {
     if (!baselineSession) {
       throw new NotFoundException(`Baseline session ${vs} not found`);
     }
-    return this.crossReferenceEngine.computeCaptureDiff(id, vs);
+    return this.crossReferenceEngine.computeCaptureDiff(id, vs, {
+      session,
+      baselineSession,
+      sessionLive,
+      baselineLive,
+    });
   }
 
   @Get('sessions/:id/export')

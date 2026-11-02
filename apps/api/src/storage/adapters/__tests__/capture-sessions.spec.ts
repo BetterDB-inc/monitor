@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import Database from 'better-sqlite3';
+import type { CaptureCounterSnapshots } from '@betterdb/shared';
 import { MemoryAdapter } from '../memory.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
 import { StoredCaptureSession } from '../../../common/interfaces/storage-port.interface';
@@ -130,6 +132,67 @@ describe.each([
       byteCount: 4096,
       lineCount: 100,
       terminationReason: 'manual_stop',
+    });
+  });
+
+  describe('counterSnapshots', () => {
+    const SINGLE: CaptureCounterSnapshots = {
+      version: 1,
+      nodes: [
+        {
+          start: { capturedAt: 1_700_000_000_000, counters: { total_commands_processed: 10 } },
+          end: { capturedAt: 1_700_000_005_000, counters: { total_commands_processed: 30 } },
+        },
+      ],
+    };
+    const FAN_OUT: CaptureCounterSnapshots = {
+      version: 1,
+      nodes: [
+        {
+          nodeId: 'A',
+          address: 'h1:6379',
+          start: { capturedAt: 1, counters: { evicted_keys: 0 } },
+          end: { capturedAt: 2, counters: { evicted_keys: 3 } },
+        },
+        { nodeId: 'B', address: 'h2:6379', start: null, end: null, startError: 'timeout', endError: 'no_end_sample' },
+      ],
+    };
+
+    it('round-trips counterSnapshots through save/get', async () => {
+      for (const counterSnapshots of [SINGLE, FAN_OUT]) {
+        const session = makeSession({ counterSnapshots });
+        await storage.saveCaptureSession(session, CONNECTION_ID);
+        expect((await storage.getCaptureSession(session.id))?.counterSnapshots).toEqual(
+          counterSnapshots,
+        );
+      }
+    });
+
+    it('updateCaptureSession writes counterSnapshots and leaves other fields intact', async () => {
+      const session = makeSession({ status: 'running', endedAt: undefined, lineCount: 7 });
+      await storage.saveCaptureSession(session, CONNECTION_ID);
+
+      await storage.updateCaptureSession(session.id, {
+        status: 'completed',
+        counterSnapshots: FAN_OUT,
+      });
+
+      const fetched = await storage.getCaptureSession(session.id);
+      expect(fetched?.counterSnapshots).toEqual(FAN_OUT);
+      expect(fetched).toMatchObject({ status: 'completed', lineCount: 7, byteCap: session.byteCap });
+    });
+
+    it('reads sessions without counterSnapshots back as undefined', async () => {
+      const session = makeSession();
+      await storage.saveCaptureSession(session, CONNECTION_ID);
+      expect((await storage.getCaptureSession(session.id))?.counterSnapshots).toBeUndefined();
+    });
+
+    it('carries counterSnapshots on getCaptureSessions list rows', async () => {
+      const session = makeSession({ counterSnapshots: SINGLE });
+      await storage.saveCaptureSession(session, CONNECTION_ID);
+      const rows = await storage.getCaptureSessions({ connectionId: CONNECTION_ID });
+      expect(rows[0].counterSnapshots).toEqual(SINGLE);
     });
   });
 
@@ -298,5 +361,141 @@ describe.each([
       expect(await storage.getScheduledCapture(disabled.id)).toBeNull();
       expect(await storage.getScheduledCapture(enabled.id)).not.toBeNull();
     });
+  });
+});
+
+describe('Capture session storage (SqliteAdapter counter_snapshots column)', () => {
+  const files: string[] = [];
+
+  function tempDb(): string {
+    const filepath = path.join(os.tmpdir(), `capture-sessions-counters-${randomUUID()}.db`);
+    files.push(filepath);
+    return filepath;
+  }
+
+  afterEach(() => {
+    for (const file of files.splice(0)) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+  });
+
+  it('migrates a legacy capture_sessions table', async () => {
+    const filepath = tempDb();
+    const raw = new Database(filepath);
+    raw.exec(`
+      CREATE TABLE capture_sessions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running','completed','truncated','failed','skipped')),
+        source TEXT NOT NULL CHECK (source IN ('manual','trigger','schedule')),
+        trigger_id TEXT,
+        schedule_id TEXT,
+        requested_by TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        duration_ms INTEGER,
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        byte_cap INTEGER NOT NULL,
+        line_cap INTEGER NOT NULL,
+        termination_reason TEXT,
+        target_node TEXT,
+        node_segments TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+    `);
+    raw
+      .prepare(
+        `INSERT INTO capture_sessions (id, connection_id, status, source, started_at, byte_cap, line_cap)
+         VALUES ('legacy', ?, 'completed', 'manual', 1700000000000, 1000, 1000)`,
+      )
+      .run(CONNECTION_ID);
+    raw.close();
+
+    const storage = new SqliteAdapter({ filepath });
+    await storage.initialize();
+    try {
+      const db = (storage as unknown as { db: Database.Database }).db;
+      const cols = db.prepare('PRAGMA table_info(capture_sessions)').all() as { name: string }[];
+      expect(cols.map((c) => c.name)).toContain('counter_snapshots');
+
+      const legacy = await storage.getCaptureSession('legacy');
+      expect(legacy).not.toBeNull();
+      expect(legacy?.counterSnapshots).toBeUndefined();
+    } finally {
+      await storage.close();
+    }
+  });
+
+  it('fails initialization when the counter_snapshots ALTER fails', async () => {
+    const filepath = tempDb();
+    const raw = new Database(filepath);
+    raw.exec(`
+      CREATE TABLE capture_sessions (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running','completed','truncated','failed','skipped')),
+        source TEXT NOT NULL CHECK (source IN ('manual','trigger','schedule')),
+        trigger_id TEXT,
+        schedule_id TEXT,
+        requested_by TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        duration_ms INTEGER,
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        byte_cap INTEGER NOT NULL,
+        line_cap INTEGER NOT NULL,
+        termination_reason TEXT,
+        target_node TEXT,
+        node_segments TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
+      );
+    `);
+    raw.close();
+
+    const originalPrepare = Database.prototype.prepare;
+    const prepareSpy = jest
+      .spyOn(Database.prototype, 'prepare')
+      .mockImplementation(function (this: Database.Database, source: string) {
+        if (source.includes('ADD COLUMN counter_snapshots')) {
+          throw new Error('disk I/O error');
+        }
+        return originalPrepare.call(this, source);
+      } as typeof Database.prototype.prepare);
+    try {
+      const storage = new SqliteAdapter({ filepath });
+      try {
+        await expect(storage.initialize()).rejects.toThrow('disk I/O error');
+      } finally {
+        // initialize() failed midway; release the file handle so the temp db can be removed.
+        (storage as unknown as { db?: Database.Database }).db?.close();
+      }
+    } finally {
+      prepareSpy.mockRestore();
+    }
+  });
+
+  // A fresh database (no capture_sessions table before createSchema) is exercised by every
+  // other test in this file, which all start from tempDb().
+
+  it('decodes a corrupted counter_snapshots value to undefined', async () => {
+    const storage = new SqliteAdapter({ filepath: tempDb() });
+    await storage.initialize();
+    try {
+      const session = makeSession({
+        counterSnapshots: { version: 1, nodes: [{ start: null, end: null }] },
+      });
+      await storage.saveCaptureSession(session, CONNECTION_ID);
+      (storage as unknown as { db: Database.Database }).db
+        .prepare(`UPDATE capture_sessions SET counter_snapshots = '{bad'`)
+        .run();
+
+      const fetched = await storage.getCaptureSession(session.id);
+      expect(fetched).not.toBeNull();
+      expect(fetched?.counterSnapshots).toBeUndefined();
+    } finally {
+      await storage.close();
+    }
   });
 });

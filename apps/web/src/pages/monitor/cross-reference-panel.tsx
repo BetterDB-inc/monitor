@@ -8,6 +8,7 @@ import {
   CrossReferenceSlowlogRegression,
   monitorApi,
 } from '../../api/monitor';
+import { CounterDeltasTable } from './counter-deltas-table';
 
 const BASELINE_OPTIONS: Array<{ value: BaselineWindow; label: string }> = [
   { value: '6h', label: 'Last 6 hours' },
@@ -98,6 +99,22 @@ export function CrossReferenceSections({ result }: { result: CrossReferenceResul
       >
         <AclDeltas result={result} />
       </Section>
+
+      <div className="md:col-span-2" data-testid="counter-deltas-section">
+        <Section
+          title="INFO counters during capture"
+          subtitle="INFO stats sampled at session start and end"
+        >
+          {result.counterDeltas ? (
+            <CounterDeltasTable
+              deltas={result.counterDeltas}
+              baseline={result.baselineCounterDeltas}
+            />
+          ) : (
+            <Empty text={COUNTERS_NOT_RECORDED} />
+          )}
+        </Section>
+      </div>
     </div>
   );
 }
@@ -221,10 +238,29 @@ function RegressionsList({ regressions }: { regressions: CrossReferenceSlowlogRe
   );
 }
 
+const COUNTERS_NOT_RECORDED = 'INFO counters were not recorded for this capture.';
+
+/** `deltas` can be missing when the API predates counter deltas; render it as unavailable. */
+function unavailableCountersNote(
+  deltas: CrossReferenceResult['counterDeltas'] | undefined,
+): string | null {
+  if (deltas === undefined) {
+    return COUNTERS_NOT_RECORDED;
+  }
+  if (deltas.coverage !== 'unavailable') {
+    return null;
+  }
+  if (deltas.pending === 'capture_running') {
+    return 'INFO counters are available when the capture ends, if INFO responded at start.';
+  }
+  if (deltas.pending === 'capture_interrupted') {
+    return 'INFO counters were not recorded: the capture was interrupted before it ended.';
+  }
+  return COUNTERS_NOT_RECORDED;
+}
+
 function AclDeltas({ result }: { result: CrossReferenceResult }) {
-  const counterDeltaUnknown =
-    result.aclDeltas.counters.aclAccessDeniedAuthDelta === null &&
-    result.aclDeltas.counters.rejectedConnectionsDelta === null;
+  const countersNote = unavailableCountersNote(result.counterDeltas);
   return (
     <dl className="space-y-1 text-xs">
       <Row label="Audit entries in window">{result.aclDeltas.auditEntriesInWindow}</Row>
@@ -234,10 +270,8 @@ function AclDeltas({ result }: { result: CrossReferenceResult }) {
       <Row label="rejected_connections Δ">
         {result.aclDeltas.counters.rejectedConnectionsDelta ?? '—'}
       </Row>
-      {counterDeltaUnknown && (
-        <p className="pt-1 text-[10px] text-muted-foreground">
-          INFO counter deltas pending session-boundary snapshots (follow-up PR).
-        </p>
+      {countersNote !== null && (
+        <p className="pt-1 text-[10px] text-muted-foreground">{countersNote}</p>
       )}
     </dl>
   );

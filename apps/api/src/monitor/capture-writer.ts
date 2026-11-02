@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
-import { StoragePort } from '../common/interfaces/storage-port.interface';
+import type { CaptureSessionPatch, StoragePort } from '../common/interfaces/storage-port.interface';
+import { withTimeout } from '../common/utils/with-timeout';
+import type { CounterSampleOutcome } from './capture-counters';
 
 /**
  * Source of MONITOR-formatted text lines. The CaptureWriter consumes lines from
@@ -51,6 +53,26 @@ export interface CaptureWriterOptions {
    * once every writer has terminated.
    */
   skipSessionFinalize?: boolean;
+  /**
+   * Optional end-of-window probe for session-boundary INFO counters. Invoked
+   * exactly once inside terminate(), right after the MONITOR source is
+   * stopped (so the probe's own INFO is never captured as a line) and before
+   * the write queue drains (so slow storage does not stretch the window).
+   * Its outcome is returned on {@link CaptureWriterResult.endSample}. The writer
+   * bounds this by `endSampleTimeoutMs`; a timeout records `{ sample: null, error }`.
+   */
+  endSampler?: () => Promise<CounterSampleOutcome>;
+  /** Upper bound the writer waits for `endSampler`. Defaults to {@link END_SAMPLE_TIMEOUT_MS}. */
+  endSampleTimeoutMs?: number;
+  /**
+   * Single-writer sessions only: extra fields merged into the writer's own
+   * finalize `updateCaptureSession` patch, built from the end-sample outcome
+   * (null when no endSampler is set). Ignored when skipSessionFinalize is true;
+   * a throw is logged and the session is still finalized without the extras.
+   */
+  buildFinalizePatch?: (
+    endSample: CounterSampleOutcome | null,
+  ) => Pick<CaptureSessionPatch, 'counterSnapshots'>;
 }
 
 export type CaptureWriterStatus = 'completed' | 'truncated' | 'failed';
@@ -61,7 +83,12 @@ export interface CaptureWriterResult {
   byteCount: number;
   lineCount: number;
   endedAt: number;
+  /** Outcome of the endSampler probe; undefined when the writer had none. */
+  endSample?: CounterSampleOutcome | null;
 }
+
+/** Upper bound the writer waits for endSampler, independent of the sampler's own timeout. */
+export const END_SAMPLE_TIMEOUT_MS = 3_000;
 
 const DEFAULT_FLUSH_INTERVAL_MS = 1000;
 const DEFAULT_FLUSH_LINE_THRESHOLD = 5000;
@@ -100,6 +127,9 @@ export class CaptureWriter {
   private readonly now: () => number;
   private readonly nodeId?: string;
   private readonly skipSessionFinalize: boolean;
+  private readonly endSampler?: () => Promise<CounterSampleOutcome>;
+  private readonly endSampleTimeoutMs: number;
+  private readonly buildFinalizePatch?: CaptureWriterOptions['buildFinalizePatch'];
 
   private buffer: string[] = [];
   private bufferBytes = 0;
@@ -142,6 +172,9 @@ export class CaptureWriter {
     this.nodeId = opts.nodeId;
     this.chunkIndex = opts.startChunkIndex ?? 0;
     this.skipSessionFinalize = opts.skipSessionFinalize ?? false;
+    this.endSampler = opts.endSampler;
+    this.endSampleTimeoutMs = opts.endSampleTimeoutMs ?? END_SAMPLE_TIMEOUT_MS;
+    this.buildFinalizePatch = opts.buildFinalizePatch;
 
     this.donePromise = new Promise((resolve) => {
       this.resolveDone = resolve;
@@ -315,6 +348,15 @@ export class CaptureWriter {
       this.logger.warn(`source.stop threw: ${(err as Error).message}`);
     }
 
+    // The window ends when MONITOR stops: take endedAt before the end probe
+    // and the queue drain so neither stretches the recorded duration.
+    const endedAt = this.now();
+
+    // Kick the end-of-window probe now: after MONITOR is stopped (its INFO is
+    // never captured) and before draining the write queue (slow storage must
+    // not stretch the sampled window).
+    const endSamplePromise = this.startEndSample();
+
     this.flush();
 
     // Wait for the in-flight write queue to drain.
@@ -324,7 +366,7 @@ export class CaptureWriter {
       // queue items already log their own errors
     }
 
-    const endedAt = this.now();
+    const endSample = await endSamplePromise;
 
     if (!this.skipSessionFinalize) {
       try {
@@ -335,6 +377,7 @@ export class CaptureWriter {
           byteCount: this.byteCount,
           lineCount: this.lineCount,
           terminationReason: reason,
+          ...this.finalizeExtras(endSample),
         });
       } catch (err) {
         this.logger.error(`Failed to finalize session row: ${(err as Error).message}`);
@@ -357,7 +400,38 @@ export class CaptureWriter {
       byteCount: this.byteCount,
       lineCount: this.lineCount,
       endedAt,
+      endSample: this.endSampler === undefined ? undefined : endSample,
     });
     this.resolveDone = null;
+  }
+
+  private startEndSample(): Promise<CounterSampleOutcome | null> {
+    const sampler = this.endSampler;
+    if (sampler === undefined) {
+      return Promise.resolve(null);
+    }
+    return withTimeout(
+      Promise.resolve().then(() => sampler()),
+      this.endSampleTimeoutMs,
+      `End-of-window counter sample timed out after ${this.endSampleTimeoutMs} ms`,
+    ).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`End-of-window counter sample threw: ${message}`);
+        return { sample: null, error: message };
+      });
+  }
+
+  private finalizeExtras(
+    endSample: CounterSampleOutcome | null,
+  ): Pick<CaptureSessionPatch, 'counterSnapshots'> {
+    if (this.buildFinalizePatch === undefined) {
+      return {};
+    }
+    try {
+      return this.buildFinalizePatch(endSample);
+    } catch (err) {
+      this.logger.warn(`buildFinalizePatch threw (ignored): ${(err as Error).message}`);
+      return {};
+    }
   }
 }

@@ -2306,6 +2306,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (patch.lineCount !== undefined) session.lineCount = patch.lineCount;
     if (patch.terminationReason !== undefined) session.terminationReason = patch.terminationReason;
     if (patch.nodeSegments !== undefined) session.nodeSegments = patch.nodeSegments;
+    if (patch.counterSnapshots !== undefined) session.counterSnapshots = patch.counterSnapshots;
     return true;
   }
 
