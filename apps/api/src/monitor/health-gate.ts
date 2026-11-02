@@ -30,6 +30,10 @@ export const DEFAULT_HEALTH_GATE_THRESHOLDS: HealthGateThresholds = {
   replicationLagThresholdBytes: 10 * 1024 * 1024,
 };
 
+export function isLagAtLimit(lagBytes: number, limitBytes: number): boolean {
+  return lagBytes > 0 && lagBytes >= limitBytes;
+}
+
 export function evaluateHealthGate(
   signals: HealthGateSignals,
   thresholds: HealthGateThresholds = DEFAULT_HEALTH_GATE_THRESHOLDS,
@@ -54,7 +58,7 @@ export function evaluateHealthGate(
 
   if (
     signals.replicationLagBytes !== null &&
-    signals.replicationLagBytes >= thresholds.replicationLagThresholdBytes
+    isLagAtLimit(signals.replicationLagBytes, thresholds.replicationLagThresholdBytes)
   ) {
     return { ...base, allow: false, skipReason: 'replication_lag_elevated' };
   }

@@ -172,12 +172,12 @@ describe('HealthGateService', () => {
       }),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(500_000_000);
+    expect(result.signals.replicationLagBytes).toBe(510_000_000);
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
   it.each(['0', '1', '2'])(
-    'does not count in-flight writes on a busy primary when a replica acked %ss ago',
+    'counts the writes read with an ack on a busy primary when a replica acked %ss ago',
     async (lag) => {
       const info = makeInfo({
         role: 'master',
@@ -194,12 +194,12 @@ describe('HealthGateService', () => {
         }),
       });
       const result = await evaluateSettled(service);
-      expect(result.signals.replicationLagBytes).toBe(0);
-      expect(result.allow).toBe(true);
+      expect(result.signals.replicationLagBytes).toBe(30_000_000);
+      expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
     },
   );
 
-  it('reports no negative lag once a replica passes the first primary offset', async () => {
+  it('measures a replica past the first primary offset against the later one', async () => {
     const info = makeInfo({
       role: 'master',
       master_repl_offset: '100000000',
@@ -215,7 +215,7 @@ describe('HealthGateService', () => {
       }),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.signals.replicationLagBytes).toBe(5_000_000);
   });
 
   it('counts a stalled replica by its gap to the first primary offset', async () => {
@@ -241,7 +241,7 @@ describe('HealthGateService', () => {
       samples: [primaryInfo(150_000_000, 130_000_000), primaryInfo(160_000_000, 131_000_000)],
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(19_000_000);
+    expect(result.signals.replicationLagBytes).toBe(20_000_000);
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
@@ -266,7 +266,7 @@ describe('HealthGateService', () => {
       nextInfo: primaryInfo(145_000_000, 143_000_000),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(0);
+    expect(result.signals.replicationLagBytes).toBe(2_000_000);
     expect(result.allow).toBe(true);
     expect(client.getInfoParsed).toHaveBeenCalledTimes(16);
   });
@@ -281,7 +281,7 @@ describe('HealthGateService', () => {
       nextInfo: primaryInfo(150_000_000, 100_000_000),
     });
     const result = await evaluateSettled(service);
-    expect(result.signals.replicationLagBytes).toBe(45_000_000);
+    expect(result.signals.replicationLagBytes).toBe(50_000_000);
     expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
@@ -427,9 +427,35 @@ describe('HealthGateService', () => {
     await jest.runAllTimersAsync();
     await pending;
     expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
-    expect(client.getInfoParsed).toHaveBeenNthCalledWith(1);
+    expect(client.getInfoParsed).toHaveBeenNthCalledWith(1, ['memory', 'replication']);
     expect(client.getInfoParsed).toHaveBeenNthCalledWith(2, ['replication']);
     expect(replacement.getInfoParsed).toHaveBeenCalledWith(['replication']);
+  });
+
+  it('stops at an ack that moved past the baseline', async () => {
+    const { service, client } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [primaryInfo(100_000_000, 60_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(2);
+    expect(result.signals.replicationLagBytes).toBe(40_000_000);
+  });
+
+  it('measures an ack against the primary offset read with it', async () => {
+    const { service } = makeService({
+      info: primaryInfo(100_000_000, 50_000_000),
+      samples: [primaryInfo(100_000_000, 50_000_000), primaryInfo(130_000_000, 60_000_000)],
+    });
+    const result = await evaluateSettled(service);
+    expect(result.signals.replicationLagBytes).toBe(70_000_000);
+  });
+
+  it('answers an advisory read without waiting for acks', async () => {
+    const { service, client } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
+    const result = await service.evaluateAdvisory(CONNECTION_ID);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
   });
 
   it('logs the measured lag rather than the baseline gap', async () => {
@@ -439,13 +465,13 @@ describe('HealthGateService', () => {
       samples: [primaryInfo(100_000_000, 50_000_000), primaryInfo(101_000_000, 60_000_000)],
     });
     await evaluateSettled(service);
-    expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":40000000'));
+    expect(debug).toHaveBeenCalledWith(expect.stringContaining('"replicationLagBytes":41000000'));
   });
 
   describe('overlapping evaluations', () => {
     const lagging = () => primaryInfo(100_000_000, 50_000_000);
     const countPolls = (client: { getInfoParsed: jest.Mock }) =>
-      client.getInfoParsed.mock.calls.filter(([sections]) => sections !== undefined).length;
+      client.getInfoParsed.mock.calls.filter(([sections]) => sections?.length === 1).length;
 
     async function countPollsOfOneEvaluation(): Promise<number> {
       const { service, client } = makeService({ info: lagging() });
@@ -464,54 +490,20 @@ describe('HealthGateService', () => {
       }
     });
 
-    it('measure apart when the later reading has a lagging replica the first lacks', async () => {
-      const laterReading = primaryInfo(100_000_000, 100_000_000, 40_000_000);
-      const { service } = makeService({
-        info: primaryInfo(100_000_000, 50_000_000, 100_000_000),
-        samples: [laterReading],
-        nextInfo: laterReading,
-      });
-      const pending = [service.evaluate(CONNECTION_ID), service.evaluate(CONNECTION_ID)];
-      await jest.runAllTimersAsync();
-      const [first, second] = await Promise.all(pending);
-      expect(first).toMatchObject({ allow: true });
-      expect(second).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
-      expect(second.signals.replicationLagBytes).toBe(60_000_000);
+    it('reuse the result within its lifetime', async () => {
+      const { service, client } = makeService({ info: lagging() });
+      await evaluateSettled(service);
+      await evaluateSettled(service);
+      expect(countPolls(client)).toBe(await countPollsOfOneEvaluation());
     });
 
-    it('share the measurement started for a replica the first lacks', async () => {
-      const laterReading = primaryInfo(100_000_000, 100_000_000, 40_000_000);
-      const { service } = makeService({
-        info: primaryInfo(100_000_000, 50_000_000, 100_000_000),
-        samples: [laterReading],
-        nextInfo: laterReading,
+    it('do not keep a failed evaluation', async () => {
+      const { service, registry } = makeService({ info: makeInfo() });
+      (registry.get as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('Connection not found');
       });
-      const measure = jest.spyOn(service as any, 'measureLagAtNextAcks');
-      const pending = [1, 2, 3].map(() => service.evaluate(CONNECTION_ID));
-      await jest.runAllTimersAsync();
-      await Promise.all(pending);
-      expect(measure).toHaveBeenCalledTimes(2);
-    });
-
-    it('take a measurement only from one that covered their replica', async () => {
-      const { service } = makeService({ info: primaryInfo(100_000_000) });
-      const settle: Array<(lag: number) => void> = [];
-      jest
-        .spyOn(service as any, 'measureLagAtNextAcks')
-        .mockImplementation(() => new Promise((resolve) => settle.push(resolve)));
-      const share = (id: string): Promise<number> =>
-        (service as any).shareLagMeasurement(CONNECTION_ID, {
-          primaryOffset: 100_000_000,
-          acks: new Map([[id, 0]]),
-        });
-
-      share('slave0');
-      share('slave1');
-      const third = share('slave0');
-      settle[1](0);
-      settle[0](60_000_000);
-
-      await expect(third).resolves.toBe(60_000_000);
+      await expect(service.evaluate(CONNECTION_ID)).rejects.toThrow('Connection not found');
+      await expect(service.evaluate(CONNECTION_ID)).resolves.toMatchObject({ allow: true });
     });
 
     it('measure each connection on its own', async () => {
@@ -522,9 +514,10 @@ describe('HealthGateService', () => {
       expect(countPolls(client)).toBe(2 * (await countPollsOfOneEvaluation()));
     });
 
-    it('measure again once the shared measurement is over', async () => {
+    it('measure again once the result has expired', async () => {
       const { service, client } = makeService({ info: lagging() });
       await evaluateSettled(service);
+      await jest.advanceTimersByTimeAsync(1_000);
       await evaluateSettled(service);
       expect(countPolls(client)).toBe(2 * (await countPollsOfOneEvaluation()));
     });
@@ -538,7 +531,7 @@ describe('HealthGateService', () => {
       const result = await service.evaluate(CONNECTION_ID);
       expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
       expect(result.signals.replicationLagBytes).toBe(0);
-      expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+      expect(result.allow).toBe(true);
     });
 
     it('does not wait for a replica that is already in sync', async () => {

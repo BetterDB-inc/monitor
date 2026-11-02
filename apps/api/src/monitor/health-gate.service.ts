@@ -8,6 +8,7 @@ import {
   HealthGateSignals,
   HealthGateThresholds,
   evaluateHealthGate,
+  isLagAtLimit,
 } from './health-gate';
 
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
@@ -15,6 +16,7 @@ const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
 const NUMBERED_MASTER_LINK_KEY = /^(master_\d+)_link_status$/;
 const REPLICA_ACK_POLL_INTERVAL_MS = 100;
 const REPLICA_ACK_TIMEOUT_MS = 2500;
+const GATE_RESULT_TTL_MS = 1000;
 
 interface ReplicaAckSample {
   primaryOffset: number;
@@ -23,9 +25,9 @@ interface ReplicaAckSample {
 
 type ReplicaLine = [string, Record<string, string>];
 
-interface LagMeasurement {
-  lag: Promise<number>;
-  replicas: Set<string>;
+interface SharedGate {
+  result: Promise<HealthGateResult>;
+  expiresAt: number;
 }
 
 @Injectable()
@@ -35,7 +37,8 @@ export class HealthGateService {
   private readonly failoverWindowMs: number;
   private readonly replicaIoStaleSeconds: number;
   private readonly thresholds: HealthGateThresholds;
-  private readonly lagMeasurements = new Map<string, Set<LagMeasurement>>();
+  private readonly settledGates = new Map<string, SharedGate>();
+  private readonly advisoryGates = new Map<string, SharedGate>();
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -60,8 +63,48 @@ export class HealthGateService {
     };
   }
 
-  async evaluate(connectionId: string): Promise<HealthGateResult> {
-    const info = await this.connectionRegistry.get(connectionId).getInfoParsed();
+  evaluate(connectionId: string): Promise<HealthGateResult> {
+    return this.share(this.settledGates, connectionId, () => this.readGate(connectionId, true));
+  }
+
+  evaluateAdvisory(connectionId: string): Promise<HealthGateResult> {
+    return this.share(this.advisoryGates, connectionId, () => this.readGate(connectionId, false));
+  }
+
+  private share(
+    gates: Map<string, SharedGate>,
+    connectionId: string,
+    read: () => Promise<HealthGateResult>,
+  ): Promise<HealthGateResult> {
+    const now = Date.now();
+    const known = gates.get(connectionId);
+    if (known !== undefined && known.expiresAt > now) {
+      return known.result;
+    }
+    for (const [id, gate] of gates) {
+      if (gate.expiresAt <= now) {
+        gates.delete(id);
+      }
+    }
+    const gate: SharedGate = { result: read(), expiresAt: Infinity };
+    gates.set(connectionId, gate);
+    gate.result.then(
+      () => {
+        gate.expiresAt = Date.now() + GATE_RESULT_TTL_MS;
+      },
+      () => {
+        if (gates.get(connectionId) === gate) {
+          gates.delete(connectionId);
+        }
+      },
+    );
+    return gate.result;
+  }
+
+  private async readGate(connectionId: string, settle: boolean): Promise<HealthGateResult> {
+    const info = await this.connectionRegistry
+      .get(connectionId)
+      .getInfoParsed(['memory', 'replication']);
 
     const memoryPct = readMemoryPct(info);
     const { replicationLagBytes, replicaLinkDown, infoFailoverInProgress, ackSample } =
@@ -83,7 +126,9 @@ export class HealthGateService {
 
     const firstResult = evaluateHealthGate(signals, this.thresholds);
     const result =
-      ackSample === null ? firstResult : await this.settleLag(connectionId, ackSample, firstResult);
+      settle && ackSample !== null
+        ? await this.settleLag(connectionId, ackSample, firstResult)
+        : firstResult;
     if (!result.allow) {
       this.logger.debug(
         `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(result.signals)}`,
@@ -97,50 +142,22 @@ export class HealthGateService {
     baseline: ReplicaAckSample,
     result: HealthGateResult,
   ): Promise<HealthGateResult> {
-    const gaps = [...readReplicaGaps(baseline).values()];
+    const gaps = readReplicaGaps(baseline);
     if (
       result.skipReason !== 'replication_lag_elevated' ||
-      !gaps.some((gap) => this.isBehindLimit(gap))
+      ![...gaps.values()].some((gap) => this.isBehindLimit(gap))
     ) {
       return result;
     }
-    const replicationLagBytes = await this.shareLagMeasurement(connectionId, baseline);
+    const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline, gaps);
     return evaluateHealthGate({ ...result.signals, replicationLagBytes }, this.thresholds);
-  }
-
-  private shareLagMeasurement(connectionId: string, baseline: ReplicaAckSample): Promise<number> {
-    const replicas = this.replicasBehindLimit(baseline);
-    const inFlight = this.lagMeasurements.get(connectionId) ?? new Set<LagMeasurement>();
-    const covering = [...inFlight].find((measurement) =>
-      [...replicas].every((id) => measurement.replicas.has(id)),
-    );
-    if (covering) {
-      return covering.lag;
-    }
-    const measurement: LagMeasurement = {
-      lag: this.measureLagAtNextAcks(connectionId, baseline).finally(() => {
-        inFlight.delete(measurement);
-        if (inFlight.size === 0 && this.lagMeasurements.get(connectionId) === inFlight) {
-          this.lagMeasurements.delete(connectionId);
-        }
-      }),
-      replicas,
-    };
-    inFlight.add(measurement);
-    this.lagMeasurements.set(connectionId, inFlight);
-    return measurement.lag;
-  }
-
-  private replicasBehindLimit(sample: ReplicaAckSample): Set<string> {
-    const behind = [...readReplicaGaps(sample)].filter(([, gap]) => this.isBehindLimit(gap));
-    return new Set(behind.map(([id]) => id));
   }
 
   private async measureLagAtNextAcks(
     connectionId: string,
     baseline: ReplicaAckSample,
+    gaps: Map<string, number>,
   ): Promise<number> {
-    const gaps = readReplicaGaps(baseline);
     const deadline = Date.now() + REPLICA_ACK_TIMEOUT_MS;
     const firstSample = await this.readAckSampleBefore(connectionId, deadline);
     if (firstSample === null) {
@@ -154,14 +171,13 @@ export class HealthGateService {
         continue;
       }
       const freshGap = Math.max(0, firstSample.primaryOffset - ack);
-      if (this.isBehindLimit(freshGap)) {
+      if (ack === baseline.acks.get(id) && this.isBehindLimit(freshGap)) {
         pending.set(id, ack);
       } else {
         gaps.set(id, freshGap);
       }
     }
 
-    let previous = firstSample;
     while (pending.size > 0 && Date.now() < deadline) {
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(REPLICA_ACK_POLL_INTERVAL_MS, deadline - Date.now())),
@@ -175,17 +191,16 @@ export class HealthGateService {
         if (ack === undefined) {
           pending.delete(id);
         } else if (ack > lastAck) {
-          gaps.set(id, Math.max(0, previous.primaryOffset - ack));
+          gaps.set(id, Math.max(0, sample.primaryOffset - ack));
           pending.delete(id);
         }
       }
-      previous = sample;
     }
     return Math.max(...gaps.values());
   }
 
   private isBehindLimit(gap: number): boolean {
-    return gap > 0 && gap >= this.thresholds.replicationLagThresholdBytes;
+    return isLagAtLimit(gap, this.thresholds.replicationLagThresholdBytes);
   }
 
   private async readAckSampleBefore(
