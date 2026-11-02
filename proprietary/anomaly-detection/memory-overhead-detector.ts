@@ -1,3 +1,5 @@
+import { rearmLevel } from './rearm-level';
+
 /**
  * Non-dataset memory overhead detection (valkey-io/valkey#1792, refined memory
  * management): a maxmemory budget is meant to bound the DATASET, but the server
@@ -329,14 +331,19 @@ export function memoryOverheadRearm(
   state: MemoryOverheadState,
   finding: MemoryOverheadFinding,
 ): () => void {
-  const previousLevel = state.ackedLevel;
+  const rearm = rearmLevel(
+    LEVEL_RANK,
+    state.ackedLevel,
+    () => state.ackedLevel,
+    (level) => {
+      state.ackedLevel = level;
+    },
+  );
   return () => {
     if (finding.level === 'info') {
       state.inconsistencyNoted = false;
       return;
     }
-    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
-      state.ackedLevel = previousLevel;
-    }
+    rearm();
   };
 }

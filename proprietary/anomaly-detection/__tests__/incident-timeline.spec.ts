@@ -99,6 +99,34 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.incidentId).toBe(incidentIdFor('conn-a', 'z-gone', T0));
     });
 
+    it('keeps the stored start when the early events are no longer held', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map([['conn-a', T0 + 9 * MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('starts afresh when the dropped events ended before the gap', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map([['conn-a', T0 + MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
+    });
+
     it('splits same timestamp boundaries in event order, not id order', () => {
       const first = event({ id: 'z-first', timestamp: T0, eventSequence: 1 });
       const second = event({ id: 'a-second', timestamp: T0, eventSequence: 2 });

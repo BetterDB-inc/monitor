@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatValue } from './AnomalyDashboard';
+import { formatValue } from '../lib/formatters';
 
 describe('formatValue', () => {
   it('keeps a replication gap below 1 KiB in bytes', () => {

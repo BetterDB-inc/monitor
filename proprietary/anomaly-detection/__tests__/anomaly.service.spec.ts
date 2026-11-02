@@ -5580,13 +5580,13 @@ describe('AnomalyService', () => {
       expect((service as any).saveTails.size).toBe(0);
     });
 
-    it('announces nothing for an event closed before its first save', async () => {
+    it('sends the webhook for an event closed before its first save', async () => {
       const event = { ...anomaly(), resolved: true, resolvedAt: Date.now() };
 
       await (service as any).persistAnomaly(event, mockCtx);
 
       expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
-      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
     });
 
     it('closes an open event once the outbox gives up on its save', async () => {
@@ -8842,20 +8842,64 @@ describe('AnomalyService', () => {
       expect((service as any).findIncidentEvent('next-199')?.id).toBe('next-199');
     });
 
-    it('forgets the events of a removed connection and cleared events', async () => {
-      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
-      const other = { connectionId: 'conn-2', host: 'h', port: 6379 };
-      await (service as any).addAnomaly(anomaly({ id: 'gone', connectionId: 'conn-1' }), ctx);
-      await (service as any).addAnomaly(
-        anomaly({ id: 'closed', connectionId: 'conn-2', resolved: true }),
-        other,
+    it('reads history behind more boundaries than a call can take as arguments', async () => {
+      const startedAt = Date.now() - 60_000;
+      storage.getIncidentBoundaries.mockResolvedValue(
+        Array.from({ length: 200_000 }, (_, i) => ({
+          scopeId: 'conn-1',
+          startedAt: startedAt + i,
+          anomalyId: `a-${i}`,
+        })),
       );
 
-      (service as any).onConnectionRemoved('conn-1');
+      await expect(service.getIncidentTimelines('conn-1', startedAt)).resolves.toEqual([]);
+    });
+
+    it('forgets a node once it leaves the cluster', () => {
+      const node = (id: string) => ({ id, address: `${id}:6379` }) as ClusterNode;
+      (service as any).rememberClusterKey('conn-1', [node('a'), node('b')]);
+      (service as any).rememberClusterKey('conn-1', [node('b'), node('c')]);
+
+      expect([...(service as any).clusterKeyByNode.keys()].sort()).toEqual(['b', 'c']);
+    });
+
+    it('knows the cluster before anything in a first poll is stamped', async () => {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        stats: { cluster_enabled: '1' },
+      });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([
+        { id: 'a', flags: ['master'], master: '-', slots: [], address: 'a:6379' },
+        { id: 'b', flags: ['master'], master: '-', slots: [], address: 'b:6379' },
+      ]);
+      let known: string | undefined;
+      jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+        known = (service as any).connectionClusterKeys.get('conn-1');
+      });
+
+      await (service as any).pollConnection(mockCtx);
+
+      expect(known).toEqual(expect.any(String));
+    });
+
+    it('keeps cleared events for the incident they belong to', async () => {
+      await (service as any).addAnomaly(
+        anomaly({ id: 'closed', connectionId: 'conn-2', resolved: true }),
+        { connectionId: 'conn-2', host: 'h', port: 6379 },
+      );
+
       service.clearResolved();
 
+      expect((service as any).findIncidentEvent('closed')).toBeDefined();
+      expect((service as any).recentAnomalies).toEqual([]);
+    });
+
+    it('forgets the events of a removed connection', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'gone', connectionId: 'conn-1' }), ctx);
+
+      (service as any).onConnectionRemoved('conn-1');
+
       expect((service as any).findIncidentEvent('gone')).toBeUndefined();
-      expect((service as any).findIncidentEvent('closed')).toBeUndefined();
     });
 
     it('does not rebuild timelines on a tick where nothing changed', async () => {
@@ -9402,7 +9446,7 @@ describe('AnomalyService', () => {
 
     it('pages incident history by cursor, not offset', async () => {
       const t = Date.now() - 60 * MIN;
-      const rows = Array.from({ length: 1500 }, (_, i) => ({
+      const rows = Array.from({ length: 7500 }, (_, i) => ({
         ...anomaly({ id: `e-${String(i).padStart(4, '0')}`, timestamp: t + i }),
         anomalyType: 'spike',
       })).reverse();
@@ -9414,7 +9458,7 @@ describe('AnomalyService', () => {
 
       const [incident] = await service.getIncidentTimelines('conn-1', t, undefined, 1);
 
-      expect(incident.entries).toHaveLength(1500);
+      expect(incident.entries).toHaveLength(7500);
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
     });
 
@@ -9552,13 +9596,13 @@ describe('AnomalyService', () => {
         anomalyType: 'spike',
       });
       storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
-        after ? [row(999), row(1000)] : Array.from({ length: 1000 }, (_, i) => row(i)),
+        after ? [row(4999), row(5000)] : Array.from({ length: 5000 }, (_, i) => row(i)),
       );
 
       const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
-      expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(1001);
-      expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(1001);
+      expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(5001);
+      expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(5001);
     });
 
     it('warns and stops paging at the scan cap', async () => {
@@ -9567,7 +9611,7 @@ describe('AnomalyService', () => {
       const pageStart = (after?: { id: string }) =>
         after ? Number(after.id.split('-').pop()) + 1 : 0;
       storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
-        Array.from({ length: 1000 }, (_, i) => ({
+        Array.from({ length: 5000 }, (_, i) => ({
           ...anomaly({ id: `event-${pageStart(after) + i}`, timestamp: t }),
           anomalyType: 'spike',
         })),
@@ -9575,9 +9619,9 @@ describe('AnomalyService', () => {
 
       const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
-      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(100);
-      expect(events).toHaveLength(100_000);
-      expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 100000 events');
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(10);
+      expect(events).toHaveLength(50_000);
+      expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 50000 events');
     });
 
     it('binds the next firing to the earliest of many later events', async () => {

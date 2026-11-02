@@ -26,6 +26,7 @@ import {
   WebhookEventType,
 } from '@betterdb/shared';
 import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
+import { rearmLevel } from './rearm-level';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -327,7 +328,8 @@ interface TrackedResyncEvent {
   since: number;
 }
 
-const MAX_SCANNED_CALLER_EVENTS = 100_000;
+const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
+const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -349,6 +351,7 @@ export class AnomalyService
   private recentAnomalies: AnomalyEvent[] = [];
   private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
   private readonly incidentEventsById = new Map<string, AnomalyEvent>();
+  private readonly incidentEventsDroppedThrough = new Map<string, number>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly incidentTimelineBuilder = new IncidentTimelineBuilder(
     {},
@@ -904,6 +907,7 @@ export class AnomalyService
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
     this.forgetIncidentEvents(connectionId, () => true);
+    this.incidentEventsDroppedThrough.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -1061,6 +1065,10 @@ export class AnomalyService
       const info = this.convertInfoToRecord(infoResponse);
       const sentinelMode = isSentinelMode(info);
       const timestamp = Date.now();
+      const clusterKeyUnknown = !this.connectionClusterKeys.has(ctx.connectionId);
+      if (live && info['cluster_enabled'] === '1' && clusterKeyUnknown) {
+        await this.learnClusterKey(ctx);
+      }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       let cpuUtilizationSample: number | null = null;
@@ -2038,12 +2046,12 @@ export class AnomalyService
     connectionId: string,
     previous: 'none' | 'warning' | 'critical',
   ): () => void {
-    return () => {
-      const level = this.clientSaturationLevel.get(connectionId) ?? 'none';
-      if (AnomalyService.SATURATION_RANK[previous] < AnomalyService.SATURATION_RANK[level]) {
-        this.clientSaturationLevel.set(connectionId, previous);
-      }
-    };
+    return rearmLevel(
+      AnomalyService.SATURATION_RANK,
+      previous,
+      () => this.clientSaturationLevel.get(connectionId) ?? 'none',
+      (level) => this.clientSaturationLevel.set(connectionId, level),
+    );
   }
 
   /**
@@ -6001,7 +6009,10 @@ export class AnomalyService
     this.incidentEventsById.set(anomaly.id, anomaly);
     if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
       const evicted = events.shift();
-      if (evicted) this.incidentEventsById.delete(evicted.id);
+      if (evicted) {
+        this.incidentEventsById.delete(evicted.id);
+        this.incidentEventsDroppedThrough.set(connectionId, evicted.timestamp);
+      }
     }
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
@@ -6117,11 +6128,9 @@ export class AnomalyService
     if (firstSave) {
       this.anomalySaveHooks.get(anomaly)?.();
       this.anomalySaved?.publish({ ...stored, connectionId });
-      if (!anomaly.resolved) {
-        this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
-          this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
-        });
-      }
+      this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+        this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
+      });
     }
     const onCloseDrop = this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
@@ -6248,8 +6257,22 @@ export class AnomalyService
     const nodeIds = nodes.map((node) => node.id);
     const known = nodeIds.map((id) => this.clusterKeyByNode.get(id)).find(Boolean);
     const clusterKey = known ?? liveKey;
+    const current = new Set(nodeIds);
+    for (const [nodeId, key] of this.clusterKeyByNode) {
+      if (key === clusterKey && !current.has(nodeId)) this.clusterKeyByNode.delete(nodeId);
+    }
     nodeIds.forEach((id) => this.clusterKeyByNode.set(id, clusterKey));
     this.connectionClusterKeys.set(connectionId, clusterKey);
+  }
+
+  private async learnClusterKey(ctx: ConnectionContext): Promise<void> {
+    try {
+      this.rememberClusterKey(ctx.connectionId, await ctx.client.getClusterNodes());
+    } catch (err) {
+      this.logger.debug(
+        `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   private forgetClusterKey(connectionId: string): void {
@@ -6453,6 +6476,7 @@ export class AnomalyService
         now,
         this.incidentRecoveryProbe,
         this.liveBoundaries,
+        this.incidentEventsDroppedThrough,
       );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;
@@ -6644,10 +6668,10 @@ export class AnomalyService
   ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
     const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, endTime);
     const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    const earliest = Math.min(
-      loadFrom,
-      ...boundaries.map((b) => b.startedAt).filter((at) => at >= reach),
-    );
+    const earliest = boundaries
+      .map((b) => b.startedAt)
+      .filter((at) => at >= reach)
+      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
     const events = await this.loadIncidentEvents(connectionId, earliest, endTime);
     if (!connectionId) return { events, boundaries };
     const scope = this.correlationScopeOf(connectionId);
@@ -6715,7 +6739,6 @@ export class AnomalyService
     startTime: number,
     endTime: number | undefined,
   ): Promise<AnomalyEvent[]> {
-    const pageSize = 1000;
     const events: AnomalyEvent[] = [];
     let after: AnomalyEventCursor | undefined;
     while (events.length < MAX_SCANNED_CALLER_EVENTS) {
@@ -6723,11 +6746,11 @@ export class AnomalyService
         startTime,
         endTime,
         scope,
-        limit: pageSize,
+        limit: INCIDENT_HISTORY_PAGE_SIZE,
         after,
       });
       events.push(...page.map((s) => this.storedToAnomalyEvent(s)));
-      if (page.length < pageSize) return events;
+      if (page.length < INCIDENT_HISTORY_PAGE_SIZE) return events;
       after = page[page.length - 1];
     }
     this.logger.warn(
@@ -7875,9 +7898,6 @@ export class AnomalyService
   clearResolved(): number {
     const beforeCount = this.recentAnomalies.length;
     this.recentAnomalies = this.recentAnomalies.filter((a) => !a.resolved);
-    for (const connectionId of [...this.incidentEvents.keys()]) {
-      this.forgetIncidentEvents(connectionId, (a) => a.resolved === true);
-    }
     return beforeCount - this.recentAnomalies.length;
   }
 
