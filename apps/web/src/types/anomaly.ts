@@ -28,6 +28,7 @@ export interface CorrelatedAnomalyGroup {
   correlationId: string;
   timestamp: number;
   anomalies: AnomalyEvent[];
+  truncated?: boolean;
   pattern: string;
   diagnosis: string;
   recommendations: string[];

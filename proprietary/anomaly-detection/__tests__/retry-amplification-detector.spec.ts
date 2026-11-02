@@ -2,7 +2,8 @@ import {
   createRetryAmplificationState,
   describeRetryAmplificationState,
   observePushCadence,
-  retryAmplificationEpisodeStart,
+  latestEpisodeStart,
+  openEpisodeStart,
   retryAmplificationMaxPollGap,
   retryAmplificationRearm,
   evaluateRetryAmplification,
@@ -489,8 +490,8 @@ describe('retry amplification detector', () => {
       skipGap(d);
       const finding = d.poll(hotSpec);
 
-      expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
-      expect(retryAmplificationEpisodeStart(d.state, null)).toBeNull();
+      expect(latestEpisodeStart(d.state)).toBe(startedAt);
+      expect(openEpisodeStart(d.state)).toBeNull();
     });
 
     it('keeps the episode through a blip shorter than two windows', () => {
@@ -869,7 +870,7 @@ describe('retry amplification detector', () => {
       windows: 4,
       startedAt,
     });
-    expect(retryAmplificationEpisodeStart(d.state, finding)).toBe(startedAt);
+    expect(latestEpisodeStart(d.state)).toBe(startedAt);
   });
 
   describe('hot run that never goes cold twice', () => {

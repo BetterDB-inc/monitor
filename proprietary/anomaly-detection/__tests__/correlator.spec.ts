@@ -717,6 +717,7 @@ describe('Correlator', () => {
         divergence({ timestamp: now }),
         makeAnomaly({
           metricType: MetricType.CPU_UTILIZATION,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
           timestamp: now + 100,
           connectionId: 'c1',
         }),

@@ -179,10 +179,16 @@ export function isCustomized(
   return ENTRY_FIELDS.some((key) => resolved[key] !== defaults[key]);
 }
 
+export const WARNING_ZSCORE_ONLY_METRICS: ReadonlySet<AnomalyDetectorMetric> = new Set([
+  'error_replies',
+]);
+
 export function summarize(
   resolved: AnomalyDetectorConfigEntry,
   defaults: AnomalyDetectorConfigEntry,
+  metric?: AnomalyDetectorMetric,
 ): Array<{ text: string; customized: boolean }> {
+  const warningZScoreOnly = metric !== undefined && WARNING_ZSCORE_ONLY_METRICS.has(metric);
   const differs = (key: keyof AnomalyDetectorConfigEntry) => resolved[key] !== defaults[key];
   const absolute = (label: string, key: AbsoluteKey) => ({
     text: resolved[key] === undefined ? `${label} off` : `${label} >${resolved[key]}`,
@@ -190,8 +196,10 @@ export function summarize(
   });
   return [
     {
-      text: `z ${resolved.warningZScore} / ${resolved.criticalZScore}`,
-      customized: differs('warningZScore') || differs('criticalZScore'),
+      text: warningZScoreOnly
+        ? `z ${resolved.warningZScore}`
+        : `z ${resolved.warningZScore} / ${resolved.criticalZScore}`,
+      customized: differs('warningZScore') || (!warningZScoreOnly && differs('criticalZScore')),
     },
     absolute('warn', 'warningAbsolute'),
     absolute('crit', 'criticalAbsolute'),

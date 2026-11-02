@@ -10,7 +10,6 @@ import {
 
 export interface SpikeDetectorOptions {
   minValue?: number;
-  thresholdOverridesBelowMean?: boolean;
   zScoreCritical?: boolean;
 }
 
@@ -33,7 +32,6 @@ export class SpikeDetector {
   ) {
     this.options = {
       minValue: options.minValue ?? Number.NEGATIVE_INFINITY,
-      thresholdOverridesBelowMean: options.thresholdOverridesBelowMean ?? false,
       zScoreCritical: options.zScoreCritical ?? true,
     };
     // Set defaults
@@ -71,7 +69,6 @@ export class SpikeDetector {
     const isDrop = zScore < 0;
 
     const exceedsAbsolute =
-      this.options.thresholdOverridesBelowMean &&
       currentValue >= Math.min(this.config.warningThreshold, this.config.criticalThreshold);
 
     if (currentValue < this.options.minValue && !exceedsAbsolute) {
@@ -82,9 +79,7 @@ export class SpikeDetector {
 
     // Skip drops if not configured to detect them
     if (isDrop && !countsAsDrop && !exceedsAbsolute) {
-      if (this.options.thresholdOverridesBelowMean) {
-        this.consecutiveCounts.delete(this.metricType);
-      }
+      this.consecutiveCounts.delete(this.metricType);
       return null;
     }
 

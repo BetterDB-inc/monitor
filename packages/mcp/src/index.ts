@@ -198,6 +198,18 @@ function instanceNotFoundResult(instanceId: string): {
   };
 }
 
+async function unavailableOrNotFoundResult(
+  instanceId: string,
+  feature: string,
+): Promise<ReturnType<typeof unavailableResult> | ReturnType<typeof instanceNotFoundResult>> {
+  const { instances } = (await apiFetch('/mcp/instances')) as {
+    instances: Array<{ id: string }>;
+  };
+  return instances.some((inst) => inst.id === instanceId)
+    ? unavailableResult(feature)
+    : instanceNotFoundResult(instanceId);
+}
+
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function resolveInstanceId(overrideId?: string): string {
@@ -682,12 +694,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/anomalies/retry-amplification`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          const { instances } = (await apiFetch('/mcp/instances')) as {
-            instances: Array<{ id: string }>;
-          };
-          return instances.some((inst) => inst.id === id)
-            ? unavailableResult('Anomaly detection')
-            : instanceNotFoundResult(id);
+          return unavailableOrNotFoundResult(id, 'Anomaly detection');
         }
         throw err;
       }
@@ -2047,7 +2054,7 @@ server.tool(
         data = await apiFetch(`/mcp/instance/${id}/history/replication-divergence${qs}`);
       } catch (err) {
         if (err instanceof ApiHttpError && err.status === 404) {
-          return unavailableResult('Replication divergence detection');
+          return unavailableOrNotFoundResult(id, 'Replication divergence detection');
         }
         throw err;
       }

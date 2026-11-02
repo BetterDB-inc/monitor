@@ -81,6 +81,21 @@ describe('retry amplification attribution', () => {
   });
 
   describe('rankRetryAmplificationContributors', () => {
+    it('keeps a client that always connects per request out of the reconnect slots', () => {
+      const group = (name: string, count: number) => ({ name, user: 'default', ip: '10.0.0.1', count });
+
+      const ranked = rankRetryAmplificationContributors({
+        before: null,
+        first: null,
+        latest: null,
+        capture: [],
+        newConnections: [group('php-fpm', 900), group('storm', 40)],
+        baselineConnections: [group('php-fpm', 880)],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['storm']);
+    });
+
     it('ranks by command-rate growth against the pre-episode rate', () => {
       const before = snapshot(0, [
         client({ id: '1', name: 'checkout', 'tot-cmds': '1000' }),

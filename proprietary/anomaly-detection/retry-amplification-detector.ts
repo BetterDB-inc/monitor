@@ -159,7 +159,7 @@ export const RETRY_AMP_TRIGGER_LABEL: Record<RetryAmplificationTrigger, string> 
 };
 
 const LOAD_PATTERN_LABEL: Record<LoadPattern, string> = {
-  stress: 'load is rising with stress',
+  rising: 'load is rising with stress',
   step: 'load stepped up under stress and is holding',
 };
 
@@ -311,7 +311,7 @@ function pearson(xs: number[], ys: number[]): number | null {
   return cov / Math.sqrt(vx * vy);
 }
 
-type LoadPattern = 'stress' | 'step';
+type LoadPattern = 'rising' | 'step';
 
 interface CoMovement {
   r: number | null;
@@ -328,7 +328,7 @@ function coMovement(run: RetryAmplificationWindow[], base: WindowBaseline): CoMo
   for (const { series, stressed } of retryLegs) {
     if (!stressed || series.some((v) => v === null)) continue;
     const r = pearson(load, series as number[]);
-    if (r !== null && (best === null || r > (best.r ?? -Infinity))) best = { r, pattern: 'stress' };
+    if (r !== null && (best === null || r > (best.r ?? -Infinity))) best = { r, pattern: 'rising' };
   }
   return best;
 }
@@ -444,7 +444,7 @@ function classifyRun(
     trigger,
     windows,
     loadRatio,
-    pattern: movement.pattern === 'step' ? 'step' : 'rising',
+    pattern: movement.pattern,
     correlation,
     connectedClients: latest.connectedClients,
     relatedMetrics: collectRelatedMetrics(run, base, trigger),
@@ -710,12 +710,12 @@ export function describeRetryAmplificationState(
   };
 }
 
-export function retryAmplificationEpisodeStart(
-  state: RetryAmplificationState,
-  finding: RetryAmplificationFinding | null,
-): number | null {
-  if (state.hotRun.length > 0) return state.hotRun[0].start;
-  return finding !== null ? (state.lastEpisode?.startedAt ?? null) : null;
+export function openEpisodeStart(state: RetryAmplificationState): number | null {
+  return state.hotRun[0]?.start ?? null;
+}
+
+export function latestEpisodeStart(state: RetryAmplificationState): number | null {
+  return openEpisodeStart(state) ?? state.lastEpisode?.startedAt ?? null;
 }
 
 export function retryAmplificationRearm(

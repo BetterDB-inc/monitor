@@ -25,6 +25,7 @@ import {
   WebhookEventType,
 } from '@betterdb/shared';
 import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
+import { ClientListCache } from '@app/common/services/client-list-cache';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
 import { SpikeDetector } from './spike-detector';
@@ -227,7 +228,8 @@ import {
   evaluateRetryAmplification,
   RetryAmplificationStatus,
   describeRetryAmplificationState,
-  retryAmplificationEpisodeStart,
+  latestEpisodeStart,
+  openEpisodeStart,
   retryAmplificationRearm,
   observePushCadence,
   retryAmplificationMaxPollGap,
@@ -296,19 +298,13 @@ const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const MAX_CORRELATED_MEMBER_ROWS = 10_000;
+const CLIENT_SNAPSHOT_MIN_GAP_MS = RETRY_AMP_WINDOW_MS / 2;
 const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
 
 interface RetryAmplificationClientHistory {
   snapshots: ClientCommandSnapshot[];
   readAt: number | null;
-  reading: boolean;
-  unsupported: boolean;
-}
-
-interface RecentAnomalyIndex {
-  ring: AnomalyEvent[];
-  length: number;
-  byConnection: Map<string, AnomalyEvent[]>;
+  runId: string | undefined;
 }
 
 interface RetryAmplificationReport {
@@ -479,7 +475,7 @@ export class AnomalyService
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
     if (entry.kind === 'save' && entry.anomaly.resolved) this.releaseLatch(entry.anomaly);
     if (entry.kind === 'resolve' && reason === 'expired') {
-      this.recentAnomalies = this.recentAnomalies.filter((anomaly) => anomaly.id !== entry.id);
+      this.keepRecentAnomalies((anomaly) => anomaly.id !== entry.id);
     }
   });
   private correlationTicking = false;
@@ -507,7 +503,11 @@ export class AnomalyService
   private retryAmplificationState = new Map<string, RetryAmplificationState>();
   private retryAmplificationClients = new Map<string, RetryAmplificationClientHistory>();
   private readonly retryAmplificationReports = new Map<string, Promise<void>>();
-  private recentAnomalyIndex: RecentAnomalyIndex | null = null;
+  private recentAnomaliesByConnection = new Map<string, AnomalyEvent[]>();
+  private retryAmplificationDispatched = new Map<
+    string,
+    { episodeStart: number; level: RetryAmplificationFinding['level'] }
+  >();
   private retryAmplificationContributors = new Map<
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
@@ -630,6 +630,8 @@ export class AnomalyService
     private readonly anomalyWebhookSink?: AnomalyWebhookSink,
     @Optional()
     private readonly anomalySaved?: AnomalySavedBus,
+    @Optional()
+    private readonly clientListCache?: ClientListCache,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -900,6 +902,8 @@ export class AnomalyService
     this.retryAmplificationState.delete(connectionId);
     this.retryAmplificationReports.delete(connectionId);
     this.retryAmplificationClients.delete(connectionId);
+    this.retryAmplificationDispatched.delete(connectionId);
+    this.clientListCache?.forget(connectionId);
     this.retryAmplificationContributors.delete(connectionId);
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
@@ -3253,7 +3257,6 @@ export class AnomalyService
           this.resolveSpikeConfig(MetricType.ERROR_REPLIES),
           {
             minValue: ERROR_REPLIES_MIN_PER_SEC,
-            thresholdOverridesBelowMean: true,
             zScoreCritical: false,
           },
         ),
@@ -3407,11 +3410,11 @@ export class AnomalyService
       activeSaturation: [...activeSaturation],
     });
 
-    this.refreshClientSnapshots(ctx, state, timestamp);
+    this.refreshClientSnapshots(ctx, state, info.run_id);
     if (finding === null) return;
 
     const attributionStart =
-      retryAmplificationEpisodeStart(state, finding) ?? timestamp - RETRY_AMP_WINDOW_MS;
+      latestEpisodeStart(state) ?? timestamp - RETRY_AMP_WINDOW_MS;
     const closedAt = state.hotRun.length === 0 ? state.lastEpisode?.endedAt : undefined;
     this.queueRetryAmplificationReport({
       ctx,
@@ -3481,6 +3484,13 @@ export class AnomalyService
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     this.anomalySaveHooks.set(event, () => {
       if (event.resolved) return;
+      const sent = this.retryAmplificationDispatched.get(ctx.connectionId);
+      const sameEpisode = sent?.episodeStart === attributionStart;
+      if (sameEpisode && sent?.level === 'critical' && finding.level === 'warning') return;
+      this.retryAmplificationDispatched.set(ctx.connectionId, {
+        episodeStart: attributionStart,
+        level: finding.level,
+      });
       this.webhookEventsProService
         ?.dispatchRetryAmplificationDetected({
           level: finding.level,
@@ -3503,77 +3513,63 @@ export class AnomalyService
   }
 
   private recentEventsOf(connectionId: string): AnomalyEvent[] {
-    const ring = this.recentAnomalies;
-    let index = this.recentAnomalyIndex;
-    if (index === null || index.ring !== ring || index.length !== ring.length) {
-      const byConnection = new Map<string, AnomalyEvent[]>();
-      for (const event of ring) {
-        if (event.connectionId === undefined) continue;
-        const events = byConnection.get(event.connectionId);
-        if (events === undefined) byConnection.set(event.connectionId, [event]);
-        else events.push(event);
-      }
-      index = { ring, length: ring.length, byConnection };
-      this.recentAnomalyIndex = index;
+    return this.recentAnomaliesByConnection.get(connectionId) ?? [];
+  }
+
+  private addRecentAnomaly(anomaly: AnomalyEvent): void {
+    this.recentAnomalies.push(anomaly);
+    if (anomaly.connectionId !== undefined) {
+      const events = this.recentAnomaliesByConnection.get(anomaly.connectionId);
+      if (events === undefined) this.recentAnomaliesByConnection.set(anomaly.connectionId, [anomaly]);
+      else events.push(anomaly);
     }
-    return index.byConnection.get(connectionId) ?? [];
+    const excess = this.recentAnomalies.length - this.maxRecentEvents;
+    if (excess > 0) {
+      const dropped = new Set(this.recentAnomalies.slice(0, excess));
+      this.keepRecentAnomalies((anomaly) => !dropped.has(anomaly));
+    }
+  }
+
+  private keepRecentAnomalies(keep: (anomaly: AnomalyEvent) => boolean): void {
+    this.recentAnomalies = this.recentAnomalies.filter(keep);
+    const byConnection = new Map<string, AnomalyEvent[]>();
+    for (const anomaly of this.recentAnomalies) {
+      if (anomaly.connectionId === undefined) continue;
+      const events = byConnection.get(anomaly.connectionId);
+      if (events === undefined) byConnection.set(anomaly.connectionId, [anomaly]);
+      else events.push(anomaly);
+    }
+    this.recentAnomaliesByConnection = byConnection;
   }
 
   private refreshClientSnapshots(
     ctx: ConnectionContext,
     state: RetryAmplificationState,
-    timestamp: number,
+    runId: string | undefined,
   ): void {
-    if (ctx.connectionType === 'external') return;
     let history = this.retryAmplificationClients.get(ctx.connectionId);
     if (history === undefined) {
-      history = { snapshots: [], readAt: null, reading: false, unsupported: false };
+      history = { snapshots: [], readAt: null, runId };
       this.retryAmplificationClients.set(ctx.connectionId, history);
     }
-    const tracked = history;
-    if (tracked.reading || tracked.unsupported) return;
-    if (tracked.readAt !== null && timestamp - tracked.readAt < RETRY_AMP_WINDOW_MS) return;
-    tracked.reading = true;
-    tracked.readAt = timestamp;
-    void this.readClientCommandCounts(ctx, tracked, timestamp).then((snapshot) => {
-      if (snapshot === null) return;
-      tracked.snapshots = pushClientSnapshot(
-        tracked.snapshots,
-        snapshot,
-        retryAmplificationEpisodeStart(state, null),
-      );
-    });
-  }
-
-  private async trackClientRead(
-    ctx: ConnectionContext,
-    history: RetryAmplificationClientHistory,
-  ): Promise<ClientListEntry[]> {
-    try {
-      return await ctx.client.getClients({ type: 'normal' });
-    } finally {
-      history.reading = false;
+    const capture = this.clientListCache?.latest(ctx.connectionId);
+    if (runId !== undefined && history.runId !== runId) {
+      const restarted = history.runId !== undefined;
+      history.runId = runId;
+      if (restarted) {
+        history.snapshots = [];
+        history.readAt = capture?.takenAt ?? null;
+        return;
+      }
     }
-  }
-
-  private async readClientCommandCounts(
-    ctx: ConnectionContext,
-    history: RetryAmplificationClientHistory,
-    timestamp: number,
-  ): Promise<ClientCommandSnapshot | null> {
-    try {
-      const clients = await this.raceWithTimeout(
-        this.trackClientRead(ctx, history),
-        this.infoTimeoutMs,
-        `CLIENT LIST timed out after ${this.infoTimeoutMs}ms`,
-      );
-      const snapshot = readClientCommandCounts(clients, timestamp);
-      if (snapshot === null && clients.length > 0) history.unsupported = true;
-      return snapshot;
-    } catch (error) {
-      this.logger.debug(`CLIENT LIST unavailable for ${ctx.connectionName}: ${String(error)}`);
-      return null;
+    if (capture === undefined) return;
+    if (history.readAt !== null && capture.takenAt - history.readAt < CLIENT_SNAPSHOT_MIN_GAP_MS) {
+      return;
     }
+    history.readAt = capture.takenAt;
+    const snapshot = readClientCommandCounts(capture.clients, capture.takenAt);
+    if (snapshot === null) return;
+    history.snapshots = pushClientSnapshot(history.snapshots, snapshot, openEpisodeStart(state));
   }
 
   private async attributeRetryAmplification(
@@ -3585,12 +3581,19 @@ export class AnomalyService
     const snapshots = selectClientSnapshots(history, episodeStart, until);
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
+    let baselineConnections: typeof newConnections = [];
     let snapshotsLoaded = true;
     try {
-      [capture, newConnections] = await withTimeout(
+      const span = Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+      [capture, newConnections, baselineConnections] = await withTimeout(
         Promise.all([
           this.latestClientCapture(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
+          this.storage.getNewClientConnections(
+            ctx.connectionId,
+            episodeStart - span,
+            episodeStart - 1,
+          ),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
@@ -3602,7 +3605,12 @@ export class AnomalyService
     const ratesKnown =
       snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
     if (!reconnectsKnown && !ratesKnown) return null;
-    return rankRetryAmplificationContributors({ ...snapshots, capture, newConnections });
+    return rankRetryAmplificationContributors({
+      ...snapshots,
+      capture,
+      newConnections,
+      baselineConnections,
+    });
   }
 
   private async latestClientCapture(
@@ -3628,8 +3636,7 @@ export class AnomalyService
     const state = this.retryAmplificationState.get(connectionId);
     const cached = this.retryAmplificationContributors.get(connectionId);
     if (state === undefined || cached === undefined) return null;
-    const episodeStart = retryAmplificationEpisodeStart(state, null) ?? state.lastEpisode?.startedAt;
-    return episodeStart === cached.episodeStart ? cached.contributors : null;
+    return latestEpisodeStart(state) === cached.episodeStart ? cached.contributors : null;
   }
 
   getRetryAmplificationStatus(
@@ -5545,7 +5552,7 @@ export class AnomalyService
         // pollConnection settles, so one hung fan-out would suspend anomaly
         // detection for ALL connections. Race a timeout the way healthCheckNode
         // does; a timeout surfaces as a rejected (unreachable) self-view.
-        const raw = await this.raceWithTimeout(
+        const raw = await withTimeout(
           client.call('CLUSTER', 'NODES'),
           AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
           `CLUSTER NODES to replica ${r.id.substring(0, 8)} timed out`,
@@ -5606,24 +5613,6 @@ export class AnomalyService
       this.replicaFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
     return { nodes: merged, unreachableIds };
-  }
-
-  /**
-   * Resolve a promise, or reject with `message` if it doesn't settle within `ms`.
-   * The timer is always cleared so a settled race can't leave a dangling handle.
-   */
-  private async raceWithTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(message)), ms);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
   }
 
   /**
@@ -5943,11 +5932,7 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.recentAnomalies.push(anomaly);
-
-    if (this.recentAnomalies.length > this.maxRecentEvents) {
-      this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
-    }
+    this.addRecentAnomaly(anomaly);
 
     this.countAnomaly(anomaly, ctx);
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
@@ -6142,10 +6127,7 @@ export class AnomalyService
 
   ingestExternalAnomaly(event: AnomalyEvent): void {
     if (this.recentAnomalies.some((a) => a.id === event.id)) return;
-    this.recentAnomalies.push({ ...event, persisted: true });
-    if (this.recentAnomalies.length > this.maxRecentEvents) {
-      this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
-    }
+    this.addRecentAnomaly({ ...event, persisted: true });
     this.anomalySaved?.publish(event);
   }
 
@@ -6413,15 +6395,18 @@ export class AnomalyService
       .slice(0, boundedLimit);
 
     const membersByGroup = new Map<string, AnomalyEvent[]>();
+    const truncated = new Set<string>();
     for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
       const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
       const timestamps = chunk.map((s) => s.timestamp);
+      const limit = Math.min(this.maxRecentEvents * chunk.length, MAX_CORRELATED_MEMBER_ROWS);
       const members = await this.storage.getAnomalyEvents({
         startTime: Math.min(...timestamps) - this.correlationIntervalMs,
         endTime: Math.max(...timestamps) + this.correlationIntervalMs,
         correlationIds: chunk.map((s) => s.correlationId),
-        limit: Math.min(this.maxRecentEvents * chunk.length, MAX_CORRELATED_MEMBER_ROWS),
+        limit,
       });
+      if (members.length >= limit) chunk.forEach((s) => truncated.add(s.correlationId));
       for (const member of members) {
         if (!member.correlationId) continue;
         const anomalies = membersByGroup.get(member.correlationId) ?? [];
@@ -6440,6 +6425,7 @@ export class AnomalyService
       anomalies: (membersByGroup.get(s.correlationId) ?? []).sort(
         (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
       ),
+      ...(truncated.has(s.correlationId) ? { truncated: true } : {}),
     }));
   }
 
@@ -7077,7 +7063,7 @@ export class AnomalyService
 
   clearResolved(): number {
     const beforeCount = this.recentAnomalies.length;
-    this.recentAnomalies = this.recentAnomalies.filter((a) => !a.resolved);
+    this.keepRecentAnomalies((a) => !a.resolved);
     return beforeCount - this.recentAnomalies.length;
   }
 

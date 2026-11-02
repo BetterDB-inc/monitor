@@ -16,6 +16,7 @@ export interface RetryAmplificationContributor {
 }
 
 export interface ClientListEntry {
+  flags?: string;
   id: string;
   addr: string;
   name: string;
@@ -44,6 +45,7 @@ export interface EpisodeClientSnapshots {
 export interface AttributionInput extends EpisodeClientSnapshots {
   capture: ClientSnapshotGroupRow[];
   newConnections: NewClientConnectionGroup[];
+  baselineConnections?: NewClientConnectionGroup[];
   limit?: number;
 }
 
@@ -52,6 +54,7 @@ interface ContributorAccumulator {
   keyKind: ContributorKeyKind;
   episodeRate: number;
   preEpisodeRate: number;
+  baselineConnections: number;
   newConnections: number;
   connections: number;
 }
@@ -88,6 +91,7 @@ export function readClientCommandCounts(
 ): ClientCommandSnapshot | null {
   const counts = new Map<string, ClientCommandCount>();
   for (const client of clients) {
+    if (/[SM]/.test(client.flags ?? '')) continue;
     const totalCommands = parseTotalCommands(client['tot-cmds']);
     if (totalCommands === null) continue;
     counts.set(client.id, {
@@ -109,6 +113,7 @@ function accumulatorFor(
       ...identity,
       episodeRate: 0,
       preEpisodeRate: 0,
+      baselineConnections: 0,
       newConnections: 0,
       connections: 0,
     };
@@ -176,9 +181,14 @@ function addReconnects(
   map: Map<string, ContributorAccumulator>,
   groups: NewClientConnectionGroup[],
   capture: ClientSnapshotGroupRow[],
+  baseline: NewClientConnectionGroup[],
 ): void {
   for (const group of groups) {
     accumulatorFor(map, hostKey(group.name, group.user, group.ip)).newConnections += group.count;
+  }
+  for (const group of baseline) {
+    const key = hostKey(group.name, group.user, group.ip);
+    accumulatorFor(map, key).baselineConnections += group.count;
   }
   for (const group of capture) {
     accumulatorFor(map, hostKey(group.name, group.user, group.ip)).connections += group.count;
@@ -192,20 +202,23 @@ export function rankRetryAmplificationContributors(
   if (input.before !== null && input.first !== null && input.latest !== null) {
     addCommandGrowth(map, input.before, input.first, input.latest);
   }
-  addReconnects(map, input.newConnections, input.capture);
+  addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
 
-  const contributors = [...map.values()].map((acc) => {
-    const growth = acc.preEpisodeRate > 0 ? acc.episodeRate / acc.preEpisodeRate : null;
-    return {
-      key: acc.key,
-      keyKind: acc.keyKind,
-      commandRateGrowth: growth,
-      newConnections: acc.newConnections,
-      connections: acc.connections,
-    };
-  });
+  const contributorOf = new Map(
+    [...map.values()].map((acc) => {
+      const growth = acc.preEpisodeRate > 0 ? acc.episodeRate / acc.preEpisodeRate : null;
+      const contributor = {
+        key: acc.key,
+        keyKind: acc.keyKind,
+        commandRateGrowth: growth,
+        newConnections: acc.newConnections,
+        connections: acc.connections,
+      };
+      return [acc, contributor] as const;
+    }),
+  );
 
-  const byGrowth = contributors
+  const byGrowth = [...contributorOf.values()]
     .filter(
       (c) => c.commandRateGrowth !== null && c.commandRateGrowth >= RETRY_AMP_CONTRIBUTOR_GROWTH,
     )
@@ -213,12 +226,19 @@ export function rankRetryAmplificationContributors(
       const diff = (b.commandRateGrowth ?? 0) - (a.commandRateGrowth ?? 0);
       return diff !== 0 ? diff : a.key.localeCompare(b.key);
     });
-  const byReconnects = contributors
-    .filter((c) => c.newConnections > 0)
+  const excessConnections = (acc: ContributorAccumulator) =>
+    acc.newConnections - acc.baselineConnections;
+  const byReconnects = [...map.values()]
+    .filter(
+      (acc) =>
+        acc.newConnections > 0 &&
+        acc.newConnections >= RETRY_AMP_CONTRIBUTOR_GROWTH * acc.baselineConnections,
+    )
     .sort((a, b) => {
-      const diff = b.newConnections - a.newConnections;
+      const diff = excessConnections(b) - excessConnections(a);
       return diff !== 0 ? diff : a.key.localeCompare(b.key);
-    });
+    })
+    .map((acc) => contributorOf.get(acc)!);
 
   const limit = input.limit ?? RETRY_AMP_TOP_CONTRIBUTORS;
   const ranked: RetryAmplificationContributor[] = [];
