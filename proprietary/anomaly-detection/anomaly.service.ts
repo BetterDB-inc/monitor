@@ -3244,14 +3244,6 @@ export class AnomalyService
       return;
     }
     const lastErrors = this.lastErrorReplies.get(ctx.connectionId);
-    const errorsPerSec =
-      lastErrors === undefined
-        ? 0
-        : errorRepliesPerSecond(
-            Math.max(0, currentErrors - lastErrors.value),
-            timestamp - lastErrors.timestamp,
-            this.getIntervalMs(),
-          );
     this.lastErrorReplies.set(ctx.connectionId, { value: currentErrors, timestamp });
 
     const currentCounts = readErrorstatCounts(errorstats);
@@ -3259,6 +3251,16 @@ export class AnomalyService
     if (errorstats !== undefined) {
       this.lastErrorstatCounts.set(ctx.connectionId, { counts: currentCounts, timestamp });
     }
+
+    if (lastErrors === undefined) {
+      detectors.get(MetricType.ERROR_REPLIES)?.resetRun();
+      return;
+    }
+    const errorsPerSec = errorRepliesPerSecond(
+      Math.max(0, currentErrors - lastErrors.value),
+      timestamp - lastErrors.timestamp,
+      this.getIntervalMs(),
+    );
 
     if (buffers.has(MetricType.ERROR_REPLIES) === false) {
       buffers.set(MetricType.ERROR_REPLIES, new MetricBuffer(MetricType.ERROR_REPLIES));

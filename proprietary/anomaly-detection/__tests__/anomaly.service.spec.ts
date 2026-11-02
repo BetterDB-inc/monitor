@@ -4965,8 +4965,35 @@ describe('AnomalyService', () => {
       await poll();
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5000'));
       await poll();
+      expect(errorBuffer()).toBeUndefined();
 
-      expect(errorBuffer().getLatest()).toBe(0);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5010'));
+      await poll();
+      expect(errorBuffer().getLatest()).toBe(10);
+    });
+
+    it('takes no sample until a previous reading exists', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
+      await poll();
+
+      expect(errorBuffer()).toBeUndefined();
+    });
+
+    it('does not sample when the counter reappears mid-run', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('110'));
+      await poll();
+      const samples = errorBuffer().getSampleCount();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...infoWith('0'),
+        stats: { ...infoWith('0').stats, total_error_replies: undefined },
+      });
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('120'));
+      await poll();
+
+      expect(errorBuffer().getSampleCount()).toBe(samples);
     });
 
     it('needs two consecutive hot polls before firing', async () => {
