@@ -603,13 +603,15 @@ export function replicaObservedLevel(
   addr: string,
   now: number,
   staleAfterMs: number,
+  storedWindow?: DivergenceWindow,
 ): ReplicaObservedLevel {
   const replica = state?.replicas.get(addr);
   const level = replica ? replica.level : 'none';
   if (level !== 'none') return level;
   if (!state?.observed.has(addr) || state.lastSampleAt === null) return 'unobserved';
   if (now - state.lastSampleAt > staleAfterMs) return 'unobserved';
-  const last = staleAckWindow(state, addr) ?? replica?.windows[replica.windows.length - 1];
+  const last =
+    staleAckWindow(state, addr) ?? replica?.windows[replica.windows.length - 1] ?? storedWindow;
   return last && isBehind(last) ? 'behind' : 'none';
 }
 
