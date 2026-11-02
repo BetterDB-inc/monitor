@@ -2,12 +2,14 @@ export type HealthGateSkipReason =
   | 'memory_above_threshold'
   | 'recent_oom'
   | 'failover_in_progress'
+  | 'replica_link_unhealthy'
   | 'replication_lag_elevated';
 
 export interface HealthGateSignals {
   memoryPct: number;
   oomEventsRecent: number;
-  replicationLagBytes: number;
+  replicationLagBytes: number | null;
+  replicaLinkDown: boolean | null;
   failoverInProgress: boolean;
 }
 
@@ -19,6 +21,7 @@ export interface HealthGateThresholds {
 export interface HealthGateResult {
   allow: boolean;
   skipReason?: HealthGateSkipReason;
+  lagUnconfirmed?: boolean;
   signals: HealthGateSignals;
   thresholds: HealthGateThresholds;
 }
@@ -27,6 +30,10 @@ export const DEFAULT_HEALTH_GATE_THRESHOLDS: HealthGateThresholds = {
   memoryPctThreshold: 0.85,
   replicationLagThresholdBytes: 10 * 1024 * 1024,
 };
+
+export function isLagAtLimit(lagBytes: number, limitBytes: number): boolean {
+  return lagBytes > 0 && lagBytes >= limitBytes;
+}
 
 export function evaluateHealthGate(
   signals: HealthGateSignals,
@@ -46,7 +53,14 @@ export function evaluateHealthGate(
     return { ...base, allow: false, skipReason: 'failover_in_progress' };
   }
 
-  if (signals.replicationLagBytes >= thresholds.replicationLagThresholdBytes) {
+  if (signals.replicaLinkDown) {
+    return { ...base, allow: false, skipReason: 'replica_link_unhealthy' };
+  }
+
+  if (
+    signals.replicationLagBytes !== null &&
+    isLagAtLimit(signals.replicationLagBytes, thresholds.replicationLagThresholdBytes)
+  ) {
     return { ...base, allow: false, skipReason: 'replication_lag_elevated' };
   }
 

@@ -134,6 +134,7 @@ import type {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureTriggerStatus,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
@@ -820,7 +821,11 @@ export interface StoragePort {
 
   // Monitor Capture Trigger Methods (Pro+)
   saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string>;
-  updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean>;
+  updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean>;
   getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null>;
   getCaptureTriggers(options?: CaptureTriggerQueryOptions): Promise<StoredCaptureTrigger[]>;
 

@@ -1,8 +1,6 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { SESSION_REQUIRED_MESSAGE } from '../src/auth/guards/require-session';
 
@@ -14,7 +12,6 @@ const OWNER_SIGN_IN_IP = '198.51.100.61';
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -54,7 +51,7 @@ describe('Workspace MCP tokens (E2E)', () => {
   let ownerCookie: string;
   let ownerId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-mcp-tokens-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-mcp-tokens.db');
 
   async function activity(): Promise<ActivityItem[]> {
     const response = await app.inject({
@@ -74,7 +71,6 @@ describe('Workspace MCP tokens (E2E)', () => {
     delete process.env.AUTH_SECRET;
     delete process.env.ACTIVITY_RETENTION_DAYS;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;
@@ -124,7 +120,6 @@ describe('Workspace MCP tokens (E2E)', () => {
     if (app !== undefined) {
       await app.close();
     }
-    rmSync(sqlitePath, { force: true });
     for (const key of TOUCHED) {
       const value = previous.get(key);
       if (value === undefined) {

@@ -1,6 +1,6 @@
 {
   "name": "api",
-  "version": "0.52.0",
+  "version": "0.53.0",
   "homepage": "https://betterdb.com",
   "private": true,
   "scripts": {
@@ -31,6 +31,7 @@
     "test:migration-topology": "RUN_TOPOLOGY_TESTS=true jest test/migration-topology.e2e-spec.ts",
     "test:sentinel-topology": "RUN_SENTINEL_TESTS=true jest test/sentinel-topology.e2e-spec.ts",
     "test:sentinel-loop-stall": "RUN_SENTINEL_TESTS=true jest test/sentinel-loop-stall.e2e-spec.ts",
+    "test:mtls": "RUN_MTLS_TESTS=true SKIP_DOCKER_SETUP=true jest test/mtls.e2e-spec.ts",
     "test:cluster:unit": "jest src/cluster/*.spec.ts",
     "test:integration:cluster": "TEST_DB_HOST=localhost TEST_DB_PORT=7001 jest test/api-cluster.e2e-spec.ts",
     "test:unit:parsers": "jest src/database/parsers/*.spec.ts",
@@ -74,7 +75,7 @@
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@types/better-sqlite3": "^7.6.13",
     "apache-arrow": "^21.1.0",
-    "better-auth": "1.7.2",
+    "better-auth": "1.7.14",
     "better-sqlite3": "^12.8.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",

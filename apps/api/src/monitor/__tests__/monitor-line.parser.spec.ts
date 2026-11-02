@@ -108,6 +108,22 @@ describe('matchesFilters', () => {
       expect(matchesFilters(dot, { key: 'aXb' })).toBe(false);
     });
 
+    it('matches adversarial star patterns without catastrophic backtracking', () => {
+      const long = parseMonitorLine(
+        `1700000000.0 [0 1.2.3.4:5] "GET" "${'a'.repeat(4096)}"`,
+      )!;
+      expect(matchesFilters(long, { key: `${'*a'.repeat(24)}!` })).toBe(false);
+      expect(matchesFilters(long, { key: 'a*' })).toBe(true);
+    });
+
+    it('keeps backslash and bracket literal', () => {
+      const odd = parseMonitorLine('1700000000.0 [0 1.2.3.4:5] "GET" "path\\\\part[1]"')!;
+      expect(odd.key).toBe('path\\part[1]');
+      expect(matchesFilters(odd, { key: 'path\\part[1]' })).toBe(true);
+      expect(matchesFilters(odd, { key: 'path\\part[1]*' })).toBe(true);
+      expect(matchesFilters(odd, { key: 'path\\part[2]' })).toBe(false);
+    });
+
     it('returns false for keyless commands', () => {
       const ping = parseMonitorLine('1700000000.0 [0 1.2.3.4:5] "PING"')!;
       expect(matchesFilters(ping, { key: '*' })).toBe(false);
