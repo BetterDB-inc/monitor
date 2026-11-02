@@ -236,16 +236,17 @@ function baselineRate(rateHistory: number[], excludeLast: number): number | null
   return recent.length > 0 ? median(recent) : null;
 }
 
-function rateAfterBurst(rateHistory: number[]): number | null {
-  if (rateHistory.length === 0) return null;
-  const lowest = Math.min(...rateHistory);
-  return lowest * DIVERGENCE_SUBSIDED_RATE_FACTOR < Math.max(...rateHistory) ? lowest : null;
-}
-
-function rateSubsided(replica: ReplicaDivergenceState, last: DivergenceWindow): boolean {
+function rateSubsided(
+  replica: ReplicaDivergenceState,
+  last: DivergenceWindow,
+  rateHistory: number[],
+): boolean {
   if (writesStopped(last)) return true;
-  if (replica.baselineRate === null) return false;
-  return (last.bytesPerSec as number) <= DIVERGENCE_SUBSIDED_RATE_FACTOR * replica.baselineRate;
+  const rate = last.bytesPerSec as number;
+  if (replica.baselineRate === null) {
+    return rate * DIVERGENCE_SUBSIDED_RATE_FACTOR < Math.max(...rateHistory);
+  }
+  return rate <= DIVERGENCE_SUBSIDED_RATE_FACTOR * replica.baselineRate;
 }
 
 function windowsToDrain(subside: SubsideTracking, gapBytes: number): number {
@@ -286,12 +287,12 @@ function evaluateReplica(
   }
 
   if (replica.baselineRate === null && (replica.level !== 'none' || target !== 'none')) {
-    replica.baselineRate =
-      baselineRate(rateHistory, Math.max(streak, behindRun(windows))) ?? rateAfterBurst(rateHistory);
+    replica.baselineRate = baselineRate(rateHistory, Math.max(streak, behindRun(windows)));
   }
 
   const stopped = writesStopped(last);
-  if ((replica.level !== 'none' || target !== 'none' || stopped) && rateSubsided(replica, last)) {
+  const alerting = replica.level !== 'none' || target !== 'none';
+  if ((alerting || stopped) && rateSubsided(replica, last, rateHistory)) {
     if (replica.subside === null) {
       replica.subside = { referenceGap: last.gapBytes, windows: 0 };
     } else if (last.gapBytes <= DIVERGENCE_RECOVERY_SHRINK_FRACTION * replica.subside.referenceGap) {
