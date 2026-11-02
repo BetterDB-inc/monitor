@@ -4,7 +4,7 @@ import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -78,6 +78,7 @@ import {
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
+  CaptureTriggerStatus,
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
@@ -2371,6 +2372,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
+      -- Migration: custom CA / client certificate material and auth mode (mTLS).
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS tls_config TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS auth_mode TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_connections_is_default ON connections(is_default);
 
@@ -6110,8 +6114,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -6124,6 +6128,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         node_password_encrypted = EXCLUDED.node_password_encrypted,
         db_index = EXCLUDED.db_index,
         tls = EXCLUDED.tls,
+        tls_config = EXCLUDED.tls_config,
+        auth_mode = EXCLUDED.auth_mode,
         ssh_tunnel = EXCLUDED.ssh_tunnel,
         connection_type = EXCLUDED.connection_type,
         auto_register_nodes = EXCLUDED.auto_register_nodes,
@@ -6144,6 +6150,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.nodePassword ? config.nodePasswordEncrypted === true : null,
         config.dbIndex || 0,
         config.tls || false,
+        config.tlsConfig ? JSON.stringify(config.tlsConfig) : null,
+        config.authMode ?? null,
         config.sshTunnel ? JSON.stringify(config.sshTunnel) : null,
         config.connectionType ?? null,
         config.autoRegisterNodes ?? null,
@@ -6173,6 +6181,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:
@@ -6206,6 +6216,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       nodePasswordEncrypted: row.node_password_encrypted === true ? true : undefined,
       dbIndex: row.db_index,
       tls: row.tls,
+      tlsConfig: parseTlsConfig(row.tls_config),
+      authMode: row.auth_mode === 'certificate' ? 'certificate' : undefined,
       sshTunnel: parseSshTunnel(row.ssh_tunnel),
       connectionType: row.connection_type === 'external' ? 'external' : 'direct',
       autoRegisterNodes:
@@ -7074,7 +7086,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return trigger.id;
   }
 
-  async updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean> {
+  async updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean> {
     if (!this.pool) throw new Error('Database not initialized');
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -7097,8 +7113,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (sets.length === 0) return false;
     params.push(id);
+    let where = `id = $${p++}`;
+    if (fromStatuses) {
+      where += ` AND status = ANY($${p}::text[])`;
+      params.push([...fromStatuses]);
+    }
     const result = await this.pool.query(
-      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE id = $${p}`,
+      `UPDATE capture_triggers SET ${sets.join(', ')} WHERE ${where}`,
       params,
     );
     return (result.rowCount ?? 0) > 0;

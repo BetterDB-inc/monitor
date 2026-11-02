@@ -1,39 +1,9 @@
+import { existsSync, mkdtempSync, realpathSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { Logger } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
-import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
-import { StorageModule } from '../storage/storage.module';
-import { UsageTelemetryService } from '../telemetry/usage-telemetry.service';
-import { TelemetryModule } from '../telemetry/telemetry.module';
+import { boot } from '../../test/boot-workspace-auth';
 import { ActorResolver } from './actor-resolver';
-import { WorkspaceAuthModule } from './workspace-auth.module';
-import { SystemModule } from '../system/system.module';
-
-async function boot(env: Record<string, string | undefined>): Promise<NestFastifyApplication> {
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = value;
-    }
-  }
-  const moduleRef = await Test.createTestingModule({
-    imports: [StorageModule, WorkspaceAuthModule.forRoot(), SystemModule, TelemetryModule],
-  })
-    .overrideProvider(UsageTelemetryService)
-    .useValue({
-      trackUserInvited: jest.fn(),
-      trackInviteAccepted: jest.fn(),
-      trackAppStart: jest.fn(),
-      trackUserLogin: jest.fn(),
-      trackWorkspaceFirstRegister: jest.fn(),
-      trackMemberRemoved: jest.fn(),
-    })
-    .compile();
-  const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
-  await app.init();
-  await app.getHttpAdapter().getInstance().ready();
-  return app;
-}
 
 describe('WorkspaceAuthModule', () => {
   afterEach(() => {
@@ -77,16 +47,25 @@ describe('WorkspaceAuthModule', () => {
 
   it('boots when BETTERDB_DATA_DIR is set to an empty string', async () => {
     const previous = process.env.BETTERDB_DATA_DIR;
+    const previousCwd = process.cwd();
+    const cwd = realpathSync(mkdtempSync(join(previous || tmpdir(), 'workspace-auth-cwd-')));
+    process.chdir(cwd);
     process.env.BETTERDB_DATA_DIR = '';
     try {
-      const app = await boot({
-        WORKSPACE_DISABLED: undefined,
-        STORAGE_TYPE: 'memory',
-        AUTH_SECRET: undefined,
+      await jest.isolateModulesAsync(async () => {
+        const isolated = await import('../../test/boot-workspace-auth');
+        const app = await isolated.boot({
+          WORKSPACE_DISABLED: undefined,
+          STORAGE_TYPE: 'memory',
+          AUTH_SECRET: undefined,
+        });
+        const response = await app.inject({ method: 'GET', url: '/auth/get-session' });
+        expect(response.statusCode).toBe(200);
+        await app.close();
       });
-      expect((await app.inject({ method: 'GET', url: '/auth/get-session' })).statusCode).toBe(200);
-      await app.close();
+      expect(existsSync(join(cwd, 'data', 'auth-secret'))).toBe(true);
     } finally {
+      process.chdir(previousCwd);
       if (previous === undefined) {
         delete process.env.BETTERDB_DATA_DIR;
       } else {

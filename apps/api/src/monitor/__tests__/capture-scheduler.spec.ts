@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import { CaptureScheduler } from '../capture-scheduler';
@@ -66,6 +66,27 @@ function makeScheduler(
 describe('CaptureScheduler', () => {
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('starts nothing when the schedule is deleted during the gate', async () => {
+    const captureService = makeCaptureService();
+    const healthGate = makeHealthGate(true);
+    const allowed = await healthGate.evaluate();
+    const { scheduler, storage } = makeScheduler(captureService, healthGate);
+    const schedule = await scheduler.createSchedule({
+      connectionId: CONNECTION_ID,
+      intervalSeconds: 30,
+      durationMs: 5000,
+    });
+    healthGate.evaluate.mockImplementation(async () => {
+      await scheduler.deleteSchedule(schedule.id);
+      return allowed;
+    });
+
+    await (scheduler as any).tick(schedule);
+
+    expect(captureService.startSession).not.toHaveBeenCalled();
+    expect(await storage.getScheduledCapture(schedule.id)).toBeNull();
   });
 
   describe('createSchedule', () => {
@@ -285,6 +306,26 @@ describe('CaptureScheduler', () => {
       await scheduler.fireOnce(schedule.id);
 
       expect(captureService.startSession).not.toHaveBeenCalled();
+      const updated = await storage.getScheduledCapture(schedule.id);
+      expect(updated?.lastSkipReason).toBe('session_already_active');
+
+      await scheduler.deleteSchedule(schedule.id);
+    });
+
+    it('records session_already_active when a session starts during the health gate', async () => {
+      const captureService = makeCaptureService({
+        throwOnStart: new ConflictException('connection busy'),
+      });
+      const healthGate = makeHealthGate(true);
+      const { scheduler, storage } = makeScheduler(captureService, healthGate);
+
+      const schedule = await scheduler.createSchedule({
+        connectionId: CONNECTION_ID,
+        intervalSeconds: 30,
+        durationMs: 5000,
+      });
+      await scheduler.fireOnce(schedule.id);
+
       const updated = await storage.getScheduledCapture(schedule.id);
       expect(updated?.lastSkipReason).toBe('session_already_active');
 

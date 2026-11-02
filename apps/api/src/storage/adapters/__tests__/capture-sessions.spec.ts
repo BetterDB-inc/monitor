@@ -137,6 +137,44 @@ describe.each([
     expect(await storage.updateCaptureSession(randomUUID(), { status: 'completed' })).toBe(false);
   });
 
+  describe('updateCaptureTrigger from an expected status', () => {
+    const trigger = (status: 'configured' | 'cancelled') => ({
+      id: randomUUID(),
+      connectionId: CONNECTION_ID,
+      metricType: 'connections',
+      anomalyType: 'spike',
+      expiresAt: 1_700_000_100_000,
+      createdAt: 1_700_000_000_000,
+      status,
+    });
+
+    it('applies when the status is one of those expected', async () => {
+      const stored = trigger('configured');
+      await storage.saveCaptureTrigger(stored);
+
+      const updated = await storage.updateCaptureTrigger(stored.id, { status: 'fired' }, [
+        'configured',
+        'queued',
+      ]);
+
+      expect(updated).toBe(true);
+      expect((await storage.getCaptureTrigger(stored.id))?.status).toBe('fired');
+    });
+
+    it('leaves a row in any other status alone', async () => {
+      const stored = trigger('cancelled');
+      await storage.saveCaptureTrigger(stored);
+
+      const updated = await storage.updateCaptureTrigger(stored.id, { status: 'fired' }, [
+        'configured',
+        'queued',
+      ]);
+
+      expect(updated).toBe(false);
+      expect((await storage.getCaptureTrigger(stored.id))?.status).toBe('cancelled');
+    });
+  });
+
   it('saveCaptureChunk + getCaptureChunks round-trip preserves bytes and order', async () => {
     const session = makeSession();
     await storage.saveCaptureSession(session, CONNECTION_ID);

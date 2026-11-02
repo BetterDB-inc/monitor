@@ -71,14 +71,15 @@ RUN pnpm --filter "api..." --filter "web..." build
 # cross-compiles (via GOARCH below) instead of running the toolchain under QEMU on
 # the arm64 leg - QEMU is 5-10x slower and a known source of spurious SIGSEGV.
 #
-# The `go get golang.org/x/text@v0.39.0` step raises x/text to clear the Go CVE wall
-# (v4.6.1's go.mod pins the vulnerable 0.14.0). Two caveats it introduces:
+# The `go get golang.org/x/text@v0.43.0 golang.org/x/sys@v0.49.0` step raises x/text
+# and x/sys to clear the Go CVE wall (v4.6.1's go.mod pins the vulnerable x/text 0.14.0
+# and x/sys 0.15.0). Two caveats it introduces:
 #   - It mutates go.mod/go.sum AFTER the commit tamper-check, so the shipped binary
-#     is a v4.6.1 + x/text-0.39.0 combination upstream never released; an SBOM audit
-#     against RedisShake v4.6.1 will show that single dependency delta.
+#     is a v4.6.1 + x/text-0.43.0 + x/sys-0.49.0 combination upstream never released;
+#     an SBOM audit against RedisShake v4.6.1 will show those two dependency deltas.
 #   - `go get pkg@exact-version` also DOWNGRADES. Once a future REDISSHAKE_VERSION's
-#     go.mod already requires x/text >= 0.39.0, remove that line - otherwise it
-#     silently pins x/text back down on the version bump.
+#     go.mod already requires x/text >= 0.43.0 / x/sys >= 0.49.0, drop that module
+#     from the line - otherwise it silently pins it back down on the version bump.
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS redisshake-builder
 ARG TARGETARCH
 ARG REDISSHAKE_VERSION=4.6.1
@@ -88,7 +89,7 @@ RUN apk add --no-cache git
 WORKDIR /build
 RUN git clone --depth 1 --branch "v${REDISSHAKE_VERSION}" https://github.com/tair-opensource/RedisShake.git . && \
     test "$(git rev-parse HEAD)" = "${REDISSHAKE_COMMIT}" && \
-    go get golang.org/x/text@v0.39.0 && \
+    go get golang.org/x/text@v0.43.0 golang.org/x/sys@v0.49.0 && \
     CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
         go build -trimpath -ldflags "-s -w -X main.Version=v${REDISSHAKE_VERSION} -X main.GitCommit=${REDISSHAKE_COMMIT}" -o /out/redis-shake ./cmd/redis-shake
 

@@ -287,6 +287,149 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('re-reads the seed TLS material before a node client reconnects', async () => {
+      let seedTls: Record<string, unknown> = { servername: 'seed.example', ca: 'seed-ca', cert: 'cert-a', key: 'key-a' };
+      mockDbClient.getClient.mockImplementation(() => ({ options: { username: 'u', password: 'p', tls: seedTls } }));
+      const handlers: Record<string, () => void> = {};
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, fn: () => void) => {
+          handlers[event] = fn;
+        }),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-a', key: 'key-a' });
+
+      // The adapter rotated its client certificate.
+      seedTls = { ...seedTls, cert: 'cert-b', key: 'key-b' };
+      handlers.reconnecting();
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-b', key: 'key-b' });
+    });
+
+    it('re-reads the seed TLS material before reviving a cached node client', async () => {
+      let seedTls: Record<string, unknown> = { ca: 'seed-ca', cert: 'cert-a' };
+      mockDbClient.getClient.mockImplementation(() => ({ options: { username: 'u', password: 'p', tls: seedTls } }));
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+
+      nodeClient.status = 'end';
+      seedTls = { ...seedTls, cert: 'cert-b' };
+      await service.getNodeConnection('node2-id-def456', 'test-connection');
+      expect(nodeClient.options.tls).toEqual({ ca: 'seed-ca', cert: 'cert-b' });
+    });
+
+    it('keeps a node client bound to the default connection it was created through', async () => {
+      const clientFor = (cert: string) => ({
+        ...mockDbClient,
+        getClient: () => ({ options: { username: 'u', password: 'p', tls: { ca: 'ca', cert } } }),
+      });
+      const clients: Record<string, unknown> = { 'conn-a': clientFor('cert-a'), 'conn-b': clientFor('cert-b') };
+      let defaultId = 'conn-a';
+      mockConnectionRegistry.getDefaultId.mockImplementation(() => defaultId);
+      mockConnectionRegistry.get.mockImplementation((id?: string) => clients[id ?? defaultId]);
+      const handlers: Record<string, () => void> = {};
+      const nodeClient = {
+        status: 'ready',
+        options: {} as { tls?: Record<string, unknown> },
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, fn: () => void) => {
+          handlers[event] = fn;
+        }),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(((opts: { tls?: Record<string, unknown> }) => {
+        nodeClient.options.tls = opts.tls;
+        return nodeClient;
+      }) as never);
+
+      await service.getNodeConnection('node2-id-def456');
+      defaultId = 'conn-b';
+      handlers.reconnecting();
+      expect(nodeClient.options.tls).toEqual({ ca: 'ca', cert: 'cert-a' });
+
+      nodeClient.status = 'end';
+      await service.getNodeConnection('node2-id-def456');
+      expect(nodeClient.options.tls).toEqual({ ca: 'ca', cert: 'cert-a' });
+    });
+
+    // Node clients set enableOfflineQueue: false, so quit() on a client that
+    // never became ready rejects without closing it and iovalkey keeps
+    // reconnecting. These clients must be disconnect()ed instead.
+    const notReadyClient = () => ({
+      status: 'reconnecting',
+      options: {},
+      connect: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+      quit: jest.fn().mockRejectedValue(new Error("Stream isn't writeable and enableOfflineQueue options is false")),
+      disconnect: jest.fn(),
+      on: jest.fn(),
+    });
+
+    it('disconnects a node client whose first dial fails', async () => {
+      const nodeClient = notReadyClient();
+      jest.mocked(Valkey).mockImplementationOnce((() => nodeClient) as never);
+
+      await expect(service.getNodeConnection('node2-id-def456', 'test-connection')).rejects.toThrow('ECONNREFUSED');
+      expect(nodeClient.disconnect).toHaveBeenCalled();
+      expect(nodeClient.quit).not.toHaveBeenCalled();
+    });
+
+    it('disconnects a replaced node client that is not ready', async () => {
+      const nodes = await service.discoverNodes('test-connection');
+      const target = nodes.find((n) => n.id === 'node2-id-def456')!;
+      const stale = notReadyClient();
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      internal.discoveredNodes.set(target.id, {
+        node: target,
+        client: stale,
+        lastHealthCheck: Date.now(),
+        healthy: false,
+        connectionId: 'test-connection',
+        host: '192.168.1.11',
+      });
+
+      await service.getNodeConnection(target.id, 'test-connection');
+      expect(stale.disconnect).toHaveBeenCalled();
+      expect(stale.quit).not.toHaveBeenCalled();
+    });
+
+    it('disconnects idle and remaining node clients that are not ready', async () => {
+      const nodes = await service.discoverNodes('test-connection');
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const idle = notReadyClient();
+      const remaining = notReadyClient();
+      internal.discoveredNodes.set(nodes[0].id, { node: nodes[0], client: idle, lastHealthCheck: 0, healthy: false });
+      internal.discoveredNodes.set(nodes[1].id, { node: nodes[1], client: remaining, lastHealthCheck: Date.now(), healthy: false });
+
+      await service.cleanupIdleConnections(60_000);
+      expect(idle.disconnect).toHaveBeenCalled();
+      expect(idle.quit).not.toHaveBeenCalled();
+
+      await service.disconnectAll();
+      expect(remaining.disconnect).toHaveBeenCalled();
+      expect(remaining.quit).not.toHaveBeenCalled();
+    });
+
     it('leaves TLS off for node clients when the seed has none', async () => {
       mockDbClient.getClient.mockReturnValue({ options: { username: 'u', password: 'p' } });
       await service.getNodeConnection('node2-id-def456', 'test-connection').catch(() => undefined);

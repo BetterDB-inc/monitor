@@ -116,6 +116,21 @@ describePostgres('connection type storage — postgres', () => {
     expect(plain?.nodePasswordEncrypted).toBeUndefined();
   });
 
+  it('round-trips TLS material and the auth mode, and reads them absent when unset', async () => {
+    const tlsConfig = { source: 'inline' as const, ca: 'CA', cert: 'CERT', key: 'enc(KEY)', passphrase: 'enc(pw)', secretsEncrypted: true };
+    await adapter.saveConnection({ id: 'mtls', name: 'T', host: 'h', port: 6390, tls: true, isDefault: false, createdAt: 7, tlsConfig, authMode: 'certificate' });
+    expect(await adapter.getConnection('mtls')).toMatchObject({ tls: true, tlsConfig, authMode: 'certificate' });
+    expect((await adapter.getConnections()).find((c) => c.id === 'mtls')).toMatchObject({ tlsConfig, authMode: 'certificate' });
+    // An upsert replaces the material and clears the mode.
+    await adapter.saveConnection({ id: 'mtls', name: 'T', host: 'h', port: 6390, tls: true, isDefault: false, createdAt: 7, tlsConfig: { source: 'file', caPath: 'ca.pem' } });
+    const replaced = await adapter.getConnection('mtls');
+    expect(replaced?.tlsConfig).toEqual({ source: 'file', caPath: 'ca.pem' });
+    expect(replaced?.authMode).toBeUndefined();
+    const plain = await adapter.getConnection('dir');
+    expect(plain?.tlsConfig).toBeUndefined();
+    expect(plain?.authMode).toBeUndefined();
+  });
+
   it('preserves an explicitly empty data node username', async () => {
     await adapter.saveConnection({ id: 'empty-node-user', name: 'E', host: 'h', port: 26380, isDefault: false, createdAt: 6, nodeUsername: '' });
     expect((await adapter.getConnection('empty-node-user'))?.nodeUsername).toBe('');
