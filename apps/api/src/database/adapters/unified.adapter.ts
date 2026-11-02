@@ -233,18 +233,25 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * heals on its own once the pair is complete.
    */
   private loadTlsMaterial(): void {
+    // Fingerprint before reading: if the files change between the two, the
+    // stored fingerprint is stale and the next refresh re-reads them.
+    let fingerprint: string | undefined;
+    try {
+      fingerprint = this.config.tls ? tlsMaterialFingerprint(this.config.tlsConfig) : undefined;
+    } catch {
+      fingerprint = undefined;
+    }
     const material = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
     try {
       assertUsableTlsMaterial(material);
     } catch (error) {
       this.logger.warn(`${error instanceof Error ? error.message : error}; the files are re-read before each reconnect`);
+      // Unusable material must not count as current, or a non-forced refresh
+      // would skip it until the files change again.
+      fingerprint = undefined;
     }
     this.tlsMaterial = material;
-    try {
-      this.tlsMaterialFingerprint = this.config.tls ? tlsMaterialFingerprint(this.config.tlsConfig) : undefined;
-    } catch {
-      this.tlsMaterialFingerprint = undefined;
-    }
+    this.tlsMaterialFingerprint = fingerprint;
     this.tlsMaterialCheckedAt = Date.now();
   }
 
