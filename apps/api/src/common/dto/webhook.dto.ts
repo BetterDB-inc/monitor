@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, Max, IsNumber, IsEnum, ArrayMinSize, ValidateNested } from 'class-validator';
+import { IsString, IsUrl, IsBoolean, IsArray, IsObject, IsOptional, IsInt, Min, Max, IsNumber, IsEnum, ArrayMinSize, ValidateNested, MaxLength } from 'class-validator';
 import { Type } from 'class-transformer';
 import type {
   Webhook,
@@ -223,13 +223,23 @@ export class CreateWebhookDto {
   thresholds?: WebhookThresholdsDto;
 
   @ApiPropertyOptional({
-    description: 'Payload format (generic, slack, discord)',
+    description: 'Payload format (generic, slack, discord, pagerduty, teams, google_chat)',
     enum: PayloadFormatEnum,
     default: PayloadFormatEnum.GENERIC,
   })
   @IsOptional()
   @IsEnum(PayloadFormatEnum)
   payloadFormat?: WebhookPayloadFormat;
+
+  @ApiPropertyOptional({
+    description:
+      'PagerDuty Events API v2 integration (routing) key, 32 letters and digits. Required when payloadFormat is pagerduty. Redacted in responses; sending the redacted value back keeps the stored key.',
+    example: 'R0123456789ABCDEFGHIJKLMNOPQRSTU',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  routingKey?: string;
 }
 
 /**
@@ -311,13 +321,23 @@ export class UpdateWebhookDto {
   thresholds?: WebhookThresholdsDto;
 
   @ApiPropertyOptional({
-    description: 'Payload format (generic, slack, discord)',
+    description: 'Payload format (generic, slack, discord, pagerduty, teams, google_chat)',
     enum: PayloadFormatEnum,
     default: PayloadFormatEnum.GENERIC,
   })
   @IsOptional()
   @IsEnum(PayloadFormatEnum)
   payloadFormat?: WebhookPayloadFormat;
+
+  @ApiPropertyOptional({
+    description:
+      'PagerDuty Events API v2 integration (routing) key, 32 letters and digits. Required when payloadFormat is pagerduty. Redacted in responses; sending the redacted value back keeps the stored key.',
+    example: 'R0123456789ABCDEFGHIJKLMNOPQRSTU',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  routingKey?: string;
 }
 
 /**
@@ -382,6 +402,9 @@ export class WebhookDto implements Webhook {
     default: PayloadFormatEnum.GENERIC,
   })
   payloadFormat?: WebhookPayloadFormat;
+
+  @ApiPropertyOptional({ description: 'PagerDuty routing key (redacted)', example: 'R012***' })
+  routingKey?: string;
 
   @ApiProperty({ description: 'Creation timestamp (ms)', example: 1704934800000 })
   createdAt: number;
@@ -491,4 +514,10 @@ export class TestWebhookResponseDto {
 
   @ApiPropertyOptional({ description: 'Rendered request body preview (parsed JSON)' })
   renderedPayload?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    description:
+      'PagerDuty only: whether the test incident was resolved right after it was triggered',
+  })
+  testIncidentResolved?: boolean;
 }

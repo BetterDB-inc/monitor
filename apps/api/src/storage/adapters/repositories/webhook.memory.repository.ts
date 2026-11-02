@@ -3,6 +3,7 @@ import {
   Webhook,
   WebhookDelivery,
   WebhookEventType,
+  WebhookUpdate,
 } from '../../../common/interfaces/storage-port.interface';
 
 export class WebhookMemoryRepository {
@@ -61,7 +62,7 @@ export class WebhookMemoryRepository {
 
   async updateWebhook(
     id: string,
-    updates: Partial<Omit<Webhook, 'id' | 'createdAt' | 'updatedAt'>>,
+    updates: WebhookUpdate,
   ): Promise<Webhook | null> {
     const webhook = this.webhooks.get(id);
     if (!webhook) return null;
@@ -78,6 +79,7 @@ export class WebhookMemoryRepository {
       createdAt: webhook.createdAt,
       updatedAt: Date.now(),
     };
+    if (updates.routingKey === null) delete updated.routingKey;
     this.webhooks.set(id, updated);
     return { ...updated };
   }

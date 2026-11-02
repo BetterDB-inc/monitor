@@ -269,6 +269,11 @@ export interface Webhook {
   thresholds?: WebhookThresholds;
   /** Payload rendering format. Defaults to 'generic' for backward compat. */
   payloadFormat?: WebhookPayloadFormat;
+  /**
+   * PagerDuty Events API v2 routing (integration) key. Required when
+   * payloadFormat is 'pagerduty', ignored otherwise. Redacted in API responses.
+   */
+  routingKey?: string;
   connectionId?: string;
   createdAt: number;
   updatedAt: number;
@@ -279,6 +284,47 @@ export enum WebhookPayloadFormat {
   GENERIC = 'generic',
   SLACK = 'slack',
   DISCORD = 'discord',
+  /** PagerDuty Events API v2: trigger / resolve with a stable dedup_key. */
+  PAGERDUTY = 'pagerduty',
+  /** Microsoft Teams Workflows webhook: Adaptive Card message. */
+  TEAMS = 'teams',
+  /** Google Chat space webhook: cardsV2 message. */
+  GOOGLE_CHAT = 'google_chat',
+}
+
+/** PagerDuty Events API v2 endpoint (US service region). */
+export const PAGERDUTY_EVENTS_URL = 'https://events.pagerduty.com/v2/enqueue';
+
+/** PagerDuty integration (routing) keys are 32 alphanumeric characters. */
+export const PAGERDUTY_ROUTING_KEY_PATTERN = /^[A-Za-z0-9]{32}$/;
+
+export function isValidPagerDutyRoutingKey(value: string): boolean {
+  return PAGERDUTY_ROUTING_KEY_PATTERN.test(value);
+}
+
+const PAGERDUTY_EVENTS_HOSTS = ['events.pagerduty.com', 'events.eu.pagerduty.com'];
+
+function hostMatches(host: string, domain: string): boolean {
+  return host === domain || host.endsWith('.' + domain);
+}
+
+/** True when the URL's hostname is PagerDuty's US or EU Events API host, whatever the scheme. */
+export function hasPagerDutyEventsHost(url: string): boolean {
+  try {
+    return PAGERDUTY_EVENTS_HOSTS.includes(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** True for an https URL on PagerDuty's US or EU Events API host. */
+export function isPagerDutyEventsUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && PAGERDUTY_EVENTS_HOSTS.includes(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -286,9 +332,35 @@ export enum WebhookPayloadFormat {
  * Returns undefined when the URL doesn't match a known chat endpoint.
  */
 export function suggestPayloadFormatForUrl(url: string): WebhookPayloadFormat | undefined {
-  if (url.includes('hooks.slack.com')) return WebhookPayloadFormat.SLACK;
-  if (url.includes('discord.com/api/webhooks') || url.includes('discordapp.com/api/webhooks')) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname;
+  if (host === 'hooks.slack.com') return WebhookPayloadFormat.SLACK;
+  if (
+    (hostMatches(host, 'discord.com') || hostMatches(host, 'discordapp.com')) &&
+    path.startsWith('/api/webhooks/')
+  ) {
     return WebhookPayloadFormat.DISCORD;
+  }
+  // events.pagerduty.com and the EU service region events.eu.pagerduty.com
+  if (parsed.protocol === 'https:' && PAGERDUTY_EVENTS_HOSTS.includes(host)) {
+    return WebhookPayloadFormat.PAGERDUTY;
+  }
+  // Teams Workflows ("When a Teams webhook request is received") and legacy incoming webhooks
+  if (
+    (host.endsWith('.logic.azure.com') || host.endsWith('.api.powerplatform.com')) &&
+    path.includes('/workflows/')
+  ) {
+    return WebhookPayloadFormat.TEAMS;
+  }
+  if (host.endsWith('.webhook.office.com')) return WebhookPayloadFormat.TEAMS;
+  if (host === 'chat.googleapis.com' && path.startsWith('/v1/spaces/')) {
+    return WebhookPayloadFormat.GOOGLE_CHAT;
   }
   return undefined;
 }

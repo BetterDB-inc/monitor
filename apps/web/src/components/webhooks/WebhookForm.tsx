@@ -5,11 +5,22 @@ import {
   getEventsByTierCategory,
   isEventAllowedForTier,
   suggestPayloadFormatForUrl,
+  isPagerDutyEventsUrl,
   WebhookEventType as WebhookEventTypeEnum,
   WebhookPayloadFormat,
+  PAGERDUTY_EVENTS_URL,
+  resolvingEventFor,
 } from '@betterdb/shared';
 import { Card } from '../ui/card';
 import { licenseApi } from '../../api/license';
+
+// Chat vendors whose URL must never receive a PagerDuty integration key.
+const OTHER_VENDOR_FORMATS = new Set<WebhookPayloadFormat>([
+  WebhookPayloadFormat.SLACK,
+  WebhookPayloadFormat.DISCORD,
+  WebhookPayloadFormat.TEAMS,
+  WebhookPayloadFormat.GOOGLE_CHAT,
+]);
 
 // Events that have configurable thresholds
 const THRESHOLD_EVENTS: WebhookEventType[] = [
@@ -30,6 +41,18 @@ const FORMAT_PLACEHOLDERS: Record<WebhookPayloadFormat, string> = {
   [WebhookPayloadFormat.GENERIC]: 'https://api.example.com/webhooks',
   [WebhookPayloadFormat.SLACK]: 'https://hooks.slack.com/services/...',
   [WebhookPayloadFormat.DISCORD]: 'https://discord.com/api/webhooks/...',
+  [WebhookPayloadFormat.PAGERDUTY]: PAGERDUTY_EVENTS_URL,
+  [WebhookPayloadFormat.TEAMS]: 'https://prod-00.westus.logic.azure.com:443/workflows/...',
+  [WebhookPayloadFormat.GOOGLE_CHAT]: 'https://chat.googleapis.com/v1/spaces/.../messages?key=...',
+};
+
+const FORMAT_LABELS: Record<WebhookPayloadFormat, string> = {
+  [WebhookPayloadFormat.GENERIC]: 'Generic JSON',
+  [WebhookPayloadFormat.SLACK]: 'Slack (Block Kit)',
+  [WebhookPayloadFormat.DISCORD]: 'Discord (embed)',
+  [WebhookPayloadFormat.PAGERDUTY]: 'PagerDuty (Events API v2)',
+  [WebhookPayloadFormat.TEAMS]: 'Microsoft Teams (Workflows)',
+  [WebhookPayloadFormat.GOOGLE_CHAT]: 'Google Chat (card)',
 };
 
 function cleanEmptyObjects(data: WebhookFormData): WebhookFormData {
@@ -152,6 +175,8 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
         events: webhook.events,
         headers: webhook.headers || {},
         payloadFormat: webhook.payloadFormat ?? WebhookPayloadFormat.GENERIC,
+        // Redacted by the API; sending it back unchanged keeps the stored key.
+        routingKey: webhook.routingKey,
         retryPolicy: webhook.retryPolicy,
         deliveryConfig: webhook.deliveryConfig ?? {},
         alertConfig: webhook.alertConfig ?? {},
@@ -235,6 +260,37 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
 
   const suggestedFormat = formData.url ? suggestPayloadFormatForUrl(formData.url) : undefined;
   const showFormatHint = !!suggestedFormat && suggestedFormat !== formData.payloadFormat;
+  const isPagerDuty = formData.payloadFormat === WebhookPayloadFormat.PAGERDUTY;
+  // A PagerDuty incident only closes on its recovery event; flag openers whose
+  // resolver is not subscribed so incidents are not left open forever.
+  const missingResolvers = isPagerDuty
+    ? formData.events
+        .map((event) => resolvingEventFor(event))
+        .filter((resolver): resolver is WebhookEventType => resolver !== undefined && !formData.events.includes(resolver))
+    : [];
+
+  const handleFormatChange = (payloadFormat: WebhookPayloadFormat) => {
+    setFormData((prev) => {
+      // PagerDuty has one well-known endpoint; fill it in rather than make users look it up,
+      // and never leave the integration key pointed at another chat vendor's URL.
+      const suggested = prev.url ? suggestPayloadFormatForUrl(prev.url) : undefined;
+      const url =
+        payloadFormat === WebhookPayloadFormat.PAGERDUTY &&
+        (prev.url === '' || (suggested !== undefined && OTHER_VENDOR_FORMATS.has(suggested)))
+          ? PAGERDUTY_EVENTS_URL
+          : prev.url;
+      if (payloadFormat !== WebhookPayloadFormat.PAGERDUTY) {
+        // Leaving PagerDuty: don't keep its endpoint or integration key.
+        return {
+          ...prev,
+          payloadFormat,
+          url: isPagerDutyEventsUrl(prev.url) ? '' : prev.url,
+          routingKey: undefined,
+        };
+      }
+      return { ...prev, payloadFormat, url };
+    });
+  };
 
   return (
     <form onSubmit={handleSubmit}>
@@ -267,13 +323,19 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
               className="w-full px-3 py-2 border rounded-md"
               placeholder={FORMAT_PLACEHOLDERS[formData.payloadFormat ?? WebhookPayloadFormat.GENERIC]}
             />
+            {isPagerDuty && formData.url !== '' && !isPagerDutyEventsUrl(formData.url) && (
+              <p className="text-xs text-yellow-600 dark:text-yellow-500 mt-1">
+                The PagerDuty integration key is sent in the body to this URL. Use{' '}
+                https://events.pagerduty.com/v2/enqueue (or events.eu.pagerduty.com) unless this is your own relay.
+              </p>
+            )}
             {showFormatHint && (
               <p className="text-xs text-primary mt-1">
                 This looks like a {suggestedFormat} URL.{' '}
                 <button
                   type="button"
                   className="underline"
-                  onClick={() => setFormData({ ...formData, payloadFormat: suggestedFormat })}
+                  onClick={() => handleFormatChange(suggestedFormat)}
                 >
                   Use {suggestedFormat} format
                 </button>
@@ -284,18 +346,45 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
           <div>
             <label className="block text-sm font-medium mb-1">Payload format</label>
             <select
+              aria-label="Payload format"
               value={formData.payloadFormat ?? WebhookPayloadFormat.GENERIC}
-              onChange={(e) => setFormData({ ...formData, payloadFormat: e.target.value as WebhookPayloadFormat })}
+              onChange={(e) => handleFormatChange(e.target.value as WebhookPayloadFormat)}
               className="w-full px-3 py-2 border rounded-md dark:[color-scheme:dark]"
             >
-              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.GENERIC}>Generic JSON</option>
-              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.SLACK}>Slack (Block Kit)</option>
-              <option className="bg-card text-card-foreground" value={WebhookPayloadFormat.DISCORD}>Discord (embed)</option>
+              {Object.values(WebhookPayloadFormat).map((format) => (
+                <option key={format} className="bg-card text-card-foreground" value={format}>
+                  {FORMAT_LABELS[format]}
+                </option>
+              ))}
             </select>
             <p className="text-xs text-muted-foreground mt-1">
-              Slack and Discord render rich messages; generic sends the raw BetterDB event JSON.
+              Slack, Discord, Teams and Google Chat render rich messages. PagerDuty opens an incident and resolves it
+              when the matching recovery event arrives (instance up, writes recovered, failover
+              completed). Generic sends the raw BetterDB event JSON.
             </p>
           </div>
+
+          {isPagerDuty && (
+            <div>
+              <label htmlFor="routing-key" className="block text-sm font-medium mb-1">
+                Integration key *
+              </label>
+              <input
+                id="routing-key"
+                type="text"
+                required={!webhook?.routingKey}
+                autoComplete="off"
+                value={formData.routingKey || ''}
+                onChange={(e) => setFormData({ ...formData, routingKey: e.target.value.trim() })}
+                className="w-full px-3 py-2 border rounded-md font-mono"
+                placeholder="32-character Events API v2 integration key"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                PagerDuty service → Integrations → Events API v2 → Integration Key. Stored redacted;
+                leave it as shown to keep the current key.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium mb-1">Secret (optional)</label>
@@ -327,6 +416,12 @@ export function WebhookForm({ webhook, onSubmit, onCancel }: WebhookFormProps) {
           {/* Events */}
           <div>
             <label className="block text-sm font-medium mb-2">Events to Subscribe *</label>
+            {missingResolvers.length > 0 && (
+              <p className="text-xs text-yellow-600 mb-2" data-testid="missing-resolvers">
+                Also subscribe to {missingResolvers.map((event) => EVENT_LABELS[event]).join(', ')} so PagerDuty
+                resolves these incidents automatically.
+              </p>
+            )}
             {loadingTier ? (
               <div className="border rounded-md p-4 text-center text-sm text-muted-foreground">
                 Loading available events...

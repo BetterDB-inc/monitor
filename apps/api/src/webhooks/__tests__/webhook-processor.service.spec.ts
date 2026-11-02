@@ -78,7 +78,7 @@ describe('WebhookProcessorService', () => {
 
       await service.processRetries();
 
-      expect(dispatcherService.sendWebhook).toHaveBeenCalledWith(webhook, delivery.id, delivery.payload);
+      expect(dispatcherService.sendWebhook).toHaveBeenCalledWith(webhook, delivery.id, delivery.payload, delivery.attempts);
     });
 
     it('should skip disabled webhooks', async () => {
