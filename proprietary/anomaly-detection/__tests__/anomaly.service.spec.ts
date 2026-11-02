@@ -4239,13 +4239,14 @@ describe('AnomalyService', () => {
       });
 
       it('retries a failed resolve on the next poll', async () => {
-        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        const id = '11111111-1111-4111-8111-111111111111';
+        openRows({ [MetricType.CLIENT_SATURATION]: [id] });
         storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
 
         await pollAt(50);
         await pollAt(50);
 
-        expect(resolvedIds()).toEqual(['old-1', 'old-1']);
+        expect(resolvedIds()).toEqual([id, id]);
       });
     });
 
@@ -9953,7 +9954,7 @@ describe('AnomalyService', () => {
     });
 
     it('retries a backlog close from the drain and stops tracking the event', async () => {
-      (service as any).backlogCoverageEventIds.set('conn-1', 'bk-1');
+      (service as any).backlogCoverageEventIds.set('conn-1', '11111111-1111-4111-8111-111111111111');
       storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
 
       await (service as any).settleBacklogCoverageEvent('conn-1');
@@ -10118,7 +10119,8 @@ describe('AnomalyService', () => {
       });
 
       it('retries a failed resolve on the next poll', async () => {
-        openBacklogRows('old-1');
+        const id = '11111111-1111-4111-8111-111111111111';
+        openBacklogRows(id);
         storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
         for (let i = 0; i < 21; i += 1) await pollPrimary({ bytes: 2000 });
         storage.resolveAnomaly.mockClear();
@@ -10127,7 +10129,7 @@ describe('AnomalyService', () => {
         await pollPrimary({ bytes: 2000 });
         await pollPrimary({ bytes: 2000 });
 
-        expect(resolvedIds()).toEqual(['old-1']);
+        expect(resolvedIds()).toEqual([id]);
       });
     });
 
