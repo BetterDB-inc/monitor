@@ -1,8 +1,7 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { mkdtempSync } from 'fs';
 import { join } from 'path';
 
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
@@ -21,7 +20,8 @@ describe('Workspace boot smoke (E2E)', () => {
   let app: NestFastifyApplication;
   let sessionCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-boot-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-boot.db');
+  const previousCwd = process.cwd();
 
   beforeAll(async () => {
     for (const key of TOUCHED) {
@@ -31,6 +31,7 @@ describe('Workspace boot smoke (E2E)', () => {
     delete process.env.AUTH_PUBLIC_URL;
     delete process.env.AUTH_SECRET;
     process.env.NODE_ENV = 'production';
+    process.chdir(mkdtempSync(join(process.env.BETTERDB_DATA_DIR!, 'workspace-boot-cwd-')));
     process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
@@ -52,17 +53,20 @@ describe('Workspace boot smoke (E2E)', () => {
   });
 
   afterAll(async () => {
-    if (app !== undefined) {
-      await app.close();
-    }
-    for (const [key, value] of previous) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
+    try {
+      if (app !== undefined) {
+        await app.close();
+      }
+    } finally {
+      process.chdir(previousCwd);
+      for (const [key, value] of previous) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
       }
     }
-    rmSync(sqlitePath, { force: true });
   });
 
   it('reports an un-bootstrapped workspace before any user exists', async () => {

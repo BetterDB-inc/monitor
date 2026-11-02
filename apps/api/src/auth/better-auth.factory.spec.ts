@@ -300,6 +300,37 @@ describe('createBetterAuth', () => {
     unlinkSync(path);
   });
 
+  it('relaxes the Better Auth 1.7.2 account.issuer column so sign-up still works', async () => {
+    const path = join(tmpdir(), `factory-issuer-${Date.now()}-${Math.random()}.db`);
+    const Database = await loadBetterSqlite3();
+    const db = new Database(path);
+    db.exec(`CREATE TABLE "account" (
+      "id" text NOT NULL PRIMARY KEY, "accountId" text NOT NULL, "issuer" text NOT NULL,
+      "providerId" text NOT NULL, "userId" text NOT NULL, "accessToken" text,
+      "refreshToken" text, "idToken" text, "accessTokenExpiresAt" date,
+      "refreshTokenExpiresAt" date, "scope" text, "password" text,
+      "createdAt" date NOT NULL, "updatedAt" date NOT NULL)`);
+    db.exec(
+      'CREATE UNIQUE INDEX "account_issuer_accountId_uidx" ON "account" ("issuer", "accountId")',
+    );
+    db.exec(`INSERT INTO "account" ("id", "accountId", "issuer", "providerId", "userId", "createdAt", "updatedAt")
+      VALUES ('legacy-account', 'legacy-subject', 'legacy-issuer', 'credential', 'legacy-user', 0, 0)`);
+    const handle: RawDatabaseHandle = { kind: 'sqlite', db };
+    const auth = await build(handle);
+    await runBetterAuthMigrations(auth, handle);
+    await runBetterAuthMigrations(auth, handle);
+    const response = await signUp(auth, 'owner@example.com', '10.0.0.6');
+    expect(response.status).toBe(200);
+    const columns = db.prepare("PRAGMA table_info('account')").all() as { name: string }[];
+    expect(columns.map((column) => column.name)).not.toContain('issuer');
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM account WHERE id = 'legacy-account'").get(),
+    ).toEqual({ n: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM account').get()).toEqual({ n: 2 });
+    db.close();
+    unlinkSync(path);
+  });
+
   it('writes a caller-constructed verification row on better-sqlite3', async () => {
     const path = join(tmpdir(), `factory-verification-${Date.now()}-${Math.random()}.db`);
     const Database = await loadBetterSqlite3();

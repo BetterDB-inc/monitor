@@ -13,6 +13,10 @@ import type {
   SshTunnelInput,
   SshAuthMethod,
   SshKeySource,
+  TlsConfigInput,
+  TlsConfigStatus,
+  TlsMaterialSource,
+  DatabaseAuthMode,
   TopologyMembership,
   TopologyMembershipOrigin,
   TopologyKind,
@@ -79,6 +83,67 @@ export class SshTunnelDto implements SshTunnelInput {
   @IsOptional()
   @IsString()
   hostKeyFingerprint?: string;
+}
+
+/**
+ * DTO for TLS material: a custom CA bundle and/or a client certificate + key
+ * (mutual TLS). Implements `TlsConfigInput` so `secretsEncrypted` can never be
+ * asserted by a caller.
+ */
+export class TlsConfigDto implements TlsConfigInput {
+  @ApiPropertyOptional({ description: "Where the material comes from: 'inline' PEM content or server-side 'file' paths", enum: ['inline', 'file'], example: 'inline' })
+  @IsOptional()
+  @IsIn(['inline', 'file'])
+  source?: TlsMaterialSource;
+
+  @ApiPropertyOptional({ description: 'CA bundle (PEM) used to verify the server certificate (source=inline)' })
+  @IsOptional()
+  @IsString()
+  ca?: string;
+
+  @ApiPropertyOptional({ description: 'Server-side CA bundle path (source=file); must be inside BETTERDB_TLS_CERT_DIR' })
+  @IsOptional()
+  @IsString()
+  caPath?: string;
+
+  @ApiPropertyOptional({ description: 'Client certificate (PEM) presented to the server (source=inline)' })
+  @IsOptional()
+  @IsString()
+  cert?: string;
+
+  @ApiPropertyOptional({ description: 'Server-side client certificate path (source=file); must be inside BETTERDB_TLS_CERT_DIR' })
+  @IsOptional()
+  @IsString()
+  certPath?: string;
+
+  @ApiPropertyOptional({ description: 'Client private key (PEM) matching the certificate (source=inline)' })
+  @IsOptional()
+  @IsString()
+  key?: string;
+
+  @ApiPropertyOptional({ description: 'Server-side client private key path (source=file); must be inside BETTERDB_TLS_CERT_DIR' })
+  @IsOptional()
+  @IsString()
+  keyPath?: string;
+
+  @ApiPropertyOptional({ description: 'Passphrase protecting the private key' })
+  @IsOptional()
+  @IsString()
+  passphrase?: string;
+}
+
+/**
+ * DTO for the redacted TLS material summary (no PEM content)
+ */
+export class TlsConfigStatusDto implements TlsConfigStatus {
+  @ApiProperty({ description: 'Where the material comes from', enum: ['inline', 'file'], example: 'inline' })
+  source: TlsMaterialSource;
+
+  @ApiProperty({ description: 'Whether a custom CA bundle is configured', example: true })
+  hasCa: boolean;
+
+  @ApiProperty({ description: 'Whether a client certificate + key is configured (mutual TLS)', example: true })
+  hasClientCert: boolean;
 }
 
 /**
@@ -151,6 +216,15 @@ export class ConnectionStatusDto implements ConnectionStatus {
 
   @ApiPropertyOptional({ description: 'Whether TLS is enabled', example: false })
   tls?: boolean;
+
+  @ApiPropertyOptional({ description: 'Redacted TLS material summary (custom CA / client certificate)', type: TlsConfigStatusDto })
+  tlsConfig?: TlsConfigStatus;
+
+  @ApiPropertyOptional({ description: "How the monitor authenticates: 'password' (AUTH) or 'certificate' (client cert maps to an ACL user)", enum: ['password', 'certificate'], example: 'password' })
+  authMode?: DatabaseAuthMode;
+
+  @ApiPropertyOptional({ description: 'ACL user the server reports for the live connection (ACL WHOAMI)', example: 'monitor' })
+  authenticatedUser?: string;
 
   @ApiPropertyOptional({ description: 'Whether this is the default connection', example: true })
   isDefault?: boolean;
@@ -230,6 +304,17 @@ export class CreateConnectionDto implements CreateConnectionRequest {
   @IsBoolean()
   tls?: boolean;
 
+  @ApiPropertyOptional({ description: 'TLS material: custom CA bundle and/or client certificate + key (used when tls=true)', type: TlsConfigDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => TlsConfigDto)
+  tlsConfig?: TlsConfigDto;
+
+  @ApiPropertyOptional({ description: "'password' (default) sends AUTH; 'certificate' sends no AUTH so the server maps the client certificate to an ACL user. Requires tls=true and a client certificate + key.", enum: ['password', 'certificate'], example: 'password' })
+  @IsOptional()
+  @IsIn(['password', 'certificate'])
+  authMode?: DatabaseAuthMode;
+
   @ApiPropertyOptional({ description: 'Optional SSH tunnel used to reach the database', type: SshTunnelDto })
   @IsOptional()
   @ValidateNested()
@@ -283,6 +368,9 @@ export class TestConnectionResponseDto implements TestConnectionResponse {
 
   @ApiPropertyOptional({ description: 'Connection capabilities if successful', type: ConnectionCapabilitiesDto })
   capabilities?: ConnectionCapabilities;
+
+  @ApiPropertyOptional({ description: 'ACL user the server reported for the test session (ACL WHOAMI), when available', example: 'monitor' })
+  authenticatedUser?: string;
 
   @ApiPropertyOptional({ description: 'Error message if failed', example: 'Connection refused' })
   error?: string;

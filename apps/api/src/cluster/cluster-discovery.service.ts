@@ -22,6 +22,8 @@ export interface NodeConnection {
   client: Valkey;
   lastHealthCheck: number;
   healthy: boolean;
+  connectionId?: string;
+  host?: string;
 }
 
 export interface NodeHealth {
@@ -182,6 +184,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       // Not ready — revive it in place before falling back to a brand-new client.
       try {
+        this.refreshNodeTls(existingConnection);
         await existingConnection.client.connect();
         existingConnection.lastHealthCheck = Date.now();
         existingConnection.healthy = true;
@@ -204,14 +207,17 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
           const oldConnection = this.discoveredNodes.get(oldestNodeId);
           if (oldConnection) {
-            await oldConnection.client.quit().catch(() => {/* ignore */});
+            await this.closeNodeClient(oldConnection.client);
             this.discoveredNodes.delete(oldestNodeId);
           }
         }
       }
     }
 
-    const nodes = await this.discoverNodes(connectionId);
+    // Bind the node client to the connection that owns it now, so a later
+    // default-connection change can't swap in another connection's TLS identity.
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
     if (!node) {
@@ -227,12 +233,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Invalid node address: ${node.address}`);
     }
 
-    const dbClient = this.connectionRegistry.get(connectionId);
+    const dbClient = this.connectionRegistry.get(ownerId);
     const primaryClient = dbClient.getClient();
     const username = primaryClient.options.username || '';
     const password = primaryClient.options.password || '';
-    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryClient.options.tls ?? {};
-    const tls = primaryClient.options.tls ? { ...nodeTls, ...tlsIdentityOptions(host, node.hostname) } : undefined;
+    const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
 
     const client = new Valkey({
       host,
@@ -244,6 +249,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       connectTimeout: this.CONNECTION_TIMEOUT,
       enableOfflineQueue: false,
       connectionName: `BetterDB-Monitor-Node-${node.id.substring(0, 8)}`,
+    });
+
+    // Node clients are long-lived, so pick up rotated client cert/key material
+    // from the primary adapter before every reconnect.
+    client.on('reconnecting', () => {
+      this.refreshNodeTls({ node, client, connectionId: ownerId, host });
     });
 
     // Add error handler to prevent unhandled error events
@@ -276,14 +287,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         client,
         lastHealthCheck: Date.now(),
         healthy: true,
+        connectionId: ownerId,
+        host,
       };
 
-      // Quit any stale client we're about to replace so the overwrite never
+      // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
       const replaced = this.discoveredNodes.get(nodeId);
       if (replaced && replaced.client !== client) {
-        await replaced.client.quit().catch(() => {});
+        await this.closeNodeClient(replaced.client);
       }
 
       this.discoveredNodes.set(nodeId, connection);
@@ -307,9 +320,39 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         this.loggedGetConnectionErrors.add(errorKey);
       }
 
-      await client.quit().catch(() => {});
+      await this.closeNodeClient(client);
 
       throw error;
+    }
+  }
+
+  /**
+   * TLS options for a discovered node, built from the primary adapter's current
+   * material. getClient() re-reads file-sourced material when it has rotated.
+   */
+  private nodeTlsOptions(
+    connectionId: string | undefined,
+    host: string,
+    hostname: string | undefined,
+  ): Valkey['options']['tls'] {
+    const primaryTls = this.connectionRegistry.get(connectionId).getClient().options.tls;
+    if (!primaryTls) return undefined;
+    const { servername: _servername, checkServerIdentity: _checkServerIdentity, ...nodeTls } = primaryTls;
+    return { ...nodeTls, ...tlsIdentityOptions(host, hostname) };
+  }
+
+  private refreshNodeTls(connection: Pick<NodeConnection, 'node' | 'client' | 'connectionId' | 'host'>): void {
+    if (!connection.host || !connection.client.options?.tls) return;
+    try {
+      connection.client.options.tls = this.nodeTlsOptions(
+        connection.connectionId,
+        connection.host,
+        connection.node.hostname,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Keeping previous TLS material for node ${connection.node.id.substring(0, 12)}: ${error instanceof Error ? error.message : error}`,
+      );
     }
   }
 
@@ -382,19 +425,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
 
-    const disconnectPromises: Promise<void>[] = [];
-
-    for (const [nodeId, connection] of this.discoveredNodes.entries()) {
-      disconnectPromises.push(
-        connection.client.quit().then(() => undefined).catch((error) => {
-          this.logger.warn(
-            `Failed to disconnect from node ${nodeId}: ${error instanceof Error ? error.message : error}`,
-          );
-        }),
-      );
-    }
-
-    await Promise.allSettled(disconnectPromises);
+    await Promise.allSettled(
+      Array.from(this.discoveredNodes.values(), (connection) => this.closeNodeClient(connection.client)),
+    );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
     this.logger.log('All node connections closed');
@@ -416,10 +449,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       for (const nodeId of toRemove) {
         const connection = this.discoveredNodes.get(nodeId);
         if (connection) {
-          await connection.client.quit().catch(() => {});
+          await this.closeNodeClient(connection.client);
           this.discoveredNodes.delete(nodeId);
         }
       }
+    }
+  }
+
+  /**
+   * Node clients set enableOfflineQueue: false, so quit() on one that isn't
+   * ready rejects without closing it and iovalkey keeps reconnecting (and
+   * re-reading TLS) forever. Only quit a ready client; disconnect the rest.
+   */
+  private async closeNodeClient(client: Valkey): Promise<void> {
+    if (client.status === 'ready') {
+      await client.quit().catch(() => client.disconnect());
+    } else {
+      client.disconnect();
     }
   }
 
