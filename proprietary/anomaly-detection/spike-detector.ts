@@ -167,14 +167,20 @@ export class SpikeDetector {
     zScore: number,
   ): string {
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
-    const change = Math.abs(((value - baseline) / baseline) * 100).toFixed(1);
-    const direction = value < baseline ? 'below' : 'above';
 
     return (
       `${severity.toUpperCase()}: ${this.metricType} ${typeStr} detected. ` +
       `Value: ${this.formatValue(value)}, Baseline: ${this.formatValue(baseline)} ` +
-      `(${change}% ${direction} normal, Z-score: ${zScore.toFixed(2)})`
+      `(${this.describeChange(value, baseline)}, Z-score: ${zScore.toFixed(2)})`
     );
+  }
+
+  private describeChange(value: number, baseline: number): string {
+    if (baseline === 0) {
+      return 'above a zero baseline';
+    }
+    const change = Math.abs(((value - baseline) / baseline) * 100).toFixed(1);
+    return `${change}% ${value < baseline ? 'below' : 'above'} normal`;
   }
 
   private formatValue(value: number): string {

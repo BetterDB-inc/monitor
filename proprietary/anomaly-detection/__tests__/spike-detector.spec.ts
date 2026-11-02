@@ -204,6 +204,22 @@ describe('SpikeDetector', () => {
       expect(result!.message).toContain('(94.3% below normal');
     });
 
+    it('describes a burst on a quiet metric without a percentage', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ERROR_REPLIES, {
+        warningThreshold: 10,
+        criticalThreshold: 200,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(0, i * 1000);
+
+      const result = detector.detect(buffer, 500, 50000);
+
+      expect(result!.message).toContain('Baseline: 0 (above a zero baseline');
+      expect(result!.message).not.toMatch(/Infinity|NaN/);
+    });
+
     describe('zScoreCritical', () => {
       const quietBuffer = () => {
         const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
