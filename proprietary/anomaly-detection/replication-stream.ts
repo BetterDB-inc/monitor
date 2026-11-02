@@ -24,7 +24,7 @@ export interface ReplicationStreamSample {
   masterReplOffset: number;
   bytesPerSec: number | null;
   bytesPerSecEwma: number | null;
-  replBacklogHistlen: number | null;
+  replBacklogSize: number | null;
   replicas: ReplicaOffset[];
 }
 
@@ -111,7 +111,7 @@ export class ReplicationStreamTracker {
       masterReplOffset,
       bytesPerSec,
       bytesPerSecEwma: bytesPerSec === null ? null : ewma,
-      replBacklogHistlen: toFiniteNumber(info.repl_backlog_histlen),
+      replBacklogSize: toFiniteNumber(info.repl_backlog_size),
       replicas: isReplica
         ? []
         : parseReplicaLines(info).map((line) => ({

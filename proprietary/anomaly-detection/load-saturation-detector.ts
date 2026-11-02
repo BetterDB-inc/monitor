@@ -1,3 +1,5 @@
+import { rearmLevel } from './rearm-level';
+
 /**
  * Event-loop load saturation detection (valkey-io/valkey#2055): on a
  * (largely) single-threaded server, raw CPU% is a poor busyness indicator —
@@ -213,10 +215,12 @@ export function acknowledgeLoadSaturationFinding(
 }
 
 export function loadSaturationRearm(state: LoadSaturationState): () => void {
-  const previousLevel = state.ackedLevel;
-  return () => {
-    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
-      state.ackedLevel = previousLevel;
-    }
-  };
+  return rearmLevel(
+    LEVEL_RANK,
+    state.ackedLevel,
+    () => state.ackedLevel,
+    (level) => {
+      state.ackedLevel = level;
+    },
+  );
 }

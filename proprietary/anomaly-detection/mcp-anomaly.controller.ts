@@ -54,6 +54,24 @@ export class McpAnomalyController {
     }
   }
 
+  @Get('instance/:id/history/incidents')
+  async getIncidents(
+    @Param('id', ValidateInstanceIdPipe) id: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+  ) {
+    try {
+      return await this.anomalyService.getIncidentTimelines(
+        id,
+        safeParseInt(startTime, Date.now() - DEFAULT_LOOKBACK_MS),
+        undefined,
+        safeLimit(limit, 20),
+      );
+    } catch (error) {
+      throw mapMcpError(this.logger, error, 'Failed to get incident timelines');
+    }
+  }
+
   @Get('instance/:id/anomalies/retry-amplification')
   getRetryAmplification(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {

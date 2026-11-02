@@ -162,6 +162,7 @@ Once connected, your AI assistant can query your databases directly:
 | `get_latency_regressions` | Detected sustained p99 latency regressions vs baseline from the anomaly store *(Pro)* |
 | `get_replication_divergence` | Per-replica offset gap series and divergence events for a primary *(Pro)* |
 | `get_largest_keys` | Largest keys by measured memory usage from key analytics snapshots *(Pro)* |
+| `get_incident_timeline` | Anomaly incidents as ordered timelines with matched sequence patterns and recovery status *(Pro)* |
 
 ### Vector Search Tools
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { formatRelatedCount, formatValue } from './AnomalyDashboard';
+import { formatValue } from '../lib/formatters';
+import { formatRelatedCount } from './AnomalyDashboard';
 
 describe('formatRelatedCount', () => {
   it('marks a member list the API cut short', () => {

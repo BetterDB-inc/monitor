@@ -17,7 +17,7 @@ import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressi
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
-import { formatBytes } from '../lib/utils';
+import { formatValue } from '../lib/formatters';
 import type { ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
@@ -115,6 +115,12 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
   connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
   cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
   node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
+  reshard_pressure: { icon: Database, label: 'Reshard Pressure', color: 'var(--chart-warning)' },
+  recovery_amplification: {
+    icon: Database,
+    label: 'Recovery Amplification',
+    color: 'var(--destructive)',
+  },
   retry_amplification: { icon: AlertTriangle, label: 'Retry Amplification', color: 'var(--chart-warning)' },
   replication_divergence: {
     icon: Database,
@@ -166,6 +172,9 @@ const METRIC_LABELS: Record<string, string> = {
   cpu_utilization: 'CPU Utilization',
   slowlog_count: 'Slow Queries (legacy)',
   connection_churn: 'Connection Churn',
+  reshard_shard_skew: 'Reshard Shard Skew',
+  backlog_coverage_risk: 'Backlog Coverage Risk',
+  resync_escalation: 'Resync Escalation',
   retry_amplification: 'Retry Amplification',
   error_replies: 'Error Replies',
   replication_divergence: 'Replication Divergence',
@@ -181,28 +190,6 @@ function formatTime(ts: number): string {
 
 export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
   return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
-}
-
-export function formatValue(value: number, metric: string): string {
-  if (metric === 'replication_divergence') return formatBytes(value);
-  if (metric === 'memory_used' || metric === 'memory_overhead') {
-    if (value > 1e9) return `${(value / 1e9).toFixed(2)} GB`;
-    if (value > 1e6) return `${(value / 1e6).toFixed(1)} MB`;
-    return `${(value / 1e3).toFixed(0)} KB`;
-  }
-  // Percentage-valued events (value/baseline/threshold are all percentages).
-  if (metric === 'load_saturation' || metric === 'fork_memory_risk') {
-    return `${value.toFixed(1)}%`;
-  }
-  if (metric === 'fragmentation_ratio') return value.toFixed(2);
-  if (metric === 'retry_amplification') return `${value.toFixed(1)}×`;
-  if (metric === 'command_p99') {
-    // Stored in microseconds; show ms once past 1ms, else µs.
-    return value >= 1000 ? `${(value / 1000).toFixed(1)} ms` : `${Math.round(value)} µs`;
-  }
-  if (value > 1e6) return `${(value / 1e6).toFixed(1)}M`;
-  if (value > 1e3) return `${(value / 1e3).toFixed(1)}K`;
-  return value.toLocaleString();
 }
 
 export function AnomalyDashboard() {

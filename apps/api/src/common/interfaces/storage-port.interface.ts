@@ -164,12 +164,16 @@ export interface StoredAnomalyEvent {
   correlationId?: string;
   relatedMetrics?: string[];
   replicaAddr?: string;
+  dedupeKey?: string;
+  commands?: string[];
+  eventSequence?: number;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  scopeId?: string;
 }
 
 // Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
@@ -214,6 +218,30 @@ export interface StoredCorrelatedGroup {
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  anomalyIds?: string[];
+  scopeId?: string;
+}
+
+export interface AnomalyEventCursor {
+  timestamp: number;
+  id: string;
+}
+
+export interface StoredIncidentBoundary {
+  scopeId: string;
+  startedAt: number;
+  anomalyId: string;
+}
+
+export interface IncidentBoundaryQuery {
+  scopeIds?: string[];
+  startTime: number;
+  endTime?: number;
+}
+
+export interface AnomalyScopeFilter {
+  id: string;
+  connectionIds: string[];
 }
 
 export interface AnomalyQueryOptions {
@@ -226,8 +254,15 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
-  correlationIds?: string[];
-  involving?: { connectionId: string; startTime?: number; endTime?: number };
+  order?: 'asc' | 'desc';
+  after?: AnomalyEventCursor;
+  scope?: AnomalyScopeFilter;
+}
+
+export interface CorrelatedGroupQueryOptions
+  extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
+  patterns?: string[];
+  involvingConnectionId?: string;
 }
 
 export interface AnomalyStats {
@@ -635,8 +670,20 @@ export interface StoragePort {
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
-  getCorrelatedGroups(options?: AnomalyQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroups(options?: CorrelatedGroupQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+    maxRows: number,
+  ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number>;
+
+  getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]>;
+
+  pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number>;
 
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
   saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;

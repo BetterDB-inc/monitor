@@ -14,6 +14,8 @@ describe('AnomalyController time bounds', () => {
     getRecentCorrelatedGroups: jest.fn().mockResolvedValue([]),
     getSummary: jest.fn().mockResolvedValue({}),
     getReplicationDivergenceHistory: jest.fn().mockResolvedValue([]),
+    getIncidentTimelines: jest.fn().mockResolvedValue([]),
+    getIncidentTimeline: jest.fn().mockResolvedValue({}),
   };
   const controller = new AnomalyController(service as unknown as AnomalyService);
 
@@ -22,6 +24,7 @@ describe('AnomalyController time bounds', () => {
     ['groups', async (s, e) => controller.getGroups(undefined, undefined, undefined, s, e)],
     ['summary', async (s, e) => controller.getSummary(undefined, s, e)],
     ['replication-divergence', async (s, e) => controller.getReplicationDivergence('c1', s, e)],
+    ['incidents', async (s, e) => controller.getIncidents(undefined, undefined, s, e)],
   ];
 
   beforeEach(() => jest.clearAllMocks());
@@ -57,9 +60,44 @@ describe('AnomalyController time bounds', () => {
     expect(service.getRecentAnomalies.mock.calls[0].slice(0, 2)).toEqual([1000, 2000]);
   });
 
+  it('truncates a fractional start on the single incident route', async () => {
+    await controller.getIncident('incident-1', 'c1', '1000.5');
+
+    expect(service.getIncidentTimeline).toHaveBeenCalledWith('incident-1', 'c1', 1000);
+  });
+
   it('honours an explicit start of 0 on the events route', async () => {
     await controller.getEvents(undefined, undefined, undefined, '0', '1000');
 
     expect(service.getRecentAnomalies.mock.calls[0].slice(0, 2)).toEqual([0, 1000]);
+  });
+
+});
+
+describe('AnomalyController incident limit', () => {
+  const service = { getIncidentTimelines: jest.fn().mockResolvedValue([]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it.each(['abc', '-1', '0', '1.5', '10abc', '   '])('rejects %j', async (limit) => {
+    await expect(controller.getIncidents(undefined, limit)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(service.getIncidentTimelines).not.toHaveBeenCalled();
+  });
+
+  it('caps the limit at 1000', async () => {
+    await controller.getIncidents('c1', '999999');
+    await controller.getIncidents('c1', '1000');
+
+    expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([1000, 1000]);
+  });
+
+  it('passes a valid limit and defaults to 50', async () => {
+    await controller.getIncidents('c1', '10');
+    await controller.getIncidents('c1');
+
+    expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([10, 50]);
   });
 });

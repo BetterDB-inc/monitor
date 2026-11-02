@@ -8,9 +8,11 @@ import {
   HttpCode,
   HttpStatus,
   UseGuards,
+  NotFoundException,
 } from '@nestjs/common';
 import { ApiHeader } from '@nestjs/swagger';
 import { AnomalyService } from './anomaly.service';
+import { IncidentTimeline } from './incident-timeline';
 import {
   AnomalyEvent,
   CorrelatedAnomalyGroup,
@@ -34,6 +36,17 @@ function parseTimeRange(
     throw new BadRequestException('startTime must not be after endTime');
   }
   return { parsedStartTime, parsedEndTime };
+}
+
+const MAX_INCIDENT_LIMIT = 1000;
+
+function parseLimit(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (value.trim() === '' || !Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new BadRequestException('limit must be a positive integer');
+  }
+  return Math.min(parsed, MAX_INCIDENT_LIMIT);
 }
 
 @Controller('anomaly')
@@ -168,5 +181,42 @@ export class AnomalyController {
   clearResolved(): { cleared: number } {
     const cleared = this.anomalyService.clearResolved();
     return { cleared };
+  }
+
+  @Get('incidents')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncidents(
+    @ConnectionId() connectionId?: string,
+    @Query('limit') limit?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<IncidentTimeline[]> {
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
+    return this.anomalyService.getIncidentTimelines(
+      connectionId,
+      parsedStartTime,
+      parsedEndTime,
+      parseLimit(limit, 50),
+    );
+  }
+
+  @Get('incidents/:incidentId')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncident(
+    @Param('incidentId') incidentId: string,
+    @ConnectionId() connectionId?: string,
+    @Query('startTime') startTime?: string,
+  ): Promise<IncidentTimeline> {
+    const incident = await this.anomalyService.getIncidentTimeline(
+      incidentId,
+      connectionId,
+      parseOptionalInt(startTime, 'startTime'),
+    );
+    if (!incident) throw new NotFoundException(`Incident ${incidentId} not found`);
+    return incident;
   }
 }

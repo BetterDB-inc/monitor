@@ -10,6 +10,7 @@ describe('McpAnomalyController', () => {
   let controller: McpAnomalyController;
   const svc = {
     getRecentAnomalies: jest.fn(),
+    getIncidentTimelines: jest.fn(),
     getRetryAmplificationStatus: jest.fn(),
     getReplicationDivergenceHistory: jest.fn(),
   };
@@ -126,6 +127,21 @@ describe('McpAnomalyController', () => {
     }
     expect(caught).toBeInstanceOf(HttpException);
     expect((caught as HttpException).getStatus()).toBe(500);
+  });
+
+  it('incidents forwards the instance, start time and limit', async () => {
+    svc.getIncidentTimelines.mockResolvedValueOnce([{ incidentId: 'i1' }]);
+
+    const res = await controller.getIncidents('inst1', '5', '5000');
+
+    expect(res).toEqual([{ incidentId: 'i1' }]);
+    expect(svc.getIncidentTimelines).toHaveBeenCalledWith('inst1', 5000, undefined, 5);
+  });
+
+  it('incidents maps service failures to 500', async () => {
+    svc.getIncidentTimelines.mockRejectedValueOnce(new Error('boom'));
+
+    await expect(controller.getIncidents('inst1')).rejects.toBeInstanceOf(HttpException);
   });
 
   it('retry amplification returns the detector status for the instance', () => {

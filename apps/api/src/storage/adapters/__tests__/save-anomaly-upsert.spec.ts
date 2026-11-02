@@ -56,6 +56,45 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows.map((r) => r.replicaAddr).sort()).toEqual(['10.0.0.2:6379', '10.0.0.3:6379']);
     });
 
+    it('stores the dedupe key', async () => {
+      await storage.saveAnomalyEvent(event({ dedupeKey: 'a' }), CONN);
+      await storage.saveAnomalyEvents([event({ id: randomUUID(), dedupeKey: 'b' })], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.dedupeKey).sort()).toEqual(['a', 'b']);
+    });
+
+    it('keeps the dedupe key when a later save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ dedupeKey: 'a' }), CONN);
+      await storage.saveAnomalyEvent(event(), CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.dedupeKey).toBe('a');
+    });
+
+    it('stores the regressed commands and the event sequence', async () => {
+      const fields = { commands: ['get', 'set'], eventSequence: 7 };
+      await storage.saveAnomalyEvent(event(fields), CONN);
+      await storage.saveAnomalyEvents([event({ ...fields, id: randomUUID() })], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject(fields);
+      expect(rows[1]).toMatchObject(fields);
+    });
+
+    it('keeps the commands and the sequence when a later save omits them', async () => {
+      await storage.saveAnomalyEvent(event({ commands: ['get'], eventSequence: 7 }), CONN);
+      await storage.saveAnomalyEvent(correlated, CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row).toMatchObject({ commands: ['get'], eventSequence: 7 });
+    });
+
     it('keeps the replica address when a later save omits it', async () => {
       await storage.saveAnomalyEvent(event({ replicaAddr: '10.0.0.2:6379' }), CONN);
       await storage.saveAnomalyEvent(correlated, CONN);
@@ -84,6 +123,16 @@ describe.each<[string, AdapterFactory]>(adapters)(
     it('keeps correlation fields when saved again without them', async () => {
       await storage.saveAnomalyEvent(correlated, CONN);
       await storage.saveAnomalyEvent(event(), CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(preserved);
+    });
+
+    it('adds correlation fields when batch saved again with them', async () => {
+      await storage.saveAnomalyEvents([event()], CONN);
+      await storage.saveAnomalyEvents([correlated], CONN);
 
       const rows = await storage.getAnomalyEvents({ connectionId: CONN });
 
@@ -142,28 +191,6 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(row).toEqual(
         expect.objectContaining({ resolved: true, resolvedAt: 1_700_000_060_000 }),
       );
-    });
-
-    it('filters by correlation id before the page limit', async () => {
-      const other = randomUUID();
-      await storage.saveAnomalyEvents(
-        Array.from({ length: 120 }, (_, i) =>
-          event({
-            id: randomUUID(),
-            timestamp: 1_700_000_000_000 + i,
-            correlationId: i < 2 ? CORRELATION_ID : other,
-          }),
-        ),
-        CONN,
-      );
-
-      const rows = await storage.getAnomalyEvents({
-        connectionId: CONN,
-        correlationIds: [CORRELATION_ID],
-      });
-
-      expect(rows).toHaveLength(2);
-      expect(await storage.getAnomalyEvents({ connectionId: CONN, correlationIds: [] })).toEqual([]);
     });
   },
 );

@@ -350,6 +350,26 @@ describe('CaptureTriggerRegistry', () => {
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
     });
 
+    it('fires for an event the outbox saved nearly an hour after it happened', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const trigger = await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 59 * 60_000);
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: trigger.createdAt + 1 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+      clock.mockRestore();
+
+      expect((await registry.getTrigger(trigger.id))?.status).toBe('fired');
+    });
+
     it('reads no anomalies from storage while nothing new was saved', async () => {
       const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
       const read = jest.spyOn(storage, 'getAnomalyEvents');

@@ -26,6 +26,9 @@ import type {
 import type { RawDatabaseHandle, RawDatabaseHandleProvider } from '../raw-database-handle';
 import {
   AnomalyQueryOptions,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   AppSettings,
   AuditQueryOptions,
@@ -543,7 +546,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
             // close() ending the build connection is expected, not a failure.
             if (this.closing) return;
             console.warn(
-              `Building the client analytics indexes failed: ${
+              `Building the background indexes failed: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             );
@@ -1689,6 +1692,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       );
 
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS replica_addr TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
 
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
@@ -1737,6 +1743,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_id TEXT NOT NULL DEFAULT 'env-default',
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS anomaly_ids TEXT[];
+      CREATE TABLE IF NOT EXISTS incident_boundaries (
+        scope_id TEXT NOT NULL,
+        started_at BIGINT NOT NULL,
+        anomaly_id TEXT NOT NULL,
+        PRIMARY KEY (scope_id, started_at, anomaly_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
+
+      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
@@ -2801,14 +2819,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -2827,12 +2849,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.correlationId || null,
         event.relatedMetrics ?? null,
         event.replicaAddr ?? null,
+        event.dedupeKey ?? null,
+        event.commands ?? null,
+        event.eventSequence ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       ],
     );
 
@@ -2851,7 +2877,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2868,12 +2895,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.correlationId || null,
         event.relatedMetrics ?? null,
         event.replicaAddr ?? null,
+        event.dedupeKey ?? null,
+        event.commands ?? null,
+        event.eventSequence ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
         event.sourceHost || null,
         event.sourcePort || null,
         connectionId,
+        event.scopeId ?? null,
       );
     }
 
@@ -2881,14 +2912,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, EXCLUDED.scope_id),
         replica_addr = COALESCE(EXCLUDED.replica_addr, anomaly_events.replica_addr),
+        dedupe_key = COALESCE(EXCLUDED.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -2929,9 +2964,18 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`resolved = $${paramIndex++}`);
       params.push(options.resolved);
     }
-    if (options.correlationIds) {
-      conditions.push(`correlation_id = ANY($${paramIndex++})`);
-      params.push(options.correlationIds);
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
+    }
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    if (options.after) {
+      const past = direction === 'ASC' ? '>' : '<';
+      const time = paramIndex++;
+      conditions.push(
+        `(timestamp ${past} $${time} OR (timestamp = $${time} AND id ${past} $${paramIndex++}))`,
+      );
+      params.push(options.after.timestamp, options.after.id);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -2942,12 +2986,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, scope_id
       FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC, id DESC
+      ORDER BY timestamp ${direction}, id ${direction}
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
@@ -3080,12 +3124,14 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (correlation_id) DO UPDATE SET
         diagnosis = EXCLUDED.diagnosis,
         recommendations = EXCLUDED.recommendations,
-        anomaly_count = EXCLUDED.anomaly_count`,
+        anomaly_count = EXCLUDED.anomaly_count,
+        anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, EXCLUDED.scope_id)`,
       [
         group.correlationId,
         group.timestamp,
@@ -3098,13 +3144,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         group.sourceHost || null,
         group.sourcePort || null,
         connectionId,
+        group.anomalyIds ?? null,
+        group.scopeId ?? null,
       ],
     );
 
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     if (!this.pool) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -3131,25 +3181,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(`pattern = $${paramIndex++}`);
       params.push(options.pattern);
     }
-    if (options.correlationIds) {
-      conditions.push(`correlation_id = ANY($${paramIndex++})`);
-      params.push(options.correlationIds);
+    if (options.scope) {
+      conditions.push(`(scope_id = $${paramIndex++} OR connection_id = ANY($${paramIndex++}))`);
+      params.push(options.scope.id, options.scope.connectionIds);
     }
-    if (options.involving) {
-      const { connectionId, startTime, endTime } = options.involving;
-      const member = [`connection_id = $${paramIndex++}`, 'correlation_id IS NOT NULL'];
-      params.push(connectionId);
-      if (startTime !== undefined) {
-        member.push(`timestamp >= $${paramIndex++}`);
-        params.push(startTime);
-      }
-      if (endTime !== undefined) {
-        member.push(`timestamp <= $${paramIndex++}`);
-        params.push(endTime);
-      }
-      conditions.push(
-        `correlation_id IN (SELECT correlation_id FROM anomaly_events WHERE ${member.join(' AND ')})`,
-      );
+    if (options.patterns) {
+      conditions.push(`pattern = ANY($${paramIndex++})`);
+      params.push(options.patterns);
+    }
+    if (options.involvingConnectionId) {
+      const caller = paramIndex++;
+      conditions.push(`(connection_id = $${caller} OR EXISTS (
+        SELECT 1 FROM anomaly_events member
+        WHERE member.correlation_id = correlated_anomaly_groups.correlation_id
+          AND member.connection_id = $${caller}
+      ))`);
+      params.push(options.involvingConnectionId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3160,15 +3207,98 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
+        source_host, source_port, connection_id, anomaly_ids, scope_id
       FROM correlated_anomaly_groups
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, correlation_id DESC
       LIMIT $${paramIndex++} OFFSET $${paramIndex++}`,
       [...params, limit, offset],
     );
 
     return result.rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
+  }
+
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+    maxRows: number,
+  ): Promise<StoredAnomalyEvent[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
+
+    const isUuid = (id: string) => /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id);
+    const result = await this.pool.query(
+      `SELECT
+        id, timestamp, metric_type, anomaly_type, severity,
+        value, baseline, std_dev, z_score, threshold,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
+        resolved, resolved_at, duration_ms,
+        source_host, source_port, connection_id, scope_id
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(correlation_id::text, id::text) ORDER BY timestamp DESC, id DESC
+        ) AS group_rank
+        FROM anomaly_events
+        WHERE correlation_id = ANY($1::uuid[]) OR id = ANY($2::uuid[])
+      ) ranked
+      WHERE group_rank <= $3
+      ORDER BY timestamp DESC, id DESC
+      LIMIT $4`,
+      [correlationIds, anomalyIds.filter(isUuid), maxPerGroup, maxRows],
+    );
+
+    return result.rows.map((row) => this.mappers.mapAnomalyEventRow(row)).reverse();
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (boundaries.length === 0) return 0;
+
+    const result = await this.pool.query(
+      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[])
+       ON CONFLICT DO NOTHING`,
+      [
+        boundaries.map((b) => b.scopeId),
+        boundaries.map((b) => b.startedAt),
+        boundaries.map((b) => b.anomalyId),
+      ],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    if (!this.pool) throw new Error('Database not initialized');
+    if (query.scopeIds?.length === 0) return [];
+
+    const result = await this.pool.query(
+      `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+       WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
+         AND started_at >= $2
+         AND ($3::bigint IS NULL OR started_at <= $3)
+       UNION ALL
+       SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+       JOIN (
+         SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+         WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
+         GROUP BY scope_id
+       ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+       ORDER BY started_at ASC, anomaly_id ASC`,
+      [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
+    );
+    return result.rows.map((row) => ({
+      scopeId: row.scope_id,
+      startedAt: Number(row.started_at),
+      anomalyId: row.anomaly_id,
+    }));
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    if (!this.pool) throw new Error('Database not initialized');
+    return chunkedPostgresDelete(this.pool, 'incident_boundaries', 'started_at < $1', [
+      cutoffTimestamp,
+    ]);
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -5590,7 +5720,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   /**
    * Build the (connection_id, captured_at) indexes every bounded client
-   * analytics and audit read relies on. Called fire-and-forget from
+   * analytics and audit read relies on, and the anomaly correlation scope
+   * indexes. Called fire-and-forget from
    * initialize(): on a multi-million-row table the build takes minutes, and
    * CONCURRENTLY keeps writers flowing while it runs. Until it completes,
    * isClientSnapshotIndexReady() reports false.
@@ -5606,6 +5737,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const indexes: Array<[string, string, string]> = [
       ['idx_client_connection_captured', 'client_snapshots', 'connection_id, captured_at'],
       ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
+      ['idx_anomaly_events_scope', 'anomaly_events', 'scope_id, timestamp DESC'],
+      ['idx_correlated_groups_scope', 'correlated_anomaly_groups', 'scope_id, timestamp DESC'],
     ];
     if (this.closing) return;
     // A dedicated connection, not a pooled one, so close() can end it

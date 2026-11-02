@@ -216,11 +216,16 @@ describe('replicaSlotSignature', () => {
   };
 
   it('is stable for the same (replica, reason, slots)', () => {
-    expect(replicaSlotSignature(base)).toBe('rep|replica_importing|1,2');
+    expect(replicaSlotSignature(base)).toMatch(/^rep\|replica_importing\|[0-9a-f]{16}$/);
     // Attribution/address changes don't affect the signature.
     expect(replicaSlotSignature({ ...base, replicaAddress: 'b', shardId: 'x' })).toBe(
-      'rep|replica_importing|1,2',
+      replicaSlotSignature(base),
     );
+  });
+
+  it('stays short however many slots are affected', () => {
+    const affectedSlots = Array.from({ length: 16384 }, (_, slot) => slot);
+    expect(replicaSlotSignature({ ...base, affectedSlots }).length).toBeLessThan(64);
   });
 
   it('differs by reason and by the set of affected slots', () => {

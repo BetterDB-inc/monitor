@@ -81,6 +81,54 @@ describe('Correlator', () => {
     });
   });
 
+  describe('RESHARD_PRESSURE pattern', () => {
+    const pressure = (overrides: Partial<AnomalyEvent> = {}) =>
+      makeAnomaly({
+        metricType: MetricType.RESHARD_SHARD_SKEW,
+        syntheticPattern: AnomalyPattern.RESHARD_PRESSURE,
+        ...overrides,
+      });
+
+    it('matches a skew event the detector confirmed as pressure', () => {
+      const groups = correlator.correlate([pressure()]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it('does not blame the reshard for a skew event without the marker', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RESHARD_SHARD_SKEW }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.UNKNOWN);
+    });
+
+    it('wins over a latency pattern in the same window', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.COMMAND_P99, timestamp: now }),
+        pressure({ timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it.each([MetricType.REPLICATION_ROLE, MetricType.CLUSTER_STATE])(
+      'leaves a window with %s to the failover diagnosis',
+      (metricType) => {
+        const now = Date.now();
+        const groups = correlator.correlate([
+          pressure({ timestamp: now }),
+          makeAnomaly({ metricType, timestamp: now + 100 }),
+        ]);
+
+        expect(groups).toHaveLength(1);
+        expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
+      },
+    );
+  });
+
   describe('NODE_FAILOVER pattern', () => {
     it('matches on REPLICATION_ROLE metric', () => {
       const anomaly = makeAnomaly({
@@ -490,6 +538,40 @@ describe('Correlator', () => {
       const groups = correlator.correlate([late, early]);
 
       expect(groups.map((g) => g.timestamp)).toEqual([baseTime, baseTime + 3000]);
+    });
+  });
+
+  describe('CONNECTION_CHURN input', () => {
+    const churn = (timestamp: number) =>
+      makeAnomaly({ metricType: MetricType.CONNECTION_CHURN, timestamp });
+
+    it('names a lone churn event instead of leaving it unknown', () => {
+      const groups = correlator.correlate([churn(Date.now())]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.CONNECTION_LEAK);
+      expect(groups[0].diagnosis).toContain('reconnecting');
+    });
+
+    it('joins a connection spike in one group', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        churn(now),
+        makeAnomaly({ metricType: MetricType.CONNECTIONS, timestamp: now + 100 }),
+      ]);
+
+      expect(groups).toHaveLength(1);
+      expect(groups[0].pattern).toBe(AnomalyPattern.CONNECTION_LEAK);
+      expect(groups[0].diagnosis).toContain('connection leak');
+    });
+
+    it('yields to a failover that caused the reconnects', () => {
+      const now = Date.now();
+      const groups = correlator.correlate([
+        churn(now),
+        makeAnomaly({ metricType: MetricType.REPLICATION_ROLE, timestamp: now + 100 }),
+      ]);
+
+      expect(groups[0].pattern).toBe(AnomalyPattern.NODE_FAILOVER);
     });
   });
 

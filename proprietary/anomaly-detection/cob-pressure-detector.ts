@@ -1,3 +1,5 @@
+import { rearmLevel } from './rearm-level';
+
 /**
  * Replication output-buffer (COB) pressure detection (valkey-io/valkey#3963):
  * during full sync on a busy primary, a replica's client output buffer can
@@ -486,12 +488,15 @@ export function cobPressureRearm(
     };
   }
   const replicaState = state.replicas.get(finding.replicaAddr ?? AGGREGATE_KEY);
-  const previousLevel = replicaState?.ackedLevel ?? 'none';
-  return () => {
-    if (replicaState && LEVEL_RANK[previousLevel] < LEVEL_RANK[replicaState.ackedLevel]) {
-      replicaState.ackedLevel = previousLevel;
-    }
-  };
+  if (!replicaState) return () => undefined;
+  return rearmLevel(
+    LEVEL_RANK,
+    replicaState.ackedLevel,
+    () => replicaState.ackedLevel,
+    (level) => {
+      replicaState.ackedLevel = level;
+    },
+  );
 }
 
 export function cobPressureLatch(finding: CobPressureFinding): string {

@@ -48,19 +48,25 @@ const postgresAdapters: Array<[string, AdapterFactory]> = isReachable(POSTGRES_D
         async () => {
           const schema = `anomaly_storage_${randomUUID().replace(/-/g, '')}`;
           const storage = new PostgresAdapter({ connectionString: POSTGRES_DSN, schema });
-          await storage.initialize();
-          return {
-            storage: storage as StoragePort,
-            cleanup: async () => {
+          const cleanup = async () => {
+            const pool = new Pool({ connectionString: POSTGRES_DSN });
+            try {
               await storage.close();
-              const pool = new Pool({ connectionString: POSTGRES_DSN });
+            } finally {
               try {
                 await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
               } finally {
                 await pool.end();
               }
-            },
+            }
           };
+          try {
+            await storage.initialize();
+          } catch (err) {
+            await cleanup().catch(() => undefined);
+            throw err;
+          }
+          return { storage: storage as StoragePort, cleanup };
         },
       ],
     ]

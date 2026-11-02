@@ -43,6 +43,10 @@ import {
   BulkDeleteAuditQueryOptions,
   StoredCorrelatedGroup,
   AnomalyQueryOptions,
+  AnomalyScopeFilter,
+  IncidentBoundaryQuery,
+  StoredIncidentBoundary,
+  CorrelatedGroupQueryOptions,
   AnomalyStats,
   KeyPatternSnapshot,
   KeyPatternQueryOptions,
@@ -721,6 +725,26 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   private runMigrations(): void {
     if (!this.db) return;
 
+    const groupColumns = this.db.prepare('PRAGMA table_info(correlated_anomaly_groups)').all() as {
+      name: string;
+    }[];
+    if (!groupColumns.some((col) => col.name === 'anomaly_ids')) {
+      this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN anomaly_ids TEXT').run();
+    }
+    if (!groupColumns.some((col) => col.name === 'scope_id')) {
+      this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN scope_id TEXT').run();
+    }
+    const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
+      name: string;
+    }[];
+    if (!eventColumns.some((col) => col.name === 'scope_id')) {
+      this.db.prepare('ALTER TABLE anomaly_events ADD COLUMN scope_id TEXT').run();
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_anomaly_events_scope ON anomaly_events(scope_id, timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_correlated_groups_scope ON correlated_anomaly_groups(scope_id, timestamp DESC);
+    `);
+
     // Get existing columns in webhooks table
     const tableInfo = this.db.prepare('PRAGMA table_info(webhooks)').all() as { name: string }[];
     const existingColumns = new Set(tableInfo.map((col) => col.name));
@@ -788,6 +812,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }[];
     if (!anomalyEventInfo.some((col) => col.name === 'replica_addr')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN replica_addr TEXT');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'dedupe_key')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN dedupe_key TEXT');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'commands')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN commands TEXT');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'event_sequence')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN event_sequence INTEGER');
     }
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
@@ -1837,6 +1870,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         correlation_id TEXT,
         related_metrics TEXT,
         replica_addr TEXT,
+        dedupe_key TEXT,
+        commands TEXT,
+        event_sequence INTEGER,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -1891,8 +1927,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         source_host TEXT,
         source_port INTEGER,
         connection_id TEXT NOT NULL DEFAULT 'env-default',
+        anomaly_ids TEXT,
         created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
       );
+
+      CREATE TABLE IF NOT EXISTS incident_boundaries (
+        scope_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        anomaly_id TEXT NOT NULL,
+        PRIMARY KEY (scope_id, started_at, anomaly_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_pattern ON correlated_anomaly_groups(pattern, timestamp DESC);
@@ -2718,14 +2764,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, excluded.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2746,12 +2796,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.correlationId || null,
       event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
       event.replicaAddr ?? null,
+      event.dedupeKey ?? null,
+      event.commands ? JSON.stringify(event.commands) : null,
+      event.eventSequence ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
       event.sourceHost || null,
       event.sourcePort || null,
       connectionId,
+      event.scopeId ?? null,
     );
 
     return event.id;
@@ -2764,14 +2818,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO anomaly_events (
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
-        message, correlation_id, related_metrics, replica_addr,
+        message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
         resolved, resolved_at, duration_ms,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
+        scope_id = COALESCE(anomaly_events.scope_id, excluded.scope_id),
         replica_addr = COALESCE(excluded.replica_addr, anomaly_events.replica_addr),
+        dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
+        commands = COALESCE(anomaly_events.commands, excluded.commands),
+        event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2794,12 +2852,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.correlationId || null,
           event.relatedMetrics ? JSON.stringify(event.relatedMetrics) : null,
           event.replicaAddr ?? null,
+          event.dedupeKey ?? null,
+          event.commands ? JSON.stringify(event.commands) : null,
+          event.eventSequence ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,
           event.sourceHost || null,
           event.sourcePort || null,
           connId,
+          event.scopeId ?? null,
         );
       }
     });
@@ -2838,13 +2900,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('resolved = ?');
       params.push(options.resolved ? 1 : 0);
     }
-    if (options.correlationIds) {
-      conditions.push(
-        options.correlationIds.length > 0
-          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
-          : '1 = 0',
-      );
-      params.push(...options.correlationIds);
+    if (options.scope) {
+      conditions.push(this.scopeCondition(options.scope));
+      params.push(options.scope.id, ...options.scope.connectionIds);
+    }
+    const direction = options.order === 'asc' ? 'ASC' : 'DESC';
+    if (options.after) {
+      const past = direction === 'ASC' ? '>' : '<';
+      conditions.push(`(timestamp ${past} ? OR (timestamp = ? AND id ${past} ?))`);
+      params.push(options.after.timestamp, options.after.timestamp, options.after.id);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -2854,7 +2918,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM anomaly_events
       ${whereClause}
-      ORDER BY timestamp DESC, id DESC
+      ORDER BY timestamp ${direction}, id ${direction}
       LIMIT ? OFFSET ?
     `;
 
@@ -2981,12 +3045,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(correlation_id) DO UPDATE SET
         diagnosis = excluded.diagnosis,
         recommendations = excluded.recommendations,
-        anomaly_count = excluded.anomaly_count
+        anomaly_count = excluded.anomaly_count,
+        anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id)
     `);
 
     stmt.run(
@@ -3001,12 +3067,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       group.sourceHost || null,
       group.sourcePort || null,
       connectionId,
+      group.anomalyIds ? JSON.stringify(group.anomalyIds) : null,
+      group.scopeId ?? null,
     );
 
     return group.correlationId;
   }
 
-  async getCorrelatedGroups(options: AnomalyQueryOptions = {}): Promise<StoredCorrelatedGroup[]> {
+  async getCorrelatedGroups(
+    options: CorrelatedGroupQueryOptions = {},
+  ): Promise<StoredCorrelatedGroup[]> {
     if (!this.db) throw new Error('Database not initialized');
 
     const conditions: string[] = [];
@@ -3032,29 +3102,25 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push('pattern = ?');
       params.push(options.pattern);
     }
-    if (options.correlationIds) {
+    if (options.scope) {
+      conditions.push(this.scopeCondition(options.scope));
+      params.push(options.scope.id, ...options.scope.connectionIds);
+    }
+    if (options.patterns) {
       conditions.push(
-        options.correlationIds.length > 0
-          ? `correlation_id IN (${options.correlationIds.map(() => '?').join(', ')})`
+        options.patterns.length > 0
+          ? `pattern IN (${options.patterns.map(() => '?').join(', ')})`
           : '1 = 0',
       );
-      params.push(...options.correlationIds);
+      params.push(...options.patterns);
     }
-    if (options.involving) {
-      const { connectionId, startTime, endTime } = options.involving;
-      const member = ['connection_id = ?', 'correlation_id IS NOT NULL'];
-      params.push(connectionId);
-      if (startTime !== undefined) {
-        member.push('timestamp >= ?');
-        params.push(startTime);
-      }
-      if (endTime !== undefined) {
-        member.push('timestamp <= ?');
-        params.push(endTime);
-      }
-      conditions.push(
-        `correlation_id IN (SELECT correlation_id FROM anomaly_events WHERE ${member.join(' AND ')})`,
-      );
+    if (options.involvingConnectionId) {
+      conditions.push(`(connection_id = ? OR EXISTS (
+        SELECT 1 FROM anomaly_events member
+        WHERE member.correlation_id = correlated_anomaly_groups.correlation_id
+          AND member.connection_id = ?
+      ))`);
+      params.push(options.involvingConnectionId, options.involvingConnectionId);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -3064,7 +3130,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       SELECT * FROM correlated_anomaly_groups
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, correlation_id DESC
       LIMIT ? OFFSET ?
     `;
 
@@ -3073,6 +3139,97 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db.prepare(query).all(...params) as any[];
 
     return rows.map((row) => this.mappers.mapCorrelatedGroupRow(row));
+  }
+
+  private scopeCondition(scope: AnomalyScopeFilter): string {
+    const members = scope.connectionIds.map(() => '?').join(', ');
+    return members ? `(scope_id = ? OR connection_id IN (${members}))` : 'scope_id = ?';
+  }
+
+  async getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+    maxRows: number,
+  ): Promise<StoredAnomalyEvent[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
+
+    const placeholders = (values: string[]) => values.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(correlation_id, id) ORDER BY timestamp DESC, id DESC
+          ) AS group_rank
+          FROM anomaly_events
+          WHERE correlation_id IN (${placeholders(correlationIds)})
+            OR id IN (${placeholders(anomalyIds)})
+        )
+        WHERE group_rank <= ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?`,
+      )
+      .all(...correlationIds, ...anomalyIds, maxPerGroup, maxRows) as any[];
+
+    return rows.map((row) => this.mappers.mapAnomalyEventRow(row)).reverse();
+  }
+
+  async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (boundaries.length === 0) return 0;
+
+    const stmt = this.db.prepare(`
+      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+      VALUES (?, ?, ?)
+      ON CONFLICT DO NOTHING
+    `);
+    const insertMany = this.db.transaction((rows: StoredIncidentBoundary[]) =>
+      rows.reduce(
+        (saved, row) => saved + stmt.run(row.scopeId, row.startedAt, row.anomalyId).changes,
+        0,
+      ),
+    );
+    return insertMany(boundaries);
+  }
+
+  async getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]> {
+    if (!this.db) throw new Error('Database not initialized');
+    if (query.scopeIds?.length === 0) return [];
+
+    const scopes = query.scopeIds?.map(() => '?').join(', ');
+    const inScope = scopes ? `scope_id IN (${scopes}) AND ` : '';
+    const inWindow = query.endTime ? 'AND started_at <= ?' : '';
+    const rows = this.db
+      .prepare(
+        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+         WHERE ${inScope}started_at >= ? ${inWindow}
+         UNION ALL
+         SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+         JOIN (
+           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+           WHERE ${inScope}started_at < ?
+           GROUP BY scope_id
+         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+         ORDER BY started_at ASC, anomaly_id ASC`,
+      )
+      .all(
+        ...(query.scopeIds ?? []),
+        query.startTime,
+        ...(query.endTime ? [query.endTime] : []),
+        ...(query.scopeIds ?? []),
+        query.startTime,
+      ) as { scope_id: string; started_at: number; anomaly_id: string }[];
+    return rows.map((row) => ({
+      scopeId: row.scope_id,
+      startedAt: row.started_at,
+      anomalyId: row.anomaly_id,
+    }));
+  }
+
+  async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {
+    if (!this.db) throw new Error('Database not initialized');
+    return chunkedSqliteDelete(this.db, 'incident_boundaries', 'started_at < ?', [cutoffTimestamp]);
   }
 
   async pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number> {

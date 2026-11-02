@@ -36,6 +36,10 @@ export function computeConnectionChurn(
   return sample;
 }
 
+export function connectsPerOp(connectsPerSec: number, opsPerSec: number | null): number {
+  return connectsPerSec / Math.max(1, opsPerSec ?? 0);
+}
+
 export function isChurnWithFlatPopulation(sample: ConnectionChurnSample): boolean {
   return (
     sample.connectsPerSec !== null &&
