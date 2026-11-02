@@ -19,6 +19,7 @@ import {
   ConnectionContext,
 } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
+import { withTimeout } from '@app/common/utils/with-timeout';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
@@ -410,6 +411,7 @@ export class AnomalyService
   private reshardSnapshot = new Map<string, ReshardShardSnapshot>();
   private readonly connectionClusterKeys = new Map<string, string>();
   private readonly clusterKeyByNode = new Map<string, string>();
+  private readonly clusterViews = new Map<string, ReadonlySet<string>>();
   private reshardSkewFirstSeen = new Map<string, Map<string, number>>();
   private activeReshardSkews = new Map<string, Set<string>>();
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
@@ -6257,17 +6259,28 @@ export class AnomalyService
     const nodeIds = nodes.map((node) => node.id);
     const known = nodeIds.map((id) => this.clusterKeyByNode.get(id)).find(Boolean);
     const clusterKey = known ?? liveKey;
-    const current = new Set(nodeIds);
-    for (const [nodeId, key] of this.clusterKeyByNode) {
-      if (key === clusterKey && !current.has(nodeId)) this.clusterKeyByNode.delete(nodeId);
-    }
+    const previousView = this.clusterViews.get(connectionId);
+    this.clusterViews.set(connectionId, new Set(nodeIds));
     nodeIds.forEach((id) => this.clusterKeyByNode.set(id, clusterKey));
     this.connectionClusterKeys.set(connectionId, clusterKey);
+    if (previousView) this.releaseClusterNodes(previousView);
+  }
+
+  private releaseClusterNodes(nodeIds: ReadonlySet<string>): void {
+    const views = [...this.clusterViews.values()];
+    for (const nodeId of nodeIds) {
+      if (!views.some((view) => view.has(nodeId))) this.clusterKeyByNode.delete(nodeId);
+    }
   }
 
   private async learnClusterKey(ctx: ConnectionContext): Promise<void> {
     try {
-      this.rememberClusterKey(ctx.connectionId, await ctx.client.getClusterNodes());
+      const nodes = await withTimeout(
+        ctx.client.getClusterNodes(),
+        this.infoTimeoutMs,
+        'CLUSTER NODES timed out',
+      );
+      this.rememberClusterKey(ctx.connectionId, nodes);
     } catch (err) {
       this.logger.debug(
         `Failed to read cluster nodes for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6276,12 +6289,10 @@ export class AnomalyService
   }
 
   private forgetClusterKey(connectionId: string): void {
-    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const view = this.clusterViews.get(connectionId);
+    this.clusterViews.delete(connectionId);
     this.connectionClusterKeys.delete(connectionId);
-    if (!clusterKey || [...this.connectionClusterKeys.values()].includes(clusterKey)) return;
-    for (const [nodeId, key] of this.clusterKeyByNode) {
-      if (key === clusterKey) this.clusterKeyByNode.delete(nodeId);
-    }
+    if (view) this.releaseClusterNodes(view);
   }
 
   private seedIdOf(connectionId: string): string | undefined {

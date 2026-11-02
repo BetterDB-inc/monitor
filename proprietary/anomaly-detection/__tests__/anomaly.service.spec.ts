@@ -8863,6 +8863,34 @@ describe('AnomalyService', () => {
       expect([...(service as any).clusterKeyByNode.keys()].sort()).toEqual(['b', 'c']);
     });
 
+    it('keeps a node that another connection still sees', () => {
+      const node = (id: string) => ({ id, address: `${id}:6379` }) as ClusterNode;
+      (service as any).rememberClusterKey('conn-1', [node('a'), node('b'), node('c')]);
+      (service as any).rememberClusterKey('conn-2', [node('a'), node('b'), node('c')]);
+      const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+
+      (service as any).rememberClusterKey('conn-1', [node('a')]);
+      (service as any).rememberClusterKey('conn-3', [node('c'), node('d')]);
+
+      expect((service as any).connectionClusterKeys.get('conn-3')).toBe(clusterKey);
+    });
+
+    it('still runs the poll when CLUSTER NODES hangs on the first read', async () => {
+      (service as any).infoTimeoutMs = 5;
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        stats: { cluster_enabled: '1' },
+      });
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockReturnValueOnce(new Promise(() => undefined))
+        .mockResolvedValue([]);
+      const adopt = jest.spyOn(service as any, 'adoptOpenEvents').mockResolvedValue(undefined);
+
+      await (service as any).pollConnection(mockCtx);
+
+      expect(adopt).toHaveBeenCalledTimes(1);
+    });
+
     it('knows the cluster before anything in a first poll is stamped', async () => {
       dbClient.getInfoParsed = jest.fn().mockResolvedValue({
         stats: { cluster_enabled: '1' },
