@@ -21,6 +21,7 @@ import { withTimeout } from '@app/common/utils/with-timeout';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
+  ClientConnectionCaptureRow,
   ClientSnapshotGroupRow,
   ReplicationRecoveredData,
   WebhookEventType,
@@ -245,6 +246,7 @@ import {
   describeRetryAmplificationContributors,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
+  estimateNewConnections,
   selectClientSnapshots,
   readClientCommandCounts,
 } from './retry-amplification-attribution';
@@ -3612,18 +3614,16 @@ export class AnomalyService
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];
+    let connectionCaptures: ClientConnectionCaptureRow[] = [];
     let snapshotsLoaded = true;
+    const baselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
     try {
-      const span = Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
-      [capture, newConnections, baselineConnections] = await withTimeout(
+      [capture, newConnections, baselineConnections, connectionCaptures] = await withTimeout(
         Promise.all([
           this.latestClientCapture(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(
-            ctx.connectionId,
-            episodeStart - span,
-            episodeStart - 1,
-          ),
+          this.storage.getNewClientConnections(ctx.connectionId, baselineStart, episodeStart - 1),
+          this.storage.getClientConnectionCaptures(ctx.connectionId, baselineStart, until),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
@@ -3638,8 +3638,18 @@ export class AnomalyService
     return rankRetryAmplificationContributors({
       ...snapshots,
       capture,
-      newConnections,
-      baselineConnections,
+      newConnections: estimateNewConnections(
+        newConnections,
+        connectionCaptures,
+        episodeStart,
+        until,
+      ),
+      baselineConnections: estimateNewConnections(
+        baselineConnections,
+        connectionCaptures,
+        baselineStart,
+        episodeStart - 1,
+      ),
     });
   }
 
@@ -6451,16 +6461,7 @@ export class AnomalyService
     const truncated = new Set<string>();
     for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
       const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
-      const timestamps = chunk.map((s) => s.timestamp);
-      const limit = Math.min(this.maxRecentEvents * chunk.length, MAX_CORRELATED_MEMBER_ROWS);
-      const members = await this.storage.getAnomalyEvents({
-        startTime: Math.min(...timestamps) - this.correlationIntervalMs,
-        endTime: Math.max(...timestamps) + this.correlationIntervalMs,
-        correlationIds: chunk.map((s) => s.correlationId),
-        limit,
-      });
-      if (members.length >= limit) chunk.forEach((s) => truncated.add(s.correlationId));
-      for (const member of members) {
+      for (const member of await this.readGroupMembers(chunk, truncated)) {
         if (!member.correlationId) continue;
         const anomalies = membersByGroup.get(member.correlationId) ?? [];
         anomalies.push(this.storedToAnomalyEvent(member));
@@ -6480,6 +6481,30 @@ export class AnomalyService
       ),
       ...(truncated.has(s.correlationId) ? { truncated: true } : {}),
     }));
+  }
+
+  private async readGroupMembers(
+    groups: StoredCorrelatedGroup[],
+    truncated: Set<string>,
+  ): Promise<StoredAnomalyEvent[]> {
+    const timestamps = groups.map((group) => group.timestamp);
+    const limit = Math.min(this.maxRecentEvents * groups.length, MAX_CORRELATED_MEMBER_ROWS);
+    const members = await this.storage.getAnomalyEvents({
+      startTime: Math.min(...timestamps) - this.correlationIntervalMs,
+      endTime: Math.max(...timestamps) + this.correlationIntervalMs,
+      correlationIds: groups.map((group) => group.correlationId),
+      limit,
+    });
+    if (members.length < limit) return members;
+    if (groups.length === 1) {
+      truncated.add(groups[0].correlationId);
+      return members;
+    }
+    const middle = Math.ceil(groups.length / 2);
+    return [
+      ...(await this.readGroupMembers(groups.slice(0, middle), truncated)),
+      ...(await this.readGroupMembers(groups.slice(middle), truncated)),
+    ];
   }
 
   async getReplicationDivergenceHistory(

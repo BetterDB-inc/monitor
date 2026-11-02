@@ -40,6 +40,15 @@ export interface NewClientConnectionGroup {
   count: number;
 }
 
+export interface ClientConnectionCaptureRow {
+  capturedAt: number;
+  name: string;
+  user: string;
+  ip: string;
+  youngestAge: number;
+  maxClientId: number;
+}
+
 export interface ClientTimeSeriesPoint {
   timestamp: number;
   totalConnections: number;

@@ -6,6 +6,7 @@ import {
   ClientListEntry,
   contributorKey,
   describeRetryAmplificationContributors,
+  estimateNewConnections,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   RETRY_AMP_CLIENT_SNAPSHOTS,
@@ -495,5 +496,65 @@ describe('retry amplification attribution', () => {
       expect(describeRetryAmplificationContributors([])).toBe('No client stood out.');
       expect(describeRetryAmplificationContributors(null)).toBe('Client attribution unavailable.');
     });
+  });
+});
+
+describe('estimateNewConnections', () => {
+  const identity = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+  const capture = (capturedAt: number, maxClientId: number, youngestAge: number, name = 'worker') => ({
+    ...identity,
+    name,
+    capturedAt,
+    maxClientId,
+    youngestAge,
+  });
+
+  it('credits the id growth between captures to the only fresh client', () => {
+    const groups = [{ ...identity, count: 2 }];
+    const captures = [capture(0, 100, 5), capture(60_000, 130, 1), capture(120_000, 160, 1)];
+
+    expect(estimateNewConnections(groups, captures, 60_000, 120_000)).toEqual([
+      { ...identity, count: 60 },
+    ]);
+  });
+
+  it('shares the growth between clients that are fresh in the same capture', () => {
+    const captures = [
+      capture(0, 100, 5),
+      capture(60_000, 130, 1),
+      capture(60_000, 120, 2, 'other'),
+    ];
+
+    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
+      { ...identity, count: 15 },
+      { ...identity, name: 'other', count: 15 },
+    ]);
+  });
+
+  it('gives no growth to clients older than the previous capture', () => {
+    const captures = [capture(0, 100, 5), capture(60_000, 130, 61)];
+
+    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([]);
+  });
+
+  it('ignores the drop in ids after a server restart', () => {
+    const captures = [capture(0, 5_000, 5), capture(60_000, 12, 1)];
+
+    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([]);
+  });
+
+  it('keeps the observed count when ids grew less than it', () => {
+    const groups = [{ ...identity, count: 4 }];
+    const captures = [capture(0, 100, 5), capture(60_000, 101, 1)];
+
+    expect(estimateNewConnections(groups, captures, 60_000, 60_000)).toEqual(groups);
+  });
+
+  it('counts only captures inside the range', () => {
+    const captures = [capture(0, 100, 5), capture(60_000, 900, 1), capture(120_000, 910, 1)];
+
+    expect(estimateNewConnections([], captures, 120_000, 120_000)).toEqual([
+      { ...identity, count: 10 },
+    ]);
   });
 });

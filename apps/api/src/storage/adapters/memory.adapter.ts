@@ -17,6 +17,7 @@ import {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
   NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -389,6 +390,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       if (snapshot.connectionId !== connectionId) continue;
       if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
       if (snapshot.capturedAt - snapshot.age * 1000 < since) continue;
+      if (/[SM]/.test(snapshot.flags)) continue;
       const ip = clientAddrIp(snapshot.addr);
       const key = JSON.stringify([snapshot.name, snapshot.user, ip]);
       const entry = groups.get(key) ?? {
@@ -399,6 +401,33 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       groups.set(key, entry);
     }
     return [...groups.values()].map(({ group, ids }) => ({ ...group, count: ids.size }));
+  }
+
+  async getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]> {
+    const rows = new Map<string, ClientConnectionCaptureRow>();
+    for (const snapshot of this.clientSnapshots) {
+      if (snapshot.connectionId !== connectionId) continue;
+      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
+      if (/[SM]/.test(snapshot.flags)) continue;
+      const ip = clientAddrIp(snapshot.addr);
+      const key = JSON.stringify([snapshot.capturedAt, snapshot.name, snapshot.user, ip]);
+      const row = rows.get(key) ?? {
+        capturedAt: snapshot.capturedAt,
+        name: snapshot.name,
+        user: snapshot.user,
+        ip,
+        youngestAge: snapshot.age,
+        maxClientId: 0,
+      };
+      row.youngestAge = Math.min(row.youngestAge, snapshot.age);
+      row.maxClientId = Math.max(row.maxClientId, Number(snapshot.clientId) || 0);
+      rows.set(key, row);
+    }
+    return [...rows.values()];
   }
 
   async getClientTimeSeries(

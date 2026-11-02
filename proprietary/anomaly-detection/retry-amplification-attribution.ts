@@ -1,4 +1,8 @@
-import type { ClientSnapshotGroupRow, NewClientConnectionGroup } from '@betterdb/shared';
+import type {
+  ClientConnectionCaptureRow,
+  ClientSnapshotGroupRow,
+  NewClientConnectionGroup,
+} from '@betterdb/shared';
 import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
@@ -176,6 +180,47 @@ function addCommandGrowth(
   for (const { client, rate } of commandRates(first, latest)) {
     accumulatorFor(map, client).episodeRate += rate;
   }
+}
+
+function highestClientId(rows: ClientConnectionCaptureRow[]): number {
+  return Math.max(...rows.map((row) => row.maxClientId));
+}
+
+export function estimateNewConnections(
+  groups: NewClientConnectionGroup[],
+  captures: ClientConnectionCaptureRow[],
+  since: number,
+  until: number,
+): NewClientConnectionGroup[] {
+  const byCapture = new Map<number, ClientConnectionCaptureRow[]>();
+  for (const row of captures) {
+    byCapture.set(row.capturedAt, [...(byCapture.get(row.capturedAt) ?? []), row]);
+  }
+  const estimates = new Map(
+    groups.map((group) => [JSON.stringify([group.name, group.user, group.ip]), { ...group }]),
+  );
+  const shares = new Map<string, { row: ClientConnectionCaptureRow; share: number }>();
+  const times = [...byCapture.keys()].sort((a, b) => a - b);
+  for (let i = 1; i < times.length; i++) {
+    const capturedAt = times[i];
+    if (capturedAt < since || capturedAt > until) continue;
+    const rows = byCapture.get(capturedAt) ?? [];
+    const previous = byCapture.get(times[i - 1]) ?? [];
+    const growth = highestClientId(rows) - highestClientId(previous);
+    if (growth <= 0) continue;
+    const fresh = rows.filter((row) => capturedAt - row.youngestAge * 1000 >= times[i - 1]);
+    for (const row of fresh) {
+      const key = JSON.stringify([row.name, row.user, row.ip]);
+      const entry = shares.get(key) ?? { row, share: 0 };
+      entry.share += growth / fresh.length;
+      shares.set(key, entry);
+    }
+  }
+  for (const [key, { row, share }] of shares) {
+    const group = estimates.get(key) ?? { name: row.name, user: row.user, ip: row.ip, count: 0 };
+    estimates.set(key, { ...group, count: Math.max(group.count, Math.round(share)) });
+  }
+  return [...estimates.values()];
 }
 
 function addReconnects(

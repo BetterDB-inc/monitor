@@ -3,6 +3,7 @@ export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
   NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -96,6 +97,7 @@ import type {
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
   NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -534,6 +536,11 @@ export interface StoragePort {
     since: number,
     until: number,
   ): Promise<NewClientConnectionGroup[]>;
+  getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,

@@ -82,6 +82,7 @@ describe('AnomalyService', () => {
       getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getNewClientConnections: jest.fn().mockResolvedValue([]),
+      getClientConnectionCaptures: jest.fn().mockResolvedValue([]),
       getClientSnapshotGroups: jest.fn().mockResolvedValue([]),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
@@ -4063,6 +4064,34 @@ describe('AnomalyService', () => {
 
       expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 600_000, 780_000);
       expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 420_000, 599_999);
+    });
+
+    it('scores a fast retrier from the id growth between captures', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+        { capturedAt: 780_000, ...worker, count: 1, ageSum: 1 },
+      ]);
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockResolvedValueOnce([{ ...worker, count: 1 }])
+        .mockResolvedValueOnce([]);
+      storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([
+        { ...worker, capturedAt: 590_000, youngestAge: 500, maxClientId: 100 },
+        { ...worker, capturedAt: 650_000, youngestAge: 1, maxClientId: 130 },
+      ]);
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+      );
+
+      expect(storage.getClientConnectionCaptures).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
     });
 
     it('reports a connection on its own recent events', () => {
@@ -8479,6 +8508,42 @@ describe('AnomalyService', () => {
       const [group] = await service.getRecentCorrelatedGroups(1, undefined, undefined, 1, 'node-2');
 
       expect(group.truncated).toBe(true);
+    });
+
+    it('reads every group of an over-full query and flags only the capped one', async () => {
+      const group = (correlationId: string, timestamp: number) => ({
+        correlationId,
+        timestamp,
+        pattern: 'unknown',
+        severity: 'warning',
+        metricTypes: [],
+        connectionId: 'node-2',
+      });
+      storage.getCorrelatedGroups.mockResolvedValue([
+        group('busy', 2_000_000),
+        group('quiet', 1_000_000),
+      ]);
+      const rows = (correlationId: string, count: number) =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${correlationId}-${i}`,
+          timestamp: 1_000_000,
+          metricType: 'memory_used',
+          anomalyType: 'spike',
+          severity: 'warning',
+          correlationId,
+        }));
+      storage.getAnomalyEvents.mockImplementation(async ({ correlationIds, limit }: any) =>
+        [...rows('busy', 5_000), ...rows('quiet', 2)]
+          .filter((row) => correlationIds.includes(row.correlationId))
+          .slice(0, limit),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 2, 'node-2');
+      const byId = new Map(groups.map((g) => [g.correlationId, g]));
+
+      expect(byId.get('busy')?.truncated).toBe(true);
+      expect(byId.get('quiet')?.truncated).toBeUndefined();
+      expect(byId.get('quiet')?.anomalies).toHaveLength(2);
     });
 
     it('does not flag groups read in full', async () => {
