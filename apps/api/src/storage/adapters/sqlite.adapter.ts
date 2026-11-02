@@ -34,6 +34,8 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -1301,6 +1303,48 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db.prepare(query).all(...params) as any[];
 
     return rows.map((row) => this.mappers.mapClientRow(row));
+  }
+
+  async getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    return this.db
+      .prepare(
+        `SELECT COALESCE(name, '') AS name, COALESCE(user, '') AS user,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
+           FROM client_snapshots
+          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
+            AND captured_at - age * 1000 >= ?
+            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+          GROUP BY COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}`,
+      )
+      .all(connectionId, since, until, since) as NewClientConnectionGroup[];
+  }
+
+  async getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    return this.db
+      .prepare(
+        `SELECT captured_at AS capturedAt, COALESCE(name, '') AS name, COALESCE(user, '') AS user,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldestAge,
+                MAX(CAST(client_id AS INTEGER)) AS maxClientId
+           FROM client_snapshots
+          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
+            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}`,
+      )
+      .all(connectionId, since, until) as ClientConnectionCaptureRow[];
   }
 
   async getClientTimeSeries(
@@ -3106,6 +3150,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     correlationIds: string[],
     anomalyIds: string[],
     maxPerGroup: number,
+    maxRows: number,
   ): Promise<StoredAnomalyEvent[]> {
     if (!this.db) throw new Error('Database not initialized');
     if (correlationIds.length === 0 && anomalyIds.length === 0) return [];
@@ -3122,11 +3167,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
             OR id IN (${placeholders(anomalyIds)})
         )
         WHERE group_rank <= ?
-        ORDER BY timestamp ASC, id ASC`,
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?`,
       )
-      .all(...correlationIds, ...anomalyIds, maxPerGroup) as any[];
+      .all(...correlationIds, ...anomalyIds, maxPerGroup, maxRows) as any[];
 
-    return rows.map((row) => this.mappers.mapAnomalyEventRow(row));
+    return rows.map((row) => this.mappers.mapAnomalyEventRow(row)).reverse();
   }
 
   async saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number> {

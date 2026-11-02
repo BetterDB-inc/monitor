@@ -1,8 +1,9 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { McpAnomalyController } from '../mcp-anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
+import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { LicenseGuard } from '@proprietary/licenses';
 
 describe('McpAnomalyController', () => {
@@ -10,8 +11,10 @@ describe('McpAnomalyController', () => {
   const svc = {
     getRecentAnomalies: jest.fn(),
     getIncidentTimelines: jest.fn(),
+    getRetryAmplificationStatus: jest.fn(),
     getReplicationDivergenceHistory: jest.fn(),
   };
+  const registry = { get: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -19,7 +22,10 @@ describe('McpAnomalyController', () => {
     svc.getReplicationDivergenceHistory.mockResolvedValue([{ replica: '10.0.0.2:6379' }]);
     const mod = await Test.createTestingModule({
       controllers: [McpAnomalyController],
-      providers: [{ provide: AnomalyService, useValue: svc }],
+      providers: [
+        { provide: AnomalyService, useValue: svc },
+        { provide: ConnectionRegistry, useValue: registry },
+      ],
     })
       .overrideGuard(AgentTokenGuard)
       .useValue({ canActivate: () => true })
@@ -40,6 +46,15 @@ describe('McpAnomalyController', () => {
       10,
       'inst1',
     );
+  });
+
+  it('replication divergence returns 404 for an unregistered instance', async () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    await expect(controller.getReplicationDivergence('ghost')).rejects.toMatchObject({ status: 404 });
+    expect(svc.getReplicationDivergenceHistory).not.toHaveBeenCalled();
   });
 
   it('replication divergence returns per-replica series with divergence events', async () => {
@@ -127,5 +142,29 @@ describe('McpAnomalyController', () => {
     svc.getIncidentTimelines.mockRejectedValueOnce(new Error('boom'));
 
     await expect(controller.getIncidents('inst1')).rejects.toBeInstanceOf(HttpException);
+  });
+
+  it('retry amplification returns the detector status for the instance', () => {
+    const status = { armed: true, classification: 'none', topContributors: null };
+    svc.getRetryAmplificationStatus.mockReturnValue(status);
+
+    expect(controller.getRetryAmplification('inst1')).toBe(status);
+    expect(svc.getRetryAmplificationStatus).toHaveBeenCalledWith('inst1');
+  });
+
+  it('retry amplification returns 404 for an unregistered instance', () => {
+    registry.get.mockImplementationOnce(() => {
+      throw new NotFoundException('nope');
+    });
+
+    let caught: unknown;
+    try {
+      controller.getRetryAmplification('ghost');
+    } catch (error) {
+      caught = error;
+    }
+
+    expect((caught as HttpException).getStatus()).toBe(404);
+    expect(svc.getRetryAmplificationStatus).not.toHaveBeenCalled();
   });
 });

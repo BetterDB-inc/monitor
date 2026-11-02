@@ -69,6 +69,8 @@ export enum MetricType {
   /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
+  RETRY_AMPLIFICATION = 'retry_amplification',
+  ERROR_REPLIES = 'error_replies',
   REPLICATION_DIVERGENCE = 'replication_divergence',
   BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
   RESYNC_ESCALATION = 'resync_escalation',
@@ -114,6 +116,8 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LARGE_REPLY_PRESSURE,
   MetricType.CONNECTION_CHURN,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.RETRY_AMPLIFICATION,
+  MetricType.ERROR_REPLIES,
   MetricType.REPLICATION_DIVERGENCE,
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.RESYNC_ESCALATION,
@@ -143,10 +147,13 @@ export enum AnomalyPattern {
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
   RESHARD_PRESSURE = 'reshard_pressure',
+  RETRY_AMPLIFICATION = 'retry_amplification',
   REPLICATION_DIVERGENCE = 'replication_divergence',
   RECOVERY_AMPLIFICATION = 'recovery_amplification',
   UNKNOWN = 'unknown',
 }
+
+export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
 
 export interface AnomalyEvent {
   id: string;
@@ -178,6 +185,7 @@ export interface AnomalyEvent {
    * the numeric fields.
    */
   syntheticPattern?: AnomalyPattern;
+  retryTrigger?: RetryAmplificationTrigger;
   /**
    * Transient (not persisted): whether this cached event was durably written to
    * storage. An event whose save has not landed is resolved by flipping the cache
@@ -194,6 +202,7 @@ export interface CorrelatedAnomalyGroup {
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;
+  truncated?: boolean;
 }
 
 export interface MetricSample {
@@ -237,6 +246,7 @@ export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
 
 export interface AnomalyEventSink {
   ingestExternalAnomaly(event: AnomalyEvent): void;
+  reportLatencyDegraded?(connectionId: string, degraded: boolean | null): void;
 }
 
 export const ANOMALY_WEBHOOK_SINK = 'ANOMALY_WEBHOOK_SINK';

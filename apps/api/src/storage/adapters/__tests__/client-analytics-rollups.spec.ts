@@ -105,6 +105,133 @@ describe.each([
     await h.cleanup();
   });
 
+  describe('getNewClientConnections', () => {
+    const since = 1_000_000;
+    const until = 2_000_000;
+    const rows = (overrides: Array<Partial<ReturnType<typeof client>>>) =>
+      overrides.map((o) => ({ ...client(since), ...o }));
+
+    it('counts each client once across captures, grouped by name, user and ip', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: 'a', name: 'api', user: 'svc', addr: '10.0.0.1:1', age: 0, capturedAt: since },
+          { clientId: 'a', name: 'api', user: 'svc', addr: '10.0.0.1:1', age: 60, capturedAt: since + 60_000 },
+          { clientId: 'b', name: 'api', user: 'svc', addr: '10.0.0.1:2', age: 1, capturedAt: since + 60_000 },
+          { clientId: 'c', name: '', user: 'default', addr: '[::1]:6379', age: 1, capturedAt: since + 60_000 },
+        ]),
+      );
+
+      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
+      expect(groups.sort((x, y) => y.count - x.count)).toEqual([
+        { name: 'api', user: 'svc', ip: '10.0.0.1', count: 2 },
+        { name: '', user: 'default', ip: '[::1]', count: 1 },
+      ]);
+    });
+
+    it('skips clients connected before the range, other connections and later captures', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: 'old', name: 'pool', age: 5, capturedAt: since + 1_000 },
+          { clientId: 'late', name: 'later', age: 0, capturedAt: until + 1 },
+        ]),
+      );
+      await save(h.storage, rows([{ clientId: 'x', name: 'other', age: 0 }]), 'other');
+
+      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([]);
+    });
+
+    it('finds early connections that a limited snapshot read drops', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: 'early', name: 'retrier', age: 0, capturedAt: since },
+          { clientId: 'p1', name: 'pool', age: 9_999, capturedAt: since + 60_000 },
+          { clientId: 'p2', name: 'pool', age: 9_999, capturedAt: since + 60_000 },
+        ]),
+      );
+
+      const limited = await h.storage.getClientSnapshots({
+        connectionId: 'conn-x',
+        startTime: since,
+        endTime: until,
+        limit: 2,
+      });
+      expect(limited.map((r) => r.clientId)).not.toContain('early');
+      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([
+        expect.objectContaining({ name: 'retrier', count: 1 }),
+      ]);
+    });
+
+    it('leaves replica and master links out', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: 'r', name: 'replica', flags: 'S', age: 0 },
+          { clientId: 'm', name: 'master', flags: 'M', age: 0 },
+          { clientId: 'n', name: 'api', flags: 'N', age: 0 },
+        ]),
+      );
+
+      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([
+        expect.objectContaining({ name: 'api', count: 1 }),
+      ]);
+    });
+  });
+
+  describe('getClientConnectionCaptures', () => {
+    const since = 1_000_000;
+    const until = 2_000_000;
+    const rows = (overrides: Array<Partial<ReturnType<typeof client>>>) =>
+      overrides.map((o) => ({ ...client(since), ...o }));
+
+    it('reads the oldest connection and highest id of each identity per capture', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '7', name: 'api', addr: '10.0.0.1:1', age: 90, capturedAt: since },
+          { clientId: '12', name: 'api', addr: '10.0.0.1:2', age: 4, capturedAt: since },
+          { clientId: '40', name: 'api', addr: '10.0.0.1:3', age: 1, capturedAt: since + 60_000 },
+        ]),
+      );
+
+      const captures = await h.storage.getClientConnectionCaptures('conn-x', since, until);
+      expect(captures.sort((x, y) => x.capturedAt - y.capturedAt)).toEqual([
+        {
+          capturedAt: since,
+          name: 'api',
+          user: 'default',
+          ip: '10.0.0.1',
+          oldestAge: 90,
+          maxClientId: 12,
+        },
+        {
+          capturedAt: since + 60_000,
+          name: 'api',
+          user: 'default',
+          ip: '10.0.0.1',
+          oldestAge: 1,
+          maxClientId: 40,
+        },
+      ]);
+    });
+
+    it('skips replica links, other connections and captures outside the range', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '1', name: 'replica', flags: 'S' },
+          { clientId: '2', name: 'late', capturedAt: until + 1 },
+          { clientId: '3', name: 'early', capturedAt: since - 1 },
+        ]),
+      );
+      await save(h.storage, rows([{ clientId: '4', name: 'other' }]), 'other');
+
+      expect(await h.storage.getClientConnectionCaptures('conn-x', since, until)).toEqual([]);
+    });
+  });
+
   describe('getClientSnapshotBounds', () => {
     it('is null for a connection with no rows', async () => {
       await save(h.storage, [client(1_000)], 'other');

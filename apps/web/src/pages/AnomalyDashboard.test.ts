@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { formatValue } from '../lib/formatters';
+import { formatRelatedCount } from './AnomalyDashboard';
+
+describe('formatRelatedCount', () => {
+  it('marks a member list the API cut short', () => {
+    expect(formatRelatedCount({ anomalies: [{}, {}], truncated: true })).toBe('2+');
+  });
+
+  it('shows the plain count otherwise', () => {
+    expect(formatRelatedCount({ anomalies: [{}, {}] })).toBe('2');
+  });
+});
 
 describe('formatValue', () => {
   it('keeps a replication gap below 1 KiB in bytes', () => {

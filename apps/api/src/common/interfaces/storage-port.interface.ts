@@ -2,6 +2,8 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -94,6 +96,8 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -562,6 +566,16 @@ export interface StoragePort {
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
+  getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]>;
+  getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,
@@ -661,6 +675,7 @@ export interface StoragePort {
     correlationIds: string[],
     anomalyIds: string[],
     maxPerGroup: number,
+    maxRows: number,
   ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 

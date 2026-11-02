@@ -36,6 +36,52 @@ describe('webhook-payload-formatter', () => {
   });
 });
 
+describe('webhook-payload-formatter: retry amplification', () => {
+  const message =
+    'WARNING: Retry amplification — commands per client at 1.9× baseline for 3 min while connected ' +
+    'clients stay flat at ~120; load is rising with stress (r=0.97). Trigger: a latency regression ' +
+    '(COMMAND_P99). Without client backoff the loop keeps feeding itself. ' +
+    'Top clients: name checkout (cmds 4.8×, 12 reconnects).';
+  const payload: WebhookPayload = {
+    ...base,
+    event: WebhookEventType.RETRY_AMPLIFICATION_DETECTED,
+    data: { metricType: 'retry_amplification', value: 1.9, baseline: 1, message },
+  };
+
+  it('shows the whole message in Slack and links to the anomalies page', () => {
+    const body = JSON.stringify(toSlack(payload, 'https://betterdb.example.com'));
+    expect(body).toContain('Trigger: a latency regression');
+    expect(body).toContain('Top clients: name checkout');
+    expect(body).toContain('https://betterdb.example.com/anomalies');
+    expect(body).not.toContain('/dashboard');
+  });
+
+  it('shows the whole message in Discord and links to the anomalies page', () => {
+    const discord = toDiscord(payload, 'https://betterdb.example.com') as {
+      embeds: Array<{ description: string; url: string }>;
+    };
+    expect(discord.embeds[0].description).toContain('Top clients: name checkout');
+    expect(discord.embeds[0].url).toBe('https://betterdb.example.com/anomalies');
+  });
+
+  it('stays within the Slack and Discord text limits', () => {
+    const long = { ...payload, data: { message: '<'.repeat(5_000) } };
+    const blocks = toSlack(long)['blocks'] as Array<{ text?: { text: string } }>;
+    const discord = toDiscord(long) as { embeds: Array<{ description: string }> };
+    for (const block of blocks) {
+      expect(block.text?.text.length ?? 0).toBeLessThanOrEqual(3_000);
+    }
+    expect(discord.embeds[0].description.length).toBeLessThanOrEqual(4_096);
+  });
+
+  it('adds no body for a message that already fits the title', () => {
+    const blocks = toSlack(base)['blocks'] as unknown[];
+    const discord = toDiscord(base) as { embeds: Array<{ description?: string }> };
+    expect(blocks).toHaveLength(3);
+    expect(discord.embeds[0].description).toBeUndefined();
+  });
+});
+
 describe('webhook-payload-formatter: untrusted text', () => {
   // ACL LOG records the username an unauthenticated client *tried*, so
   // `AUTH <!channel> x` / `AUTH @everyone x` reaches client.blocked verbatim.
@@ -72,5 +118,55 @@ describe('webhook-payload-formatter: untrusted text', () => {
 
   it('leaves the generic JSON payload untouched', () => {
     expect(JSON.parse(formatWebhookBody({}, hostile))).toEqual(JSON.parse(JSON.stringify(hostile)));
+  });
+});
+
+describe('webhook-payload-formatter: long text', () => {
+  const withMessage = (message: string): WebhookPayload => ({
+    ...base,
+    data: { ...base.data, message },
+  });
+  const slackText = (message: string) => {
+    const blocks = toSlack(withMessage(message), 'https://b.example.com')['blocks'] as Array<{
+      text?: { text: string };
+    }>;
+    return blocks[1].text!.text;
+  };
+  const discordText = (message: string) => {
+    const discord = toDiscord(withMessage(message), 'https://b.example.com') as {
+      embeds: Array<{ description: string }>;
+    };
+    return discord.embeds[0].description;
+  };
+
+  it.each(['&', '<', '>'])('never cuts a Slack entity in half for %s', (char) => {
+    const text = slackText('x'.repeat(2999) + char.repeat(500));
+
+    expect(text.length).toBeLessThanOrEqual(3000);
+    expect(text.replace(/&(amp|lt|gt);/g, '')).not.toMatch(/&/);
+  });
+
+  it('fills the Slack limit with plain text', () => {
+    expect(slackText('x'.repeat(5000))).toHaveLength(3000);
+  });
+
+  it('never ends a Discord description on a dangling escape', () => {
+    const text = discordText('x'.repeat(4095) + '*'.repeat(500));
+
+    expect(text.length).toBeLessThanOrEqual(4096);
+    expect(text.endsWith('\\')).toBe(false);
+  });
+
+  it('never leaves a Discord mention whole after the limit', () => {
+    const text = discordText('x'.repeat(4085) + '@everyone hello');
+
+    expect(text.length).toBeLessThanOrEqual(4096);
+    expect(text).not.toContain('@everyone');
+  });
+
+  it('leaves text inside the limits unchanged', () => {
+    const message = `${'a'.repeat(130)} <b>`;
+
+    expect(slackText(message)).toBe(`${'a'.repeat(130)} &lt;b&gt;`);
   });
 });

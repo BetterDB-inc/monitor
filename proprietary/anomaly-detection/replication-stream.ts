@@ -104,7 +104,7 @@ export class ReplicationStreamTracker {
     this.baselines.set(connectionId, { replid, offset: masterReplOffset, ts: timestamp, ewma });
 
     const isReplica = REPLICA_ROLES.has(info.role);
-    const sample: ReplicationStreamSample = {
+    return {
       timestamp,
       role: isReplica ? 'replica' : 'primary',
       replid,
@@ -119,7 +119,6 @@ export class ReplicationStreamTracker {
             gapBytes: Math.max(0, masterReplOffset - line.offset),
           })),
     };
-    return sample;
   }
 
   forget(connectionId: string): void {

@@ -13,6 +13,7 @@ export enum MetricType {
   blocked_clients = 'blocked_clients',
   keyspace_misses = 'keyspace_misses',
   fragmentation_ratio = 'fragmentation_ratio',
+  error_replies = 'error_replies',
 }
 
 export interface DetectorConfig {
@@ -143,6 +144,14 @@ export const DETECTOR_DEFAULTS: Record<MetricType, Required<DetectorConfig>> = {
     criticalAbsolute: 2.0,
     consecutiveRequired: 5,
     cooldownMs: 120_000,
+  },
+  [MetricType.error_replies]: {
+    ...zScoreDefaults,
+    warningZScore: 3,
+    criticalZScore: 5,
+    warningAbsolute: 200,
+    criticalAbsolute: 2000,
+    consecutiveRequired: 2,
   },
 };
 

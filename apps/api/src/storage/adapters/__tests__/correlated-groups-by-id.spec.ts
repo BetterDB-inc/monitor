@@ -154,7 +154,7 @@ describe.each<[string, AdapterFactory]>(adapters)(
         await save(event(c, 'conn-c', undefined, 300));
         await save(event(noise, CONN, randomUUID(), 400));
 
-        const rows = await storage.getCorrelatedGroupMembers([shared], [c], 100);
+        const rows = await storage.getCorrelatedGroupMembers([shared], [c], 100, 1000);
 
         expect(rows.map((e) => e.id)).toEqual([b, a, c]);
       });
@@ -164,14 +164,14 @@ describe.each<[string, AdapterFactory]>(adapters)(
         const id = randomUUID();
         await save({ ...event(id, CONN, shared, 200), replicaAddr: '10.0.0.2:6379' });
 
-        const [member] = await storage.getCorrelatedGroupMembers([shared], [], 100);
+        const [member] = await storage.getCorrelatedGroupMembers([shared], [], 100, 1000);
 
         expect(member.replicaAddr).toBe('10.0.0.2:6379');
       });
 
       it('returns no members for empty lists and ignores ids storage cannot hold', async () => {
-        expect(await storage.getCorrelatedGroupMembers([], [], 100)).toEqual([]);
-        expect(await storage.getCorrelatedGroupMembers([], ['failover:conn-a:1'], 100)).toEqual([]);
+        expect(await storage.getCorrelatedGroupMembers([], [], 100, 1000)).toEqual([]);
+        expect(await storage.getCorrelatedGroupMembers([], ['failover:conn-a:1'], 100, 1000)).toEqual([]);
       });
 
       it('keeps the newest members of each group up to the bound', async () => {
@@ -183,9 +183,19 @@ describe.each<[string, AdapterFactory]>(adapters)(
         await save(event(smallId, CONN, small, 50));
         await save(event(solo, CONN, undefined, 60));
 
-        const rows = await storage.getCorrelatedGroupMembers([big, small], [solo], 2);
+        const rows = await storage.getCorrelatedGroupMembers([big, small], [solo], 2, 1000);
 
         expect(rows.map((e) => e.id)).toEqual([smallId, solo, bigIds[3], bigIds[4]]);
+      });
+
+      it('keeps the newest rows up to the total bound', async () => {
+        const group = randomUUID();
+        const ids = Array.from({ length: 5 }, () => randomUUID());
+        for (const [i, id] of ids.entries()) await save(event(id, CONN, group, 100 + i));
+
+        const rows = await storage.getCorrelatedGroupMembers([group], [], 5, 2);
+
+        expect(rows.map((e) => e.id)).toEqual([ids[3], ids[4]]);
       });
     });
   },

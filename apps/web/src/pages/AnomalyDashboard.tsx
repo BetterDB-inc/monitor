@@ -70,6 +70,7 @@ interface CorrelatedGroup {
   recommendations: string[];
   severity: 'info' | 'warning' | 'critical';
   anomalies: AnomalyEvent[];
+  truncated?: boolean;
 }
 
 interface AnomalySummary {
@@ -120,6 +121,7 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
     label: 'Recovery Amplification',
     color: 'var(--destructive)',
   },
+  retry_amplification: { icon: AlertTriangle, label: 'Retry Amplification', color: 'var(--chart-warning)' },
   replication_divergence: {
     icon: Database,
     label: 'Replication Divergence',
@@ -173,6 +175,8 @@ const METRIC_LABELS: Record<string, string> = {
   reshard_shard_skew: 'Reshard Shard Skew',
   backlog_coverage_risk: 'Backlog Coverage Risk',
   resync_escalation: 'Resync Escalation',
+  retry_amplification: 'Retry Amplification',
+  error_replies: 'Error Replies',
   replication_divergence: 'Replication Divergence',
 };
 
@@ -182,6 +186,10 @@ function formatTime(ts: number): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
+  return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
 }
 
 export function AnomalyDashboard() {
@@ -533,7 +541,7 @@ export function AnomalyDashboard() {
                             </span>
                           </div>
                           <p className="text-sm text-muted-foreground">
-                            {formatTime(group.timestamp)} · {group.anomalies.length} related
+                            {formatTime(group.timestamp)} · {formatRelatedCount(group)} related
                             anomalies
                           </p>
                         </div>

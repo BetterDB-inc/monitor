@@ -507,4 +507,70 @@ describePostgres('client analytics rollups — postgres', () => {
       }
     });
   });
+
+  describe('getNewClientConnections', () => {
+    const since = T0 + BATCH_MS;
+    const until = T0 + 5 * BATCH_MS;
+    const sortGroups = (groups: Array<{ name: string; user: string; ip: string; count: number }>) =>
+      [...groups].sort((a, b) =>
+        `${a.name}|${a.user}|${a.ip}` < `${b.name}|${b.user}|${b.ip}` ? -1 : 1,
+      );
+
+    it.each(CONNECTIONS)('matches the memory adapter for %s', async (connectionId) => {
+      const groups = await pg.getNewClientConnections(connectionId, since, until);
+      expect(groups.length).toBeGreaterThan(0);
+      expect(sortGroups(groups)).toEqual(
+        sortGroups(await memory.getNewClientConnections(connectionId, since, until)),
+      );
+    });
+
+    it('handles clients connected for longer than 32-bit milliseconds allow', async () => {
+      const connectionId = 'conn-old-client';
+      const [template] = rows;
+      await pg.saveClientSnapshot(
+        [{ ...template, id: 0, clientId: 'old', age: 3_000_000, capturedAt: since, connectionId }],
+        connectionId,
+      );
+
+      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+    });
+
+    it('leaves replica and master links out', async () => {
+      const connectionId = 'conn-links';
+      const [template] = rows;
+      const link = { ...template, id: 0, age: 0, capturedAt: since, connectionId };
+      await pg.saveClientSnapshot(
+        [
+          { ...link, clientId: '1', flags: 'S' },
+          { ...link, clientId: '2', flags: 'M' },
+        ],
+        connectionId,
+      );
+
+      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+    });
+  });
+
+  describe('getClientConnectionCaptures', () => {
+    it('reads the oldest connection and highest id of each identity per capture', async () => {
+      const connectionId = 'conn-captures';
+      const capturedAt = T0 + BATCH_MS;
+      const [template] = rows;
+      const row = { ...template, id: 0, name: 'api', user: 'svc', capturedAt, connectionId };
+      await pg.saveClientSnapshot(
+        [
+          { ...row, clientId: '9', addr: '10.0.0.1:1', age: 30 },
+          { ...row, clientId: '10', addr: '10.0.0.1:2', age: 2 },
+          { ...row, clientId: '99', addr: '10.0.0.2:1', age: 0, flags: 'S' },
+        ],
+        connectionId,
+      );
+
+      await expect(
+        pg.getClientConnectionCaptures(connectionId, capturedAt, capturedAt),
+      ).resolves.toEqual([
+        { capturedAt, name: 'api', user: 'svc', ip: '10.0.0.1', oldestAge: 30, maxClientId: 10 },
+      ]);
+    });
+  });
 });

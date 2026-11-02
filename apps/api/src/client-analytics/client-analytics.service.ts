@@ -1,4 +1,4 @@
-import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, Inject, OnModuleInit, Logger, Optional } from '@nestjs/common';
 import {
   StoragePort,
   StoredClientSnapshot,
@@ -14,6 +14,7 @@ import { RuntimeCapabilityTracker } from '../connections/runtime-capability-trac
 import { ConfigService } from '@nestjs/config';
 import { ClientAnalyticsRollupService } from './client-analytics-rollup.service';
 import { QueryBudget } from './query-budget';
+import { ClientListCache } from '../common/services/client-list-cache';
 import { RAW_STATS_SPAN_MAX_MS } from './client-rollup-math';
 
 /**
@@ -39,6 +40,7 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
     private readonly rollupService: ClientAnalyticsRollupService,
     configService: ConfigService,
+    @Optional() private readonly clientListCache?: ClientListCache,
   ) {
     super(connectionRegistry);
     this.budget = QueryBudget.fromConfig(configService, this.logger);
@@ -50,6 +52,10 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
 
   protected pollsSentinels(): boolean {
     return true;
+  }
+
+  protected onConnectionRemoved(connectionId: string): void {
+    this.clientListCache?.forget(connectionId);
   }
 
   async onModuleInit(): Promise<void> {
@@ -66,6 +72,7 @@ export class ClientAnalyticsService extends MultiConnectionPoller implements OnM
     try {
       const clients = await ctx.client.getClients();
       const now = Date.now();
+      this.clientListCache?.record(ctx.connectionId, clients, now);
 
       const snapshots: StoredClientSnapshot[] = clients.map((c) => ({
         id: 0,

@@ -16,6 +16,8 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  NewClientConnectionGroup,
+  ClientConnectionCaptureRow,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -382,6 +384,56 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const offset = options.offset ?? 0;
 
     return filtered.slice(offset, offset + limit);
+  }
+
+  async getNewClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<NewClientConnectionGroup[]> {
+    const groups = new Map<string, { group: NewClientConnectionGroup; ids: Set<string> }>();
+    for (const snapshot of this.clientSnapshots) {
+      if (snapshot.connectionId !== connectionId) continue;
+      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
+      if (snapshot.capturedAt - snapshot.age * 1000 < since) continue;
+      if (/[SM]/.test(snapshot.flags)) continue;
+      const ip = clientAddrIp(snapshot.addr);
+      const key = JSON.stringify([snapshot.name, snapshot.user, ip]);
+      const entry = groups.get(key) ?? {
+        group: { name: snapshot.name, user: snapshot.user, ip, count: 0 },
+        ids: new Set<string>(),
+      };
+      entry.ids.add(snapshot.clientId);
+      groups.set(key, entry);
+    }
+    return [...groups.values()].map(({ group, ids }) => ({ ...group, count: ids.size }));
+  }
+
+  async getClientConnectionCaptures(
+    connectionId: string,
+    since: number,
+    until: number,
+  ): Promise<ClientConnectionCaptureRow[]> {
+    const rows = new Map<string, ClientConnectionCaptureRow>();
+    for (const snapshot of this.clientSnapshots) {
+      if (snapshot.connectionId !== connectionId) continue;
+      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
+      if (/[SM]/.test(snapshot.flags)) continue;
+      const ip = clientAddrIp(snapshot.addr);
+      const key = JSON.stringify([snapshot.capturedAt, snapshot.name, snapshot.user, ip]);
+      const row = rows.get(key) ?? {
+        capturedAt: snapshot.capturedAt,
+        name: snapshot.name,
+        user: snapshot.user,
+        ip,
+        oldestAge: snapshot.age,
+        maxClientId: 0,
+      };
+      row.oldestAge = Math.max(row.oldestAge, snapshot.age);
+      row.maxClientId = Math.max(row.maxClientId, Number(snapshot.clientId) || 0);
+      rows.set(key, row);
+    }
+    return [...rows.values()];
   }
 
   async getClientTimeSeries(
@@ -850,6 +902,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     correlationIds: string[],
     anomalyIds: string[],
     maxPerGroup: number,
+    maxRows: number,
   ): Promise<StoredAnomalyEvent[]> {
     const groups = new Set(correlationIds);
     const ids = new Set(anomalyIds);
@@ -863,6 +916,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         seenPerGroup.set(group, seen);
         return seen <= maxPerGroup;
       })
+      .slice(0, maxRows)
       .reverse();
   }
 
