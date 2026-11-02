@@ -550,6 +550,16 @@ describe('estimateNewConnections', () => {
     expect(estimateNewConnections(groups, captures, 60_000, 60_000)).toEqual(groups);
   });
 
+  it('handles a capture with more identities than a spread call can take', () => {
+    const fresh = Array.from({ length: 200_000 }, (_, i) =>
+      capture(60_000, 130 + i, 1, `client-${i}`),
+    );
+
+    expect(() =>
+      estimateNewConnections([], [capture(0, 100, 5), ...fresh], 60_000, 60_000),
+    ).not.toThrow();
+  });
+
   it('counts only captures inside the range', () => {
     const captures = [capture(0, 100, 5), capture(60_000, 900, 1), capture(120_000, 910, 1)];
 

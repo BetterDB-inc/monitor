@@ -183,7 +183,7 @@ function addCommandGrowth(
 }
 
 function highestClientId(rows: ClientConnectionCaptureRow[]): number {
-  return Math.max(...rows.map((row) => row.maxClientId));
+  return rows.reduce((highest, row) => Math.max(highest, row.maxClientId), 0);
 }
 
 export function estimateNewConnections(
@@ -194,7 +194,9 @@ export function estimateNewConnections(
 ): NewClientConnectionGroup[] {
   const byCapture = new Map<number, ClientConnectionCaptureRow[]>();
   for (const row of captures) {
-    byCapture.set(row.capturedAt, [...(byCapture.get(row.capturedAt) ?? []), row]);
+    const rows = byCapture.get(row.capturedAt);
+    if (rows) rows.push(row);
+    else byCapture.set(row.capturedAt, [row]);
   }
   const estimates = new Map(
     groups.map((group) => [JSON.stringify([group.name, group.user, group.ip]), { ...group }]),

@@ -6459,9 +6459,10 @@ export class AnomalyService
 
     const membersByGroup = new Map<string, AnomalyEvent[]>();
     const truncated = new Set<string>();
+    const budget = { rows: MAX_CORRELATED_MEMBER_ROWS };
     for (let i = 0; i < stored.length; i += CORRELATION_ID_CHUNK_SIZE) {
       const chunk = stored.slice(i, i + CORRELATION_ID_CHUNK_SIZE);
-      for (const member of await this.readGroupMembers(chunk, truncated)) {
+      for (const member of await this.readGroupMembers(chunk, truncated, budget)) {
         if (!member.correlationId) continue;
         const anomalies = membersByGroup.get(member.correlationId) ?? [];
         anomalies.push(this.storedToAnomalyEvent(member));
@@ -6486,24 +6487,29 @@ export class AnomalyService
   private async readGroupMembers(
     groups: StoredCorrelatedGroup[],
     truncated: Set<string>,
+    budget: { rows: number },
   ): Promise<StoredAnomalyEvent[]> {
+    if (budget.rows <= 0) {
+      groups.forEach((group) => truncated.add(group.correlationId));
+      return [];
+    }
     const timestamps = groups.map((group) => group.timestamp);
-    const limit = Math.min(this.maxRecentEvents * groups.length, MAX_CORRELATED_MEMBER_ROWS);
+    const limit = Math.min(this.maxRecentEvents * groups.length, budget.rows);
     const members = await this.storage.getAnomalyEvents({
       startTime: Math.min(...timestamps) - this.correlationIntervalMs,
       endTime: Math.max(...timestamps) + this.correlationIntervalMs,
       correlationIds: groups.map((group) => group.correlationId),
       limit,
     });
-    if (members.length < limit) return members;
-    if (groups.length === 1) {
-      truncated.add(groups[0].correlationId);
+    if (members.length < limit || groups.length === 1) {
+      budget.rows -= members.length;
+      if (members.length >= limit) truncated.add(groups[0].correlationId);
       return members;
     }
     const middle = Math.ceil(groups.length / 2);
     return [
-      ...(await this.readGroupMembers(groups.slice(0, middle), truncated)),
-      ...(await this.readGroupMembers(groups.slice(middle), truncated)),
+      ...(await this.readGroupMembers(groups.slice(0, middle), truncated, budget)),
+      ...(await this.readGroupMembers(groups.slice(middle), truncated, budget)),
     ];
   }
 

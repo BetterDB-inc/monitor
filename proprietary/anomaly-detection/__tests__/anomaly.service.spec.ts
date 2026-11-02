@@ -8546,6 +8546,41 @@ describe('AnomalyService', () => {
       expect(byId.get('quiet')?.anomalies).toHaveLength(2);
     });
 
+    it('stops at the total row budget and flags the groups it could not read', async () => {
+      const ids = Array.from({ length: 12 }, (_, i) => `grp-${i}`);
+      storage.getCorrelatedGroups.mockResolvedValue(
+        ids.map((correlationId, i) => ({
+          correlationId,
+          timestamp: 1_000_000 + i,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        })),
+      );
+      storage.getAnomalyEvents.mockImplementation(async ({ correlationIds, limit }: any) =>
+        correlationIds
+          .flatMap((correlationId: string) =>
+            Array.from({ length: 999 }, (_, i) => ({
+              id: `${correlationId}-${i}`,
+              timestamp: 1_000_000,
+              metricType: 'memory_used',
+              anomalyType: 'spike',
+              severity: 'warning',
+              correlationId,
+            })),
+          )
+          .slice(0, limit),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 12, 'node-2');
+
+      const rows = groups.reduce((sum, group) => sum + group.anomalies.length, 0);
+      expect(rows).toBe(10_000);
+      expect(groups.filter((group) => group.anomalies.length === 0)).toHaveLength(1);
+      expect(groups.filter((group) => group.truncated)).toHaveLength(2);
+    });
+
     it('does not flag groups read in full', async () => {
       storage.getCorrelatedGroups.mockResolvedValue([
         {
