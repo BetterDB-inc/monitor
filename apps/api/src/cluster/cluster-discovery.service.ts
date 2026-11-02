@@ -207,7 +207,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           this.logger.warn(`Closing oldest connection to ${oldestNodeId} to make room for new connection`);
           const oldConnection = this.discoveredNodes.get(oldestNodeId);
           if (oldConnection) {
-            await oldConnection.client.quit().catch(() => {/* ignore */});
+            await this.closeNodeClient(oldConnection.client);
             this.discoveredNodes.delete(oldestNodeId);
           }
         }
@@ -291,12 +291,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         host,
       };
 
-      // Quit any stale client we're about to replace so the overwrite never
+      // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
       const replaced = this.discoveredNodes.get(nodeId);
       if (replaced && replaced.client !== client) {
-        await replaced.client.quit().catch(() => {});
+        await this.closeNodeClient(replaced.client);
       }
 
       this.discoveredNodes.set(nodeId, connection);
@@ -320,7 +320,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         this.loggedGetConnectionErrors.add(errorKey);
       }
 
-      await client.quit().catch(() => {});
+      await this.closeNodeClient(client);
 
       throw error;
     }
@@ -425,19 +425,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   async disconnectAll(): Promise<void> {
     this.logger.log(`Disconnecting from ${this.discoveredNodes.size} nodes`);
 
-    const disconnectPromises: Promise<void>[] = [];
-
-    for (const [nodeId, connection] of this.discoveredNodes.entries()) {
-      disconnectPromises.push(
-        connection.client.quit().then(() => undefined).catch((error) => {
-          this.logger.warn(
-            `Failed to disconnect from node ${nodeId}: ${error instanceof Error ? error.message : error}`,
-          );
-        }),
-      );
-    }
-
-    await Promise.allSettled(disconnectPromises);
+    await Promise.allSettled(
+      Array.from(this.discoveredNodes.values(), (connection) => this.closeNodeClient(connection.client)),
+    );
     this.discoveredNodes.clear();
     this.discoveryCacheByConnection.clear();
     this.logger.log('All node connections closed');
@@ -459,10 +449,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       for (const nodeId of toRemove) {
         const connection = this.discoveredNodes.get(nodeId);
         if (connection) {
-          await connection.client.quit().catch(() => {});
+          await this.closeNodeClient(connection.client);
           this.discoveredNodes.delete(nodeId);
         }
       }
+    }
+  }
+
+  /**
+   * Node clients set enableOfflineQueue: false, so quit() on one that isn't
+   * ready rejects without closing it and iovalkey keeps reconnecting (and
+   * re-reading TLS) forever. Only quit a ready client; disconnect the rest.
+   */
+  private async closeNodeClient(client: Valkey): Promise<void> {
+    if (client.status === 'ready') {
+      await client.quit().catch(() => client.disconnect());
+    } else {
+      client.disconnect();
     }
   }
 
