@@ -753,6 +753,26 @@ describe('observeDivergence', () => {
       expect(recoveries(outcomes)).toHaveLength(1);
     });
 
+    it('recovers above the floor on a flat gap under the thresholds', () => {
+      const h = new Harness();
+      h.windows(growing);
+      const outcomes = h.windows(Array.from({ length: 4 }, () => ({ gap: 28 * MiB, rate: SPIKE })));
+
+      expect(recoveries(outcomes)).toHaveLength(1);
+    });
+
+    it('recovers a not-acking alert on a flat stale gap under the thresholds', () => {
+      const h = new Harness();
+      h.windows(
+        Array.from({ length: 8 }, (_, i) => ({ gap: 40 * MiB, rate: MiB, lagSec: climbingLag(i) })),
+      );
+      const outcomes = h.windows(
+        Array.from({ length: 3 }, (_, i) => ({ gap: 40 * MiB, rate: SPIKE, lagSec: climbingLag(8 + i) })),
+      );
+
+      expect(recoveries(outcomes)).toHaveLength(1);
+    });
+
     it('keeps a not-acking alert open while its stale gap grows', () => {
       const h = new Harness();
       const opened = h.windows(
