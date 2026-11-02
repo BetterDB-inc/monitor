@@ -234,6 +234,7 @@ export class IncidentTimelineBuilder {
     probe: RecoveryProbe,
     boundaries: readonly IncidentBoundary[] = [],
     droppedThrough: ReadonlyMap<string, number> = new Map(),
+    heldFrom = Number.NEGATIVE_INFINITY,
   ): IncidentTimeline[] {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
@@ -276,7 +277,11 @@ export class IncidentTimelineBuilder {
             positionOf(a.anomalyId) - positionOf(b.anomalyId) ||
             (a.anomalyId < b.anomalyId ? -1 : a.anomalyId > b.anomalyId ? 1 : 0),
         );
-      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedThrough)) {
+      const droppedAt = Math.max(
+        heldFrom,
+        this.droppedThroughScope(scope, scoped, droppedThrough),
+      );
+      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedAt)) {
         timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
@@ -289,7 +294,7 @@ export class IncidentTimelineBuilder {
     sorted: AnomalyEvent[],
     boundaries: readonly IncidentBoundary[],
     positionOf: (anomalyId: string) => number,
-    droppedThrough: ReadonlyMap<string, number>,
+    droppedAt: number,
   ): IncidentCluster[] {
     const clusters: IncidentCluster[] = [];
     let current: AnomalyEvent[] = [];
@@ -327,9 +332,7 @@ export class IncidentTimelineBuilder {
         start = undefined;
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
-        const droppedAt = droppedThrough.get(event.connectionId ?? '');
         const anchorDropped =
-          droppedAt !== undefined &&
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= droppedAt &&
           event.timestamp - droppedAt <= this.opts.gapMs;
@@ -346,6 +349,21 @@ export class IncidentTimelineBuilder {
     }
     if (current.length > 0) clusters.push({ events: current, start });
     return clusters;
+  }
+
+  private droppedThroughScope(
+    scope: string,
+    events: AnomalyEvent[],
+    droppedThrough: ReadonlyMap<string, number>,
+  ): number {
+    const members = new Set(events.map((event) => event.connectionId ?? ''));
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const [connectionId, droppedAt] of droppedThrough) {
+      if (members.has(connectionId) || this.resolveScope(connectionId) === scope) {
+        latest = Math.max(latest, droppedAt);
+      }
+    }
+    return latest;
   }
 
   private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {

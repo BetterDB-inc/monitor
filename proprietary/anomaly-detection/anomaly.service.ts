@@ -370,6 +370,11 @@ interface SeedBackoff {
   retryAt: number;
 }
 
+interface LegacyReplicaSlotEvent {
+  id: string;
+  message: string;
+}
+
 interface TrackedResyncEvent {
   id: string;
   addr: string | null;
@@ -604,6 +609,7 @@ export class AnomalyService
   private openEventsAdopted = new Set<string>();
   private readonly openEventsRetry = new Map<string, { at: number; delayMs: number }>();
   private adoptedReshardEventIds = new Map<string, string>();
+  private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
   private readonly lastDivergencePrune = new Map<string, number>();
@@ -987,6 +993,7 @@ export class AnomalyService
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
+    this.legacyReplicaSlotEvents.delete(connectionId);
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
     this.clientSaturationEventIds.delete(connectionId);
@@ -2152,17 +2159,48 @@ export class AnomalyService
   private adoptReplicaSlotEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
     const eventIds = this.replicaSlotEventIds.get(connectionId) ?? new Map<string, string>();
     const tracked = new Set(eventIds.values());
+    const legacy: LegacyReplicaSlotEvent[] = [];
     for (const event of [...open].sort((a, b) => a.timestamp - b.timestamp)) {
       if (tracked.has(event.id)) continue;
       const signature = event.dedupeKey;
-      const previous = signature === undefined ? undefined : eventIds.get(signature);
-      if (signature === undefined || (previous && tracked.has(previous))) this.closeLater(event.id);
+      if (signature === undefined) {
+        legacy.unshift({ id: event.id, message: event.message });
+        continue;
+      }
+      const previous = eventIds.get(signature);
+      if (previous && tracked.has(previous)) this.closeLater(event.id);
       else if (previous !== event.id) {
         if (previous) this.closeLater(previous);
         eventIds.set(signature, event.id);
       }
     }
     if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
+    if (legacy.length > 0) this.legacyReplicaSlotEvents.set(connectionId, legacy);
+  }
+
+  private claimLegacyReplicaSlotEvents(
+    connectionId: string,
+    findings: ReplicaSlotAnomaly[],
+    unreachableReplicaIds: Set<string>,
+  ): void {
+    const legacy = this.legacyReplicaSlotEvents.get(connectionId);
+    if (!legacy) return;
+    const eventIds = this.replicaSlotEventIds.get(connectionId) ?? new Map<string, string>();
+    const signatures = new Map(
+      findings.map((a) => [this.buildReplicaSlotMessage(a), replicaSlotSignature(a)]),
+    );
+    const unclaimed: LegacyReplicaSlotEvent[] = [];
+    for (const event of legacy) {
+      const signature = signatures.get(event.message);
+      if (signature === undefined) unclaimed.push(event);
+      else if (eventIds.has(signature)) this.closeLater(event.id);
+      else eventIds.set(signature, event.id);
+    }
+    if (eventIds.size > 0) this.replicaSlotEventIds.set(connectionId, eventIds);
+    const sawEveryReplica = unreachableReplicaIds.size === 0;
+    if (sawEveryReplica) unclaimed.forEach((event) => this.closeLater(event.id));
+    if (sawEveryReplica || unclaimed.length === 0) this.legacyReplicaSlotEvents.delete(connectionId);
+    else this.legacyReplicaSlotEvents.set(connectionId, unclaimed);
   }
 
   private forgetClientSaturationEvent(connectionId: string, eventId: string): void {
@@ -6053,10 +6091,12 @@ export class AnomalyService
       const preserveSignature = unreachableReplicaIds.size
         ? (signature: string) => unreachableReplicaIds.has(signature.split('|')[0])
         : undefined;
+      const findings = detectReplicaSlotState(nodes, shards);
+      this.claimLegacyReplicaSlotEvents(ctx.connectionId, findings, unreachableReplicaIds);
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
-        findings: detectReplicaSlotState(nodes, shards),
+        findings,
         signatureOf: replicaSlotSignature,
         firstSeenByConn: this.replicaSlotFirstSeen,
         activeByConn: this.activeReplicaSlotAnomalies,
@@ -6976,7 +7016,9 @@ export class AnomalyService
 
   private async seedIncidentBoundaries(startTime: number): Promise<boolean> {
     try {
-      this.liveBoundaries = await this.storage.getIncidentBoundaries({ startTime });
+      this.liveBoundaries = await this.storage.getIncidentBoundaries({
+        startTime: startTime - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+      });
       this.incidentsDirty = true;
       const known = new Set([...this.incidentEvents.values()].flat().map((a) => a.id));
       const stored = await this.storedAnomaliesInRange(undefined, startTime, undefined);
@@ -7052,6 +7094,7 @@ export class AnomalyService
         this.incidentRecoveryProbe,
         this.liveBoundaries,
         this.incidentEventsDroppedThrough,
+        now - windowMs,
       );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;
@@ -8122,6 +8165,7 @@ export class AnomalyService
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
+      ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
       ...[...(state?.replicas.values() ?? [])].map((r) => r.eventId),

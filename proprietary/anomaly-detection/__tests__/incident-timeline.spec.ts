@@ -127,6 +127,64 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
     });
 
+    it('keeps the stored start when the held window passed the early events', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 70 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        T0 + 10 * MIN,
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('starts afresh when a new event follows the held window by more than the gap', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 70 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        T0 + 5 * MIN,
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
+    });
+
+    it('keeps the stored start when another node of the scope dropped the events', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN, connectionId: 'conn-b' });
+
+      const [incident] = new IncidentTimelineBuilder({}, () => 'cluster').build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone', 'cluster')],
+        new Map([['conn-a', T0 + 9 * MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('ignores events dropped from another scope', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map([['conn-b', T0 + 9 * MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
+    });
+
     it('splits same timestamp boundaries in event order, not id order', () => {
       const first = event({ id: 'z-first', timestamp: T0, eventSequence: 1 });
       const second = event({ id: 'a-second', timestamp: T0, eventSequence: 2 });

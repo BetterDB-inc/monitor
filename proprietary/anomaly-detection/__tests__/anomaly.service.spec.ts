@@ -4,7 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { AnomalyService } from '../anomaly.service';
-import { IncidentTimelineBuilder, incidentIdFor } from '../incident-timeline';
+import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf } from '../incident-timeline';
+import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
 import { MetricBuffer } from '../metric-buffer';
 import * as sequenceRules from '../sequence-rules';
 import {
@@ -10413,6 +10414,25 @@ describe('AnomalyService', () => {
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
     });
 
+    it('keeps a live incident on its stored start once its first events age out', async () => {
+      const now = Date.now();
+      const startedAt = now - 62 * MIN;
+      storage.getIncidentBoundaries.mockImplementation(async ({ startTime }: any) =>
+        startedAt >= startTime
+          ? [{ scopeId: 'conn-1', startedAt, anomalyId: 'z-gone' }]
+          : [],
+      );
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'tail', timestamp: now - 59 * MIN }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      const [incident] = (service as any).liveIncidents;
+      expect(incidentStartOf(incident.incidentId)).toBe(startedAt);
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
     it('gives history and live one id when a stored start outlived its event', async () => {
       const t = Date.now() - 2 * MIN;
       const rows = [
@@ -13254,18 +13274,100 @@ describe('AnomalyService', () => {
               expect(resolvedIds()).toEqual(['slot-1']);
             });
 
-            it('closes an older duplicate and a slot row it cannot place', async () => {
+            it('closes an older duplicate of a slot row', async () => {
               rowsBy({
                 [MetricType.REPLICA_SLOT_STATE]: [
                   slotRow('slot-newer', 'abc|stale|1', T0 + 1),
                   slotRow('slot-older', 'abc|stale|1'),
-                  row('no-signature'),
                 ],
               });
               await adopt();
               await (service as any).drainPersistenceOutbox();
 
-              expect(resolvedIds()).toEqual(['no-signature', 'slot-older']);
+              expect(resolvedIds()).toEqual(['slot-older']);
+            });
+
+            describe('rows from before dedupe keys', () => {
+              const finding = {
+                replicaId: 'abcdef0123456789',
+                replicaAddress: '10.0.0.1:6379',
+                reason: 'replica_migrating',
+                affectedSlots: [7],
+              };
+              const signature = replicaSlotSignature(finding as ReplicaSlotAnomaly);
+              const message = () => (service as any).buildReplicaSlotMessage(finding);
+              const legacyRow = (id: string, text: string, timestamp = T0) => ({
+                ...row(id, timestamp),
+                message: text,
+              });
+              const claim = (findings: unknown[], unreachable = new Set<string>()) =>
+                (service as any).claimLegacyReplicaSlotEvents('conn-9', findings, unreachable);
+              const settle = () => (service as any).drainPersistenceOutbox();
+
+              it('stays open for the finding it describes', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', message())] });
+                await adopt();
+                claim([finding]);
+                await settle();
+                const ids = (service as any).replicaSlotEventIds;
+
+                expect(ids.get('conn-9').get(signature)).toBe('legacy');
+                storage.getAnomalyEvents.mockResolvedValue([legacyRow('legacy', message())]);
+                await gate(signature, ids);
+                expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+                await gate(null, ids);
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('closes all but the newest row of one finding', async () => {
+                rowsBy({
+                  [MetricType.REPLICA_SLOT_STATE]: [
+                    legacyRow('older', message()),
+                    legacyRow('newer', message(), T0 + 1),
+                  ],
+                });
+                await adopt();
+                claim([finding]);
+                await settle();
+
+                expect((service as any).replicaSlotEventIds.get('conn-9').get(signature)).toBe(
+                  'newer',
+                );
+                expect(resolvedIds()).toEqual(['older']);
+              });
+
+              it('closes a row whose condition is gone', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+                claim([finding]);
+                await settle();
+
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('waits for every replica to answer before closing a row', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+                claim([], new Set(['abcdef0123456789']));
+                await settle();
+                expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+                claim([]);
+                await settle();
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('closes a row left unclaimed when the connection goes away', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+
+                (service as any).onConnectionRemoved('conn-9');
+                await new Promise((resolve) => setImmediate(resolve));
+                await settle();
+
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
             });
 
             it('does not raise a second reshard event for a row left open', async () => {
