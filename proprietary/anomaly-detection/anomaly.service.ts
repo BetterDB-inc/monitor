@@ -6176,8 +6176,10 @@ export class AnomalyService
     }
     if (now - lastPrune <= DIVERGENCE_WINDOW_PRUNE_INTERVAL_MS) return;
     this.lastDivergencePrune.set(ctx.connectionId, now);
-    const retentionMs =
-      this.retentionPolicy?.getSampleRetentionMs() ?? DIVERGENCE_WINDOW_RETENTION_MS;
+    const retentionMs = this.retentionPolicy
+      ? this.retentionPolicy.getSampleRetentionMs()
+      : DIVERGENCE_WINDOW_RETENTION_MS;
+    if (retentionMs === null) return;
     try {
       await this.storage.pruneOldReplicationDivergenceWindows(now - retentionMs, ctx.connectionId);
     } catch (err) {
