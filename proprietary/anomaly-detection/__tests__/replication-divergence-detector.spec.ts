@@ -668,10 +668,12 @@ describe('observeDivergence', () => {
       ]);
     });
 
-    it('stays quiet on one stale sample in each window', () => {
+    it('judges the gap, not the ack, on one stale sample in each window', () => {
       const h = new Harness();
 
-      expect(divergences([sporadic(h, 6, [[0, 11, 0]])])).toEqual([]);
+      const findings = divergences([sporadic(h, 6, [[0, 11, 0]])]);
+
+      expect(findings.map((f) => [f.level, f.reason])).toEqual([['critical', 'ceiling']]);
     });
 
     it('restarts the count when a window is not mostly stale', () => {
@@ -682,6 +684,20 @@ describe('observeDivergence', () => {
         [0, 0, 20],
       ];
       expect(divergences([sporadic(h, 8, lags)])).toEqual([]);
+    });
+
+    it('recovers under the floor with one stale sample in each window', () => {
+      const h = new Harness();
+      sporadic(h, 6);
+
+      const outcomes: DivergenceOutcome[] = [];
+      for (let w = 0; w < 4; w++) {
+        for (const lagSec of [0, 20, 0]) {
+          outcomes.push(...h.poll({ gap: 0.1 * MiB, rate: 0.1 * MiB, lagSec }, POLL_MS));
+        }
+      }
+
+      expect(outcomes[0]).toMatchObject({ kind: 'recovered', addr: ADDR });
     });
   });
 

@@ -390,10 +390,14 @@ function dropReplica(
   return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
+function hasGapReading(state: DivergenceConnectionState, addr: string): boolean {
+  const gaps = state.accumulators.get(addr)?.gaps.length ?? 0;
+  return gaps >= DIVERGENCE_MIN_SAMPLES || gaps * 2 >= state.windowSamples;
+}
+
 function staleWindowGap(state: DivergenceConnectionState, addr: string): number | null {
   const stale = state.staleGaps.get(addr);
-  if (stale === undefined) return null;
-  if ((state.accumulators.get(addr)?.gaps.length ?? 0) >= DIVERGENCE_MIN_SAMPLES) return null;
+  if (stale === undefined || hasGapReading(state, addr)) return null;
   return stale.samples * 2 > state.windowSamples ? stale.gapBytes : null;
 }
 
@@ -431,7 +435,7 @@ function closeWindow(
   }
 
   for (const [addr, acc] of state.accumulators) {
-    if (acc.gaps.length < DIVERGENCE_MIN_SAMPLES) continue;
+    if (!hasGapReading(state, addr)) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
     const gapBytes = median(acc.gaps);
