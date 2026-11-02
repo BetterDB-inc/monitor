@@ -10540,6 +10540,26 @@ describe('AnomalyService', () => {
       expect(history[0].latest?.gapBytes).toBe(10 * MiB);
     });
 
+    it('reads a stored gap as behind until a live window closes', async () => {
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([0], T0));
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0 - 30_000,
+          windowEnd: T0,
+          gapBytes: 10 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 10,
+        },
+      ]);
+
+      const history = await service.getReplicationDivergenceHistory('conn-1', T0 - 60_000, T0 + 1);
+
+      expect(history.map((h) => [h.replica, h.level])).toEqual([['10.0.0.2:6379', 'behind']]);
+    });
+
     it('adds live windows that are newer than the stored series', async () => {
       jest.spyOn(Date, 'now').mockReturnValue(await feed([2, 4, 6], T0));
       storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
