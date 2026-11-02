@@ -158,6 +158,41 @@ describe('MonitorCaptureService', () => {
         await failure;
       }
 
+      it('falls back to the supplied id when resolving the target node hangs', async () => {
+        const { service, storage, cluster } = makeService();
+        cluster.discoverNodes.mockReturnValueOnce(new Promise(() => undefined));
+
+        const start = service.startSession({ connectionId: CONNECTION_ID, targetNodeId: 'node-a' });
+        await jest.advanceTimersByTimeAsync(10_000);
+        const session = await start;
+
+        expect((await storage.getCaptureSession(session.id))?.targetNode).toBe('node-a');
+        await service.stopSession(session.id);
+      });
+
+      it('falls back to a single node when resolving fan-out nodes hangs', async () => {
+        const { service, storage, cluster } = makeService();
+        cluster.discoverNodes.mockReturnValueOnce(new Promise(() => undefined));
+
+        const start = service.startSession({ connectionId: CONNECTION_ID, fanOut: true });
+        await jest.advanceTimersByTimeAsync(10_000);
+        const session = await start;
+
+        expect((await storage.getCaptureSession(session.id))?.nodeSegments).toBeUndefined();
+        await service.stopSession(session.id);
+      });
+
+      it('reports the MONITOR error when marking the row failed hangs', async () => {
+        const { service, storage } = makeService();
+        service.setMonitorSourceFactory(() => Promise.reject(new Error('NOPERM monitor')));
+        jest.spyOn(storage, 'updateCaptureSession').mockReturnValue(new Promise(() => undefined));
+
+        const start = service.startSession({ connectionId: CONNECTION_ID });
+        const failure = expect(start).rejects.toThrow('NOPERM monitor');
+        await jest.advanceTimersByTimeAsync(10_000);
+        await failure;
+      });
+
       it('frees the connection when saving the row hangs', async () => {
         const { service, storage } = makeService();
         jest.spyOn(storage, 'saveCaptureSession').mockReturnValue(new Promise(() => undefined));

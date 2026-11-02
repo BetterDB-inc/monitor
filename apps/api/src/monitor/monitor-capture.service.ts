@@ -152,14 +152,12 @@ export class MonitorCaptureService {
     const byteCap = input.byteCap ?? DEFAULT_BYTE_CAP;
     const lineCap = input.lineCap ?? DEFAULT_LINE_CAP;
 
-    const fanOutNodes = input.fanOut
-      ? await this.boundStartStep(this.resolveFanOutNodes(connectionId))
-      : [];
+    const fanOutNodes = input.fanOut ? await this.resolveFanOutNodes(connectionId) : [];
     const isFanOut = fanOutNodes.length > 0;
 
     const targetNode = isFanOut
       ? undefined
-      : await this.boundStartStep(this.resolveTargetNodeAddress(connectionId, input.targetNodeId));
+      : await this.resolveTargetNodeAddress(connectionId, input.targetNodeId);
 
     const initialSegments: CaptureNodeSegment[] = isFanOut
       ? fanOutNodes.map((n) => ({
@@ -232,6 +230,20 @@ export class MonitorCaptureService {
     }
   }
 
+  private async markOpenFailed(sessionId: string, cause: Error): Promise<void> {
+    try {
+      await this.boundStartStep(
+        this.storage.updateCaptureSession(sessionId, {
+          status: 'failed',
+          endedAt: Date.now(),
+          terminationReason: `monitor_open_failed: ${cause.message}`,
+        }),
+      );
+    } catch (err) {
+      this.logger.error(`Failed to mark session ${sessionId} failed: ${(err as Error).message}`);
+    }
+  }
+
   private async startSingleSession(
     session: StoredCaptureSession,
     targetNodeId: string | undefined,
@@ -246,13 +258,7 @@ export class MonitorCaptureService {
       this.logger.error(
         `Failed to open MONITOR on ${session.connectionId}: ${(err as Error).message}`,
       );
-      await this.boundStartStep(
-        this.storage.updateCaptureSession(session.id, {
-          status: 'failed',
-          endedAt: Date.now(),
-          terminationReason: `monitor_open_failed: ${(err as Error).message}`,
-        }),
-      );
+      await this.markOpenFailed(session.id, err as Error);
       throw err;
     }
 
@@ -534,7 +540,7 @@ export class MonitorCaptureService {
   ): Promise<string | undefined> {
     if (!targetNodeId) return undefined;
     try {
-      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
+      const nodes = await this.boundStartStep(this.clusterDiscovery.discoverNodes(connectionId));
       const node = nodes.find((n) => n.id === targetNodeId);
       return node?.address ?? targetNodeId;
     } catch (err) {
@@ -551,7 +557,7 @@ export class MonitorCaptureService {
     connectionId: string,
   ): Promise<Array<{ id: string; address: string }>> {
     try {
-      const nodes = await this.clusterDiscovery.discoverNodes(connectionId);
+      const nodes = await this.boundStartStep(this.clusterDiscovery.discoverNodes(connectionId));
       return nodes
         .filter((n) => n.role === 'master' && n.healthy)
         .map((n) => ({ id: n.id, address: n.address }));
