@@ -2,7 +2,6 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { generateKeyPairSync } from 'crypto';
-import { rmSync } from 'fs';
 import * as jwt from 'jsonwebtoken';
 import { join } from 'path';
 
@@ -67,7 +66,7 @@ function nextIp(): string {
 describe('Workspace broker sign-in (E2E)', () => {
   let app: NestFastifyApplication;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-broker-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-broker.db');
 
   function tokenFor(
     state: string,
@@ -174,9 +173,6 @@ describe('Workspace broker sign-in (E2E)', () => {
     if (app !== undefined) {
       await app.close();
     }
-    rmSync(sqlitePath, { force: true });
-    rmSync(`${sqlitePath}-wal`, { force: true });
-    rmSync(`${sqlitePath}-shm`, { force: true });
     for (const key of TOUCHED) {
       const value = previous.get(key);
       if (value === undefined) {

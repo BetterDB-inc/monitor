@@ -1,7 +1,6 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
 import { IncomingMessage, Server } from 'http';
 import { AddressInfo, Socket } from 'net';
 import { join } from 'path';
@@ -77,7 +76,7 @@ describe('Workspace authorization (E2E)', () => {
   let ownerCookie: string;
   let memberCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-authorization-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-authorization.db');
   const openSockets: WebSocket[] = [];
 
   beforeAll(async () => {
@@ -196,7 +195,6 @@ describe('Workspace authorization (E2E)', () => {
         process.env[key] = value;
       }
     }
-    rmSync(sqlitePath, { force: true });
   });
 
   it('lets a member list connections', async () => {

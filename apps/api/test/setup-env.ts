@@ -25,21 +25,21 @@ if (!testTmpDir) {
   throw new Error('BETTERDB_TEST_TMP_DIR is set by global setup; run jest with that config');
 }
 process.env.BETTERDB_DATA_DIR = mkdtempSync(join(testTmpDir, 'betterdb-test-data-'));
+process.env.MIGRATION_VERDICT_DIR = join(process.env.BETTERDB_DATA_DIR, 'migration-analysis-verdicts');
 
 // Opt out to run against a real entitlement server or in cloud mode:
 // BETTERDB_TEST_KEEP_ENV=true CLOUD_MODE=true pnpm test
 if (process.env.BETTERDB_TEST_KEEP_ENV !== 'true') {
-  // Empty, not deleted: ConfigModule refills undefined keys from the repo-root .env
   for (const key of [
     'BETTERDB_LICENSE_KEY',
     'BETTERDB_OFFLINE_LICENSE',
     'BETTERDB_OFFLINE_LICENSE_FILE',
     'CLOUD_MODE',
     'ENTITLEMENT_URL',
+    'DB_SCHEMA',
   ]) {
-    process.env[key] = '';
+    delete process.env[key];
   }
-  delete process.env.DB_SCHEMA;
 }
 
 // Disable telemetry during tests

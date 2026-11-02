@@ -48,7 +48,7 @@ describe('WorkspaceAuthModule', () => {
   it('boots when BETTERDB_DATA_DIR is set to an empty string', async () => {
     const previous = process.env.BETTERDB_DATA_DIR;
     const previousCwd = process.cwd();
-    const cwd = realpathSync(mkdtempSync(join(previous ?? tmpdir(), 'workspace-auth-cwd-')));
+    const cwd = realpathSync(mkdtempSync(join(previous || tmpdir(), 'workspace-auth-cwd-')));
     process.chdir(cwd);
     process.env.BETTERDB_DATA_DIR = '';
     try {

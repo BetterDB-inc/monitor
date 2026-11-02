@@ -18,6 +18,7 @@ describe('LicenseService', () => {
   let mockFetch: jest.SpyInstance;
   let mockTelemetryClient: jest.Mocked<TelemetryPort>;
   let testDataDir: string;
+  const startedServices: LicenseService[] = [];
 
   const originalEnv = process.env;
 
@@ -55,33 +56,43 @@ describe('LicenseService', () => {
       ],
     }).compile();
 
-    return module.get<LicenseService>(LicenseService);
+    const created = module.get<LicenseService>(LicenseService);
+    startedServices.push(created);
+    return created;
+  };
+
+  const createServiceBeforeEach = () => {
+    beforeEach(async () => {
+      service = await createService();
+    });
   };
 
   beforeEach(() => {
     jest.resetModules();
     process.env = { ...originalEnv };
+    delete process.env.BETTERDB_LICENSE_KEY;
+    delete process.env.BETTERDB_OFFLINE_LICENSE;
+    delete process.env.BETTERDB_OFFLINE_LICENSE_FILE;
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
-    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR ?? tmpdir(), 'license-'));
+    testDataDir = mkdtempSync(join(originalEnv.BETTERDB_DATA_DIR || tmpdir(), 'license-'));
     process.env.BETTERDB_DATA_DIR = testDataDir;
     mockTelemetryClient = createMockTelemetryClient();
     mockFetch = jest.spyOn(global, 'fetch');
   });
 
   afterEach(() => {
-    service?.onModuleDestroy();
-    service = undefined as unknown as LicenseService;
+    startedServices.splice(0).forEach((started) => started.onModuleDestroy());
     process.env = originalEnv;
     mockFetch?.mockRestore();
     rmSync(testDataDir, { recursive: true, force: true });
   });
 
   describe('keyless validation', () => {
-    beforeEach(async () => {
+    beforeEach(() => {
       process.env.BETTERDB_TELEMETRY = 'false';
-      service = await createService();
     });
+    createServiceBeforeEach();
 
     it('should call entitlement server on startup even without license key', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
@@ -159,9 +170,7 @@ describe('LicenseService', () => {
   });
 
   describe('sendStartupError', () => {
-    beforeEach(async () => {
-      service = await createService();
-    });
+    createServiceBeforeEach();
 
     it('should send correct payload shape with eventType startup_error', async () => {
       mockFetch.mockResolvedValue({ ok: true });
@@ -296,9 +305,7 @@ describe('LicenseService', () => {
   });
 
   describe('version info via validateLicense', () => {
-    beforeEach(async () => {
-      service = await createService();
-    });
+    createServiceBeforeEach();
 
     it('should store version info from entitlement response', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
@@ -327,9 +334,7 @@ describe('LicenseService', () => {
   });
 
   describe('activateLicenseKey', () => {
-    beforeEach(async () => {
-      service = await createService();
-    });
+    createServiceBeforeEach();
 
     it('should keep previous key and entitlement when activation validation fails', async () => {
       const previousEntitlement = {
@@ -430,11 +435,10 @@ describe('LicenseService', () => {
   });
 
   describe('keyed validation', () => {
-    beforeEach(async () => {
-      // Set env before creating module so the service picks it up
+    beforeEach(() => {
       process.env.BETTERDB_LICENSE_KEY = 'valid-license-key-12345';
-      service = await createService();
     });
+    createServiceBeforeEach();
 
     it('should call entitlement server with license key', async () => {
       mockFetch.mockResolvedValue(createMockResponse({
@@ -559,9 +563,7 @@ describe('LicenseService', () => {
   });
 
   describe('ensureValidated', () => {
-    beforeEach(async () => {
-      service = await createService();
-    });
+    createServiceBeforeEach();
 
     it('clears its timeout once validation settles', async () => {
       jest.useFakeTimers();
@@ -576,10 +578,10 @@ describe('LicenseService', () => {
   });
 
   describe('hasFeature tier safety', () => {
-    beforeEach(async () => {
+    beforeEach(() => {
       process.env.BETTERDB_TELEMETRY = 'false';
-      service = await createService();
     });
+    createServiceBeforeEach();
 
     it('normalizes an unknown online tier to community before caching', async () => {
       // Version skew: the server reports a tier this build doesn't know.

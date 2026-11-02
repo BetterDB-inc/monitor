@@ -1,7 +1,7 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync } from 'fs';
 import { join } from 'path';
 
 const OWNER = { email: 'owner@example.com', password: 'correct horse battery', name: 'Owner' };
@@ -20,7 +20,7 @@ describe('Workspace boot smoke (E2E)', () => {
   let app: NestFastifyApplication;
   let sessionCookie: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-boot-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-boot.db');
   const previousCwd = process.cwd();
 
   beforeAll(async () => {
@@ -53,18 +53,20 @@ describe('Workspace boot smoke (E2E)', () => {
   });
 
   afterAll(async () => {
-    if (app !== undefined) {
-      await app.close();
-    }
-    process.chdir(previousCwd);
-    for (const [key, value] of previous) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
+    try {
+      if (app !== undefined) {
+        await app.close();
+      }
+    } finally {
+      process.chdir(previousCwd);
+      for (const [key, value] of previous) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
       }
     }
-    rmSync(sqlitePath, { force: true });
   });
 
   it('reports an un-bootstrapped workspace before any user exists', async () => {

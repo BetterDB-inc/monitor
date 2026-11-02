@@ -1,7 +1,6 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
 import { join } from 'path';
 import { READ_ONLY_MESSAGE } from '../src/auth/guards/mutation.guard';
 import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
@@ -55,7 +54,7 @@ describe('Workspace invitations (E2E)', () => {
   let inviteeCookie: string;
   let inviteeId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, `workspace-invitations-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-invitations.db');
 
   beforeAll(async () => {
     for (const key of TOUCHED) {
@@ -113,9 +112,6 @@ describe('Workspace invitations (E2E)', () => {
         process.env[key] = value;
       }
     }
-    rmSync(sqlitePath, { force: true });
-    rmSync(`${sqlitePath}-wal`, { force: true });
-    rmSync(`${sqlitePath}-shm`, { force: true });
   });
 
   it('lets the owner create an invitation and returns the link once', async () => {

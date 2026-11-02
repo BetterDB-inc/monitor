@@ -9,6 +9,7 @@ describe('LicenseService', () => {
   beforeEach(async () => {
     // Reset environment
     process.env = { ...originalEnv };
+    delete process.env.BETTERDB_LICENSE_KEY;
     // These specs predate signed entitlement tokens and mock unsigned responses
     process.env.LICENSE_ALLOW_UNSIGNED = 'true';
     process.env.APP_VERSION = '0.1.0';
