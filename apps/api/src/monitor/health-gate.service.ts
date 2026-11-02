@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { withTimeout } from '../common/utils/with-timeout';
 import { InfoParser } from '../database/parsers/info.parser';
 import {
   HealthGateResult,
@@ -14,8 +15,9 @@ import {
 const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
 const NUMBERED_MASTER_LINK_KEY = /^(master_\d+)_link_status$/;
-const REPLICA_ACK_POLL_INTERVAL_MS = 100;
+const REPLICA_ACK_POLL_INTERVAL_MS = 250;
 const REPLICA_ACK_TIMEOUT_MS = 2500;
+const GATE_READ_TIMEOUT_MS = 5000;
 const GATE_RESULT_TTL_MS = 1000;
 
 interface ReplicaAckSample {
@@ -86,7 +88,10 @@ export class HealthGateService {
         gates.delete(id);
       }
     }
-    const gate: SharedGate = { result: read(), expiresAt: Infinity };
+    const gate: SharedGate = {
+      result: withTimeout(read(), GATE_READ_TIMEOUT_MS, 'Health gate timed out'),
+      expiresAt: Infinity,
+    };
     gates.set(connectionId, gate);
     gate.result.then(
       () => {
@@ -125,10 +130,7 @@ export class HealthGateService {
     };
 
     const firstResult = evaluateHealthGate(signals, this.thresholds);
-    const result =
-      settle && ackSample !== null
-        ? await this.settleLag(connectionId, ackSample, firstResult)
-        : firstResult;
+    const result = await this.resolveLag(connectionId, ackSample, firstResult, settle);
     if (!result.allow) {
       this.logger.debug(
         `health gate skipping ${connectionId}: ${result.skipReason} signals=${JSON.stringify(result.signals)}`,
@@ -137,19 +139,18 @@ export class HealthGateService {
     return result;
   }
 
-  private async settleLag(
+  private async resolveLag(
     connectionId: string,
-    baseline: ReplicaAckSample,
+    baseline: ReplicaAckSample | null,
     result: HealthGateResult,
+    settle: boolean,
   ): Promise<HealthGateResult> {
-    const gaps = readReplicaGaps(baseline);
-    if (
-      result.skipReason !== 'replication_lag_elevated' ||
-      ![...gaps.values()].some((gap) => this.isBehindLimit(gap))
-    ) {
+    if (result.skipReason !== 'replication_lag_elevated' || baseline === null) {
       return result;
     }
-    const replicationLagBytes = await this.measureLagAtNextAcks(connectionId, baseline, gaps);
+    const replicationLagBytes = settle
+      ? await this.measureLagAtNextAcks(connectionId, baseline, readReplicaGaps(baseline))
+      : null;
     return evaluateHealthGate({ ...result.signals, replicationLagBytes }, this.thresholds);
   }
 
@@ -207,21 +208,13 @@ export class HealthGateService {
     connectionId: string,
     deadline: number,
   ): Promise<ReplicaAckSample | null> {
-    let timer: NodeJS.Timeout | undefined;
-    const expired = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), Math.max(0, deadline - Date.now()));
-    });
-    try {
-      return await Promise.race([this.readAckSample(connectionId), expired]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  private async readAckSample(connectionId: string): Promise<ReplicaAckSample | null> {
     try {
       const client = this.connectionRegistry.get(connectionId);
-      const info = await client.getInfoParsed(['replication']);
+      const info = await withTimeout(
+        client.getInfoParsed(['replication']),
+        Math.max(0, deadline - Date.now()),
+        'Replica ack read timed out',
+      );
       return parseAckSample(readReplicationSection(info) ?? {});
     } catch (err) {
       this.logger.warn(

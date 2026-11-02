@@ -257,8 +257,8 @@ describe('HealthGateService', () => {
   });
 
   it('keeps sampling until a late ack lands', async () => {
-    const stale = Array.from({ length: 14 }, (_, i) =>
-      primaryInfo(100_000_000 + (i + 1) * 3_000_000, 70_000_000),
+    const stale = Array.from({ length: 7 }, (_, i) =>
+      primaryInfo(100_000_000 + (i + 1) * 6_000_000, 70_000_000),
     );
     const { service, client } = makeService({
       info: primaryInfo(100_000_000, 70_000_000),
@@ -268,7 +268,7 @@ describe('HealthGateService', () => {
     const result = await evaluateSettled(service);
     expect(result.signals.replicationLagBytes).toBe(2_000_000);
     expect(result.allow).toBe(true);
-    expect(client.getInfoParsed).toHaveBeenCalledTimes(16);
+    expect(client.getInfoParsed).toHaveBeenCalledTimes(9);
   });
 
   it('measures a steady backlog smaller than the wait for the next ack', async () => {
@@ -453,9 +453,35 @@ describe('HealthGateService', () => {
 
   it('answers an advisory read without waiting for acks', async () => {
     const { service, client } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
-    const result = await service.evaluateAdvisory(CONNECTION_ID);
+    await service.evaluateAdvisory(CONNECTION_ID);
     expect(client.getInfoParsed).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ allow: false, skipReason: 'replication_lag_elevated' });
+  });
+
+  it('reports an unsettled gap as unmeasured on an advisory read', async () => {
+    const { service } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
+    const result = await service.evaluateAdvisory(CONNECTION_ID);
+    expect(result.allow).toBe(true);
+    expect(result.signals.replicationLagBytes).toBeNull();
+  });
+
+  it('keeps other advisory findings when the gap is unsettled', async () => {
+    const { service } = makeService({
+      info: makeInfo({
+        used_memory: '9900',
+        master_repl_offset: '100000000',
+        replicas: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=50000000,lag=0' },
+      }),
+    });
+    await expect(service.evaluateAdvisory(CONNECTION_ID)).resolves.toMatchObject({
+      allow: false,
+      skipReason: 'memory_above_threshold',
+    });
+  });
+
+  it('polls for an ack no more than every 250ms', async () => {
+    const { service, client } = makeService({ info: primaryInfo(100_000_000, 50_000_000) });
+    await evaluateSettled(service);
+    expect(client.getInfoParsed.mock.calls.length).toBeLessThanOrEqual(12);
   });
 
   it('logs the measured lag rather than the baseline gap', async () => {
@@ -495,6 +521,17 @@ describe('HealthGateService', () => {
       await evaluateSettled(service);
       await evaluateSettled(service);
       expect(countPolls(client)).toBe(await countPollsOfOneEvaluation());
+    });
+
+    it('give up on a read that hangs and let the next one through', async () => {
+      const { service, client } = makeService({ info: makeInfo() });
+      client.getInfoParsed.mockReset();
+      client.getInfoParsed.mockReturnValueOnce(new Promise(() => undefined));
+      client.getInfoParsed.mockResolvedValue(makeInfo());
+      const hung = expect(service.evaluate(CONNECTION_ID)).rejects.toThrow('timed out');
+      await jest.advanceTimersByTimeAsync(5_000);
+      await hung;
+      await expect(service.evaluate(CONNECTION_ID)).resolves.toMatchObject({ allow: true });
     });
 
     it('do not keep a failed evaluation', async () => {

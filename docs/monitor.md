@@ -57,10 +57,12 @@ opens. Surface findings:
   under the limit is reported as is and needs no wait. A gap at or above
   the limit may only be writes in flight, so the gate polls for up to
   2.5 s until that replica acks again and compares the new ack with the
-  primary offset just before it. A replica that drops or never acks
+  primary offset from the same read. A replica that drops or never acks
   keeps its first gap. Lag or link state with nothing to measure, such
   as lag on a replica with no replicas of its own, or that can't be
-  read, shows as n/a and does not block. The gate only blocks
+  read, shows as n/a and does not block. This panel doesn't wait for
+  that ack, so a gap at or above the limit shows as n/a here, and only
+  a triggered or scheduled capture measures it. The gate only blocks
   anomaly-triggered and scheduled captures; manual sessions surface the
   report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested
@@ -77,6 +79,9 @@ anomaly recurs on a connection.
 - Auto-clears 24 hours after creation if it never matches.
 - If the connection already has an active capture when the trigger
   fires, the trigger queues and re-tries on the next poll.
+- If the gate can't be read or the connection is away, for example
+  while an agent reconnects, the trigger also queues and re-tries until
+  it expires.
 - Health-gate denial moves the trigger to `skipped` with the gate's
   reason recorded; a `monitor.session.skipped` webhook fires.
 - A successful match dispatches a `monitor.session.started` event;
