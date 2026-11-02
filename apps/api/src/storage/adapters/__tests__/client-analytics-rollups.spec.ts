@@ -186,7 +186,7 @@ describe.each([
     const rows = (overrides: Array<Partial<ReturnType<typeof client>>>) =>
       overrides.map((o) => ({ ...client(since), ...o }));
 
-    it('reads the youngest connection and highest id of each identity per capture', async () => {
+    it('reads the oldest connection and highest id of each identity per capture', async () => {
       await save(
         h.storage,
         rows([
@@ -203,7 +203,7 @@ describe.each([
           name: 'api',
           user: 'default',
           ip: '10.0.0.1',
-          youngestAge: 4,
+          oldestAge: 90,
           maxClientId: 12,
         },
         {
@@ -211,7 +211,7 @@ describe.each([
           name: 'api',
           user: 'default',
           ip: '10.0.0.1',
-          youngestAge: 1,
+          oldestAge: 1,
           maxClientId: 40,
         },
       ]);

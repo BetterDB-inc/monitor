@@ -552,7 +552,7 @@ describePostgres('client analytics rollups — postgres', () => {
   });
 
   describe('getClientConnectionCaptures', () => {
-    it('reads the youngest connection and highest id of each identity per capture', async () => {
+    it('reads the oldest connection and highest id of each identity per capture', async () => {
       const connectionId = 'conn-captures';
       const capturedAt = T0 + BATCH_MS;
       const [template] = rows;
@@ -569,7 +569,7 @@ describePostgres('client analytics rollups — postgres', () => {
       await expect(
         pg.getClientConnectionCaptures(connectionId, capturedAt, capturedAt),
       ).resolves.toEqual([
-        { capturedAt, name: 'api', user: 'svc', ip: '10.0.0.1', youngestAge: 2, maxClientId: 10 },
+        { capturedAt, name: 'api', user: 'svc', ip: '10.0.0.1', oldestAge: 30, maxClientId: 10 },
       ]);
     });
   });

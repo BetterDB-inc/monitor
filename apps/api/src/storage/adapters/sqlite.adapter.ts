@@ -1304,7 +1304,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.db
       .prepare(
         `SELECT captured_at AS capturedAt, COALESCE(name, '') AS name, COALESCE(user, '') AS user,
-                ${SQLITE_CLIENT_IP_EXPR} AS ip, MIN(age) AS youngestAge,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldestAge,
                 MAX(CAST(client_id AS INTEGER)) AS maxClientId
            FROM client_snapshots
           WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?

@@ -420,10 +420,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         name: snapshot.name,
         user: snapshot.user,
         ip,
-        youngestAge: snapshot.age,
+        oldestAge: snapshot.age,
         maxClientId: 0,
       };
-      row.youngestAge = Math.min(row.youngestAge, snapshot.age);
+      row.oldestAge = Math.max(row.oldestAge, snapshot.age);
       row.maxClientId = Math.max(row.maxClientId, Number(snapshot.clientId) || 0);
       rows.set(key, row);
     }

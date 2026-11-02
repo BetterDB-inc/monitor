@@ -501,12 +501,12 @@ describe('retry amplification attribution', () => {
 
 describe('estimateNewConnections', () => {
   const identity = { name: 'worker', user: 'default', ip: '10.0.0.1' };
-  const capture = (capturedAt: number, maxClientId: number, youngestAge: number, name = 'worker') => ({
+  const capture = (capturedAt: number, maxClientId: number, oldestAge: number, name = 'worker') => ({
     ...identity,
     name,
     capturedAt,
     maxClientId,
-    youngestAge,
+    oldestAge,
   });
 
   it('credits the id growth between captures to the only fresh client', () => {
@@ -535,6 +535,19 @@ describe('estimateNewConnections', () => {
     const captures = [capture(0, 100, 5), capture(60_000, 130, 61)];
 
     expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([]);
+  });
+
+  it('credits the growth to a retrier and not a pool with older connections', () => {
+    const captures = [
+      capture(0, 100, 5),
+      capture(0, 90, 500, 'pool'),
+      capture(60_000, 130, 1),
+      capture(60_000, 129, 560, 'pool'),
+    ];
+
+    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
+      { ...identity, count: 30 },
+    ]);
   });
 
   it('ignores the drop in ids after a server restart', () => {

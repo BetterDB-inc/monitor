@@ -45,7 +45,7 @@ export interface ClientConnectionCaptureRow {
   name: string;
   user: string;
   ip: string;
-  youngestAge: number;
+  oldestAge: number;
   maxClientId: number;
 }
 

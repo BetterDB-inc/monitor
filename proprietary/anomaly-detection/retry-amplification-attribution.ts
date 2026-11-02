@@ -210,7 +210,7 @@ export function estimateNewConnections(
     const previous = byCapture.get(times[i - 1]) ?? [];
     const growth = highestClientId(rows) - highestClientId(previous);
     if (growth <= 0) continue;
-    const fresh = rows.filter((row) => capturedAt - row.youngestAge * 1000 >= times[i - 1]);
+    const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= times[i - 1]);
     for (const row of fresh) {
       const key = JSON.stringify([row.name, row.user, row.ip]);
       const entry = shares.get(key) ?? { row, share: 0 };

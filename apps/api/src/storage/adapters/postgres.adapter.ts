@@ -1017,7 +1017,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     const result = await this.pool.query(
       `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip, MIN(age) AS youngest_age,
+              ${PG_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldest_age,
               MAX(CASE WHEN client_id::text ~ '^[0-9]+$' THEN client_id::text::bigint END) AS max_client_id
          FROM client_snapshots
         WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
@@ -1030,7 +1030,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       name: row.name,
       user: row.user_name,
       ip: row.ip,
-      youngestAge: Number(row.youngest_age),
+      oldestAge: Number(row.oldest_age),
       maxClientId: Number(row.max_client_id ?? 0),
     }));
   }

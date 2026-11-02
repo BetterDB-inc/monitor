@@ -3614,16 +3614,21 @@ export class AnomalyService
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];
-    let connectionCaptures: ClientConnectionCaptureRow[] = [];
     let snapshotsLoaded = true;
     const baselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    const captureRead = withTimeout(
+      this.storage.getClientConnectionCaptures(ctx.connectionId, baselineStart, until),
+      RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
+    ).catch((error): ClientConnectionCaptureRow[] => {
+      this.logger.debug(`Client captures unavailable for ${ctx.connectionName}: ${String(error)}`);
+      return [];
+    });
     try {
-      [capture, newConnections, baselineConnections, connectionCaptures] = await withTimeout(
+      [capture, newConnections, baselineConnections] = await withTimeout(
         Promise.all([
           this.latestClientCapture(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, baselineStart, episodeStart - 1),
-          this.storage.getClientConnectionCaptures(ctx.connectionId, baselineStart, until),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
@@ -3631,6 +3636,7 @@ export class AnomalyService
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
+    const connectionCaptures = await captureRead;
     const reconnectsKnown = snapshotsLoaded && capture.length > 0;
     const ratesKnown =
       snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
