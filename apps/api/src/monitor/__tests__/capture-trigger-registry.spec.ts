@@ -1,11 +1,14 @@
 import { ConflictException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
+import { AnomalySavedBus } from '../../common/services/anomaly-saved-bus';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import {
   CaptureTriggerRegistry,
   DEFAULT_TRIGGER_EXPIRY_MS,
+  MAX_PENDING_ANOMALIES,
+  PENDING_ANOMALY_MAX_AGE_MS,
 } from '../capture-trigger-registry';
 import type { HealthGateService } from '../health-gate.service';
 import type { MonitorCaptureService } from '../monitor-capture.service';
@@ -76,16 +79,21 @@ function makeRegistry(
   dispatcher: FakeDispatcher;
 } {
   const storage = new MemoryAdapter();
+  const bus = new AnomalySavedBus();
+  const save = storage.saveAnomalyEvent.bind(storage);
+  storage.saveAnomalyEvent = async (event, connectionId) => {
+    const id = await save(event, connectionId);
+    bus.publish({ ...event, connectionId });
+    return id;
+  };
   const registry = new CaptureTriggerRegistry(
     storage,
     captureService as unknown as MonitorCaptureService,
     healthGate as unknown as HealthGateService,
     dispatcher as unknown as WebhookDispatcherService,
+    bus,
   );
   registry.setOptions({ autoStart: false });
-  // Tests want to see all stored anomaly events; the constructor seeds the
-  // watermark to Date.now() to avoid replaying history on real restarts.
-  registry.resetAnomalyWatermark();
   return { registry, storage, dispatcher };
 }
 
@@ -340,6 +348,57 @@ describe('CaptureTriggerRegistry', () => {
       await registry.tick();
 
       expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads no anomalies from storage while nothing new was saved', async () => {
+      const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
+      const read = jest.spyOn(storage, 'getAnomalyEvents');
+
+      await registry.tick();
+
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('gives up on an event that keeps failing once it is too old', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new Error('storage down'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+      await registry.tick();
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+
+      const clock = jest
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + PENDING_ANOMALY_MAX_AGE_MS + 1);
+      await registry.tick();
+      clock.mockRestore();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds a bounded number of unmatched events', async () => {
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValue(new Error('storage down'));
+      const { registry, storage } = makeRegistry(makeCaptureService(), healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      const timestamp = Date.now() + 1;
+      for (let i = 0; i <= MAX_PENDING_ANOMALIES; i++) {
+        await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), CONNECTION_ID);
+      }
+
+      await registry.tick();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(MAX_PENDING_ANOMALIES);
     });
 
     it('handles each event once across ticks', async () => {

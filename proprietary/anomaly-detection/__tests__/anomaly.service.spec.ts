@@ -32,6 +32,8 @@ import {
   AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
+import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
+import { ReplicationStreamSample } from '../replication-stream';
 import { DETECTOR_DEFAULTS } from '@app/anomaly/anomaly.types';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
@@ -46,6 +48,7 @@ describe('AnomalyService', () => {
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
   let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock };
+  let anomalySavedBus: AnomalySavedBus;
   let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
@@ -97,6 +100,7 @@ describe('AnomalyService', () => {
     };
 
     anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
+    anomalySavedBus = new AnomalySavedBus();
     webhookEventsProService = {
       isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
@@ -188,6 +192,7 @@ describe('AnomalyService', () => {
         { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
         { provide: ANOMALY_WEBHOOK_SINK, useValue: anomalyWebhookSink },
+        { provide: AnomalySavedBus, useValue: anomalySavedBus },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
@@ -6091,6 +6096,29 @@ describe('AnomalyService', () => {
       connectionId: 'conn-1',
     });
 
+    it('announces an event once its first save lands, even when already resolved', async () => {
+      const event = { ...anomaly(), resolved: true };
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+
+      await (service as any).persistAnomaly(event, mockCtx);
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ id: event.id, connectionId: 'conn-1' }),
+      );
+    });
+
+    it('announces an event handed over by another producer', () => {
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+
+      service.ingestExternalAnomaly(anomaly());
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
     it('hands an event over once its first save lands', async () => {
       const event = anomaly();
       await (service as any).addAnomaly(event, mockCtx);
@@ -6288,8 +6316,8 @@ describe('AnomalyService', () => {
 
       it('stops the pass when a resolve cannot reach storage', async () => {
         storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
-        (service as any).persistenceOutbox.enqueueResolve('first', 100, 0);
-        (service as any).persistenceOutbox.enqueueResolve('second', 100, 0);
+        (service as any).persistenceOutbox.enqueueResolve('first', 100, Date.now());
+        (service as any).persistenceOutbox.enqueueResolve('second', 100, Date.now());
 
         await (service as any).drainPersistenceOutbox();
 
@@ -6312,8 +6340,8 @@ describe('AnomalyService', () => {
       it('carries on past a resolve whose row is missing', async () => {
         (service as any).recentAnomalies.push(cached('missing'));
         storage.resolveAnomaly.mockResolvedValue(false);
-        (service as any).persistenceOutbox.enqueueResolve('missing', 100, 0);
-        (service as any).persistenceOutbox.enqueueResolve('next', 100, 0);
+        (service as any).persistenceOutbox.enqueueResolve('missing', 100, Date.now());
+        (service as any).persistenceOutbox.enqueueResolve('next', 100, Date.now());
 
         await (service as any).drainPersistenceOutbox();
 
@@ -8898,6 +8926,21 @@ describe('AnomalyService', () => {
       (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
       (webhookEventsProService as any).dispatchReplicationRecovered = recoveredHook;
       (service as any).recentAnomalies.push({
+        id: 'cpu-drop-1',
+        timestamp: T0 + 5_000,
+        metricType: MetricType.CPU_UTILIZATION,
+        anomalyType: AnomalyType.DROP,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 50,
+        zScore: 3,
+        stdDev: 1,
+        threshold: 2,
+        message: 'cpu drop',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+      (service as any).recentAnomalies.push({
         id: 'mem-1',
         timestamp: T0 + 5_000,
         metricType: MetricType.MEMORY_USED,
@@ -9596,6 +9639,29 @@ describe('AnomalyService', () => {
         expect(recoveredCalls()).toEqual([]);
       });
 
+      it('keeps a retried close quiet when the first sweep lands after it', async () => {
+        (service as any).divergenceOrphans.set(
+          'conn-1',
+          new Map([
+            [
+              '10.0.0.2:6379',
+              { eventIds: new Set(['retried']), sinceWindow: 0, claimed: false, notified: true },
+            ],
+          ]),
+        );
+        storage.getAnomalyEvents.mockResolvedValueOnce([
+          { id: 'retried', replicaAddr: '10.0.0.2:6379' },
+        ]);
+
+        await (service as any).collectOrphanedDivergenceEvents(
+          { replicas: new Map(), closedWindowCount: 3 },
+          mockCtx,
+        );
+
+        const orphans = (service as any).divergenceOrphans.get('conn-1');
+        expect(orphans.get('10.0.0.2:6379')).toMatchObject({ notified: true, sinceWindow: 0 });
+      });
+
       it('closes restart-orphaned events when the connection is removed', async () => {
         (service as any).divergenceOrphans.set(
           'conn-1',
@@ -10270,7 +10336,7 @@ describe('AnomalyService', () => {
           );
         });
 
-        it('does not raise it again while a full outbox of closes holds it', async () => {
+        it('does not raise it again when a full outbox of closes evicts it', async () => {
           failSaves();
           await pollWith(clients(85));
           const [first] = events();
@@ -10279,7 +10345,7 @@ describe('AnomalyService', () => {
           fillOutbox((i) => (service as any).persistenceOutbox.enqueueResolve(`r-${i}`, 1, 1));
           (service as any).persistenceOutbox.due(Date.now());
 
-          expect((service as any).persistenceOutbox.has(first.id)).toBe(true);
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
           healSaves();
           await pollWith(clients(85));
           expect(events()).toHaveLength(1);

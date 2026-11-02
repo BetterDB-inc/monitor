@@ -3,6 +3,7 @@ import { AnomalyEvent } from './types';
 
 export const OUTBOX_MAX_ENTRIES = 1000;
 export const OUTBOX_MAX_AGE_MS = 60 * 60 * 1000;
+export const OUTBOX_CLOSE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const OUTBOX_RETRY_BASE_MS = 10_000;
 export const OUTBOX_RETRY_MAX_MS = 60_000;
 
@@ -35,17 +36,18 @@ function closesEvent(entry: OutboxEntry): boolean {
   return entry.kind === 'resolve' || entry.anomaly.resolved;
 }
 
-function reRaisesClose(entry: OutboxEntry): boolean {
-  return entry.kind === 'resolve' ? entry.onDrop !== undefined : entry.onCloseDrop !== undefined;
+function dropHook(entry: OutboxEntry): (() => void) | undefined {
+  if (entry.kind === 'resolve') return entry.onDrop;
+  return entry.anomaly.resolved ? entry.onCloseDrop : entry.onDrop;
 }
 
 function isExpired(entry: OutboxEntry, now: number): boolean {
-  if (entry.kind === 'resolve') {
-    return (
-      entry.rowMissingSince !== undefined && now - entry.rowMissingSince > OUTBOX_MAX_AGE_MS
-    );
-  }
-  return !entry.anomaly.resolved && now - entry.enqueuedAt > OUTBOX_MAX_AGE_MS;
+  const rowMissing =
+    entry.kind === 'resolve' &&
+    entry.rowMissingSince !== undefined &&
+    now - entry.rowMissingSince > OUTBOX_MAX_AGE_MS;
+  const maxAge = closesEvent(entry) ? OUTBOX_CLOSE_MAX_AGE_MS : OUTBOX_MAX_AGE_MS;
+  return rowMissing || now - entry.enqueuedAt > maxAge;
 }
 
 export class PersistenceOutbox {
@@ -146,9 +148,9 @@ export class PersistenceOutbox {
       if (!isExpired(entry, now)) continue;
       this.pending.delete(entry.id);
       this.onDrop(entry, 'expired');
-      entry.onDrop?.();
+      dropHook(entry)?.();
     }
-    this.releaseHeldDrops();
+    this.releaseHeldDrops(now);
     return [...this.pending.values()].filter((entry) => (entry.retryAt ?? 0) <= now);
   }
 
@@ -162,30 +164,33 @@ export class PersistenceOutbox {
     const entries = [...this.pending.values()];
     const victim =
       entries.find((entry) => !closesEvent(entry)) ??
-      entries.find((entry) => closesEvent(entry) && reRaisesClose(entry));
+      entries.find((entry) => closesEvent(entry) && dropHook(entry) !== undefined) ??
+      (closesEvent(incoming) ? entries[0] : undefined);
     if (victim) {
       this.pending.delete(victim.id);
       this.discard(victim);
       return true;
     }
-    if (closesEvent(incoming)) return true;
     this.discard(incoming);
     return false;
   }
 
   private discard(entry: OutboxEntry): void {
     this.onDrop(entry, 'full');
-    if (entry.kind === 'resolve') entry.onDrop?.();
-    else if (entry.anomaly.resolved) entry.onCloseDrop?.();
-    else if (entry.onDrop) this.heldDrops.push(entry);
+    if (closesEvent(entry)) dropHook(entry)?.();
+    else if (entry.onDrop) this.heldDrops.push(entry as PendingSave);
   }
 
-  private releaseHeldDrops(): void {
-    if (this.pending.size >= OUTBOX_MAX_ENTRIES) return;
+  private releaseHeldDrops(now: number): void {
+    const full = this.pending.size >= OUTBOX_MAX_ENTRIES;
     const held = this.heldDrops;
     this.heldDrops = [];
     for (const entry of held) {
       if (entry.anomaly.resolved || entry.anomaly.persisted || this.pending.has(entry.id)) continue;
+      if (full && now - entry.enqueuedAt <= OUTBOX_MAX_AGE_MS) {
+        this.heldDrops.push(entry);
+        continue;
+      }
       entry.onDrop?.();
     }
   }

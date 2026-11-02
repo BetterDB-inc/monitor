@@ -236,6 +236,12 @@ function baselineRate(rateHistory: number[], excludeLast: number): number | null
   return recent.length > 0 ? median(recent) : null;
 }
 
+function rateAfterBurst(rateHistory: number[]): number | null {
+  if (rateHistory.length === 0) return null;
+  const lowest = Math.min(...rateHistory);
+  return lowest * DIVERGENCE_SUBSIDED_RATE_FACTOR < Math.max(...rateHistory) ? lowest : null;
+}
+
 function rateSubsided(replica: ReplicaDivergenceState, last: DivergenceWindow): boolean {
   if (writesStopped(last)) return true;
   if (replica.baselineRate === null) return false;
@@ -280,7 +286,8 @@ function evaluateReplica(
   }
 
   if (replica.baselineRate === null && (replica.level !== 'none' || target !== 'none')) {
-    replica.baselineRate = baselineRate(rateHistory, Math.max(streak, behindRun(windows)));
+    replica.baselineRate =
+      baselineRate(rateHistory, Math.max(streak, behindRun(windows))) ?? rateAfterBurst(rateHistory);
   }
 
   const stopped = writesStopped(last);
@@ -612,7 +619,7 @@ export const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new 
   [MetricType.FORK_MEMORY_RISK, 'fork copy-on-write pressure'],
   [MetricType.INPUT_KBPS, 'write-rate spike'],
   [MetricType.OPS_PER_SEC, 'write-rate spike'],
-  [MetricType.CLUSTER_TOPOLOGY, 'slot migration'],
+  [MetricType.CLUSTER_TOPOLOGY, 'cluster topology disagreement'],
   [MetricType.CPU_UTILIZATION, 'CPU saturation'],
 ]);
 
