@@ -126,7 +126,11 @@ const COMPONENT_REMEDY: Record<keyof OverheadComponents, string> = {
 };
 
 export function createMemoryOverheadState(): MemoryOverheadState {
-  return { ackedLevel: 'none', invalidSampleStreak: 0, inconsistencyNoted: false };
+  return {
+    ackedLevel: 'none',
+    invalidSampleStreak: 0,
+    inconsistencyNoted: false,
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -319,4 +323,20 @@ export function acknowledgeMemoryOverheadFinding(
     return;
   }
   state.ackedLevel = finding.level;
+}
+
+export function memoryOverheadRearm(
+  state: MemoryOverheadState,
+  finding: MemoryOverheadFinding,
+): () => void {
+  const previousLevel = state.ackedLevel;
+  return () => {
+    if (finding.level === 'info') {
+      state.inconsistencyNoted = false;
+      return;
+    }
+    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
+      state.ackedLevel = previousLevel;
+    }
+  };
 }

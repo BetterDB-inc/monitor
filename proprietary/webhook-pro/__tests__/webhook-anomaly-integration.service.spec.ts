@@ -69,10 +69,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      // Trigger the polling check
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -109,9 +106,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchConnectionSpike).not.toHaveBeenCalled();
@@ -137,9 +132,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -176,9 +169,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalled();
       expect(webhookProService.dispatchLatencySpike).not.toHaveBeenCalled();
@@ -202,9 +193,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         sourcePort: 6379,
       };
 
-      storageClient.getAnomalyEvents.mockResolvedValue([anomaly]);
-
-      await (service as any).checkForNewAnomalies();
+      await service.dispatchAnomalyWebhook(anomaly);
 
       // When value is 0, baseline/0 = Infinity
       expect(webhookProService.dispatchLatencySpike).toHaveBeenCalledWith({
@@ -254,9 +243,7 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
+      for (const anomaly of anomalies) await service.dispatchAnomalyWebhook(anomaly);
 
       expect(webhookProService.dispatchAnomalyDetected).toHaveBeenCalledTimes(2);
       expect(webhookProService.dispatchConnectionSpike).toHaveBeenCalledTimes(1);
@@ -264,44 +251,7 @@ describe('WebhookAnomalyIntegrationService', () => {
     });
   });
 
-  describe('command_p99 (latency regression)', () => {
-    it('does not dispatch the generic anomaly.detected for command_p99 (dedicated event owns it)', async () => {
-      const anomalies: StoredAnomalyEvent[] = [
-        {
-          id: 'lr-1',
-          timestamp: Date.now(),
-          metricType: 'command_p99',
-          anomalyType: 'spike',
-          severity: 'critical',
-          value: 6000,
-          baseline: 2000,
-          stdDev: 0,
-          zScore: 0,
-          threshold: 3.0,
-          message: 'P99 latency regression after upgrade',
-          resolved: false,
-          sourceHost: 'localhost',
-          sourcePort: 6379,
-        },
-      ];
-
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
-
-      await (service as any).checkForNewAnomalies();
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-  });
-
   describe('error handling', () => {
-    it('should handle storage errors gracefully', async () => {
-      storageClient.getAnomalyEvents.mockRejectedValue(new Error('Storage error'));
-
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
-
-      expect(webhookProService.dispatchAnomalyDetected).not.toHaveBeenCalled();
-    });
-
     it('should continue processing if webhook dispatch fails', async () => {
       const anomalies: StoredAnomalyEvent[] = [
         {
@@ -322,10 +272,9 @@ describe('WebhookAnomalyIntegrationService', () => {
         },
       ];
 
-      storageClient.getAnomalyEvents.mockResolvedValue(anomalies);
       webhookProService.dispatchAnomalyDetected.mockRejectedValue(new Error('Webhook error'));
 
-      await expect((service as any).checkForNewAnomalies()).resolves.not.toThrow();
+      await expect(service.dispatchAnomalyWebhook(anomalies[0])).resolves.not.toThrow();
     });
   });
 });

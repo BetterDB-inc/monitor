@@ -39,6 +39,7 @@ describe('LocalRetentionService', () => {
       pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(0),
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(0),
+      pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
     };
 

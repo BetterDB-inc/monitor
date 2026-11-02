@@ -211,3 +211,12 @@ export function acknowledgeLoadSaturationFinding(
 ): void {
   state.ackedLevel = finding.level;
 }
+
+export function loadSaturationRearm(state: LoadSaturationState): () => void {
+  const previousLevel = state.ackedLevel;
+  return () => {
+    if (LEVEL_RANK[previousLevel] < LEVEL_RANK[state.ackedLevel]) {
+      state.ackedLevel = previousLevel;
+    }
+  };
+}

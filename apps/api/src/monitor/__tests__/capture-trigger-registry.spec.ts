@@ -1,11 +1,14 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { WebhookEventType } from '@betterdb/shared';
 import { StoredAnomalyEvent } from '../../common/interfaces/storage-port.interface';
+import { AnomalySavedBus } from '../../common/services/anomaly-saved-bus';
 import { MemoryAdapter } from '../../storage/adapters/memory.adapter';
 import type { WebhookDispatcherService } from '../../webhooks/webhook-dispatcher.service';
 import {
   CaptureTriggerRegistry,
   DEFAULT_TRIGGER_EXPIRY_MS,
+  MAX_PENDING_ANOMALIES,
+  PENDING_ANOMALY_MAX_AGE_MS,
 } from '../capture-trigger-registry';
 import type { HealthGateService } from '../health-gate.service';
 import type { MonitorCaptureService } from '../monitor-capture.service';
@@ -76,16 +79,21 @@ function makeRegistry(
   dispatcher: FakeDispatcher;
 } {
   const storage = new MemoryAdapter();
+  const bus = new AnomalySavedBus();
+  const save = storage.saveAnomalyEvent.bind(storage);
+  storage.saveAnomalyEvent = async (event, connectionId) => {
+    const id = await save(event, connectionId);
+    bus.publish({ ...event, connectionId });
+    return id;
+  };
   const registry = new CaptureTriggerRegistry(
     storage,
     captureService as unknown as MonitorCaptureService,
     healthGate as unknown as HealthGateService,
     dispatcher as unknown as WebhookDispatcherService,
+    bus,
   );
   registry.setOptions({ autoStart: false });
-  // Tests want to see all stored anomaly events; the constructor seeds the
-  // watermark to Date.now() to avoid replaying history on real restarts.
-  registry.resetAnomalyWatermark();
   return { registry, storage, dispatcher };
 }
 
@@ -245,6 +253,172 @@ describe('CaptureTriggerRegistry', () => {
       expect(updated?.status).toBe('fired');
       expect(updated?.firedSessionId).toBe('sess-1');
       expect(updated?.firedAt).toBeGreaterThan(0);
+    });
+
+    it('matches an event again after a tick failed on it', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      healthGate.evaluate.mockRejectedValueOnce(new Error('storage down'));
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+      expect(captureService.startSession).not.toHaveBeenCalled();
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reaches later events past one that keeps failing', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      healthGate.evaluate.mockImplementation(async (connectionId: string) => {
+        if (connectionId === 'removed') throw new Error('Connection not found');
+        return { allow: true, signals: {}, thresholds: {} };
+      });
+      const timestamp = Date.now() + 1;
+      await registry.createTrigger({ connectionId: 'removed', metricType: METRIC, anomalyType: ANOMALY });
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), 'removed');
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: timestamp + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+      expect(captureService.startSession).toHaveBeenCalledWith(
+        expect.objectContaining({ connectionId: CONNECTION_ID }),
+      );
+    });
+
+    it('reaches new events past a queued trigger that keeps failing', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      healthGate.evaluate.mockImplementation(async (connectionId: string) => {
+        if (connectionId === 'removed') throw new Error('Connection not found');
+        return { allow: true, signals: {}, thresholds: {} };
+      });
+      const queued = await registry.createTrigger({
+        connectionId: 'removed',
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.updateCaptureTrigger(queued.id, { status: 'queued' });
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires for an event saved late with an older timestamp', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      const createdAt = Date.now();
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ metricType: 'other', timestamp: createdAt + 60_000 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+
+      await storage.saveAnomalyEvent(
+        makeAnomaly({ timestamp: createdAt + 30_000 }),
+        CONNECTION_ID,
+      );
+      await registry.tick();
+
+      expect(captureService.startSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads no anomalies from storage while nothing new was saved', async () => {
+      const { registry, storage } = makeRegistry(makeCaptureService(), makeHealthGate(true));
+      const read = jest.spyOn(storage, 'getAnomalyEvents');
+
+      await registry.tick();
+
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    it('gives up on an event that keeps failing once it is too old', async () => {
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(makeCaptureService(), healthGate);
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      jest.spyOn(storage, 'updateCaptureTrigger').mockRejectedValue(new Error('storage down'));
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp: Date.now() + 1 }), CONNECTION_ID);
+      await expect(registry.tick()).rejects.toThrow('storage down');
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+
+      const clock = jest
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + PENDING_ANOMALY_MAX_AGE_MS + 1);
+      await registry.tick();
+      clock.mockRestore();
+
+      expect(healthGate.evaluate).toHaveBeenCalledTimes(1);
+    });
+
+    it('holds a bounded number of unmatched events', async () => {
+      const captureService = makeCaptureService();
+      const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+      const timestamp = Date.now() + 1;
+      await storage.saveAnomalyEvent(makeAnomaly({ timestamp }), CONNECTION_ID);
+      for (let i = 0; i < MAX_PENDING_ANOMALIES; i++) {
+        await storage.saveAnomalyEvent(
+          makeAnomaly({ metricType: 'memory_used', timestamp }),
+          CONNECTION_ID,
+        );
+      }
+
+      await registry.tick();
+
+      expect(captureService.startSession).not.toHaveBeenCalled();
+    });
+
+    it('handles each event once across ticks', async () => {
+      const captureService = makeCaptureService();
+      const healthGate = makeHealthGate(true);
+      const { registry, storage } = makeRegistry(captureService, healthGate);
+      const event = makeAnomaly({ timestamp: Date.now() + 60_000 });
+      await storage.saveAnomalyEvent(event, CONNECTION_ID);
+      await registry.tick();
+      await registry.createTrigger({
+        connectionId: CONNECTION_ID,
+        metricType: METRIC,
+        anomalyType: ANOMALY,
+      });
+
+      await registry.tick();
+
+      expect(captureService.startSession).not.toHaveBeenCalled();
     });
 
     it('only fires a trigger once for repeated matching anomalies', async () => {
@@ -816,7 +990,7 @@ describe('CaptureTriggerRegistry', () => {
       );
     });
 
-    it('matches an old event behind more events than one page holds', async () => {
+    it('matches the oldest event behind a full queue of newer ones', async () => {
       const captureService = makeCaptureService();
       const { registry, storage } = makeRegistry(captureService, makeHealthGate(true));
       await registry.createTrigger({
@@ -826,7 +1000,7 @@ describe('CaptureTriggerRegistry', () => {
       });
       const start = Date.now() + 1;
       await storage.saveAnomalyEvent(makeAnomaly({ timestamp: start }), CONNECTION_ID);
-      for (let i = 1; i <= 5_100; i++) {
+      for (let i = 1; i < MAX_PENDING_ANOMALIES; i++) {
         await storage.saveAnomalyEvent(
           makeAnomaly({ metricType: 'memory_used', timestamp: start + i }),
           CONNECTION_ID,

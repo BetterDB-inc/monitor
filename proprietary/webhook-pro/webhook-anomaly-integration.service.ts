@@ -1,20 +1,18 @@
-import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
+import type { AnomalyWebhookSink } from '../anomaly-detection/types';
 
 /**
  * Webhook Anomaly Integration Service
  *
  * Integrates webhook dispatching with anomaly detection.
- * Dispatches webhooks when anomalies and correlated groups are detected.
+ * AnomalyService hands each event over after its first successful save.
  */
 @Injectable()
-export class WebhookAnomalyIntegrationService implements OnModuleInit {
+export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
   private readonly logger = new Logger(WebhookAnomalyIntegrationService.name);
-  private pollInterval: NodeJS.Timeout | null = null;
-  private readonly POLL_INTERVAL_MS = 5000; // Check every 5 seconds
-  private lastCheckedTimestamp: number = Date.now();
 
   constructor(
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
@@ -22,84 +20,11 @@ export class WebhookAnomalyIntegrationService implements OnModuleInit {
     private readonly configService: ConfigService,
   ) {}
 
-  async onModuleInit() {
-    this.logger.log('Webhook anomaly integration service initialized');
-    this.startPolling();
-  }
-
-  onModuleDestroy() {
-    this.stopPolling();
-  }
-
-  /**
-   * Start polling for new anomalies
-   */
-  private startPolling(): void {
-    this.pollInterval = setInterval(() => {
-      this.checkForNewAnomalies().catch(error => {
-        this.logger.error('Error checking for new anomalies:', error);
-      });
-    }, this.POLL_INTERVAL_MS);
-
-    // Run immediately on start
-    this.checkForNewAnomalies().catch(error => {
-      this.logger.error('Error in initial anomaly check:', error);
-    });
-  }
-
-  /**
-   * Stop polling
-   */
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
-  }
-
-  /**
-   * Check for new anomalies and dispatch webhooks
-   */
-  private async checkForNewAnomalies(): Promise<void> {
-    try {
-      const currentTime = Date.now();
-
-      // Get anomalies since last check
-      const anomalies = await this.storage.getAnomalyEvents({
-        startTime: this.lastCheckedTimestamp,
-        endTime: currentTime,
-        limit: 1000,
-      });
-
-      if (anomalies.length > 0) {
-        this.logger.debug(`Found ${anomalies.length} new anomalies to process`);
-
-        // Dispatch webhooks for each anomaly
-        for (const anomaly of anomalies) {
-          await this.dispatchAnomalyWebhook(anomaly);
-        }
-      }
-
-      // Update last checked timestamp
-      this.lastCheckedTimestamp = currentTime;
-
-    } catch (error) {
-      this.logger.error('Failed to check for new anomalies:', error);
-    }
-  }
-
   /**
    * Dispatch webhook for an anomaly event
    */
-  private async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
+  async dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void> {
     try {
-      // command_p99 regressions are delivered by LatencyRegressionService via the dedicated
-      // latency.regression.detected event; skip the generic anomaly.detected here so one
-      // regression doesn't produce two Pro webhook deliveries for the same incident.
-      if (anomaly.metricType === 'command_p99') {
-        return;
-      }
-
       const data = {
         anomalyId: anomaly.id,
         metricType: anomaly.metricType,

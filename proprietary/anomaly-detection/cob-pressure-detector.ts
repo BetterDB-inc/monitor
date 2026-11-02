@@ -474,3 +474,26 @@ export function acknowledgeCobFinding(
   }
   replicaState.ackedLevel = finding.level;
 }
+
+export function cobPressureRearm(
+  state: CobConnectionState,
+  finding: CobPressureFinding,
+): () => void {
+  if (finding.kind === 'resync-loop') {
+    const previousFiredAt = state.resyncFiredAt;
+    return () => {
+      state.resyncFiredAt = previousFiredAt;
+    };
+  }
+  const replicaState = state.replicas.get(finding.replicaAddr ?? AGGREGATE_KEY);
+  const previousLevel = replicaState?.ackedLevel ?? 'none';
+  return () => {
+    if (replicaState && LEVEL_RANK[previousLevel] < LEVEL_RANK[replicaState.ackedLevel]) {
+      replicaState.ackedLevel = previousLevel;
+    }
+  };
+}
+
+export function cobPressureLatch(finding: CobPressureFinding): string {
+  return finding.kind === 'resync-loop' ? finding.kind : (finding.replicaAddr ?? AGGREGATE_KEY);
+}

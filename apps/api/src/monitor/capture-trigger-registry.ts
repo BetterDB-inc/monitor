@@ -16,6 +16,7 @@ import {
   WebhookEventType,
 } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { AnomalySavedBus, SavedAnomaly } from '../common/services/anomaly-saved-bus';
 import { WebhookDispatcherService } from '../webhooks/webhook-dispatcher.service';
 import { HealthGateResult } from './health-gate';
 import { HealthGateService } from './health-gate.service';
@@ -31,6 +32,9 @@ const ACTIVE_STATUSES: readonly CaptureTriggerStatus[] = ['configured', 'queued'
 function triggerKey(connectionId: string, metricType: string, anomalyType: string): string {
   return JSON.stringify([connectionId, metricType, anomalyType]);
 }
+
+export const MAX_PENDING_ANOMALIES = 1000;
+export const PENDING_ANOMALY_MAX_AGE_MS = 60 * 60 * 1000;
 
 export interface CreateTriggerInput {
   connectionId: string;
@@ -51,7 +55,8 @@ export interface CaptureTriggerRegistryOptions {
  * drives a polling loop that:
  *   1. expires stale triggers (now &gt; expiresAt),
  *   2. retries previously queued triggers when the connection frees up,
- *   3. matches new anomaly events against configured triggers and fires them.
+ *   3. matches anomalies announced on first save against configured triggers
+ *      and fires them.
  *
  * The deep-module test seam is {@link tick}: callers can drive iterations
  * manually without timers. `setOptions` lets specs override the poll interval
@@ -61,7 +66,11 @@ export interface CaptureTriggerRegistryOptions {
 export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CaptureTriggerRegistry.name);
   private pollHandle?: NodeJS.Timeout;
-  private lastAnomalyAt: number;
+  private readonly pendingAnomalies = new Map<
+    string,
+    { event: SavedAnomaly; receivedAt: number }
+  >();
+  private readonly unsubscribeAnomalySaved: () => void;
   private pollIntervalMs = DEFAULT_POLL_INTERVAL_MS;
   private autoStart = true;
   private ticking = false;
@@ -71,18 +80,9 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     private readonly captureService: MonitorCaptureService,
     private readonly healthGate: HealthGateService,
     private readonly webhookDispatcher: WebhookDispatcherService,
+    anomalySaved: AnomalySavedBus,
   ) {
-    // Seed the watermark to "now" so a process restart never replays
-    // historical anomalies as if they just arrived. The trigger.createdAt
-    // guard in processNewAnomalies() blocks events older than each trigger
-    // anyway, but starting from 0 still means an unbounded scan on first
-    // tick. Tests can reset via the test seam below.
-    this.lastAnomalyAt = Date.now();
-  }
-
-  /** Test seam — reset the anomaly watermark so specs see all stored events. */
-  resetAnomalyWatermark(): void {
-    this.lastAnomalyAt = 0;
+    this.unsubscribeAnomalySaved = anomalySaved.subscribe((event) => this.enqueueAnomaly(event));
   }
 
   setOptions(options: CaptureTriggerRegistryOptions): void {
@@ -106,6 +106,7 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.unsubscribeAnomalySaved();
     if (this.pollHandle) {
       clearInterval(this.pollHandle);
       this.pollHandle = undefined;
@@ -189,38 +190,40 @@ export class CaptureTriggerRegistry implements OnModuleInit, OnModuleDestroy {
     return active;
   }
 
-  private async processNewAnomalies(configured: StoredCaptureTrigger[]): Promise<void> {
-    if (configured.length === 0) {
-      return;
+  private enqueueAnomaly(event: SavedAnomaly): void {
+    if (this.pendingAnomalies.size >= MAX_PENDING_ANOMALIES) {
+      const oldest = this.pendingAnomalies.keys().next().value as string;
+      this.pendingAnomalies.delete(oldest);
+      this.logger.warn(`Dropping pending anomaly ${oldest}: queue is full`);
     }
+    this.pendingAnomalies.set(event.id, { event, receivedAt: Date.now() });
+  }
+
+  private async processNewAnomalies(configured: StoredCaptureTrigger[]): Promise<void> {
     const waiting = new Map(
       configured.map((t) => [triggerKey(t.connectionId, t.metricType, t.anomalyType), t]),
     );
-    const oldestTrigger = Math.min(...configured.map((t) => t.createdAt));
-    const startTime = Math.max(this.lastAnomalyAt + 1, oldestTrigger);
-    let maxTs = this.lastAnomalyAt;
+    const now = Date.now();
+    const handled: string[] = [];
     const matched = new Map<string, StoredCaptureTrigger>();
-    for (let offset = 0; ; offset += ANOMALY_PAGE_SIZE) {
-      const page = await this.storage.getAnomalyEvents({
-        startTime,
-        limit: ANOMALY_PAGE_SIZE,
-        offset,
-      });
-      for (const evt of page) {
-        maxTs = Math.max(maxTs, evt.timestamp);
-        const match = evt.connectionId
-          ? waiting.get(triggerKey(evt.connectionId, evt.metricType, evt.anomalyType))
-          : undefined;
-        if (match && evt.timestamp >= match.createdAt) {
-          matched.set(match.id, match);
-        }
+    for (const [id, { event, receivedAt }] of this.pendingAnomalies) {
+      if (now - receivedAt > PENDING_ANOMALY_MAX_AGE_MS) {
+        this.pendingAnomalies.delete(id);
+        this.logger.warn(`Giving up on pending anomaly ${id}: too old`);
+        continue;
       }
-      if (page.length < ANOMALY_PAGE_SIZE) {
-        break;
+      handled.push(id);
+      const match = event.connectionId
+        ? waiting.get(triggerKey(event.connectionId, event.metricType, event.anomalyType))
+        : undefined;
+      if (match && event.timestamp >= match.createdAt) {
+        matched.set(match.id, match);
       }
     }
     await this.fireAll([...matched.values()]);
-    this.lastAnomalyAt = maxTs;
+    for (const id of handled) {
+      this.pendingAnomalies.delete(id);
+    }
   }
 
   private async fireAll(triggers: StoredCaptureTrigger[]): Promise<void> {

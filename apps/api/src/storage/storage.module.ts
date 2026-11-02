@@ -2,11 +2,13 @@ import { Module, OnModuleDestroy, Inject } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { StorageClientFactory } from './factory/storage-client.factory';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import { AnomalySavedBus } from '../common/services/anomaly-saved-bus';
 
 @Module({
   imports: [ConfigModule],
   providers: [
     StorageClientFactory,
+    AnomalySavedBus,
     {
       provide: 'STORAGE_CLIENT',
       useFactory: async (factory: StorageClientFactory): Promise<StoragePort> => {
@@ -15,7 +17,7 @@ import { StoragePort } from '../common/interfaces/storage-port.interface';
       inject: [StorageClientFactory],
     },
   ],
-  exports: ['STORAGE_CLIENT'],
+  exports: ['STORAGE_CLIENT', AnomalySavedBus],
 })
 export class StorageModule implements OnModuleDestroy {
   constructor(@Inject('STORAGE_CLIENT') private readonly storageClient: StoragePort) {}

@@ -55,3 +55,20 @@ export interface AnomalyBufferStats {
   latest: number;
   isReady: boolean;
 }
+
+export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
+
+export interface ReplicationDivergenceWindow {
+  start: number;
+  end: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+}
+
+export interface ReplicaDivergenceHistory {
+  replica: string;
+  level: ReplicationDivergenceLevel;
+  latest: ReplicationDivergenceWindow | null;
+  windows: ReplicationDivergenceWindow[];
+}

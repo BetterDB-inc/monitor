@@ -1,3 +1,5 @@
+import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
+
 export enum MetricType {
   CONNECTIONS = 'connections',
   OPS_PER_SEC = 'ops_per_sec',
@@ -64,6 +66,9 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients stays flat — z-score on the per-poll rate, fed inline. */
+  CONNECTION_CHURN = 'connection_churn',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
 }
 
 /**
@@ -104,6 +109,8 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.CONNECTION_CHURN,
+  MetricType.REPLICATION_DIVERGENCE,
 ]);
 
 export enum AnomalySeverity {
@@ -129,6 +136,7 @@ export enum AnomalyPattern {
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
   UNKNOWN = 'unknown',
 }
 
@@ -146,7 +154,9 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.
@@ -158,10 +168,8 @@ export interface AnomalyEvent {
   syntheticPattern?: AnomalyPattern;
   /**
    * Transient (not persisted): whether this cached event was durably written to
-   * storage. Deterministic string-id events (failover/promotion/cluster/
-   * persistence/dup-primary) can't be stored on Postgres (UUID PK), so they stay
-   * memory-only and are resolved by flipping the cache — a storage-backed poll
-   * can never resurface a row that was never written.
+   * storage. An event whose save has not landed is resolved by flipping the cache
+   * and carrying the close on its pending save.
    */
   persisted?: boolean;
 }
@@ -211,4 +219,16 @@ export interface AnomalySummary {
   byPattern: Record<AnomalyPattern, number>;
   activeEvents: number;
   resolvedEvents: number;
+}
+
+export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
+
+export interface AnomalyEventSink {
+  ingestExternalAnomaly(event: AnomalyEvent): void;
+}
+
+export const ANOMALY_WEBHOOK_SINK = 'ANOMALY_WEBHOOK_SINK';
+
+export interface AnomalyWebhookSink {
+  dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
 }

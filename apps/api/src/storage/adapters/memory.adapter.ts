@@ -47,6 +47,8 @@ import {
   StoredCommandStatsSample,
   CommandStatsHistoryQueryOptions,
   StoredLatencyStatsSample,
+  StoredReplicationDivergenceWindow,
+  ReplicationDivergenceWindowQueryOptions,
   LatencyStatsHistoryQueryOptions,
   StoredAiCacheSample,
   AiCacheHistoryQueryOptions,
@@ -94,7 +96,11 @@ import {
   memoryForgetTargetDiscriminator,
 } from '@betterdb/shared';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { clientAddrIp, foldClientAnalyticsStats, type ClientStatsGroup } from './client-analytics-stats';
+import {
+  clientAddrIp,
+  foldClientAnalyticsStats,
+  type ClientStatsGroup,
+} from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
@@ -124,9 +130,10 @@ import type {
 
 const NULL_SUB_DISCRIMINATOR = '__betterdb_null__';
 
-function pendingProposalSubDiscriminator(
-  p: { proposal_type: string; proposal_payload: unknown },
-): string | null {
+function pendingProposalSubDiscriminator(p: {
+  proposal_type: string;
+  proposal_payload: unknown;
+}): string | null {
   const payload = p.proposal_payload as Record<string, unknown> | null | undefined;
   if (p.proposal_type === 'threshold_adjust') {
     const category = payload?.category;
@@ -144,7 +151,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private clientSnapshots: StoredClientSnapshot[] = [];
   /** Keyed by `${connectionId}:${bucketStart}`. */
   private clientAnalyticsRollups: Map<string, ClientAnalyticsRollup> = new Map();
-  private anomalyEvents: StoredAnomalyEvent[] = [];
+  private anomalyEvents = new Map<string, StoredAnomalyEvent>();
   private bulkDeleteAudits: StoredBulkDeleteAudit[] = [];
   private correlatedGroups: StoredCorrelatedGroup[] = [];
   private commandLogEntries: StoredCommandLogEntry[] = [];
@@ -505,7 +512,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return earliest === Infinity ? null : { earliest, latest };
   }
 
-  async getClientSnapshotNextCapturedAt(connectionId: string, afterExclusive: number): Promise<number | null> {
+  async getClientSnapshotNextCapturedAt(
+    connectionId: string,
+    afterExclusive: number,
+  ): Promise<number | null> {
     let next = Infinity;
     for (const c of this.clientSnapshots) {
       if (c.connectionId === connectionId && c.capturedAt > afterExclusive && c.capturedAt < next) {
@@ -539,7 +549,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     const cmp = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
     return Array.from(groups.values()).sort(
       (a, b) =>
-        a.capturedAt - b.capturedAt || cmp(a.name, b.name) || cmp(a.user, b.user) || cmp(a.ip, b.ip),
+        a.capturedAt - b.capturedAt ||
+        cmp(a.name, b.name) ||
+        cmp(a.user, b.user) ||
+        cmp(a.ip, b.ip),
     );
   }
 
@@ -626,8 +639,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async saveAnomalyEvent(event: StoredAnomalyEvent, connectionId: string): Promise<string> {
-    this.anomalyEvents.push({ ...event, connectionId });
+    this.upsertAnomalyEvent({ ...event, connectionId });
     return event.id;
+  }
+
+  private upsertAnomalyEvent(event: StoredAnomalyEvent): void {
+    const existing = this.anomalyEvents.get(event.id);
+    if (!existing) {
+      this.anomalyEvents.set(event.id, event);
+      return;
+    }
+    this.anomalyEvents.set(event.id, {
+      ...existing,
+      correlationId: event.correlationId ?? existing.correlationId,
+      relatedMetrics: event.relatedMetrics ?? existing.relatedMetrics,
+      replicaAddr: event.replicaAddr ?? existing.replicaAddr,
+      resolved: existing.resolved || event.resolved,
+      resolvedAt: existing.resolvedAt ?? event.resolvedAt,
+      durationMs: existing.durationMs ?? event.durationMs,
+    });
   }
 
   async saveBulkDeleteAudit(record: StoredBulkDeleteAudit): Promise<string> {
@@ -646,9 +676,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       filtered = filtered.filter((r) => r.connectionId === options.connectionId);
     if (options.startTime) filtered = filtered.filter((r) => r.timestamp >= options.startTime!);
     if (options.endTime) filtered = filtered.filter((r) => r.timestamp <= options.endTime!);
-    return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, options.limit ?? 100);
+    return filtered.sort((a, b) => b.timestamp - a.timestamp).slice(0, options.limit ?? 100);
   }
 
   async markInterruptedBulkDeleteRuns(error: string, completedAt: number): Promise<number> {
@@ -666,13 +694,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   async saveAnomalyEvents(events: StoredAnomalyEvent[], connectionId: string): Promise<number> {
     for (const event of events) {
-      this.anomalyEvents.push({ ...event, connectionId });
+      this.upsertAnomalyEvent({ ...event, connectionId });
     }
     return events.length;
   }
 
   async getAnomalyEvents(options: AnomalyQueryOptions = {}): Promise<StoredAnomalyEvent[]> {
-    let filtered = [...this.anomalyEvents];
+    let filtered = [...this.anomalyEvents.values()];
 
     if (options.connectionId)
       filtered = filtered.filter((e) => e.connectionId === options.connectionId);
@@ -682,9 +710,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.metricType) filtered = filtered.filter((e) => e.metricType === options.metricType);
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
+    if (options.correlationIds) {
+      const ids = new Set(options.correlationIds);
+      filtered = filtered.filter((e) => e.correlationId !== undefined && ids.has(e.correlationId));
+    }
 
     return filtered
-      .sort((a, b) => b.timestamp - a.timestamp)
+      .sort((a, b) => b.timestamp - a.timestamp || b.id.localeCompare(a.id))
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
@@ -693,7 +725,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     endTime?: number,
     connectionId?: string,
   ): Promise<AnomalyStats> {
-    let filtered = [...this.anomalyEvents];
+    let filtered = [...this.anomalyEvents.values()];
     if (connectionId) filtered = filtered.filter((e) => e.connectionId === connectionId);
     if (startTime) filtered = filtered.filter((e) => e.timestamp >= startTime);
     if (endTime) filtered = filtered.filter((e) => e.timestamp <= endTime);
@@ -716,7 +748,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   async resolveAnomaly(id: string, resolvedAt: number): Promise<boolean> {
-    const event = this.anomalyEvents.find((e) => e.id === id);
+    const event = this.anomalyEvents.get(id);
     if (!event) return false; // no such anomaly
     if (!event.resolved) {
       event.resolved = true;
@@ -727,16 +759,22 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return true;
   }
 
+  async resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean> {
+    const event = this.anomalyEvents.get(id);
+    if (!event || event.resolved) return false;
+    event.resolved = true;
+    event.resolvedAt = resolvedAt;
+    event.durationMs = resolvedAt - event.timestamp;
+    return true;
+  }
+
   async pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number> {
-    const before = this.anomalyEvents.length;
-    if (connectionId) {
-      this.anomalyEvents = this.anomalyEvents.filter(
-        (e) => e.timestamp >= cutoffTimestamp || e.connectionId !== connectionId,
-      );
-    } else {
-      this.anomalyEvents = this.anomalyEvents.filter((e) => e.timestamp >= cutoffTimestamp);
+    const before = this.anomalyEvents.size;
+    for (const event of this.anomalyEvents.values()) {
+      if (event.timestamp >= cutoffTimestamp) continue;
+      if (!connectionId || event.connectionId === connectionId) this.anomalyEvents.delete(event.id);
     }
-    return before - this.anomalyEvents.length;
+    return before - this.anomalyEvents.size;
   }
 
   async saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string> {
@@ -760,6 +798,25 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.endTime) filtered = filtered.filter((g) => g.timestamp <= options.endTime!);
     if (options.severity) filtered = filtered.filter((g) => g.severity === options.severity);
     if (options.pattern) filtered = filtered.filter((g) => g.pattern === options.pattern);
+    if (options.correlationIds) {
+      const ids = new Set(options.correlationIds);
+      filtered = filtered.filter((g) => ids.has(g.correlationId));
+    }
+    if (options.involving) {
+      const { connectionId, startTime, endTime } = options.involving;
+      const ids = new Set<string>();
+      for (const event of this.anomalyEvents.values()) {
+        if (
+          event.correlationId &&
+          event.connectionId === connectionId &&
+          (startTime === undefined || event.timestamp >= startTime) &&
+          (endTime === undefined || event.timestamp <= endTime)
+        ) {
+          ids.add(event.correlationId);
+        }
+      }
+      filtered = filtered.filter((g) => ids.has(g.correlationId));
+    }
 
     return filtered
       .sort((a, b) => b.timestamp - a.timestamp)
@@ -1048,7 +1105,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const compare =
       options.sortBy === 'magnitude'
-        ? (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.duration - a.duration || b.timestamp - a.timestamp
+        ? (a: StoredCommandLogEntry, b: StoredCommandLogEntry) =>
+            b.duration - a.duration || b.timestamp - a.timestamp
         : (a: StoredCommandLogEntry, b: StoredCommandLogEntry) => b.timestamp - a.timestamp;
 
     return filtered
@@ -1249,7 +1307,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private kvCacheEngines = new Map<string, StoredKvCacheEngine>();
   private kvCacheSettings = new Map<string, KvCacheSettings>();
 
-  private inKvCacheRange(row: { connectionId: string; timestamp: number }, query: KvCacheRangeQuery): boolean {
+  private inKvCacheRange(
+    row: { connectionId: string; timestamp: number },
+    query: KvCacheRangeQuery,
+  ): boolean {
     return (
       row.connectionId === query.connectionId &&
       (query.from === undefined || row.timestamp >= query.from) &&
@@ -1261,23 +1322,32 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     this.kvCacheSnapshots.push(structuredClone(snapshot));
   }
 
-  async getKvCacheFootprintSnapshots(query: KvCacheFootprintQuery): Promise<KvCacheFootprintSnapshot[]> {
+  async getKvCacheFootprintSnapshots(
+    query: KvCacheFootprintQuery,
+  ): Promise<KvCacheFootprintSnapshot[]> {
     const rows = this.kvCacheSnapshots
       .filter((r) => this.inKvCacheRange(r, query))
       .sort((a, b) => a.timestamp - b.timestamp);
     const bucketMs = query.bucketMs;
     const bucketed = bucketMs
       ? [
-          ...new Map(rows.map((r) => [Math.floor((r.timestamp - (query.from ?? 0)) / bucketMs), r])).values(),
+          ...new Map(
+            rows.map((r) => [Math.floor((r.timestamp - (query.from ?? 0)) / bucketMs), r]),
+          ).values(),
         ]
       : rows;
     return bucketed.slice(-(query.limit ?? 2000)).map((r) => structuredClone(r));
   }
 
-  async pruneOldKvCacheFootprintSnapshots(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheFootprintSnapshots(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     const before = this.kvCacheSnapshots.length;
     this.kvCacheSnapshots = this.kvCacheSnapshots.filter(
-      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+      (r) =>
+        r.timestamp >= cutoffTimestamp ||
+        (connectionId !== undefined && r.connectionId !== connectionId),
     );
     return before - this.kvCacheSnapshots.length;
   }
@@ -1293,7 +1363,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.slice(-(query.limit ?? 50_000)).map((r) => ({ ...r }));
   }
 
-  private bucketKvCacheSamples(rows: KvCacheEngineSample[], bucketMs: number): KvCacheEngineSample[] {
+  private bucketKvCacheSamples(
+    rows: KvCacheEngineSample[],
+    bucketMs: number,
+  ): KvCacheEngineSample[] {
     const buckets = new Map<string, KvCacheEngineSample>();
     for (const row of rows) {
       const timestamp = Math.floor(row.timestamp / bucketMs) * bucketMs;
@@ -1307,18 +1380,28 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
     return [...buckets.values()].sort(
-      (a, b) => a.timestamp - b.timestamp || compare(a.engineId, b.engineId) || compare(a.modelName, b.modelName),
+      (a, b) =>
+        a.timestamp - b.timestamp ||
+        compare(a.engineId, b.engineId) ||
+        compare(a.modelName, b.modelName),
     );
   }
 
-  async getKvCacheSampleTotals(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): Promise<KvCacheSampleTotals> {
+  async getKvCacheSampleTotals(
+    query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>,
+  ): Promise<KvCacheSampleTotals> {
     return this.matchingKvCacheSamples(query).reduce(
-      (totals, r) => ({ requestedTokens: totals.requestedTokens + r.requestedTokens, hitTokens: totals.hitTokens + r.hitTokens }),
+      (totals, r) => ({
+        requestedTokens: totals.requestedTokens + r.requestedTokens,
+        hitTokens: totals.hitTokens + r.hitTokens,
+      }),
       { requestedTokens: 0, hitTokens: 0 },
     );
   }
 
-  private matchingKvCacheSamples(query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>): KvCacheEngineSample[] {
+  private matchingKvCacheSamples(
+    query: Omit<KvCacheSampleQuery, 'limit' | 'bucketMs'>,
+  ): KvCacheEngineSample[] {
     return this.kvCacheSamples.filter(
       (r) =>
         this.inKvCacheRange(r, query) &&
@@ -1327,10 +1410,15 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
   }
 
-  async pruneOldKvCacheEngineSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldKvCacheEngineSamples(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
     const before = this.kvCacheSamples.length;
     this.kvCacheSamples = this.kvCacheSamples.filter(
-      (r) => r.timestamp >= cutoffTimestamp || (connectionId !== undefined && r.connectionId !== connectionId),
+      (r) =>
+        r.timestamp >= cutoffTimestamp ||
+        (connectionId !== undefined && r.connectionId !== connectionId),
     );
     return before - this.kvCacheSamples.length;
   }
@@ -1342,7 +1430,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   async saveKvCacheEngine(engine: StoredKvCacheEngine): Promise<StoredKvCacheEngine> {
     const existing = this.kvCacheEngines.get(engine.id);
     const stored = existing
-      ? { ...engine, connectionId: existing.connectionId, source: existing.source, createdAt: existing.createdAt }
+      ? {
+          ...engine,
+          connectionId: existing.connectionId,
+          source: existing.source,
+          createdAt: existing.createdAt,
+        }
       : { ...engine };
     this.kvCacheEngines.set(engine.id, stored);
     return { ...stored };
@@ -1527,6 +1620,72 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return before - this.latencyStatsSamples.length;
   }
 
+  private replicationDivergenceWindows: StoredReplicationDivergenceWindow[] = [];
+  private replicationDivergenceWindowKeys = new Set<string>();
+
+  private replicationDivergenceWindowKey(
+    connectionId: string,
+    w: Pick<StoredReplicationDivergenceWindow, 'replicaAddr' | 'windowStart' | 'windowEnd'>,
+  ): string {
+    return JSON.stringify([connectionId, w.replicaAddr, w.windowStart, w.windowEnd]);
+  }
+
+  async saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number> {
+    let saved = 0;
+    for (const w of windows) {
+      const key = this.replicationDivergenceWindowKey(connectionId, w);
+      if (this.replicationDivergenceWindowKeys.has(key)) continue;
+      this.replicationDivergenceWindowKeys.add(key);
+      this.replicationDivergenceWindows.push({ id: randomUUID(), connectionId, ...w });
+      saved++;
+    }
+    return saved;
+  }
+
+  async getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]> {
+    const limit = options.limit ?? 10_000;
+    if (limit <= 0) return [];
+    const byReplica = new Map<string, StoredReplicationDivergenceWindow[]>();
+    for (const w of this.replicationDivergenceWindows) {
+      if (
+        w.connectionId !== options.connectionId ||
+        (options.replicaAddr && w.replicaAddr !== options.replicaAddr) ||
+        w.windowEnd < options.startTime ||
+        w.windowEnd > options.endTime
+      ) {
+        continue;
+      }
+      const arr = byReplica.get(w.replicaAddr) ?? [];
+      arr.push(w);
+      byReplica.set(w.replicaAddr, arr);
+    }
+    const kept: StoredReplicationDivergenceWindow[] = [];
+    for (const arr of byReplica.values()) {
+      arr.sort((a, b) => a.windowEnd - b.windowEnd);
+      kept.push(...arr.slice(-limit));
+    }
+    return kept.sort((a, b) => a.windowEnd - b.windowEnd);
+  }
+
+  async pruneOldReplicationDivergenceWindows(
+    cutoffTimestamp: number,
+    connectionId?: string,
+  ): Promise<number> {
+    const before = this.replicationDivergenceWindows.length;
+    this.replicationDivergenceWindows = this.replicationDivergenceWindows.filter(
+      (w) => w.windowEnd >= cutoffTimestamp || (connectionId !== undefined && w.connectionId !== connectionId),
+    );
+    this.replicationDivergenceWindowKeys = new Set(
+      this.replicationDivergenceWindows.map((w) => this.replicationDivergenceWindowKey(w.connectionId, w)),
+    );
+    return before - this.replicationDivergenceWindows.length;
+  }
+
   // AI Cache/Memory Sample Methods
   private aiCacheSamples: StoredAiCacheSample[] = [];
 
@@ -1544,9 +1703,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return samples.length;
   }
 
-  async getAiCacheHistory(
-    options: AiCacheHistoryQueryOptions,
-  ): Promise<StoredAiCacheSample[]> {
+  async getAiCacheHistory(options: AiCacheHistoryQueryOptions): Promise<StoredAiCacheSample[]> {
     // Keep the most-recent `limit` samples PER INSTANCE (not a single global cap), ascending.
     const limit = options.limit ?? 10_000;
     if (limit <= 0) return [];
@@ -1572,19 +1729,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return kept.sort((a, b) => a.timestamp - b.timestamp);
   }
 
-  async pruneOldAiCacheSamples(
-    cutoffTimestamp: number,
-    connectionId?: string,
-  ): Promise<number> {
+  async pruneOldAiCacheSamples(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.aiCacheSamples.length;
     if (connectionId) {
       this.aiCacheSamples = this.aiCacheSamples.filter(
         (s) => s.timestamp >= cutoffTimestamp || s.connectionId !== connectionId,
       );
     } else {
-      this.aiCacheSamples = this.aiCacheSamples.filter(
-        (s) => s.timestamp >= cutoffTimestamp,
-      );
+      this.aiCacheSamples = this.aiCacheSamples.filter((s) => s.timestamp >= cutoffTimestamp);
     }
     return before - this.aiCacheSamples.length;
   }
@@ -1706,8 +1858,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       .filter((s) => s.traceId === traceId)
       .sort(
         (a, b) =>
-          a.startTimeMs - b.startTimeMs ||
-          a.startTimeUnixNano.localeCompare(b.startTimeUnixNano),
+          a.startTimeMs - b.startTimeMs || a.startTimeUnixNano.localeCompare(b.startTimeUnixNano),
       );
   }
 
@@ -1944,7 +2095,6 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private captureChunks: StoredCaptureChunk[] = [];
   private captureTriggers: Map<string, StoredCaptureTrigger> = new Map();
   private scheduledCaptures: Map<string, StoredScheduledCapture> = new Map();
-
 
   private cloneProposal(p: StoredCacheProposal): StoredCacheProposal {
     return structuredClone(p);
@@ -2284,10 +2434,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return count;
   }
 
-  async saveCaptureSession(
-    session: StoredCaptureSession,
-    connectionId: string,
-  ): Promise<string> {
+  async saveCaptureSession(session: StoredCaptureSession, connectionId: string): Promise<string> {
     this.captureSessions.set(session.id, { ...session, connectionId });
     return session.id;
   }

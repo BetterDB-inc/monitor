@@ -280,3 +280,15 @@ export function acknowledgeForkMemoryFinding(
   state.ackedLevel = finding.level;
   state.ackedKind = finding.kind;
 }
+
+export function forkMemoryRearm(state: ForkMemoryState): () => void {
+  const { ackedLevel: previousLevel, ackedKind: previousKind } = state;
+  return () => {
+    if (
+      severityScore(previousLevel, previousKind) < severityScore(state.ackedLevel, state.ackedKind)
+    ) {
+      state.ackedLevel = previousLevel;
+      state.ackedKind = previousKind;
+    }
+  };
+}
