@@ -641,10 +641,10 @@ describe('observeDivergence', () => {
   });
 
   describe('a replica that acks only now and then', () => {
-    const sporadic = (h: Harness, windows: number): DivergenceOutcome[] => {
+    const sporadic = (h: Harness, windows: number, lags = [[0, 20, 20]]): DivergenceOutcome[] => {
       const outcomes: DivergenceOutcome[] = [];
       for (let w = 0; w < windows; w++) {
-        for (const lagSec of [0, 20, 20]) {
+        for (const lagSec of lags[w % lags.length]) {
           const spec = { gap: 50 * MiB, rate: 0.1 * MiB, lagSec };
           const emitted = observeDivergence(h.state, h.sample(spec), WINDOW_MS);
           for (const o of emitted) {
@@ -667,6 +667,22 @@ describe('observeDivergence', () => {
         ['critical', 'not_acking'],
       ]);
     });
+
+    it('stays quiet on one stale sample in each window', () => {
+      const h = new Harness();
+
+      expect(divergences([sporadic(h, 6, [[0, 11, 0]])])).toEqual([]);
+    });
+
+    it('restarts the count when a window is not mostly stale', () => {
+      const h = new Harness();
+
+      const lags = [
+        [0, 20, 20],
+        [0, 0, 20],
+      ];
+      expect(divergences([sporadic(h, 8, lags)])).toEqual([]);
+    });
   });
 
   describe('the write-rate baseline', () => {
@@ -682,20 +698,7 @@ describe('observeDivergence', () => {
       replicas: [],
     });
 
-    it('finds a baseline once a burst running since the first window ends', () => {
-      const h = new Harness();
-      const outcomes = h.windows([
-        ...[20, 22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })),
-        ...Array.from({ length: 6 }, () => ({ gap: 28 * MiB, rate: MiB })),
-      ]);
-
-      expect(divergences(outcomes).at(-1)).toMatchObject({
-        level: 'critical',
-        reason: 'not_catching_up',
-      });
-    });
-
-    it('does not hold on to a dip inside a burst running since the first window', () => {
+    it('does not call writes subsided without a baseline', () => {
       const h = new Harness();
       const outcomes = h.windows([
         ...[20, 22, 24, 26, 28].map((m) => ({ gap: m * MiB, rate: 4 * MiB })),
@@ -703,10 +706,7 @@ describe('observeDivergence', () => {
         ...Array.from({ length: 6 }, () => ({ gap: 28 * MiB, rate: MiB })),
       ]);
 
-      expect(divergences(outcomes).at(-1)).toMatchObject({
-        level: 'critical',
-        reason: 'not_catching_up',
-      });
+      expect(divergences(outcomes).map((f) => f.reason)).not.toContain('not_catching_up');
     });
 
     it('does not read a resumed burst as subsided after a dip', () => {
@@ -978,19 +978,19 @@ describe('observeDivergence', () => {
     const quiet = () => {
       const h = new Harness();
       h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
-      return { h, last: h.state.lastObservedAt as number };
+      return { h, last: h.state.lastSampleAt as number };
     };
 
     it('reports a replica behind under the alert thresholds as behind', () => {
       const h = new Harness();
       h.windows([{ gap: 8 * MiB, rate: MiB }, { gap: 8 * MiB, rate: MiB }]);
-      const last = h.state.lastObservedAt as number;
+      const last = h.state.lastSampleAt as number;
 
       expect(h.state.replicas.get(ADDR)?.level).toBe('none');
       expect(replicaObservedLevel(h.state, ADDR, last, 30_000)).toBe('behind');
 
       h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
-      expect(replicaObservedLevel(h.state, ADDR, h.state.lastObservedAt as number, 30_000)).toBe('none');
+      expect(replicaObservedLevel(h.state, ADDR, h.state.lastSampleAt as number, 30_000)).toBe('none');
     });
 
     it('stays in sync while samples are within the limit', () => {
@@ -1008,7 +1008,7 @@ describe('observeDivergence', () => {
     it('keeps an open alert level', () => {
       const h = new Harness();
       h.windows([2, 4, 6, 8, 10].map((gap) => ({ gap: gap * MiB, rate: MiB })));
-      const last = h.state.lastObservedAt as number;
+      const last = h.state.lastSampleAt as number;
 
       expect(replicaObservedLevel(h.state, ADDR, last + 1_000_000, 30_000)).toBe('warning');
     });
@@ -1027,7 +1027,7 @@ describe('observeDivergence', () => {
       h.windows([{ gap: 0, rate: MiB }, { gap: 0, rate: MiB }]);
 
       h.windows([{ gap: 40 * MiB, rate: MiB, lagSec: 30 }]);
-      const last = h.state.lastObservedAt as number;
+      const last = h.state.lastSampleAt as number;
 
       expect(h.state.replicas.get(ADDR)?.level ?? 'none').toBe('none');
       expect(replicaObservedLevel(h.state, ADDR, last, 1_000_000)).toBe('behind');
@@ -1036,7 +1036,7 @@ describe('observeDivergence', () => {
     it('is unobserved once the samples of a stale replica stop', () => {
       const h = new Harness();
       h.windows([{ gap: 40 * MiB, rate: MiB, lagSec: 30 }]);
-      const last = h.state.lastObservedAt as number;
+      const last = h.state.lastSampleAt as number;
 
       expect(replicaObservedLevel(h.state, ADDR, last + 30_001, 30_000)).toBe('unobserved');
     });
@@ -1102,25 +1102,6 @@ describe('observeDivergence', () => {
     acknowledgeRecovery(h.state, ADDR);
     expect(h.windows([absent, absent]).flat()).toEqual([]);
     expect(h.state.replicas.size).toBe(0);
-  });
-
-  it('keeps emitting cleared when an unacknowledged replica returns with a stale ack', () => {
-    const h = new Harness();
-    h.windows([2, 4, 6, 8, 8].map((m) => ({ gap: m * MiB, rate: MiB })));
-
-    const returned = h.windows(
-      [
-        { gap: 0, rate: MiB, present: false },
-        ...Array.from({ length: 6 }, (_, i) => ({ gap: 10 * MiB, rate: MiB, lagSec: climbingLag(i) })),
-      ],
-      false,
-    );
-    expect(returned.flat().every((o) => o.kind === 'cleared')).toBe(true);
-    expect(returned.flat()).toHaveLength(6);
-
-    acknowledgeRecovery(h.state, ADDR);
-    const stale = divergences(h.windows(Array.from({ length: 3 }, () => ({ gap: 10 * MiB, rate: MiB, lagSec: 30 }))));
-    expect(stale.map((f) => [f.level, f.reason])).toEqual([['warning', 'not_acking']]);
   });
 
   it('starts a fresh series when a cleared replica comes back', () => {

@@ -26,7 +26,7 @@ import {
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
-import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
+import { AnomalySavedBus, SavedAnomaly } from '@app/common/services/anomaly-saved-bus';
 import { rearmLevel } from './rearm-level';
 import { ConnectionRegistry } from '@app/connections/connection-registry.service';
 import { MetricBuffer } from './metric-buffer';
@@ -224,6 +224,8 @@ import {
   acknowledgeDivergence,
   assessOrphanedReplica,
   acknowledgeRecovery,
+  divergenceWindowsHeld,
+  markDivergenceAnnounced,
   createDivergenceState,
   describeDivergence,
   divergenceWindowMs,
@@ -334,6 +336,7 @@ const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const CORRELATION_ID_CHUNK_SIZE = 500;
+const ANOMALY_ANNOUNCE_MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const DEFAULT_CORRELATED_GROUP_RESULTS = 50;
 
@@ -354,6 +357,10 @@ export class AnomalyService
   private readonly incidentEventsById = new Map<string, AnomalyEvent>();
   private readonly incidentEventsDroppedThrough = new Map<string, number>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
+  private readonly unsavedGroups = new Map<
+    string,
+    { group: StoredCorrelatedGroup; connectionId: string }
+  >();
   private readonly incidentTimelineBuilder = new IncidentTimelineBuilder(
     {},
     (connectionId) => this.correlationScopeOf(connectionId),
@@ -6128,17 +6135,25 @@ export class AnomalyService
     anomaly.persisted = true;
     this.releaseLatch(anomaly);
     if (firstSave) {
-      this.anomalySaveHooks.get(anomaly)?.();
-      this.anomalySaved?.publish({ ...stored, connectionId });
-      this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
-        this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
-      });
+      const dedicatedHook = this.anomalySaveHooks.get(anomaly);
+      dedicatedHook?.();
+      this.announceSaved(anomaly, { ...stored, connectionId });
+      if (!dedicatedHook) {
+        this.anomalyWebhookSink?.dispatchAnomalyWebhook(stored).catch((err) => {
+          this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}`, err);
+        });
+      }
     }
     const onCloseDrop = this.persistenceOutbox.settleSave(anomaly.id);
     if (anomaly.resolved && !wasResolved) {
       const now = Date.now();
       this.persistenceOutbox.enqueueResolve(anomaly.id, anomaly.resolvedAt ?? now, now, onCloseDrop);
     }
+  }
+
+  private announceSaved(anomaly: AnomalyEvent, saved: SavedAnomaly): void {
+    if (anomaly.resolved || Date.now() - anomaly.timestamp > ANOMALY_ANNOUNCE_MAX_AGE_MS) return;
+    this.anomalySaved?.publish(saved);
   }
 
   private async correlationTick(): Promise<void> {
@@ -6170,8 +6185,37 @@ export class AnomalyService
 
   private async drainPersistenceOutbox(): Promise<void> {
     await this.sweepRemovedConnections();
+    await this.retryGroupSaves();
     for (const entry of this.persistenceOutbox.due(Date.now())) {
       if (!(await this.retryPersistence(entry))) return;
+    }
+  }
+
+  private async retryGroupSaves(): Promise<void> {
+    for (const [correlationId, { group, connectionId }] of this.unsavedGroups) {
+      try {
+        await this.storage.saveCorrelatedGroup(group, connectionId);
+        this.unsavedGroups.delete(correlationId);
+      } catch (err) {
+        this.logger.debug(
+          `Retry of group ${correlationId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+    }
+  }
+
+  private async saveGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<void> {
+    try {
+      await this.storage.saveCorrelatedGroup(group, connectionId);
+    } catch (err) {
+      this.logger.error('Failed to persist correlated group:', err);
+      if (this.unsavedGroups.size >= this.maxRecentGroups) {
+        const oldest = this.unsavedGroups.keys().next().value as string;
+        this.unsavedGroups.delete(oldest);
+        this.logger.warn(`Dropping unsaved correlated group ${oldest}: queue is full`);
+      }
+      this.unsavedGroups.set(group.correlationId, { group, connectionId });
     }
   }
 
@@ -6221,8 +6265,7 @@ export class AnomalyService
     // no-ops when disabled), so an operator can ship anomalies to their OTLP
     // collector without also configuring/enabling a webhook. Intentionally
     // broader than the webhook path too: OTLP includes command_p99 anomalies,
-    // which webhook-anomaly-integration skips and delivers as
-    // latency.regression.detected instead.
+    // which are delivered as latency.regression.detected instead.
     try {
       this.otelEvents?.dispatch(
         WebhookEventType.ANOMALY_DETECTED,
@@ -6247,7 +6290,7 @@ export class AnomalyService
     if (this.recentAnomalies.length > this.maxRecentEvents) {
       this.recentAnomalies = this.recentAnomalies.slice(-this.maxRecentEvents);
     }
-    this.anomalySaved?.publish(event);
+    this.announceSaved(event, event);
   }
 
   private rememberClusterKey(connectionId: string, nodes: ClusterNode[]): void {
@@ -6797,7 +6840,6 @@ export class AnomalyService
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
       if (uncorrelated.length === 0) return;
 
-      const priorRelatedMetrics = new Map(uncorrelated.map((a) => [a.id, a.relatedMetrics]));
       const newGroups = this.correlator.correlate(uncorrelated);
       if (newGroups.length === 0) return;
 
@@ -6805,7 +6847,6 @@ export class AnomalyService
         `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
       );
 
-      const savedGroups: typeof newGroups = [];
       for (const group of newGroups) {
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
@@ -6823,22 +6864,12 @@ export class AnomalyService
 
         // Get connectionId from first anomaly in group (all should have same connectionId)
         const connectionId = group.anomalies[0]?.connectionId;
-        try {
-          if (connectionId) await this.storage.saveCorrelatedGroup(storedGroup, connectionId);
-        } catch (err) {
-          this.logger.error('Failed to persist correlated group:', err);
-          for (const anomaly of group.anomalies) {
-            anomaly.correlationId = undefined;
-            anomaly.relatedMetrics = priorRelatedMetrics.get(anomaly.id);
-          }
-          continue;
-        }
+        if (connectionId) await this.saveGroup(storedGroup, connectionId);
 
         this.logger.warn(
           `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
         );
         this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
-        savedGroups.push(group);
 
         if (!connectionId) continue;
         for (const anomaly of group.anomalies) {
@@ -6852,9 +6883,9 @@ export class AnomalyService
         }
       }
 
-      this.recentGroups.push(...savedGroups);
+      this.recentGroups.push(...newGroups);
       this.lastHourGroups.push(
-        ...savedGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
+        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
       );
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
@@ -7079,12 +7110,14 @@ export class AnomalyService
     const state = this.divergenceState.get(connectionId);
     const series = new Map<string, DivergenceWindow[]>();
     try {
-      const stored = await this.storage.getReplicationDivergenceWindows({
-        connectionId,
-        startTime,
-        endTime,
-        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
-      });
+      const stored = divergenceWindowsHeld(state, startTime)
+        ? []
+        : await this.storage.getReplicationDivergenceWindows({
+            connectionId,
+            startTime,
+            endTime,
+            limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
+          });
       for (const row of stored) {
         const windows = series.get(row.replicaAddr) ?? [];
         windows.push({
@@ -7567,6 +7600,7 @@ export class AnomalyService
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
     this.anomalySaveHooks.set(event, () => {
       if (event.resolved) return;
+      markDivergenceAnnounced(state, finding.addr);
       this.webhookEventsProService
         ?.dispatchReplicationDivergence({
           replica: finding.addr,
@@ -7606,10 +7640,7 @@ export class AnomalyService
     timestamp: number,
   ): Promise<void> {
     const { eventId } = recovery;
-    const event =
-      this.recentAnomalies.find((a) => a.id === eventId) ??
-      (eventId ? this.persistenceOutbox.unsavedAnomaly(eventId) : undefined);
-    const unannounced = event !== undefined && !event.persisted;
+    const announced = state.replicas.get(recovery.addr)?.announced ?? false;
     if (eventId) {
       await this.resolveAnomalyOutcome(eventId, () => {
         this.retryDroppedDivergenceClose(ctx.connectionId, recovery.addr, eventId);
@@ -7617,7 +7648,7 @@ export class AnomalyService
     }
     acknowledgeRecovery(state, recovery.addr);
 
-    if (recovery.kind === 'cleared' || unannounced) return;
+    if (recovery.kind === 'cleared' || !announced) return;
 
     this.dispatchReplicationRecovered(ctx, {
       replica: recovery.addr,
