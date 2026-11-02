@@ -37,6 +37,6 @@ import { TailGateway } from './tail.gateway';
     PreflightService,
     TailGateway,
   ],
-  exports: [TailGateway],
+  exports: [TailGateway, MonitorCaptureService, CrossReferenceEngine],
 })
 export class MonitorModule {}

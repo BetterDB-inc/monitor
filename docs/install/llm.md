@@ -6,7 +6,7 @@ nav_order: 4
 
 # Using BetterDB from an LLM (MCP)
 
-BetterDB ships an MCP server — 60 tools that let Claude Code, Cursor, or any MCP
+BetterDB ships an MCP server — 73 tools that let Claude Code, Cursor, or any MCP
 client query your database's health, slow queries, memory, and analytics in
 plain language.
 

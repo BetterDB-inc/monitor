@@ -118,7 +118,7 @@ Requires Node.js >= 20.0.0 and a Valkey or Redis instance to monitor. For SQLite
 
 ### Plugs into everything
 
-- **MCP server** - 60 tools for Claude Code, Cursor, or any MCP client via [`@betterdb/mcp`](packages/mcp).
+- **MCP server** - 73 tools for Claude Code, Cursor, or any MCP client via [`@betterdb/mcp`](packages/mcp).
 - **Prometheus endpoint** - 100+ `betterdb_*` metrics. See [docs/prometheus-metrics.md](docs/prometheus-metrics.md).
 - **OpenTelemetry** - ingest OTLP traces, and mirror metrics and events to any OTLP backend. See [docs/opentelemetry.md](docs/opentelemetry.md).
 - **REST API** - everything in the UI is an API call, documented via OpenAPI.

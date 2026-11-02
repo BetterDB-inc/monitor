@@ -2,6 +2,7 @@ import { Logger, Module } from '@nestjs/common';
 import { KeyAnalyticsService } from './key-analytics.service';
 import { KeyAnalyticsController } from './key-analytics.controller';
 import { McpKeyAnalyticsController } from './mcp-key-analytics.controller';
+import { ConnectionsModule } from '@app/connections/connections.module';
 import { StorageModule } from '@app/storage/storage.module';
 import { LicenseModule } from '@proprietary/licenses/license.module';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
@@ -13,7 +14,7 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
 });
 
 @Module({
-  imports: [StorageModule, LicenseModule],
+  imports: [StorageModule, ConnectionsModule, LicenseModule],
   providers: [KeyAnalyticsService, AgentTokenGuard, ...tokenProviders],
   controllers: [KeyAnalyticsController, McpKeyAnalyticsController],
   exports: [KeyAnalyticsService],

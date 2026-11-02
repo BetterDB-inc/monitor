@@ -6,6 +6,17 @@ import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
 import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+import {
+  ApiHttpError,
+  type ToolResult,
+  apiErrorResult,
+  isLicenseError,
+  jsonResult,
+  licenseErrorResult,
+  notFoundResult,
+  textResult,
+  unavailableResult,
+} from './results.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -89,15 +100,6 @@ async function detectPrefix(): Promise<string> {
   return '/api';
 }
 
-class ApiHttpError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-  }
-}
-
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
   if (detectedPrefix === null) {
     detectedPrefix = await detectPrefix();
@@ -131,14 +133,16 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     let message = `Request failed with status ${res.status}`;
+    let detail: string | undefined;
     try {
       const parsed = JSON.parse(errText);
       if (parsed.error) message = String(parsed.error);
       else if (parsed.message) message = String(parsed.message);
+      if (typeof parsed.message === 'string') detail = parsed.message;
     } catch {
       if (errText) message = errText;
     }
-    throw new ApiHttpError(message, res.status);
+    throw new ApiHttpError(message, res.status, detail);
   }
 
   const text = await res.text();
@@ -147,40 +151,6 @@ async function apiRequest(method: string, path: string, body?: unknown): Promise
 
 async function apiFetch(path: string): Promise<unknown> {
   return apiRequest('GET', path);
-}
-
-function isLicenseError(
-  data: unknown,
-): data is { __licenseError: true; requiredTier: string; currentTier: string; upgradeUrl: string } {
-  return data != null && typeof data === 'object' && (data as any).__licenseError === true;
-}
-
-function licenseErrorResult(data: {
-  requiredTier: string;
-  currentTier: string;
-  upgradeUrl: string;
-}): string {
-  return `This feature requires a ${data.requiredTier} license (current tier: ${data.currentTier}). Upgrade at ${data.upgradeUrl}`;
-}
-
-function unavailableResult(
-  featureLabel: string,
-  requiresPro = true,
-): {
-  content: Array<{ type: 'text'; text: string }>;
-} {
-  const reason =
-    requiresPro === true
-      ? 'this monitor build does not include it (requires BetterDB Pro) or predates this tool — check license tier and monitor version.'
-      : 'this monitor build predates this tool — update the monitor to use it.';
-  return {
-    content: [
-      {
-        type: 'text' as const,
-        text: `${featureLabel} is unavailable: ${reason}`,
-      },
-    ],
-  };
 }
 
 const INSTANCE_ID_RE = /^[a-zA-Z0-9_-]+$/;
@@ -195,8 +165,6 @@ function resolveInstanceId(overrideId?: string): string {
   }
   return id;
 }
-
-type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
 async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
   const start = Date.now();
@@ -2055,6 +2023,407 @@ server.tool(
         return { content: [{ type: 'text' as const, text: licenseErrorResult(data) }] };
       }
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    }),
+);
+
+// --- Capacity & scaling ---
+
+server.tool(
+  'get_scaling_readiness',
+  'Get the current scaling readiness score (0-100) for the instance with its band (green/amber/red), the binding dimension, a one-line summary, and a per-dimension breakdown (memory, connections, CPU, throughput trend, keyspace growth). Answers "how much headroom is left before this instance needs to scale?". Pair with get_forecast for time-to-ceiling on a single metric.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_scaling_readiness', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/scaling-readiness`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Scaling readiness', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_scaling_readiness_history',
+  'Get stored scaling readiness scores over time (score, band, binding dimension and dimension breakdown per point). The result is downsampled to maxPoints (default 150) with evenly spaced original points, first and last kept; the sampling field says how. Use to see whether headroom is shrinking and which dimension became binding. Rate-limited. Requires BetterDB Pro (scalingReadinessHistory).',
+  {
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms, default 7 days before endTime)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms, default now). Range may not exceed 90 days'),
+    maxPoints: z.number().int().min(2).max(1000).optional().describe('Max points returned across all series (default 150)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ startTime, endTime, maxPoints, instanceId }) =>
+    withTelemetry('get_scaling_readiness_history', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, maxPoints });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/scaling-readiness/history${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Scaling readiness history');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_cache_size_estimate',
+  'Get the Cache Size Simulator snapshot: sampled dataset size estimate (total bytes with 95% CI, per-type breakdown), current memory state (used memory, maxmemory, eviction policy, total keys) and fitted daily key/byte growth. Status is "sampling" (with progress), "ready", "failed", or "none" when nothing has been sampled yet. Results are cached for 15 minutes. Poll without refresh until status is ready; refresh=true starts a SCAN + MEMORY USAGE sampling job and is limited to 10 calls/min. Use to answer "how much memory does this dataset really need?". Requires BetterDB Pro (cacheSizeSimulator).',
+  {
+    refresh: z.boolean().optional().describe('Start a fresh sampling job (default false: only read the current estimate or job status)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ refresh, instanceId }) =>
+    withTelemetry('get_cache_size_estimate', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/cache-simulator${refresh === true ? '/refresh' : ''}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Cache size simulator');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+// --- LLM KV cache (LMCache) ---
+
+server.tool(
+  'get_kv_cache_status',
+  'Get LMCache KV-cache status for the instance: whether LMCache keys were detected, the latest and recent footprint snapshots (matched LMCache keys, estimated bytes, share of used memory, no-TTL and orphan ratios, evicted keys), the footprint collection interval, and the linked vLLM/SGLang engines (scrape URLs are reduced to scheme://host/path; credentials are never returned). Start here for "is our LLM KV cache healthy?". Requires BetterDB Pro (kvCacheMonitoring).',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_kv_cache_status', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/kv-cache/status`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'KV cache monitoring');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_kv_cache_hit_rate',
+  'Get LMCache token counters (requested vs hit tokens) and hit-rate history from linked inference engines, bucketed per engine and per model (bucket width grows with the range), plus the overall hit rate for the range. The buckets are downsampled to maxPoints (default 150) across all engine/model series, each series keeping its first and last bucket when the budget allows, otherwise its latest bucket, and series beyond the budget are counted in sampling.omittedSeries; the sampling field says how. Rate-limited. Optionally filter to one engine (id from get_kv_cache_status) or one model. Use to answer "did the KV-cache hit rate drop, and for which model?". Requires BetterDB Pro (kvCacheMonitoring).',
+  {
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms, default 24h before endTime)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms, default now). Range may not exceed 31 days'),
+    engineId: z.string().max(200).optional().describe('Restrict to one linked engine id'),
+    model: z.string().max(200).optional().describe('Restrict to one model name'),
+    maxPoints: z.number().int().min(2).max(1000).optional().describe('Max points returned across all series (default 150)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ startTime, endTime, engineId, model, maxPoints, instanceId }) =>
+    withTelemetry('get_kv_cache_hit_rate', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, engineId, model, maxPoints });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/kv-cache/hit-rate${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'KV cache monitoring');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_kv_cache_footprint_history',
+  'Get stored LMCache footprint snapshots over time (matched KV-cache keys, estimated bytes held in Valkey, share of used memory, evicted keys, per-model footprint, primaries scanned). The snapshots are downsampled to maxPoints (default 150) with evenly spaced original snapshots, first and last kept; the sampling field says how. Rate-limited. Use to see KV-cache memory growth or eviction pressure on the Valkey side. Requires BetterDB Pro (kvCacheMonitoring).',
+  {
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms, default 24h before endTime)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms, default now). Range may not exceed 31 days'),
+    maxPoints: z.number().int().min(2).max(1000).optional().describe('Max points returned across all series (default 150)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ startTime, endTime, maxPoints, instanceId }) =>
+    withTelemetry('get_kv_cache_footprint_history', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, maxPoints });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/kv-cache/footprint-history${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'KV cache monitoring');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+// --- Security & fleet ---
+
+server.tool(
+  'get_cve_exposure',
+  'Get published CVEs matching the instance\'s running Valkey/Redis version(s) — per node for clusters, with version drift, nodes that could not be scanned, and whether the scan is partial — together with advisory dataset health (age, per-source status). May run and store a new scan if none is cached. Rate-limited. Use to answer "is this instance exposed to known vulnerabilities?". Works for externally monitored (OTLP-pushed) instances too.',
+  {
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ instanceId }) =>
+    withTelemetry('get_cve_exposure', async () => {
+      const id = resolveInstanceId(instanceId);
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/cve`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'CVE inspection', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_fleet_summary',
+  'Get a fleet-wide health overview of every registered instance: overall status, and per instance up/down state, uptime, memory used vs max, ops/sec, connected clients, replication role, last seen, and a CVE rollup. Not scoped to the selected instance. Start here when asked "how is everything doing?" before drilling into one instance.',
+  {},
+  async () =>
+    withTelemetry('get_fleet_summary', async () => {
+      let data: unknown;
+      try {
+        data = await apiFetch('/mcp/fleet/summary');
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Fleet summary', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      return jsonResult(data);
+    }),
+);
+
+// --- Key analytics ---
+
+server.tool(
+  'get_key_analytics_summary',
+  'Get the keyspace summary from key analytics snapshots — total patterns, keys and memory, hot/cold/stale key counts, keys expiring soon, and a per-pattern breakdown — plus the list of logical databases with stored analytics. Pass db to scope to one logical database. summary is null for a cluster member whose analytics are collected on its seed connection (query the seed instance). Companion to get_largest_keys and get_key_patterns. Requires BetterDB Pro (keyAnalytics).',
+  {
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms)'),
+    db: z.number().int().min(0).optional().describe('Logical database index (default: all)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ startTime, endTime, db, instanceId }) =>
+    withTelemetry('get_key_analytics_summary', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ startTime, endTime, db });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/key-analytics/summary${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Key analytics');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_key_patterns',
+  'Get key-pattern snapshots from key analytics: per normalized key pattern (e.g. user:*), key count, memory (total / avg / max), keys with a TTL, keys expiring soon, and hot / cold / stale counts. Returns the latest snapshot of each logical database only (each row carries its db and timestamp; snapshotTimestamps lists them), ranked by key count; limit (max 500) applies to the total. Optionally filter to one pattern or logical database. Use to find which key families dominate memory or lack TTLs. Requires BetterDB Pro (keyAnalytics).',
+  {
+    pattern: z.string().max(512).optional().describe('Exact pattern to filter on, as returned by this tool'),
+    db: z.number().int().min(0).optional().describe('Logical database index (default: all)'),
+    limit: z.number().int().min(1).max(500).optional().describe('Max rows in total across databases (default 50, max 500)'),
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ pattern, db, limit, startTime, endTime, instanceId }) =>
+    withTelemetry('get_key_patterns', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ pattern, db, limit, startTime, endTime });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/key-analytics/patterns${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Key analytics');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_key_pattern_trend',
+  'Get the time series for one key pattern (key count and memory over time) from key analytics snapshots, downsampled to maxPoints (default 150) with evenly spaced original points, first and last kept; the sampling field says how. Rate-limited. Use after get_key_patterns to see whether a key family is growing. Requires BetterDB Pro (keyAnalytics).',
+  {
+    pattern: z.string().min(1).max(512).describe('Pattern from get_key_patterns, e.g. user:*'),
+    startTime: z.number().int().min(0).optional().describe('Start time (Unix timestamp ms, default 7 days before endTime)'),
+    endTime: z.number().int().min(0).optional().describe('End time (Unix timestamp ms, default now). Range may not exceed 90 days'),
+    db: z.number().int().min(0).optional().describe('Logical database index (default: all)'),
+    maxPoints: z.number().int().min(2).max(1000).optional().describe('Max points returned across all series (default 150)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ pattern, startTime, endTime, db, maxPoints, instanceId }) =>
+    withTelemetry('get_key_pattern_trend', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ pattern, startTime, endTime, db, maxPoints });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/key-analytics/patterns/trend${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'Key analytics');
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      if (isLicenseError(data)) {
+        return textResult(licenseErrorResult(data));
+      }
+      return jsonResult(data);
+    }),
+);
+
+// --- MONITOR capture sessions ---
+
+server.tool(
+  'list_capture_sessions',
+  'List recent MONITOR capture sessions on the instance (newest first): id, status, source (manual / trigger / schedule), start/end, duration, captured line and byte counts, termination reason, target node, and fan-out node count. Use to find a capture to analyze with get_capture_cross_reference.',
+  {
+    limit: z.number().int().min(1).max(100).optional().describe('Max sessions (default 20, max 100)'),
+    status: z
+      .enum(['running', 'completed', 'truncated', 'failed', 'skipped'])
+      .optional()
+      .describe('Filter by session status'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ limit, status, instanceId }) =>
+    withTelemetry('list_capture_sessions', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ limit, status });
+      let data: unknown;
+      try {
+        data = await apiFetch(`/mcp/instance/${id}/monitor/sessions${qs}`);
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'MONITOR capture sessions', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      return jsonResult(data);
+    }),
+);
+
+server.tool(
+  'get_capture_cross_reference',
+  'Diff a MONITOR capture against the instance\'s recent history: command shapes never seen in the baseline, hot keys that entered the top 50 or changed rank, slowlog verbs whose slow rate exceeds the baseline p95, and ACL/audit activity during the capture. Reads every chunk of the capture and up to 100k slowlog rows; call once per session. Rate-limited. Use to answer "what was different about traffic during this capture?". The session must belong to the selected instance.',
+  {
+    sessionId: z.string().uuid().describe('Capture session id from list_capture_sessions'),
+    baseline: z
+      .enum(['6h', '24h', '7d', 'same-hour-last-week'])
+      .optional()
+      .describe('Baseline window before the capture (default 24h)'),
+    instanceId: z.string().optional().describe('Optional instance ID override'),
+  },
+  async ({ sessionId, baseline, instanceId }) =>
+    withTelemetry('get_capture_cross_reference', async () => {
+      const id = resolveInstanceId(instanceId);
+      const qs = buildQuery({ baseline });
+      let data: unknown;
+      try {
+        data = await apiFetch(
+          `/mcp/instance/${id}/monitor/sessions/${encodeURIComponent(sessionId)}/cross-reference${qs}`,
+        );
+      } catch (err) {
+        if (err instanceof ApiHttpError && err.status === 404) {
+          return notFoundResult(err, 'MONITOR capture sessions', false);
+        }
+        if (err instanceof ApiHttpError) {
+          return apiErrorResult(err);
+        }
+        throw err;
+      }
+      return jsonResult(data);
     }),
 );
 
