@@ -59,11 +59,25 @@ export function parseNodeAddress(address: string): { host: string; port: number 
   return { host, port };
 }
 
-export function desiredFromDiscovery(seed: { host: string; port: number }, nodes: DiscoveredNode[]): DesiredNode[] {
+export interface DiscoveryOptions {
+  /**
+   * The seed host resolves to several cluster nodes (a Kubernetes headless
+   * Service, round-robin DNS). Each discovery then lands on an arbitrary node,
+   * so `myself` is just whichever node answered, not the seed, and must be kept.
+   */
+  seedIsAlias?: boolean;
+}
+
+export function desiredFromDiscovery(
+  seed: { host: string; port: number },
+  nodes: DiscoveredNode[],
+  options: DiscoveryOptions = {},
+): DesiredNode[] {
   const seedKey = addressKey(seed.host, seed.port);
+  const excluded = options.seedIsAlias ? EXCLUDED_FLAGS.filter((flag) => flag !== 'myself') : EXCLUDED_FLAGS;
   const desired: DesiredNode[] = [];
   for (const node of nodes) {
-    if (node.flags.some((flag) => EXCLUDED_FLAGS.includes(flag))) continue;
+    if (node.flags.some((flag) => excluded.includes(flag))) continue;
     const parsed = parseNodeAddress(node.address);
     if (!parsed || addressKey(parsed.host, parsed.port) === seedKey) continue;
     desired.push({ ...parsed, nodeId: node.id, source: 'cluster', ...(node.hostname ? { hostname: node.hostname } : {}) });

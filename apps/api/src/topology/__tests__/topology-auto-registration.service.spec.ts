@@ -45,7 +45,9 @@ function build(options: {
   };
   const config = { get: jest.fn(() => options.envDefault) };
   const retention = { getRetentionDays: jest.fn(() => options.retentionDays ?? null) };
-  const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
+  const clusterSource = new ClusterTopologySource(discovery as never);
+  clusterSource.resolveHost = async () => [];
+  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
   return { service, registry, discovery, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
 }
 
@@ -315,7 +317,9 @@ describe('TopologyAutoRegistrationService', () => {
     const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve([discovered('shared', '10.0.0.9:7009@17009')])) };
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
-    const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
+    const clusterSource = new ClusterTopologySource(discovery as never);
+  clusterSource.resolveHost = async () => [];
+  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     await Promise.all([service.reconcile('a'), service.reconcile('b')]);
 
@@ -433,7 +437,9 @@ describe('TopologyAutoRegistrationService', () => {
     const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve(calls++ === 0 ? sharedOnly : withFillers)) };
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
-    const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
+    const clusterSource = new ClusterTopologySource(discovery as never);
+  clusterSource.resolveHost = async () => [];
+  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     const runA = service.reconcile('a');
     await new Promise((resolve) => setImmediate(resolve));
@@ -481,7 +487,9 @@ describe('TopologyAutoRegistrationService', () => {
     const discovery = { discoverNodesIsolated: jest.fn(() => Promise.resolve(calls++ === 0 ? sharedOnly : withFillers)) };
     const config = { get: jest.fn(() => 'true') };
     const retention = { getRetentionDays: jest.fn(() => null) };
-    const service = new TopologyAutoRegistrationService(registry as never, [new ClusterTopologySource(discovery as never)], config as never, retention as never);
+    const clusterSource = new ClusterTopologySource(discovery as never);
+  clusterSource.resolveHost = async () => [];
+  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     const runA = service.reconcile('a');
     await new Promise((resolve) => setImmediate(resolve));

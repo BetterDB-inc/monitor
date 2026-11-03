@@ -45,6 +45,20 @@ describe('desiredFromDiscovery', () => {
     expect(desired).toEqual([{ host: '10.0.0.5', port: 7005, nodeId: 'e', source: 'cluster' }]);
   });
 
+  it('keeps myself when the seed is an alias for several nodes', () => {
+    const desired = desiredFromDiscovery(
+      { host: 'valkey.svc', port: 6379 },
+      [
+        node('a', '10.0.0.1:6379@16379', ['myself', 'master']),
+        node('b', ':0@0', ['master', 'noaddr']),
+        node('c', '10.0.0.3:6379@16379', ['handshake']),
+        node('d', '10.0.0.4:6379@16379', ['slave']),
+      ],
+      { seedIsAlias: true },
+    );
+    expect(desired.map((n) => n.nodeId)).toEqual(['a', 'd']);
+  });
+
   it('carries the hostname a node announces', () => {
     const desired = desiredFromDiscovery({ host: 'seed', port: 7001 }, [
       { ...node('a', '10.0.0.2:7002@17002'), hostname: 'node-2.cluster.local' },
