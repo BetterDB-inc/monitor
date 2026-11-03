@@ -256,6 +256,22 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () =
     expect(result.keyDetails?.find((k) => k.keyName === 'l')?.cardinality).toBe(3);
   });
 
+  it('drops a type that went stale and ignores inherited type names', async () => {
+    const sent: string[] = [];
+    const wrongType = new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const adapter = makeAdapter({ moved: 'string', proto: '__proto__' }, (command) =>
+      command === 'STRLEN' ? [wrongType, null] : [null, 3],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('moved')?.keyType).toBeNull();
+    expect(byName.get('proto')).toEqual(expect.objectContaining({ keyType: '__proto__', cardinality: null }));
+    expect(sent.filter((c) => c === 'STRLEN')).toHaveLength(1);
+  });
+
   it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
     const sent: string[] = [];
     const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');

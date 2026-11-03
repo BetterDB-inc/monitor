@@ -87,6 +87,25 @@ describe('CommandExecutor COLLECT_KEY_ANALYTICS', () => {
     expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(4).fill('OBJECT IDLETIME'));
   });
 
+  it('drops a type that went stale and ignores inherited type names', async () => {
+    const wrongType = new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const client = fakeClient(
+      { moved: 1, proto: 1 },
+      {
+        types: { moved: 'string', proto: '__proto__' },
+        reply: (command) => (command === 'STRLEN' ? [wrongType, null] : [null, 3]),
+      },
+    );
+    const raw = await new CommandExecutor(client).execute('COLLECT_KEY_ANALYTICS', [
+      JSON.stringify({ sampleSize: 100, scanBatchSize: 100 }),
+    ]);
+
+    const result = JSON.parse(raw as string) as KeyAnalyticsResult;
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('moved')?.keyType).toBeNull();
+    expect(byName.get('proto')).toEqual(expect.objectContaining({ keyType: '__proto__', cardinality: null }));
+  });
+
   it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
     const sent: string[] = [];
     const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');

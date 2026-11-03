@@ -8,14 +8,14 @@ function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
   return !!error && /LFU maxmemory policy/i.test(error.message);
 }
 
-const SIZE_COMMAND_BY_TYPE: Record<string, string> = {
-  string: 'STRLEN',
-  list: 'LLEN',
-  hash: 'HLEN',
-  set: 'SCARD',
-  zset: 'ZCARD',
-  stream: 'XLEN',
-};
+const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
+  ['string', 'STRLEN'],
+  ['list', 'LLEN'],
+  ['hash', 'HLEN'],
+  ['set', 'SCARD'],
+  ['zset', 'ZCARD'],
+  ['stream', 'XLEN'],
+]);
 
 export class CommandExecutor {
   private readonly unsafeMode: boolean;
@@ -160,8 +160,8 @@ export class CommandExecutor {
         };
 
         try {
-          const keyType = types[index];
-          const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE[keyType] : undefined;
+          let keyType = types[index];
+          const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE.get(keyType) : undefined;
           let sentFreq = this.keyScanUsesLfu;
           const pipeline = this.client.pipeline();
           pipeline.memory('USAGE', key);
@@ -192,6 +192,8 @@ export class CommandExecutor {
 
           const cardinality =
             sizeResult && !sizeResult[0] && sizeResult[1] != null ? (sizeResult[1] as number) : null;
+          // The key changed type since the batch TYPE, so that type is stale.
+          if (sizeResult?.[0]?.message.startsWith('WRONGTYPE')) keyType = null;
           if (cardinality !== null) {
             stats.totalCardinality += cardinality;
             if (cardinality > stats.maxCardinality) stats.maxCardinality = cardinality;
