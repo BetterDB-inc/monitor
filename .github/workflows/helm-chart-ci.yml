@@ -1,0 +1,64 @@
+# Validates charts/betterdb-monitor on pull requests. helm-publish.yml only
+# lints on master, after merge; this catches a broken template, an invalid
+# manifest or a bad alert rule before review. (Drift between the chart's
+# dashboard/rule copies and their sources is checked by constants-guard.yml.)
+name: Helm Chart CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'charts/betterdb-monitor/**'
+      - 'docs/alertmanager-rules.yml'
+      - 'deploy/observability/dashboards/**'
+      - '.github/workflows/helm-chart-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint (defaults and every optional object)
+        run: |
+          helm lint charts/betterdb-monitor
+          helm lint charts/betterdb-monitor -f charts/betterdb-monitor/ci/observability-values.yaml
+
+      - name: Install kubeconform
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Validate rendered manifests (core + Prometheus Operator CRDs)
+        run: |
+          # First pass: the plain chart with a connection configured; second:
+          # every optional Prometheus Operator / Grafana object rendered.
+          for values in "--set db.host=valkey.default.svc.cluster.local --set db.password=ci" \
+                        "-f charts/betterdb-monitor/ci/observability-values.yaml"; do
+            echo "::group::helm template $values"
+            # shellcheck disable=SC2086
+            helm template ci charts/betterdb-monitor --namespace betterdb $values \
+              | kubeconform -strict -summary \
+                  -schema-location default \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+            echo "::endgroup::"
+          done
+
+      - name: Check the alert rules with promtool
+        run: |
+          docker run --rm -v "$PWD/docs:/rules:ro" --entrypoint promtool \
+            prom/prometheus:v2.55.1 check rules /rules/alertmanager-rules.yml

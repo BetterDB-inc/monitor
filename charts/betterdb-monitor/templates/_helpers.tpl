@@ -52,7 +52,26 @@ existingSecret references bypass it entirely.
 Whether the chart-managed Secret is needed at all.
 */}}
 {{- define "betterdb-monitor.createSecret" -}}
-{{- if or (and .Values.db.password (not .Values.db.existingSecret)) (and .Values.storage.url (not .Values.storage.existingSecret)) (and .Values.license.key (not .Values.license.existingSecret)) -}}
+{{- if or (and .Values.db.password (not .Values.db.existingSecret)) (and .Values.storage.url (not .Values.storage.existingSecret)) (and .Values.license.key (not .Values.license.existingSecret)) (and .Values.metrics.token (not .Values.metrics.existingSecret)) -}}
 true
 {{- end -}}
+{{- end -}}
+
+{{/*
+Whether the metrics endpoint requires a bearer token, and where it lives. The
+same Secret feeds PROMETHEUS_METRICS_TOKEN on the pod and the ServiceMonitor's
+scrape credentials, so the two can never disagree.
+*/}}
+{{- define "betterdb-monitor.metricsToken.enabled" -}}
+{{- if or .Values.metrics.token .Values.metrics.existingSecret -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "betterdb-monitor.metricsToken.secretName" -}}
+{{- .Values.metrics.existingSecret | default (include "betterdb-monitor.secretName" .) -}}
+{{- end -}}
+
+{{- define "betterdb-monitor.metricsToken.secretKey" -}}
+{{- ternary .Values.metrics.existingSecretKey "metrics-token" (ne .Values.metrics.existingSecret "") -}}
 {{- end -}}

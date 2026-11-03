@@ -58,6 +58,48 @@ The full annotated reference is [values.yaml](values.yaml). The ones that matter
 | `webhooks.allowedPrivateCidrs` | `[]` | Private CIDRs webhooks may deliver to, e.g. `["10.244.0.0/16"]`. Empty = public receivers only. See [docs/webhooks.md](../../docs/webhooks.md#receivers-on-a-private-network). |
 | `webhooks.allowedPrivateHosts` | `[]` | Hostnames (exact or `*.suffix`) that may resolve to a private address, e.g. `["*.svc.cluster.local"]`. |
 | `extraEnv` / `extraEnvFrom` | `[]` | Any other env from [docs/configuration.md](../../docs/configuration.md). |
+| `metrics.token` / `metrics.existingSecret` | `""` | Bearer token required to scrape `/api/prometheus/metrics`; also used by the ServiceMonitor. |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor`. |
+| `metrics.prometheusRule.enabled` | `false` | Install the alert pack as a `PrometheusRule`. |
+| `metrics.grafanaDashboards.enabled` | `false` | Publish the Grafana dashboard pack as sidecar ConfigMaps. |
+
+## Prometheus Operator / kube-prometheus-stack
+
+One release wires the monitor into an existing kube-prometheus-stack: a
+ServiceMonitor for scraping, the alert pack as a PrometheusRule, and the
+Grafana dashboards as ConfigMaps the Grafana sidecar loads.
+
+```bash
+kubectl create secret generic betterdb-scrape -n betterdb \
+  --from-literal=metrics-token="$(openssl rand -hex 32)"
+
+helm upgrade --install betterdb-monitor betterdb/betterdb-monitor -n betterdb \
+  --set db.host=my-valkey.default.svc.cluster.local \
+  --set metrics.existingSecret=betterdb-scrape \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.labels.release=kube-prometheus-stack \
+  --set metrics.prometheusRule.enabled=true \
+  --set metrics.prometheusRule.labels.release=kube-prometheus-stack \
+  --set metrics.grafanaDashboards.enabled=true \
+  --set metrics.grafanaDashboards.namespace=monitoring
+```
+
+- The `release` label must match your Prometheus's `serviceMonitorSelector` /
+  `ruleSelector` (kube-prometheus-stack selects on its own release name).
+- The token Secret is read by both the pod (`PROMETHEUS_METRICS_TOKEN`) and the
+  ServiceMonitor, so it lives in the release namespace with them.
+- Dashboards go to the namespace the Grafana sidecar watches. They are labelled
+  `grafana_dashboard: "1"` and annotated `grafana_folder: BetterDB`; folder
+  placement needs the sidecar's `folderAnnotation` set to `grafana_folder`.
+- The ServiceMonitor and PrometheusRule need the `monitoring.coreos.com` CRDs.
+- Every alert names the monitored instance in its `connection` label. The rules
+  are [docs/alertmanager-rules.yml](../../docs/alertmanager-rules.yml); add your
+  own groups with `metrics.prometheusRule.additionalGroups`.
+
+The dashboards and rules in this chart are byte-identical copies of
+`deploy/observability/dashboards/` and `docs/alertmanager-rules.yml` (Helm can
+only package files inside the chart). Edit the originals, then run
+`node scripts/sync-chart-observability.mjs`; CI fails if the copies drift.
 
 The `service.*` options are rendered only for the Service types Kubernetes
 accepts them on, so a value set for one type is ignored, not an error, after a

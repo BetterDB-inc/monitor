@@ -118,6 +118,36 @@ persistence:
 With an offline token and no online key the monitor makes zero outbound
 requests. Details: [Offline licenses](../offline-licenses.md).
 
+## Prometheus Operator and Grafana
+
+If the cluster runs kube-prometheus-stack (or any Prometheus Operator setup),
+the chart can wire the monitor into it: a `ServiceMonitor` to scrape
+`/api/prometheus/metrics`, the [alert pack](../alertmanager-rules.yml) as a
+`PrometheusRule`, and the Grafana dashboard pack as ConfigMaps for the Grafana
+sidecar.
+
+```yaml
+metrics:
+  existingSecret: betterdb-scrape   # key metrics-token; omit for an open endpoint
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  grafanaDashboards:
+    enabled: true
+    namespace: monitoring
+```
+
+The `release` label has to match your Prometheus's `serviceMonitorSelector` and
+`ruleSelector`. Every alert names the monitored instance in its `connection`
+label, so one monitor watching many instances raises one alert per instance.
+See the [chart README](https://github.com/BetterDB-inc/monitor/tree/master/charts/betterdb-monitor#prometheus-operator--kube-prometheus-stack)
+for the token Secret and dashboard folder details.
+
 ## Upgrade the helm chart
 
 ```bash
