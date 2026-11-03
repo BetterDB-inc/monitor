@@ -336,7 +336,7 @@ export class IncidentTimelineBuilder {
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= droppedAt &&
           (event.timestamp - droppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, droppedAt));
+            this.bridgesFromDropped(event, stored.startedAt));
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -367,10 +367,10 @@ export class IncidentTimelineBuilder {
     return latest;
   }
 
-  private bridgesFromDropped(event: AnomalyEvent, droppedAt: number): boolean {
+  private bridgesFromDropped(event: AnomalyEvent, startedAt: number): boolean {
     return this.rules().some(
       (rule) =>
-        event.timestamp - droppedAt <= rule.maxSpanMs &&
+        event.timestamp - startedAt <= rule.maxSpanMs &&
         rule.steps.slice(1).some((step) => step.includes(event.metricType)),
     );
   }

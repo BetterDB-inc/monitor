@@ -208,6 +208,19 @@ describe('SpikeDetector', () => {
       expect(result!.message).not.toContain('below normal');
     });
 
+    it('shows a fractional threshold and value without rounding them together', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        { warningThreshold: 1.2, criticalThreshold: 50, consecutiveRequired: 1, cooldownMs: 0 },
+        { absoluteBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(10 + (i % 2), i * 1000);
+      const result = detector.detect(buffer, 1.4, 50000);
+
+      expect(result!.message).toContain('Value: 1.4, Threshold: 1.2 ');
+    });
+
     it('describes a burst on a quiet metric without a percentage', () => {
       const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
       const detector = new SpikeDetector(MetricType.ERROR_REPLIES, {

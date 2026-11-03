@@ -4001,7 +4001,11 @@ export class AnomalyService
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];
     let snapshotsLoaded = true;
-    const baselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    const baselineStart =
+      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
+    const baselineScale =
+      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
     const captureRead = withTimeout(
       this.storage.getClientConnectionCaptures(ctx.connectionId, baselineStart, until),
       RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
@@ -4041,7 +4045,7 @@ export class AnomalyService
         connectionCaptures,
         baselineStart,
         episodeStart - 1,
-      ),
+      ).map((group) => ({ ...group, count: group.count * baselineScale })),
     });
   }
 

@@ -204,6 +204,21 @@ describe('LatencyRegressionService', () => {
     );
   });
 
+  it('still saves and notifies when the sink fails to stamp the event', async () => {
+    const sink = {
+      ingestExternalAnomaly: jest.fn(),
+      stampExternalAnomaly: jest.fn(() => {
+        throw new Error('stamp failed');
+      }),
+    };
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+    expect(sink.ingestExternalAnomaly).toHaveBeenCalledTimes(1);
+    expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
+  });
+
   it('tells the anomaly event sink whether latency is still degraded after each poll', async () => {
     const sink = { ingestExternalAnomaly: jest.fn(), reportLatencyDegraded: jest.fn() };
     const service = await makeService(true, sink);

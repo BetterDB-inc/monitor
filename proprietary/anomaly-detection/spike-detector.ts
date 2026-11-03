@@ -177,7 +177,7 @@ export class SpikeDetector {
     if (type === AnomalyType.SPIKE && zScore < 0) {
       return (
         `${severity.toUpperCase()}: ${this.metricType} above threshold. ` +
-        `Value: ${this.formatValue(value)}, Threshold: ${this.formatValue(threshold)} ` +
+        `Value: ${this.formatBoundary(value)}, Threshold: ${this.formatBoundary(threshold)} ` +
         `(Baseline: ${this.formatValue(baseline)}, Z-score: ${zScore.toFixed(2)})`
       );
     }
@@ -196,6 +196,11 @@ export class SpikeDetector {
     }
     const change = Math.abs(((value - baseline) / baseline) * 100).toFixed(1);
     return `${change}% ${value < baseline ? 'below' : 'above'} normal`;
+  }
+
+  private formatBoundary(value: number): string {
+    if (Number.isInteger(value) || Math.abs(value) >= 1e3) return this.formatValue(value);
+    return String(Number(value.toFixed(2)));
   }
 
   private formatValue(value: number): string {

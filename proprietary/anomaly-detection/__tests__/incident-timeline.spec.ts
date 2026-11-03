@@ -728,6 +728,18 @@ describe('IncidentTimelineBuilder', () => {
         expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
       });
 
+      it('measures the span of the rule from the stored start', () => {
+        const [incident] = new IncidentTimelineBuilder({}, (id) => id, () => [escalation]).build(
+          [event({ id: 'late', timestamp: T0 + 15 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [{ scopeId: 'conn-a', startedAt: T0, anomalyId: 'z-gone' }],
+          new Map([['conn-a', T0 + 9 * MIN]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 15 * MIN);
+      });
+
       it('starts afresh past the span of the rule', () => {
         const [incident] = dropped(event({ id: 'late', timestamp: T0 + 11 * MIN }));
 
