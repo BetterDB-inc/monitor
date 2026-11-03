@@ -704,6 +704,37 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidents).toHaveLength(2);
     });
 
+    describe('when the earlier step is no longer held', () => {
+      const dropped = (late: AnomalyEvent) =>
+        new IncidentTimelineBuilder({}, (id) => id, () => [escalation]).build(
+          [late],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [{ scopeId: 'conn-a', startedAt: T0, anomalyId: 'z-gone' }],
+          new Map([['conn-a', T0]]),
+        );
+
+      it('keeps the stored start for a later step the rule can still bridge', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }));
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+
+      it('starts afresh for an event that is not a later step of a rule', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN, metricType: MetricType.CONNECTIONS }),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('starts afresh past the span of the rule', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 11 * MIN }));
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 11 * MIN);
+      });
+    });
+
     it('takes in a step stamped ahead of an incident that already has a boundary', () => {
       const cost = event({ timestamp: T0 + 5 * MIN });
       const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };
