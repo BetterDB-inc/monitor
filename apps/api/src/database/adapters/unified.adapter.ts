@@ -271,8 +271,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * check is a stat-based fingerprint compared at most once per
    * TLS_MATERIAL_RECHECK_MS, so the scratch client per database that key
    * analytics opens does not pay for file reads. `force` (used when iovalkey is
-   * about to reconnect) skips the throttle but still skips the read when the
-   * fingerprint is unchanged. A read failure, or material that does not parse
+   * about to reconnect) skips the throttle and always re-reads, since a
+   * same-size rewrite within one timestamp tick can leave the fingerprint
+   * unchanged. A read failure, or material that does not parse
    * as a matching certificate and key (a rotation caught between writing the
    * two files), keeps the previously loaded material rather than breaking a
    * working connection, and leaves the fingerprint stale so the next check

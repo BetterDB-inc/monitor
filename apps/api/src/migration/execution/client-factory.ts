@@ -30,10 +30,9 @@ export function nodeClientAuthOptions(
 }
 
 /**
- * Returns a function that re-reads file-sourced material only when the files
- * changed on disk since the last usable read (stat fingerprint), and returns
- * the new options, or undefined when nothing changed or the files are not
- * usable. A failure is reported once per distinct error, not on every call.
+ * Returns a function that re-reads file-sourced material on every call and
+ * returns the new options, or undefined when the files are not usable. A
+ * failure is reported once per distinct error, not on every call.
  */
 function tlsMaterialReloader(
   config: TlsAuthConfig,
@@ -42,7 +41,7 @@ function tlsMaterialReloader(
   onError?: TlsRefreshErrorHandler,
 ): (label: string) => ReturnType<typeof buildTlsOptions> {
   let lastError: string | undefined;
-  // Re-reads on every call, like the adapter's reconnect refresh: a same-size
+  // No fingerprint check, like the adapter's reconnect refresh: a same-size
   // rewrite within one timestamp tick can leave the stat fingerprint unchanged.
   return (label) => {
     try {
@@ -66,8 +65,7 @@ function tlsMaterialReloader(
  * (iovalkey reads `options.tls` when it opens each socket). Material that does
  * not parse as a matching pair (a rotation caught mid-write) or cannot be read
  * keeps the previously loaded options; `onError` is told why, once per
- * distinct error. Inline material never
- * changes, so nothing is installed for it.
+ * distinct error. Inline material never changes, so nothing is installed for it.
  */
 export function attachTlsRefresh(
   client: Valkey,
