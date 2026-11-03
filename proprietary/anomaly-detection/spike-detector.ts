@@ -199,8 +199,7 @@ export class SpikeDetector {
   }
 
   private formatBoundary(value: number): string {
-    if (Number.isInteger(value) || Math.abs(value) >= 1e3) return this.formatValue(value);
-    return String(Number(value.toFixed(2)));
+    return String(Number(value.toPrecision(6)));
   }
 
   private formatValue(value: number): string {
