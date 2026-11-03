@@ -11662,6 +11662,7 @@ describe('AnomalyService', () => {
         expect(kept).toHaveLength(200);
         expect(kept.slice(0, 2)).toEqual(['early', 'mem']);
         expect(kept[2]).toBe('mem-52');
+        storm(now);
 
         await (service as any).tickIncidentTimelines(now);
 
@@ -11669,6 +11670,33 @@ describe('AnomalyService', () => {
           expect.objectContaining({ anomalyIds: ['early', 'mem'] }),
           'conn-1',
         );
+      });
+
+      it('keeps an arriving repeat once the buffer holds only distinct signals', () => {
+        const now = Date.now();
+        for (let i = 0; i < 200; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: now - 50 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+        service.ingestExternalAnomaly(
+          anomaly({
+            id: 'repeat',
+            timestamp: now - 40 * MIN,
+            metricType: MetricType.COMMAND_P99,
+            commands: ['cmd-5'],
+          }),
+        );
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept[0]).toBe('p99-1');
+        expect(kept.at(-1)).toBe('repeat');
       });
 
       it('drops the oldest event and records it when every signal is distinct', () => {
