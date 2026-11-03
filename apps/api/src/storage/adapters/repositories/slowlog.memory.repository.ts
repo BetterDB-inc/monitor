@@ -1,4 +1,5 @@
 import {
+  LogSource,
   SlowLogQueryOptions,
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
@@ -60,10 +61,13 @@ export class SlowLogMemoryRepository {
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     let entries = this.slowLogEntries;
     if (connectionId) {
       entries = entries.filter((e) => e.connectionId === connectionId);
+    }
+    if (source) {
+      entries = entries.filter((e) => e.sourceHost === source.host && e.sourcePort === source.port);
     }
     if (entries.length === 0) return null;
     return Math.max(...entries.map((e) => e.id));

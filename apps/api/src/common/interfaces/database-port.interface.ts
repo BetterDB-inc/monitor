@@ -125,6 +125,13 @@ export interface DatabasePort {
   call(command: string, args: string[], options?: { cli?: boolean }): Promise<unknown>;
   getClient(): Valkey;
   /**
+   * The node the connection's socket is attached to. A hostname that resolves
+   * to several nodes (a Kubernetes headless Service) lands on any of them and
+   * moves on reconnect. Null when not connected or when the remote address does
+   * not identify the node (SSH tunnel).
+   */
+  getServingEndpoint?(): { host: string; port: number } | null;
+  /**
    * The SSH host-key fingerprint observed on connect when none was pinned
    * (trust-on-first-use). Present only on adapters that support SSH tunnels.
    */

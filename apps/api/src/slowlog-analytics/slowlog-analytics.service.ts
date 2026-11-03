@@ -8,7 +8,7 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
-import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import { MultiConnectionPoller, ConnectionContext, logSourceOf } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
@@ -18,6 +18,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   // Per-connection state tracking
   private lastSeenIds = new Map<string, number | null>();
+  // Node each connection's lastSeenId belongs to. Slowlog IDs are per node, so
+  // when a connection lands on another node the tracker restarts from that
+  // node's own last stored ID.
+  private trackedSources = new Map<string, string>();
 
   // Per-connection cache for Prometheus metrics
   private cachedEntries = new Map<string, SlowLogEntry[]>();
@@ -51,9 +55,20 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     }
 
     try {
+      const source = logSourceOf(ctx);
+      const sourceKey = `${source.host}:${source.port}`;
+      const previousSource = this.trackedSources.get(ctx.connectionId);
+      if (previousSource !== sourceKey) {
+        if (previousSource !== undefined) {
+          this.logger.log(`Slow log source for ${ctx.connectionName} moved from ${previousSource} to ${sourceKey}`);
+        }
+        this.lastSeenIds.delete(ctx.connectionId);
+        this.trackedSources.set(ctx.connectionId, sourceKey);
+      }
+
       // Initialize lastSeenId from storage if not already set
       if (!this.lastSeenIds.has(ctx.connectionId)) {
-        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId);
+        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId, source);
         this.lastSeenIds.set(ctx.connectionId, lastId);
         this.logger.debug(`Initialized lastSeenId for ${ctx.connectionName}: ${lastId}`);
       }
@@ -99,8 +114,8 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         clientAddress: e.clientAddress || '',
         clientName: e.clientName || '',
         capturedAt: now,
-        sourceHost: ctx.host,
-        sourcePort: ctx.port,
+        sourceHost: source.host,
+        sourcePort: source.port,
         connectionId: ctx.connectionId,
       }));
 
@@ -126,6 +141,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.trackedSources.delete(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

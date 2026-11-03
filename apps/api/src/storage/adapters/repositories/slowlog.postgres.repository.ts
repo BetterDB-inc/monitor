@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { chunkedPostgresDelete } from '../postgres-chunked-delete';
 import {
+  LogSource,
   SlowLogQueryOptions,
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
@@ -105,7 +106,15 @@ export class SlowLogPostgresRepository {
     return result.rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
+    if (connectionId && source) {
+      const result = await this.pool.query(
+        'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1 AND source_host = $2 AND source_port = $3',
+        [connectionId, source.host, source.port],
+      );
+      const maxId = result.rows[0]?.max_id;
+      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    }
     if (connectionId) {
       const result = await this.pool.query(
         'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1',

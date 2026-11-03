@@ -274,6 +274,15 @@ export interface AnomalyStats {
 }
 
 // Slow Log Entry Types
+/**
+ * The node a slow/command log entry was read from. Log IDs are per node, so a
+ * connection whose host fronts several nodes tracks and dedups per source.
+ */
+export interface LogSource {
+  host: string;
+  port: number;
+}
+
 export interface StoredSlowLogEntry {
   id: number; // Original slowlog ID from Valkey/Redis
   timestamp: number; // Unix timestamp in seconds
@@ -766,13 +775,13 @@ export interface StoragePort {
   // Slow Log Methods - connectionId required for writes, optional filter for reads
   saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number>;
   getSlowLogEntries(options?: SlowLogQueryOptions): Promise<StoredSlowLogEntry[]>;
-  getLatestSlowLogId(connectionId?: string): Promise<number | null>;
+  getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Command Log Methods (Valkey-specific) - connectionId required for writes, optional filter for reads
   saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number>;
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
-  getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null>;
+  getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Latency Snapshot Methods - connectionId required for writes, optional filter for reads

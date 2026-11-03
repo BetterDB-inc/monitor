@@ -13,6 +13,7 @@ import type {
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
   KvCacheSampleTotals,
+  LogSource,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessDimension,
@@ -4011,9 +4012,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.slowlogRepo.getSlowLogEntries(options);
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    return this.slowlogRepo.getLatestSlowLogId(connectionId);
+    return this.slowlogRepo.getLatestSlowLogId(connectionId, source);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -4127,8 +4128,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
-  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
+
+    if (connectionId && source) {
+      const result = await this.pool.query(
+        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2 AND source_host = $3 AND source_port = $4',
+        [type, connectionId, source.host, source.port],
+      );
+      const maxId = result.rows[0]?.max_id;
+      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    }
 
     if (connectionId) {
       const result = await this.pool.query(

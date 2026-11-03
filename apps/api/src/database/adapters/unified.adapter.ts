@@ -1723,6 +1723,14 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return this.client.call(command, ...args);
   }
 
+  getServingEndpoint(): { host: string; port: number } | null {
+    // Through a tunnel the socket peer is the local forwarder, not the node.
+    if (this.usesTunnel || !this._client) return null;
+    const { remoteAddress, remotePort } = this._client.stream ?? {};
+    if (!remoteAddress || !remotePort) return null;
+    return { host: remoteAddress.replace(/^::ffff:/, ''), port: remotePort };
+  }
+
   getClient(): Valkey {
     // Callers copy `options.tls` onto per-node clients (cluster discovery), so
     // make sure it reflects the certificate files currently on disk.

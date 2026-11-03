@@ -5,6 +5,14 @@ import { DatabasePort } from '../interfaces/database-port.interface';
 /**
  * Context passed to pollConnection() with all relevant connection information
  */
+/**
+ * Where a connection's slow/command log entries come from: the node its socket
+ * is attached to, or the configured address when that is not known.
+ */
+export function logSourceOf(ctx: ConnectionContext): { host: string; port: number } {
+  return ctx.client.getServingEndpoint?.() ?? { host: ctx.host, port: ctx.port };
+}
+
 export interface ConnectionContext {
   /** Unique connection ID */
   connectionId: string;

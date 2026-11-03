@@ -73,6 +73,7 @@ import {
   StoredScheduledCapture,
   ScheduledCaptureQueryOptions,
   ScheduledCapturePatch,
+  LogSource,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   AgentToken,
@@ -1183,8 +1184,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.slowlogRepo.getSlowLogEntries(options);
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
-    return this.slowlogRepo.getLatestSlowLogId(connectionId);
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
+    return this.slowlogRepo.getLatestSlowLogId(connectionId, source);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -1254,10 +1255,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
-  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     let entriesOfType = this.commandLogEntries.filter((e) => e.type === type);
     if (connectionId) {
       entriesOfType = entriesOfType.filter((e) => e.connectionId === connectionId);
+    }
+    if (source) {
+      entriesOfType = entriesOfType.filter((e) => e.sourceHost === source.host && e.sourcePort === source.port);
     }
     if (entriesOfType.length === 0) return null;
     return Math.max(...entriesOfType.map((e) => e.id));

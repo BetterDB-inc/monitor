@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
 import {
+  LogSource,
   SlowLogQueryOptions,
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
@@ -98,7 +99,15 @@ export class SlowLogSqliteRepository {
     return rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
+    if (connectionId && source) {
+      const row = this.db
+        .prepare(
+          'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ? AND source_host = ? AND source_port = ?',
+        )
+        .get(connectionId, source.host, source.port) as { max_id: number | null } | undefined;
+      return row?.max_id ?? null;
+    }
     if (connectionId) {
       const row = this.db
         .prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ?')
