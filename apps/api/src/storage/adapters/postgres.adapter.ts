@@ -1753,8 +1753,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         PRIMARY KEY (scope_id, started_at, anomaly_id)
       );
       CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
-      ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS metric_type TEXT;
-      ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS connection_id TEXT;
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'incident_boundaries'
+            AND column_name = 'metric_type'
+        ) THEN
+          ALTER TABLE incident_boundaries ADD COLUMN metric_type TEXT;
+          ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS connection_id TEXT;
+          UPDATE incident_boundaries b
+          SET metric_type = e.metric_type, connection_id = e.connection_id
+          FROM anomaly_events e
+          WHERE e.id::text = b.anomaly_id;
+        END IF;
+      END $$;
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;

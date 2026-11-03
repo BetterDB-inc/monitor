@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -76,6 +77,22 @@ describe.each<[string, AdapterFactory]>(adapters)('incident boundaries (%s)', (_
   });
 });
 
+const legacyEvent = (connectionId: string) => ({
+  id: randomUUID(),
+  timestamp: 1000,
+  metricType: 'connections',
+  anomalyType: 'spike',
+  severity: 'warning',
+  value: 10,
+  baseline: 1,
+  stdDev: 1,
+  zScore: 9,
+  threshold: 3,
+  message: 'm',
+  resolved: false,
+  connectionId,
+});
+
 describe('incident boundary anchor migration (sqlite)', () => {
   let dir: string;
   let filepath: string;
@@ -89,30 +106,71 @@ describe('incident boundary anchor migration (sqlite)', () => {
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('adds the anchor columns to a database from before them and keeps old rows readable', async () => {
+  it('fills the anchor of a boundary from before the columns from its stored event', async () => {
+    const first = new SqliteAdapter({ filepath });
+    await first.initialize();
+    const anchor = legacyEvent('conn-a');
+    await first.saveAnomalyEvent(anchor, 'conn-a');
+    await first.saveIncidentBoundaries([
+      { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id },
+      { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
+    ]);
+    await first.close();
+
     const db = new Database(filepath);
     db.exec(`
-      CREATE TABLE incident_boundaries (
-        scope_id TEXT NOT NULL,
-        started_at INTEGER NOT NULL,
-        anomaly_id TEXT NOT NULL,
-        PRIMARY KEY (scope_id, started_at, anomaly_id)
-      );
-      INSERT INTO incident_boundaries VALUES ('s1', 1000, 'old');
+      ALTER TABLE incident_boundaries DROP COLUMN metric_type;
+      ALTER TABLE incident_boundaries DROP COLUMN connection_id;
     `);
     db.close();
 
-    const storage = new SqliteAdapter({ filepath });
-    await storage.initialize();
-    await storage.saveIncidentBoundaries([
-      { scopeId: 's1', startedAt: 2000, anomalyId: 'new', metricType: 'connections', connectionId: 'conn-a' },
-    ]);
-    const rows = await storage.getIncidentBoundaries({ startTime: 0 });
-    await storage.close();
+    const reopened = new SqliteAdapter({ filepath });
+    await reopened.initialize();
+    const rows = await reopened.getIncidentBoundaries({ startTime: 0 });
+    await reopened.close();
 
     expect(rows).toEqual([
-      { scopeId: 's1', startedAt: 1000, anomalyId: 'old' },
-      { scopeId: 's1', startedAt: 2000, anomalyId: 'new', metricType: 'connections', connectionId: 'conn-a' },
+      { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id, metricType: 'connections', connectionId: 'conn-a' },
+      { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
+    ]);
+  });
+});
+
+const postgres = adapters.filter(([name]) => name === 'PostgresAdapter');
+
+describe.each<[string, AdapterFactory]>(postgres)('incident boundary anchor migration (%s)', (_name, makeAdapter) => {
+  let storage: StoragePort;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    ({ storage, cleanup } = await makeAdapter());
+  });
+
+  afterEach(async () => {
+    await cleanup();
+  });
+
+  it('fills the anchor of a boundary from before the columns from its stored event', async () => {
+    const anchor = legacyEvent('conn-a');
+    await storage.saveAnomalyEvent(anchor, 'conn-a');
+    await storage.saveIncidentBoundaries([
+      { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id },
+      { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
+    ]);
+    const internals = storage as unknown as {
+      pool: { query: (sql: string) => Promise<unknown> };
+      createSchema: () => Promise<void>;
+    };
+    await internals.pool.query(`
+      ALTER TABLE incident_boundaries DROP COLUMN metric_type;
+      ALTER TABLE incident_boundaries DROP COLUMN connection_id;
+    `);
+
+    await internals.createSchema();
+
+    expect(await storage.getIncidentBoundaries({ startTime: 0 })).toEqual([
+      { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id, metricType: 'connections', connectionId: 'conn-a' },
+      { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
     ]);
   });
 });

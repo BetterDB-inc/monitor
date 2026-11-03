@@ -744,6 +744,16 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!boundaryColumns.some((col) => col.name === 'connection_id')) {
       this.db.prepare('ALTER TABLE incident_boundaries ADD COLUMN connection_id TEXT').run();
     }
+    if (!boundaryColumns.some((col) => col.name === 'metric_type')) {
+      this.db
+        .prepare(
+          `UPDATE incident_boundaries
+           SET metric_type = e.metric_type, connection_id = e.connection_id
+           FROM anomaly_events e
+           WHERE e.id = incident_boundaries.anomaly_id`,
+        )
+        .run();
+    }
     const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
       name: string;
     }[];
