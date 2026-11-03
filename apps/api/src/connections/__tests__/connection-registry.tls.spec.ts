@@ -162,6 +162,8 @@ describe('ConnectionRegistry TLS material', () => {
     // TLS off drops a lone certificate on save; the test must not reject it.
     const plain = await registry.testConnection({ name: 'plain', host: 'cache.internal', port: 6379, tls: false, tlsConfig: { cert: CERT } });
     expect(plain.success).toBe(true);
+    const AdapterMock = jest.requireMock('../../database/adapters/unified.adapter').UnifiedDatabaseAdapter as jest.Mock;
+    expect(AdapterMock.mock.calls.at(-1)![0].tlsConfig).toBeUndefined();
     // A whitespace-only key is dropped on input, leaving a certificate without its key.
     const blankKey = await registry.testConnection({ name: 'mtls', host: 'cache.internal', port: 6380, tls: true, tlsConfig: { cert: CERT, key: '  ' } });
     expect(blankKey.success).toBe(false);
@@ -487,16 +489,15 @@ describe('ConnectionRegistry TLS material', () => {
       expect(enc.decrypt(persisted!.tlsConfig!.passphrase!)).toBe('pw');
     });
 
-    it('writes a plaintext env-default row once when the environment also changed it', async () => {
+    it('re-encrypts a plaintext env-default row before the environment sync rewrites it', async () => {
       storage.getConnections.mockResolvedValue([envDefault({ tls: false, password: 'old-password', passwordEncrypted: false })]);
       database.password = 'new-password';
 
       await registry.onModuleInit();
 
-      const writes = storage.saveConnection.mock.calls.filter(([c]) => c.id === ENV_DEFAULT_ID);
-      expect(writes).toHaveLength(1);
-      expect(writes[0][0].passwordEncrypted).toBe(true);
-      expect(enc.decrypt(writes[0][0].password!)).toBe('new-password');
+      const writes = storage.saveConnection.mock.calls.filter(([c]) => c.id === ENV_DEFAULT_ID).map(([c]) => c);
+      expect(writes.every((c) => c.passwordEncrypted)).toBe(true);
+      expect(writes.map((c) => enc.decrypt(c.password!))).toEqual(['old-password', 'new-password']);
     });
 
     it('does not re-encrypt a row whose SSH tunnel secrets failed to decrypt (the ciphertext is kept)', async () => {

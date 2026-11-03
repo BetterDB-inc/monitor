@@ -286,7 +286,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     this.tlsMaterialCheckedAt = now;
     try {
       const fingerprint = tlsMaterialFingerprint(this.config.tlsConfig);
-      if (fingerprint === this.tlsMaterialFingerprint) return;
+      const changed = fingerprint !== this.tlsMaterialFingerprint;
+      // A reconnect (force) always re-reads: a same-size rewrite within one
+      // timestamp tick can leave the stat fingerprint unchanged.
+      if (!changed && !force) return;
       const material = resolveTlsMaterial(this.config.tlsConfig);
       assertUsableTlsMaterial(material);
       this.tlsMaterial = material;
@@ -298,7 +301,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       if (this.cliClient) this.cliClient.options.tls = this.composeTlsOptions();
       if (this.tlsMaterialWarning) this.logger.log('TLS files on disk are usable again');
       this.tlsMaterialWarning = undefined;
-      this.logger.log('TLS files changed on disk; new sockets present the updated material');
+      if (changed) this.logger.log('TLS files changed on disk; new sockets present the updated material');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message !== this.tlsMaterialWarning) this.logger.warn(`Keeping previously loaded TLS files: ${message}`);

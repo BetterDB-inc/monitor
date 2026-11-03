@@ -219,23 +219,19 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       for (const config of savedConnections) {
         // Decrypt password if encrypted; the env-owned default (and the nodes
         // discovered from it) follow the current environment, see syncWithEnvironment.
-        const loadedConfig = this.decryptConfig(config);
-        const decryptedConfig = await this.syncWithEnvironment(loadedConfig);
+        let decryptedConfig = this.decryptConfig(config);
         // Heal rows that hold plaintext secrets (written while ENCRYPTION_KEY was
         // unavailable, or before it was introduced) now that a cipher is present.
-        // A row the environment sync rebuilt was just saved encrypted already.
-        if (
-          decryptedConfig === loadedConfig &&
-          this.encryption &&
-          hasPlaintextSecrets(config) &&
-          loadedConfig.credentialStatus !== 'decryption_failed'
-        ) {
-          await this.storage.saveConnection(this.encryptConfig(loadedConfig))
+        // Done before the environment sync, so a failed sync save can't leave
+        // the row in plaintext.
+        if (this.encryption && hasPlaintextSecrets(config) && decryptedConfig.credentialStatus !== 'decryption_failed') {
+          await this.storage.saveConnection(this.encryptConfig(decryptedConfig))
             .then(() => this.logger.log(`${config.name}: re-encrypted secrets that were stored in plaintext`))
             .catch((err) => {
               this.logger.warn(`Failed to re-encrypt stored secrets for ${config.name}: ${err instanceof Error ? err.message : err}`);
             });
         }
+        decryptedConfig = await this.syncWithEnvironment(decryptedConfig);
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {

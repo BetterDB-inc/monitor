@@ -148,9 +148,12 @@ describe('attachTlsRefresh', () => {
       expect(read).toHaveBeenCalledTimes(1);
       expect(client.options.tls).toMatchObject({ servername: 'node1.example.com' });
 
-      writeFile(certPath, pair.cert);
+      const next = generateTlsPair('d');
+      writeFile(certPath, next.cert);
+      writeFile(keyPath, next.key);
       client.emit('reconnecting');
       expect(read).toHaveBeenCalledTimes(2);
+      expect(client.options.tls?.cert?.toString()).toBe(next.cert);
     } finally {
       read.mockRestore();
       client.disconnect();

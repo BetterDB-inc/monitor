@@ -940,20 +940,26 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     expect(client.options.tls?.key?.toString()).toBe(pairB.key);
   });
 
-  it('skips the re-read before a reconnect when the files are unchanged on disk', () => {
+  it('re-reads before every reconnect but logs a change only when the files changed', () => {
     const adapter = fileAdapter();
     const client = adapter.getClient();
     const read = jest.spyOn(tlsMaterial, 'resolveTlsMaterial');
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const changedLogs = () =>
+      log.mock.calls.filter(([m]) => /TLS files changed on disk/.test(String(m))).length;
     try {
       client.emit('reconnecting');
       client.emit('reconnecting');
-      expect(read).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(changedLogs()).toBe(0);
 
       writeFile('client.crt', pairA.cert);
       client.emit('reconnecting');
-      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(changedLogs()).toBe(1);
     } finally {
       read.mockRestore();
+      log.mockRestore();
     }
   });
 
