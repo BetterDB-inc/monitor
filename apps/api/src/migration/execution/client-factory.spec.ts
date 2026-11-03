@@ -154,6 +154,7 @@ describe('attachTlsRefresh', () => {
       client.emit('reconnecting');
       expect(read).toHaveBeenCalledTimes(3);
       expect(client.options.tls?.cert?.toString()).toBe(next.cert);
+      expect(client.options.tls?.key?.toString()).toBe(next.key);
     } finally {
       read.mockRestore();
       client.disconnect();

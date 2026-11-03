@@ -963,6 +963,19 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     }
   });
 
+  it('installs freshly read material on a forced reconnect when the fingerprint is unchanged', () => {
+    const fingerprint = jest.spyOn(tlsMaterial, 'tlsMaterialFingerprint').mockReturnValue('constant');
+    try {
+      const adapter = fileAdapter();
+      const client = adapter.getClient();
+      writePair(pairB);
+      client.emit('reconnecting');
+      expect(certOf(client)).toBe(pairB.cert);
+    } finally {
+      fingerprint.mockRestore();
+    }
+  });
+
   it('warns once while the files stay unusable and logs when they recover', () => {
     const adapter = fileAdapter();
     const client = adapter.getClient();
