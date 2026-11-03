@@ -201,7 +201,11 @@ describe('SpikeDetector', () => {
       expect(result!.zScore).toBeLessThan(0);
       expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
       expect(result!.severity).toBe(AnomalySeverity.CRITICAL);
-      expect(result!.message).toContain('(94.3% below normal');
+      expect(result!.message).toBe(
+        'CRITICAL: acl_denied above threshold. Value: 60, Threshold: 50 ' +
+          `(Baseline: 1.05K, Z-score: ${result!.zScore.toFixed(2)})`,
+      );
+      expect(result!.message).not.toContain('below normal');
     });
 
     it('describes a burst on a quiet metric without a percentage', () => {

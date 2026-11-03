@@ -141,7 +141,14 @@ export class SpikeDetector {
     this.consecutiveCounts.delete(this.metricType); // Reset after alert
 
     const anomalyType = countsAsDrop && !exceedsAbsolute ? AnomalyType.DROP : AnomalyType.SPIKE;
-    const message = this.generateMessage(anomalyType, severity, currentValue, mean, zScore);
+    const message = this.generateMessage(
+      anomalyType,
+      severity,
+      currentValue,
+      mean,
+      zScore,
+      threshold,
+    );
 
     return {
       id: randomUUID(),
@@ -165,7 +172,15 @@ export class SpikeDetector {
     value: number,
     baseline: number,
     zScore: number,
+    threshold: number,
   ): string {
+    if (type === AnomalyType.SPIKE && zScore < 0) {
+      return (
+        `${severity.toUpperCase()}: ${this.metricType} above threshold. ` +
+        `Value: ${this.formatValue(value)}, Threshold: ${this.formatValue(threshold)} ` +
+        `(Baseline: ${this.formatValue(baseline)}, Z-score: ${zScore.toFixed(2)})`
+      );
+    }
     const typeStr = type === AnomalyType.SPIKE ? 'spike' : 'drop';
 
     return (
