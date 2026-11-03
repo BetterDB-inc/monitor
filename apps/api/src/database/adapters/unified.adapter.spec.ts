@@ -155,39 +155,43 @@ describe('UnifiedDatabaseAdapter.getInfoParsed', () => {
   });
 });
 
+type PipelineReply = [Error | null, unknown];
+
+// A pipeline fake that answers each queued command, so key-scan tests can
+// assert which commands were sent instead of relying on reply positions.
+function fakeKeyPipeline(
+  reply: (command: string, key: string) => PipelineReply,
+  sent: string[] = [],
+  types: Record<string, string> = {},
+) {
+  return () => {
+    const queued: Array<[string, string]> = [];
+    const chain = {
+      memory: (_sub: string, key: string) => (queued.push(['MEMORY USAGE', key]), chain),
+      object: (sub: string, key: string) => (queued.push([`OBJECT ${sub}`, key]), chain),
+      ttl: (key: string) => (queued.push(['TTL', key]), chain),
+      type: (key: string) => (queued.push(['TYPE', key]), chain),
+      call: (command: string, key: string) => (queued.push([command, key]), chain),
+      exec: async () =>
+        queued.map(([command, key]) => {
+          sent.push(command);
+          return command === 'TYPE' ? [null, types[key] ?? 'string'] : reply(command, key);
+        }),
+    };
+    return chain;
+  };
+}
+
 describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
   const DAY = 86400;
 
   function makeScanAdapter(idleByKey: Record<string, number>) {
     const keys = Object.keys(idleByKey);
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
-    const pipeline = () => {
-      let key = '';
-      const chain = {
-        memory: (_sub: string, name: string) => {
-          key = name;
-          return chain;
-        },
-        object: () => chain,
-        ttl: () => chain,
-        type: () => chain,
-        strlen: () => chain,
-        llen: () => chain,
-        hlen: () => chain,
-        scard: () => chain,
-        zcard: () => chain,
-        xlen: () => chain,
-        exec: async () => [
-          [null, 100],
-          [null, idleByKey[key]],
-          [null, null],
-          [null, -1],
-          [null, 'string'],
-          [null, 5],
-        ],
-      };
-      return chain;
-    };
+    const pipeline = fakeKeyPipeline((command, key) => {
+      if (command === 'OBJECT IDLETIME') return [null, idleByKey[key]];
+      return [null, command === 'TTL' ? -1 : 100];
+    });
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),
@@ -216,30 +220,128 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
   });
 });
 
-describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databases', () => {
-  function scanChain() {
-    const chain = {
-      memory: () => chain,
-      object: () => chain,
-      ttl: () => chain,
-      type: () => chain,
-      strlen: () => chain,
-      llen: () => chain,
-      hlen: () => chain,
-      scard: () => chain,
-      zcard: () => chain,
-      xlen: () => chain,
-      exec: async () => [
-        [null, 100],
-        [null, 10],
-        [null, null],
-        [null, -1],
-        [null, 'string'],
-        [null, 5],
-      ],
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () => {
+  function makeAdapter(
+    types: Record<string, string>,
+    reply: (command: string, key: string) => PipelineReply,
+    sent: string[],
+  ) {
+    const keys = Object.keys(types);
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    (adapter as unknown as { _client: unknown })._client = {
+      dbsize: jest.fn().mockResolvedValue(keys.length),
+      scan: jest.fn().mockResolvedValue(['0', keys]),
+      info: jest.fn().mockResolvedValue(`# Keyspace\r\ndb0:keys=${keys.length},expires=0,avg_ttl=0`),
+      pipeline: fakeKeyPipeline(reply, sent, types),
     };
-    return chain;
+    (adapter as unknown as { config: unknown }).config = {};
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
+    (adapter as unknown as { logger: unknown }).logger = { debug: jest.fn(), warn: jest.fn() };
+    return adapter;
   }
+
+  it('sends only the size command that matches each key type', async () => {
+    const sent: string[] = [];
+    const adapter = makeAdapter(
+      { s: 'string', l: 'list', h: 'hash', z: 'zset', j: 'ReJSON-RL' },
+      () => [null, 3],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const sizeCommands = sent.filter((c) => /^(STRLEN|LLEN|HLEN|SCARD|ZCARD|XLEN)$/.test(c));
+    expect(sizeCommands.sort()).toEqual(['HLEN', 'LLEN', 'STRLEN', 'ZCARD']);
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(5).fill('OBJECT IDLETIME'));
+    expect(result.keyDetails?.find((k) => k.keyName === 'l')?.cardinality).toBe(3);
+  });
+
+  it('drops a type that went stale and ignores inherited type names', async () => {
+    const sent: string[] = [];
+    const wrongType = new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const adapter = makeAdapter({ moved: 'string', proto: '__proto__' }, (command) =>
+      command === 'STRLEN' ? [wrongType, null] : [null, 3],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('moved')?.keyType).toBeNull();
+    expect(byName.get('proto')).toEqual(expect.objectContaining({ keyType: '__proto__', cardinality: null }));
+    expect(sent.filter((c) => c === 'STRLEN')).toHaveLength(1);
+  });
+
+  it('reports a key deleted after the batch TYPE as gone', async () => {
+    const adapter = makeAdapter({ gone: 'string', kept: 'string' }, (command, key) => {
+      if (command === 'TTL') return [null, key === 'gone' ? -2 : -1];
+      return [null, key === 'gone' && command === 'STRLEN' ? 0 : 3];
+    }, []);
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('gone')).toEqual(expect.objectContaining({ keyType: 'none', cardinality: null }));
+    expect(byName.get('kept')).toEqual(expect.objectContaining({ keyType: 'string', cardinality: 3 }));
+  });
+
+  it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
+    const sent: string[] = [];
+    const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');
+    const adapter = makeAdapter({ a: 'string', b: 'string', c: 'string' }, (command) =>
+      command === 'OBJECT IDLETIME' ? [lfuError, null] : [null, 7],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual([
+      'OBJECT IDLETIME',
+      'OBJECT FREQ',
+      'OBJECT FREQ',
+      'OBJECT FREQ',
+    ]);
+    expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(3);
+  });
+
+  it('keeps OBJECT IDLETIME when a key fails for another reason', async () => {
+    const sent: string[] = [];
+    const noperm = new Error("NOPERM this user has no permissions to access the 'b' key");
+    const adapter = makeAdapter({ a: 'string', b: 'string', c: 'string' }, (command, key) =>
+      command === 'OBJECT IDLETIME' && key === 'b' ? [noperm, null] : [null, 7],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(3).fill('OBJECT IDLETIME'));
+    expect(result.keyDetails?.filter((k) => k.idleSeconds === 7)).toHaveLength(2);
+  });
+
+  it('still scans the batch when the TYPE pipeline fails', async () => {
+    const sent: string[] = [];
+    const adapter = makeAdapter({ a: 'string', b: 'list' }, () => [null, 3], sent);
+    const client = (adapter as unknown as { _client: { pipeline: () => { exec: () => Promise<unknown> } } })._client;
+    const pipeline = client.pipeline;
+    let first = true;
+    client.pipeline = () => {
+      const chain = pipeline();
+      if (first) {
+        first = false;
+        chain.exec = () => Promise.reject(new Error('connection reset'));
+      }
+      return chain;
+    };
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(result.scanned).toBe(2);
+    expect(result.keyDetails?.every((k) => k.cardinality === null)).toBe(true);
+  });
+});
+
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databases', () => {
+  const scanChain = fakeKeyPipeline((command) => [null, command === 'TTL' ? -1 : 10]);
 
   function fakeScanClient(keys: string[]) {
     return {
@@ -572,39 +674,18 @@ describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
     const keys = opts.keys ?? ['social'];
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
     const graphCalls: string[] = [];
-    const pipeline = () => {
-      const pipelineCalls: string[] = [];
-      const chain = {
-        memory: () => chain,
-        object: () => chain,
-        ttl: () => chain,
-        type: () => chain,
-        strlen: () => chain,
-        llen: () => chain,
-        hlen: () => chain,
-        scard: () => chain,
-        zcard: () => chain,
-        xlen: () => chain,
-        call: (command: string) => {
-          pipelineCalls.push(command);
+    const pipeline = fakeKeyPipeline(
+      (command) => {
+        if (command.startsWith('GRAPH.')) {
           graphCalls.push(command);
-          return chain;
-        },
-        exec: async () =>
-          pipelineCalls.length > 0
-            ? pipelineCalls.map((command) =>
-                command === 'GRAPH.MEMORY' ? opts.graphMemory : opts.graphStats,
-              )
-            : [
-                [null, opts.memoryUsage],
-                [null, 5],
-                [null, null],
-                [null, -1],
-                [null, opts.keyType],
-              ],
-      };
-      return chain;
-    };
+          return command === 'GRAPH.MEMORY' ? opts.graphMemory : opts.graphStats;
+        }
+        if (command === 'MEMORY USAGE') return [null, opts.memoryUsage];
+        return [null, command === 'TTL' ? -1 : 5];
+      },
+      [],
+      Object.fromEntries(keys.map((key) => [key, opts.keyType])),
+    );
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),

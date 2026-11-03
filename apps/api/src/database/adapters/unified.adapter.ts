@@ -59,6 +59,21 @@ import { withTimeout } from '../../common/utils/with-timeout';
 import type { ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 
+// OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
+// under any other; both errors name the LFU policy.
+function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
+  return !!error && /LFU maxmemory policy/i.test(error.message);
+}
+
+const SIZE_COMMAND_BY_TYPE = new Map<string, string>([
+  ['string', 'STRLEN'],
+  ['list', 'LLEN'],
+  ['hash', 'HLEN'],
+  ['set', 'SCARD'],
+  ['zset', 'ZCARD'],
+  ['stream', 'XLEN'],
+]);
+
 export interface UnifiedDatabaseAdapterConfig {
   host: string;
   port: number;
@@ -168,6 +183,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // the current key-analytics collection. See probeGraphKey.
   private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
   private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
+  // Which OBJECT probe the key scan sends; flips when the server's eviction
+  // policy rejects the current one (see isLfuPolicyMismatch).
+  private keyScanUsesLfu = false;
   // Custom CA / client certificate, read at construction and re-read from disk
   // when the files change (see refreshTlsMaterial). A resolution failure is
   // deferred to connect() so it surfaces as a connection error instead of a
@@ -1297,11 +1315,17 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     let scanned = 0;
 
     do {
-      const [newCursor, keys] = await client.scan(cursor, 'COUNT', options.scanBatchSize);
+      const [newCursor, scannedKeys] = await client.scan(cursor, 'COUNT', options.scanBatchSize);
       cursor = newCursor;
+      const keys = options.fullScan
+        ? scannedKeys
+        : scannedKeys.slice(0, Math.max(0, options.sampleSize - scanned));
+      // TYPE first, so each key gets only its own size probe. Probing every type
+      // returned WRONGTYPE for the rest, which showed up in the server's
+      // error_replies and tripped BetterDB's own error-reply detection.
+      const types = await this.readKeyTypes(client, keys);
 
-      for (const key of keys) {
-        if (!options.fullScan && scanned >= options.sampleSize) break;
+      for (const [index, key] of keys.entries()) {
         scanned++;
 
         const pattern = extractPattern(key);
@@ -1321,66 +1345,43 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         };
 
         try {
+          let keyType = types[index];
+          const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE.get(keyType) : undefined;
+          let sentFreq = this.keyScanUsesLfu;
           const pipeline = client.pipeline();
           pipeline.memory('USAGE', key);
-          pipeline.object('IDLETIME', key);
-          pipeline.object('FREQ', key);
+          this.queueObjectProbe(pipeline, key, sentFreq);
           pipeline.ttl(key);
-          pipeline.type(key);
-          // Per-type size probes; wrong-type calls return WRONGTYPE errors we ignore,
-          // and we read only the one matching TYPE. Single round-trip per key.
-          pipeline.strlen(key);
-          pipeline.llen(key);
-          pipeline.hlen(key);
-          pipeline.scard(key);
-          pipeline.zcard(key);
-          pipeline.xlen(key);
+          if (sizeCommand) pipeline.call(sizeCommand, key);
 
           const results = (await pipeline.exec()) || [];
-          const [
-            memResult,
-            idleResult,
-            freqResult,
-            ttlResult,
-            typeResult,
-            strlenResult,
-            llenResult,
-            hlenResult,
-            scardResult,
-            zcardResult,
-            xlenResult,
-          ] = results;
+          const [memResult, , ttlResult, sizeResult] = results;
+          let objectResult = results[1];
+          // Set from the probe this key sent, not by toggling, so concurrent
+          // scans on one adapter can't flip it back.
+          if (isLfuPolicyMismatch(objectResult?.[0])) {
+            sentFreq = !sentFreq;
+            this.keyScanUsesLfu = sentFreq;
+            const retry = this.queueObjectProbe(client.pipeline(), key, sentFreq);
+            objectResult = ((await retry.exec()) || [])[0];
+          }
+          const idleResult = sentFreq ? undefined : objectResult;
+          const freqResult = sentFreq ? objectResult : undefined;
 
           stats.count++;
-
-          const num = (r: [Error | null, unknown] | undefined): number | null =>
-            r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
           let mem =
             memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
 
-          const keyType =
-            typeResult && !typeResult[0] && typeResult[1] != null ? String(typeResult[1]) : null;
-          let cardinality: number | null = null;
-          switch (keyType) {
-            case 'string':
-              cardinality = num(strlenResult);
-              break;
-            case 'list':
-              cardinality = num(llenResult);
-              break;
-            case 'hash':
-              cardinality = num(hlenResult);
-              break;
-            case 'set':
-              cardinality = num(scardResult);
-              break;
-            case 'zset':
-              cardinality = num(zcardResult);
-              break;
-            case 'stream':
-              cardinality = num(xlenResult);
-              break;
+          let cardinality: number | null =
+            sizeResult && !sizeResult[0] && sizeResult[1] != null ? (sizeResult[1] as number) : null;
+          // The key changed type since the batch TYPE, so that type is stale.
+          if (sizeResult?.[0]?.message.startsWith('WRONGTYPE')) keyType = null;
+          // The key was deleted since the batch TYPE (TTL -2): report it as gone,
+          // as a single pipeline did, not as its old type with size 0.
+          if (ttlResult && !ttlResult[0] && ttlResult[1] === -2) {
+            keyType = 'none';
+            cardinality = null;
           }
           // Only FalkorDB's graph module registers the graphdata type, so TYPE
           // alone proves the GRAPH.* commands exist.
@@ -1460,6 +1461,35 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       keyDetails: pruneKeyDetails(keyDetails),
       db,
     };
+  }
+
+  private queueObjectProbe<P extends ReturnType<Valkey['pipeline']>>(
+    pipeline: P,
+    key: string,
+    freq: boolean,
+  ): P {
+    if (freq) pipeline.object('FREQ', key);
+    else pipeline.object('IDLETIME', key);
+    return pipeline;
+  }
+
+  private async readKeyTypes(client: Valkey, keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
+    const pipeline = client.pipeline();
+    for (const key of keys) pipeline.type(key);
+    let results: Awaited<ReturnType<typeof pipeline.exec>>;
+    try {
+      results = await pipeline.exec();
+    } catch (err) {
+      // Scan the batch without size probes rather than losing the whole database.
+      this.logger.debug(`Failed to read key types: ${err}`);
+      return keys.map(() => null);
+    }
+    results = results || [];
+    return keys.map((_, i) => {
+      const result = results[i];
+      return result && !result[0] && result[1] != null ? String(result[1]) : null;
+    });
   }
 
   async getVectorIndexList(): Promise<string[]> {

@@ -10,6 +10,14 @@ export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
 export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
+// Names of the connections BetterDB itself opens: the monitor (and its
+// -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
+// BetterDB-Migration-* stays visible on purpose.
+const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
+
+function isMonitorClientName(name: string): boolean {
+  return OWN_CLIENT_NAMES.some((own) => name === own || name.startsWith(`${own}-`));
+}
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
@@ -251,6 +259,9 @@ export function rankRetryAmplificationContributors(
     addCommandGrowth(map, input.before, input.first, input.latest);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
+  for (const [id, acc] of map) {
+    if (acc.keyKind === 'name' && isMonitorClientName(acc.key)) map.delete(id);
+  }
 
   const contributorOf = new Map(
     [...map.values()].map((acc) => {
