@@ -54,6 +54,7 @@ import {
   RESOLVER_BACKED_METRICS,
   RecoveryProbe,
   incidentStartOf,
+  signalKey,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
 import {
@@ -6566,14 +6567,24 @@ export class AnomalyService
     events.push(anomaly);
     this.incidentEventsById.set(anomaly.id, anomaly);
     if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
-      const evicted = events.shift();
-      if (evicted) {
-        this.incidentEventsById.delete(evicted.id);
-        this.incidentEventsDroppedThrough.set(connectionId, evicted.timestamp);
-      }
+      const [evicted] = events.splice(this.incidentEventToEvict(events), 1);
+      this.incidentEventsById.delete(evicted.id);
+      const droppedThrough = this.incidentEventsDroppedThrough.get(connectionId) ?? evicted.timestamp;
+      this.incidentEventsDroppedThrough.set(connectionId, Math.max(droppedThrough, evicted.timestamp));
     }
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
+  }
+
+  private incidentEventToEvict(events: AnomalyEvent[]): number {
+    const seen = new Set<string>();
+    const repeat = events.findIndex((event) => {
+      const key = signalKey(event);
+      if (seen.has(key)) return true;
+      seen.add(key);
+      return false;
+    });
+    return repeat === -1 ? 0 : repeat;
   }
 
   private forgetIncidentEvents(

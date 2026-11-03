@@ -10680,14 +10680,15 @@ describe('AnomalyService', () => {
       expect(walk).not.toHaveBeenCalled();
     });
 
-    it('forgets an event once it leaves the per connection window', async () => {
+    it('forgets a repeated signal once the per connection window is full', async () => {
       const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
       await (service as any).addAnomaly(anomaly({ id: 'oldest' }), ctx);
       for (let i = 0; i < 200; i += 1) {
         await (service as any).addAnomaly(anomaly({ id: `next-${i}` }), ctx);
       }
 
-      expect((service as any).findIncidentEvent('oldest')).toBeUndefined();
+      expect((service as any).findIncidentEvent('oldest')?.id).toBe('oldest');
+      expect((service as any).findIncidentEvent('next-0')).toBeUndefined();
       expect((service as any).findIncidentEvent('next-199')?.id).toBe('next-199');
     });
 
@@ -11639,6 +11640,54 @@ describe('AnomalyService', () => {
         storm(Date.now());
 
         expect((service as any).incidentEvents.get('storm')).toHaveLength(200);
+      });
+
+      it('keeps the first event of each signal when one signal repeats past the cap', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 52 * MIN, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept.slice(0, 2)).toEqual(['early', 'mem']);
+        expect(kept[2]).toBe('mem-52');
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', 'mem'] }),
+          'conn-1',
+        );
+      });
+
+      it('drops the oldest event and records it when every signal is distinct', () => {
+        const now = Date.now();
+        for (let i = 0; i < 201; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: now - 50 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept[0]).toBe('p99-1');
+        expect((service as any).incidentEventsDroppedThrough.get('conn-1')).toBe(now - 50 * MIN);
       });
 
       it('resolves an event that only the incident buffer still holds', async () => {

@@ -527,6 +527,31 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.recoveredAt).toBe(T0 + 90_000);
     });
 
+    it('reports an unknown recovery for a resolved row without resolvedAt', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ resolved: true }),
+          event({ timestamp: T0 + MIN, resolved: true }),
+          event({
+            metricType: MetricType.CONNECTIONS,
+            timestamp: T0 + 2 * MIN,
+            resolved: true,
+            resolvedAt: T0 + 3 * MIN,
+          }),
+        ],
+        T0 + 5 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.recovery).toEqual({
+        status: 'unknown',
+        openSignals: [],
+        unknownSignals: [MetricType.MEMORY_USED],
+        recoveredAt: null,
+      });
+      expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
+    });
+
     it('does not ask the probe before the settle time', () => {
       const probe = jest.fn().mockReturnValue(T0);
 

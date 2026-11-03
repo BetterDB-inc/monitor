@@ -188,7 +188,7 @@ function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
   );
 }
 
-function signalKey(event: AnomalyEvent): string {
+export function signalKey(event: AnomalyEvent): string {
   const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
   return POINT_IN_TIME_METRICS.has(event.metricType)
     ? `${signal}\u0000${(event.commands ?? []).join(',')}`
@@ -471,7 +471,7 @@ export class IncidentTimelineBuilder {
   }
 
   private recoveredAtIfResolved(event: AnomalyEvent): number | null {
-    return event.resolved ? (event.resolvedAt ?? event.timestamp) : null;
+    return event.resolved ? (event.resolvedAt ?? null) : null;
   }
 
   private recoveredAt(
@@ -481,7 +481,7 @@ export class IncidentTimelineBuilder {
     now: number,
     probe: RecoveryProbe,
   ): number | null | undefined {
-    if (event.resolved) return event.resolvedAt ?? event.timestamp;
+    if (event.resolved) return event.resolvedAt;
     if (now - event.timestamp < this.opts.settleMs) return null;
     return probe({
       connectionId: event.connectionId ?? '',
