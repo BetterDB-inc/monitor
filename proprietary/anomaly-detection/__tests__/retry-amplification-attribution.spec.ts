@@ -368,6 +368,18 @@ describe('retry amplification attribution', () => {
       expect(ranked.map((c) => c.key)).toEqual(['api']);
     });
 
+    it('keeps an application whose name only starts with the monitor name', () => {
+      const ranked = rankRetryAmplificationContributors({
+        before: null,
+        first: null,
+        latest: null,
+        capture: [],
+        newConnections: [{ name: 'BetterDB-Monitoring', user: 'default', ip: '10.0.0.1', count: 9 }],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['BetterDB-Monitoring']);
+    });
+
     it('drops clients whose command rate barely moved', () => {
       const steady = (takenAt: number, total: string) =>
         snapshot(takenAt, [client({ id: '1', name: 'steady', 'tot-cmds': total })]);

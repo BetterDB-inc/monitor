@@ -223,7 +223,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
 describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () => {
   function makeAdapter(
     types: Record<string, string>,
-    reply: (command: string) => PipelineReply,
+    reply: (command: string, key: string) => PipelineReply,
     sent: string[],
   ) {
     const keys = Object.keys(types);
@@ -236,6 +236,7 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () =
     };
     (adapter as unknown as { config: unknown }).config = {};
     (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
+    (adapter as unknown as { logger: unknown }).logger = { debug: jest.fn(), warn: jest.fn() };
     return adapter;
   }
 
@@ -269,8 +270,44 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () =
       'OBJECT IDLETIME',
       'OBJECT FREQ',
       'OBJECT FREQ',
+      'OBJECT FREQ',
     ]);
-    expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(2);
+    expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(3);
+  });
+
+  it('keeps OBJECT IDLETIME when a key fails for another reason', async () => {
+    const sent: string[] = [];
+    const noperm = new Error("NOPERM this user has no permissions to access the 'b' key");
+    const adapter = makeAdapter({ a: 'string', b: 'string', c: 'string' }, (command, key) =>
+      command === 'OBJECT IDLETIME' && key === 'b' ? [noperm, null] : [null, 7],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(3).fill('OBJECT IDLETIME'));
+    expect(result.keyDetails?.filter((k) => k.idleSeconds === 7)).toHaveLength(2);
+  });
+
+  it('still scans the batch when the TYPE pipeline fails', async () => {
+    const sent: string[] = [];
+    const adapter = makeAdapter({ a: 'string', b: 'list' }, () => [null, 3], sent);
+    const client = (adapter as unknown as { _client: { pipeline: () => { exec: () => Promise<unknown> } } })._client;
+    const pipeline = client.pipeline;
+    let first = true;
+    client.pipeline = () => {
+      const chain = pipeline();
+      if (first) {
+        first = false;
+        chain.exec = () => Promise.reject(new Error('connection reset'));
+      }
+      return chain;
+    };
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(result.scanned).toBe(2);
+    expect(result.keyDetails?.every((k) => k.cardinality === null)).toBe(true);
   });
 });
 

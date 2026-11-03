@@ -59,6 +59,12 @@ import { withTimeout } from '../../common/utils/with-timeout';
 import type { ConnectionOptions } from 'tls';
 import type { DatabaseAuthMode, TlsConfig } from '@betterdb/shared';
 
+// OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
+// under any other; both errors name the LFU policy.
+function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
+  return !!error && /LFU maxmemory policy/i.test(error.message);
+}
+
 const SIZE_COMMAND_BY_TYPE: Record<string, string> = {
   string: 'STRLEN',
   list: 'LLEN',
@@ -177,8 +183,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // the current key-analytics collection. See probeGraphKey.
   private graphMemoryCache = new Map<string, { bytes: number; measuredAt: number }>();
   private graphMemoryProbesLeft = GRAPH_MEMORY_PROBES_PER_SCAN;
-  // OBJECT IDLETIME errors under an LFU maxmemory-policy and OBJECT FREQ errors
-  // under any other, so the key scan sends only one and flips on an error.
+  // Which OBJECT probe the key scan sends; flips when the server's eviction
+  // policy rejects the current one (see isLfuPolicyMismatch).
   private keyScanUsesLfu = false;
   // Custom CA / client certificate, read at construction and re-read from disk
   // when the files change (see refreshTlsMaterial). A resolution failure is
@@ -1341,17 +1347,20 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         try {
           const keyType = types[index];
           const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE[keyType] : undefined;
-          const usesLfu = this.keyScanUsesLfu;
           const pipeline = client.pipeline();
           pipeline.memory('USAGE', key);
-          if (usesLfu) pipeline.object('FREQ', key);
-          else pipeline.object('IDLETIME', key);
+          this.queueObjectProbe(pipeline, key);
           pipeline.ttl(key);
           if (sizeCommand) pipeline.call(sizeCommand, key);
 
           const results = (await pipeline.exec()) || [];
-          const [memResult, objectResult, ttlResult, sizeResult] = results;
-          if (objectResult?.[0]) this.keyScanUsesLfu = !usesLfu;
+          const [memResult, , ttlResult, sizeResult] = results;
+          let objectResult = results[1];
+          if (isLfuPolicyMismatch(objectResult?.[0])) {
+            this.keyScanUsesLfu = !this.keyScanUsesLfu;
+            objectResult = ((await this.queueObjectProbe(client.pipeline(), key).exec()) || [])[0];
+          }
+          const usesLfu = this.keyScanUsesLfu;
           const idleResult = usesLfu ? undefined : objectResult;
           const freqResult = usesLfu ? objectResult : undefined;
 
@@ -1442,11 +1451,25 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     };
   }
 
+  private queueObjectProbe<P extends ReturnType<Valkey['pipeline']>>(pipeline: P, key: string): P {
+    if (this.keyScanUsesLfu) pipeline.object('FREQ', key);
+    else pipeline.object('IDLETIME', key);
+    return pipeline;
+  }
+
   private async readKeyTypes(client: Valkey, keys: string[]): Promise<(string | null)[]> {
     if (keys.length === 0) return [];
     const pipeline = client.pipeline();
     for (const key of keys) pipeline.type(key);
-    const results = (await pipeline.exec()) || [];
+    let results: Awaited<ReturnType<typeof pipeline.exec>>;
+    try {
+      results = await pipeline.exec();
+    } catch (err) {
+      // Scan the batch without size probes rather than losing the whole database.
+      this.logger.debug(`Failed to read key types: ${err}`);
+      return keys.map(() => null);
+    }
+    results = results || [];
     return keys.map((_, i) => {
       const result = results[i];
       return result && !result[0] && result[1] != null ? String(result[1]) : null;

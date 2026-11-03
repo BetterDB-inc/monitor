@@ -13,6 +13,10 @@ export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 // Prefix of every connection BetterDB opens (-keyscan, -Node-..., -Discovery).
 export const MONITOR_CLIENT_NAME_PREFIX = 'BetterDB-Monitor';
 
+function isMonitorClientName(name: string): boolean {
+  return name === MONITOR_CLIENT_NAME_PREFIX || name.startsWith(`${MONITOR_CLIENT_NAME_PREFIX}-`);
+}
+
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
 
 export interface RetryAmplificationContributor {
@@ -254,7 +258,7 @@ export function rankRetryAmplificationContributors(
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
   for (const [id, acc] of map) {
-    if (acc.keyKind === 'name' && acc.key.startsWith(MONITOR_CLIENT_NAME_PREFIX)) map.delete(id);
+    if (acc.keyKind === 'name' && isMonitorClientName(acc.key)) map.delete(id);
   }
 
   const contributorOf = new Map(
