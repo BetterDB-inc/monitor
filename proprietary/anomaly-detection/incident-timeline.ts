@@ -47,7 +47,11 @@ export interface IncidentBoundary {
   scopeId: string;
   startedAt: number;
   anomalyId: string;
+  metricType?: string;
+  connectionId?: string;
 }
+
+type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
 
 export interface IncidentTimelineOptions {
   gapMs: number;
@@ -336,7 +340,7 @@ export class IncidentTimelineBuilder {
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= droppedAt &&
           (event.timestamp - droppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, stored.startedAt));
+            this.bridgesFromDropped(event, stored));
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -367,17 +371,23 @@ export class IncidentTimelineBuilder {
     return latest;
   }
 
-  private bridgesFromDropped(event: AnomalyEvent, startedAt: number): boolean {
-    return this.rules().some(
-      (rule) =>
-        event.timestamp - startedAt <= rule.maxSpanMs &&
-        rule.steps.slice(1).some((step) => step.includes(event.metricType)),
-    );
+  private bridgesFromDropped(event: AnomalyEvent, stored: IncidentBoundary): boolean {
+    if (stored.metricType === undefined) return false;
+    const anchor: RuleStepEvent = {
+      metricType: stored.metricType as MetricType,
+      connectionId: stored.connectionId,
+      timestamp: stored.startedAt,
+    };
+    return this.followsRuleStep([anchor], event);
   }
 
   private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
+    return this.followsRuleStep(current, event);
+  }
+
+  private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
     return this.rules().some((rule) =>
       rule.steps.slice(1).some(
         (step, i) =>

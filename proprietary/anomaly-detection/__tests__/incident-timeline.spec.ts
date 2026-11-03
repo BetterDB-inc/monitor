@@ -705,12 +705,23 @@ describe('IncidentTimelineBuilder', () => {
     });
 
     describe('when the earlier step is no longer held', () => {
-      const dropped = (late: AnomalyEvent) =>
-        new IncidentTimelineBuilder({}, (id) => id, () => [escalation]).build(
+      const anchor = {
+        scopeId: 'conn-a',
+        startedAt: T0,
+        anomalyId: 'z-gone',
+        metricType: MetricType.CONNECTIONS,
+        connectionId: 'conn-a',
+      };
+      const dropped = (
+        late: AnomalyEvent,
+        stored: Partial<typeof anchor> = {},
+        rule: SequenceRule = escalation,
+      ) =>
+        new IncidentTimelineBuilder({}, () => 'conn-a', () => [rule]).build(
           [late],
           T0 + 20 * MIN,
           neverRecovers,
-          [{ scopeId: 'conn-a', startedAt: T0, anomalyId: 'z-gone' }],
+          [{ ...anchor, ...stored }],
           new Map([['conn-a', T0]]),
         );
 
@@ -733,7 +744,7 @@ describe('IncidentTimelineBuilder', () => {
           [event({ id: 'late', timestamp: T0 + 15 * MIN })],
           T0 + 20 * MIN,
           neverRecovers,
-          [{ scopeId: 'conn-a', startedAt: T0, anomalyId: 'z-gone' }],
+          [anchor],
           new Map([['conn-a', T0 + 9 * MIN]]),
         );
 
@@ -744,6 +755,43 @@ describe('IncidentTimelineBuilder', () => {
         const [incident] = dropped(event({ id: 'late', timestamp: T0 + 11 * MIN }));
 
         expect(incidentStartOf(incident.incidentId)).toBe(T0 + 11 * MIN);
+      });
+
+      it('starts afresh when the stored start was not the step before', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }), {
+          metricType: MetricType.MEMORY_USED,
+        });
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('starts afresh when a same-connection rule began on another connection', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN }),
+          { connectionId: 'conn-b' },
+          { ...escalation, sameConnection: true },
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('keeps the stored start when a same-connection rule began on the same connection', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN }),
+          {},
+          { ...escalation, sameConnection: true },
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+
+      it('starts afresh when the stored start does not say what began it', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }), {
+          metricType: undefined,
+          connectionId: undefined,
+        });
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
       });
     });
 

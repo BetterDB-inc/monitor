@@ -10631,7 +10631,13 @@ describe('AnomalyService', () => {
 
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
       expect(storage.saveIncidentBoundaries).toHaveBeenCalledWith([
-        { scopeId: 'conn-1', startedAt: now - MIN, anomalyId: 'live' },
+        {
+          scopeId: 'conn-1',
+          startedAt: now - MIN,
+          anomalyId: 'live',
+          metricType: event.metricType,
+          connectionId: 'conn-1',
+        },
       ]);
 
       (service as any).incidentBoundarySeed = null;

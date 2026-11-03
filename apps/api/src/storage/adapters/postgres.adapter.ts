@@ -2,6 +2,7 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
+import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
@@ -1752,6 +1753,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         PRIMARY KEY (scope_id, started_at, anomaly_id)
       );
       CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
+      ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS metric_type TEXT;
+      ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS connection_id TEXT;
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
@@ -3256,13 +3259,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (boundaries.length === 0) return 0;
 
     const result = await this.pool.query(
-      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
-       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[])
+      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id, metric_type, connection_id)
+       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[], $4::text[], $5::text[])
        ON CONFLICT DO NOTHING`,
       [
         boundaries.map((b) => b.scopeId),
         boundaries.map((b) => b.startedAt),
         boundaries.map((b) => b.anomalyId),
+        boundaries.map((b) => b.metricType ?? null),
+        boundaries.map((b) => b.connectionId ?? null),
       ],
     );
     return result.rowCount ?? 0;
@@ -3273,12 +3278,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (query.scopeIds?.length === 0) return [];
 
     const result = await this.pool.query(
-      `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+      `SELECT scope_id, started_at, anomaly_id, metric_type, connection_id FROM incident_boundaries
        WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
          AND started_at >= $2
          AND ($3::bigint IS NULL OR started_at <= $3)
        UNION ALL
-       SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+       SELECT b.scope_id, b.started_at, b.anomaly_id, b.metric_type, b.connection_id
+       FROM incident_boundaries b
        JOIN (
          SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
          WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
@@ -3287,11 +3293,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
        ORDER BY started_at ASC, anomaly_id ASC`,
       [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
     );
-    return result.rows.map((row) => ({
-      scopeId: row.scope_id,
-      startedAt: Number(row.started_at),
-      anomalyId: row.anomaly_id,
-    }));
+    return result.rows.map(toIncidentBoundary);
   }
 
   async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {

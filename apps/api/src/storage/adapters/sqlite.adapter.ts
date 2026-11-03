@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { toIncidentBoundary, type IncidentBoundaryRow } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -733,6 +734,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (!groupColumns.some((col) => col.name === 'scope_id')) {
       this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN scope_id TEXT').run();
+    }
+    const boundaryColumns = this.db.prepare('PRAGMA table_info(incident_boundaries)').all() as {
+      name: string;
+    }[];
+    if (!boundaryColumns.some((col) => col.name === 'metric_type')) {
+      this.db.prepare('ALTER TABLE incident_boundaries ADD COLUMN metric_type TEXT').run();
+    }
+    if (!boundaryColumns.some((col) => col.name === 'connection_id')) {
+      this.db.prepare('ALTER TABLE incident_boundaries ADD COLUMN connection_id TEXT').run();
     }
     const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
       name: string;
@@ -1935,6 +1945,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         scope_id TEXT NOT NULL,
         started_at INTEGER NOT NULL,
         anomaly_id TEXT NOT NULL,
+        metric_type TEXT,
+        connection_id TEXT,
         PRIMARY KEY (scope_id, started_at, anomaly_id)
       );
 
@@ -3180,13 +3192,21 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (boundaries.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
-      VALUES (?, ?, ?)
+      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id, metric_type, connection_id)
+      VALUES (?, ?, ?, ?, ?)
       ON CONFLICT DO NOTHING
     `);
     const insertMany = this.db.transaction((rows: StoredIncidentBoundary[]) =>
       rows.reduce(
-        (saved, row) => saved + stmt.run(row.scopeId, row.startedAt, row.anomalyId).changes,
+        (saved, row) =>
+          saved +
+          stmt.run(
+            row.scopeId,
+            row.startedAt,
+            row.anomalyId,
+            row.metricType ?? null,
+            row.connectionId ?? null,
+          ).changes,
         0,
       ),
     );
@@ -3202,10 +3222,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const inWindow = query.endTime ? 'AND started_at <= ?' : '';
     const rows = this.db
       .prepare(
-        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+        `SELECT scope_id, started_at, anomaly_id, metric_type, connection_id FROM incident_boundaries
          WHERE ${inScope}started_at >= ? ${inWindow}
          UNION ALL
-         SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
+         SELECT b.scope_id, b.started_at, b.anomaly_id, b.metric_type, b.connection_id
+         FROM incident_boundaries b
          JOIN (
            SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
            WHERE ${inScope}started_at < ?
@@ -3219,12 +3240,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ...(query.endTime ? [query.endTime] : []),
         ...(query.scopeIds ?? []),
         query.startTime,
-      ) as { scope_id: string; started_at: number; anomaly_id: string }[];
-    return rows.map((row) => ({
-      scopeId: row.scope_id,
-      startedAt: row.started_at,
-      anomalyId: row.anomaly_id,
-    }));
+      ) as IncidentBoundaryRow[];
+    return rows.map(toIncidentBoundary);
   }
 
   async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {

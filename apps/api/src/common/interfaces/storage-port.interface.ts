@@ -231,6 +231,8 @@ export interface StoredIncidentBoundary {
   scopeId: string;
   startedAt: number;
   anomalyId: string;
+  metricType?: string;
+  connectionId?: string;
 }
 
 export interface IncidentBoundaryQuery {
