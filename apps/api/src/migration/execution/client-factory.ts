@@ -1,10 +1,12 @@
 import Valkey, { Cluster } from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
-import { assertUsableTlsMaterial, buildTlsOptions, clientCredentials } from '../../database/adapters/tls-material';
+import { assertUsableTlsMaterial, buildTlsOptions, clientCredentials, tlsMaterialFingerprint } from '../../database/adapters/tls-material';
 import { tlsIdentityOptions } from '../../database/adapters/tls-servername';
 
 /** Receives a one-line explanation when a TLS re-read is skipped. */
 export type TlsRefreshErrorHandler = (message: string) => void;
+
+type TlsAuthConfig = Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>;
 
 /**
  * Credentials and TLS options for a per-node client built from a connection
@@ -16,7 +18,7 @@ export type TlsRefreshErrorHandler = (message: string) => void;
  * every node and cannot carry a single servername.
  */
 export function nodeClientAuthOptions(
-  config: Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>,
+  config: TlsAuthConfig,
   host?: string,
   announcedHostname?: string,
 ): { username: string | undefined; password: string | undefined; tls: ReturnType<typeof buildTlsOptions> } {
@@ -28,30 +30,60 @@ export function nodeClientAuthOptions(
 }
 
 /**
+ * Returns a function that re-reads file-sourced material only when the files
+ * changed on disk since the last usable read (stat fingerprint), and returns
+ * the new options, or undefined when nothing changed or the files are not
+ * usable. A failure is reported once per distinct error, not on every call.
+ */
+function tlsMaterialReloader(
+  config: TlsAuthConfig,
+  host?: string,
+  announcedHostname?: string,
+  onError?: TlsRefreshErrorHandler,
+): (label: string) => ReturnType<typeof buildTlsOptions> {
+  let last: string | undefined;
+  let lastError: string | undefined;
+  return (label) => {
+    try {
+      // Fingerprint before reading, so a change during the read is caught next time.
+      const fingerprint = tlsMaterialFingerprint(config.tlsConfig);
+      if (fingerprint !== undefined && fingerprint === last) return undefined;
+      const { tls } = nodeClientAuthOptions(config, host, announcedHostname);
+      if (!tls) return undefined;
+      assertUsableTlsMaterial(tls);
+      last = fingerprint;
+      lastError = undefined;
+      return tls;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== lastError) onError?.(`Keeping previously loaded TLS files for ${label}: ${message}`);
+      lastError = message;
+      return undefined;
+    }
+  };
+}
+
+/**
  * Re-read file-sourced TLS material before a client reconnects, so a
  * certificate rotated while a migration runs is presented on the next dial
  * (iovalkey reads `options.tls` when it opens each socket). Material that does
  * not parse as a matching pair (a rotation caught mid-write) or cannot be read
- * keeps the previously loaded options; `onError` is told why. Inline material
- * never changes, so nothing is installed for it.
+ * keeps the previously loaded options; `onError` is told why, once per
+ * distinct error. Unchanged files are not re-read. Inline material never
+ * changes, so nothing is installed for it.
  */
 export function attachTlsRefresh(
   client: Valkey,
-  config: Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>,
+  config: TlsAuthConfig,
   host?: string,
   announcedHostname?: string,
   onError?: TlsRefreshErrorHandler,
 ): void {
   if (!config.tls || config.tlsConfig?.source !== 'file') return;
+  const reload = tlsMaterialReloader(config, host, announcedHostname, onError);
   client.on('reconnecting', () => {
-    try {
-      const { tls } = nodeClientAuthOptions(config, host, announcedHostname);
-      if (!tls) return;
-      assertUsableTlsMaterial(tls);
-      client.options.tls = tls;
-    } catch (error) {
-      onError?.(`Keeping previously loaded TLS files for ${client.options.host}:${client.options.port}: ${error instanceof Error ? error.message : error}`);
-    }
+    const tls = reload(`${client.options.host}:${client.options.port}`);
+    if (tls) client.options.tls = tls;
   });
 }
 
@@ -60,7 +92,7 @@ export function attachTlsRefresh(
  * `retryStrategy: null`: a node whose socket drops is ended and rebuilt from the
  * Cluster's `redisOptions`, so `reconnecting` never fires on a node and a
  * per-node reconnect hook would never run. Instead, each time the pool adds a
- * node (`+node`, emitted before the lazy node's first dial) the files are
+ * node (`+node`, emitted before the lazy node's first dial) changed files are
  * re-read and validated, the new node is given the current material, and the
  * Cluster's `redisOptions.tls` is refreshed so every node the pool builds later
  * starts from it. Unusable or unreadable files leave both as they were.
@@ -68,18 +100,12 @@ export function attachTlsRefresh(
 function refreshClusterNodeTls(
   cluster: Cluster,
   node: Valkey,
-  config: Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>,
-  onError?: TlsRefreshErrorHandler,
+  reload: (label: string) => ReturnType<typeof buildTlsOptions>,
 ): void {
-  try {
-    const { tls } = nodeClientAuthOptions(config);
-    if (!tls) return;
-    assertUsableTlsMaterial(tls);
-    node.options.tls = tls;
-    if (cluster.options.redisOptions) cluster.options.redisOptions.tls = tls;
-  } catch (error) {
-    onError?.(`Keeping previously loaded TLS files for ${node.options.host}:${node.options.port}: ${error instanceof Error ? error.message : error}`);
-  }
+  const tls = reload(`${node.options.host}:${node.options.port}`);
+  if (!tls) return;
+  node.options.tls = tls;
+  if (cluster.options.redisOptions) cluster.options.redisOptions.tls = tls;
 }
 
 /**
@@ -128,11 +154,15 @@ export function createTargetClient(
       ...(config.tls ? { dnsLookup: (address: string, callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void) => callback(null, address, 4) } : {}),
     },
   );
-  // Node clients never emit `reconnecting` (see refreshClusterNodeTls), so the
-  // files are re-read as each node is added. No host here: the Cluster path
-  // carries no per-node identity options (see above).
-  if (config.tls && config.tlsConfig?.source === 'file') {
-    cluster.on('+node', (node: Valkey) => refreshClusterNodeTls(cluster, node, config, onTlsRefreshError));
+  // redisOptions are shared by every node, so SNI is set per node as the pool
+  // adds it (a node dialled by IP gets none). Node clients never emit
+  // `reconnecting` (see refreshClusterNodeTls), so changed files are re-read here too.
+  if (config.tls) {
+    const reload = config.tlsConfig?.source === 'file' ? tlsMaterialReloader(config, undefined, undefined, onTlsRefreshError) : undefined;
+    cluster.on('+node', (node: Valkey) => {
+      if (reload) refreshClusterNodeTls(cluster, node, reload);
+      node.options.tls = { ...tlsIdentityOptions(node.options.host as string), ...node.options.tls };
+    });
   }
 
   return cluster as unknown as Valkey;
