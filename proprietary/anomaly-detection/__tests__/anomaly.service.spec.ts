@@ -12054,7 +12054,7 @@ describe('AnomalyService', () => {
         expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
       });
 
-      it('settles a legacy row without a replica address after the resync window', async () => {
+      it('settles a legacy row without a replica address once the window passes and replicas are online', async () => {
         (service as any).connectionRegistry.getConfig.mockReturnValue({});
         storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
           metricType === MetricType.RESYNC_ESCALATION && offset === 0
@@ -12073,6 +12073,9 @@ describe('AnomalyService', () => {
 
         clock += RESYNC_ESCALATION_WINDOW_MS + 1;
         await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+        await pollPrimary({ bytes: 2000 });
 
         expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
       });

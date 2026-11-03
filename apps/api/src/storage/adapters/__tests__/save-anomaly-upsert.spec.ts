@@ -90,6 +90,15 @@ describe.each<[string, AdapterFactory]>(adapters)(
       ]);
     });
 
+    it('fills a missing kind from a later batch save', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.saveAnomalyEvents([event({ kind: 'upgrade_regression' })], CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.kind).toBe('upgrade_regression');
+    });
+
     it('stores the regressed commands and the event sequence', async () => {
       const fields = { commands: ['get', 'set'], eventSequence: 7 };
       await storage.saveAnomalyEvent(event(fields), CONN);
