@@ -4453,6 +4453,25 @@ describe('AnomalyService', () => {
       });
     });
 
+    it('leaves command growth out when the pre-episode readings fall in the previous episode', async () => {
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'storm', keyKind: 'name', totalCommands }]]),
+      });
+      const history = [reading(500_000, 0), reading(560_000, 60_000), reading(660_000, 120_000)];
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        history,
+        600_000,
+        660_000,
+        580_000,
+      );
+
+      expect(ranked).toBeNull();
+    });
+
     it('gives up on an attribution read that hangs', async () => {
       jest.useFakeTimers();
       try {

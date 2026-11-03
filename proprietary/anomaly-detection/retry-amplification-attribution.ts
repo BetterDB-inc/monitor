@@ -143,8 +143,11 @@ export function selectClientSnapshots(
   history: ClientCommandSnapshot[],
   episodeStart: number,
   until: number,
+  notBefore: number | null = null,
 ): EpisodeClientSnapshots {
-  const preEpisode = history.filter((s) => s.takenAt <= episodeStart);
+  const preEpisode = history.filter(
+    (s) => s.takenAt <= episodeStart && (notBefore === null || s.takenAt > notBefore),
+  );
   const during = history.filter((s) => s.takenAt > episodeStart && s.takenAt <= until);
   return {
     before: preEpisode[preEpisode.length - 2] ?? null,

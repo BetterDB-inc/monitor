@@ -4,6 +4,7 @@ import {
   observePushCadence,
   latestEpisodeStart,
   openEpisodeStart,
+  precedingEpisodeEnd,
   retryAmplificationMaxPollGap,
   retryAmplificationRearm,
   evaluateRetryAmplification,
@@ -175,6 +176,22 @@ describe('retry amplification detector', () => {
     expect(d.findings).toHaveLength(0);
     expect(d.state.lastEpisode?.classification).toBe('transient');
     expect(d.state.lastEpisode?.windows).toBe(2);
+  });
+
+  it('remembers where the episode before the latest one ended', () => {
+    const d = new Driver();
+    d.baseline();
+    d.windows(hot(1.6), 2);
+    d.windows(BASE, 2);
+    const firstEnd = d.state.lastEpisode!.endedAt;
+    expect(precedingEpisodeEnd(d.state)).toBeNull();
+
+    d.windows(hot(1.6), 2);
+    expect(precedingEpisodeEnd(d.state)).toBe(firstEnd);
+
+    d.windows(BASE, 2);
+    expect(d.state.lastEpisode!.endedAt).toBeGreaterThan(firstEnd);
+    expect(precedingEpisodeEnd(d.state)).toBe(firstEnd);
   });
 
   it('does not alert on organic growth through a fixed pool under a P99 regression', () => {

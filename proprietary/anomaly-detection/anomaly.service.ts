@@ -285,6 +285,7 @@ import {
   RetryAmplificationStatus,
   describeRetryAmplificationState,
   latestEpisodeStart,
+  precedingEpisodeEnd,
   openEpisodeStart,
   retryAmplificationRearm,
   observePushCadence,
@@ -412,6 +413,7 @@ interface RetryAmplificationReport {
   clientSnapshots: ClientCommandSnapshot[];
   attributionStart: number;
   closedAt: number | undefined;
+  notBefore: number | null;
   timestamp: number;
   rearm: () => void;
 }
@@ -3827,6 +3829,7 @@ export class AnomalyService
       clientSnapshots,
       attributionStart,
       closedAt,
+      notBefore: precedingEpisodeEnd(state),
       timestamp,
       rearm: retryAmplificationRearm(state, finding),
     });
@@ -3854,6 +3857,7 @@ export class AnomalyService
     clientSnapshots,
     attributionStart,
     closedAt,
+    notBefore,
     timestamp,
     rearm,
   }: RetryAmplificationReport): Promise<void> {
@@ -3862,6 +3866,7 @@ export class AnomalyService
       clientSnapshots,
       attributionStart,
       closedAt ?? timestamp,
+      notBefore,
     );
     if (this.retryAmplificationState.get(ctx.connectionId) !== state) return;
     this.retryAmplificationContributors.set(ctx.connectionId, {
@@ -3989,8 +3994,9 @@ export class AnomalyService
     clientSnapshots: ClientCommandSnapshot[],
     episodeStart: number,
     until: number,
+    notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until);
+    const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];
