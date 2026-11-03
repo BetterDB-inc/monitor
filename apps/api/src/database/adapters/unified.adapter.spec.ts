@@ -10,6 +10,7 @@ import {
   WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
+import * as tlsMaterial from './tls-material';
 import { generateTlsPair, type TlsPair } from '../../../test/helpers/tls-fixtures';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
@@ -903,15 +904,24 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
       authMode: 'certificate',
       tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
     });
+  // An in-place rewrite within one filesystem timestamp tick can keep the stat
+  // fingerprint; give every write a distinct mtime so change detection is deterministic.
+  let mtime = 1_700_000_000;
+  const writeFile = (name: string, content: string) => {
+    const file = path.join(certDir, name);
+    fs.writeFileSync(file, content);
+    mtime += 1;
+    fs.utimesSync(file, mtime, mtime);
+  };
   const writePair = (pair: TlsPair) => {
-    fs.writeFileSync(path.join(certDir, 'client.crt'), pair.cert);
-    fs.writeFileSync(path.join(certDir, 'client.key'), pair.key);
+    writeFile('client.crt', pair.cert);
+    writeFile('client.key', pair.key);
   };
   const certOf = (holder: { options: { tls?: { cert?: unknown } } }) => (holder.options.tls?.cert as Buffer | string | undefined)?.toString();
 
   it('adopts a mismatched pair at construction with a warning rather than failing, so the reconnect refresh can heal it', () => {
     // Files caught mid-rotation at boot: certificate B next to key A.
-    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    writeFile('client.crt', pairB.cert);
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const adapter = fileAdapter();
@@ -921,7 +931,7 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
       expect(material.tlsMaterial.cert?.toString()).toBe(pairB.cert);
 
       // The key lands: the forced re-read before a reconnect adopts the complete pair.
-      fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+      writeFile('client.key', pairB.key);
       (adapter as unknown as { refreshTlsMaterial(force: boolean): void }).refreshTlsMaterial(true);
       const client = (adapter as unknown as { _client: { options: { tls?: { cert?: unknown; key?: unknown } } } })._client;
       expect(certOf(client)).toBe(pairB.cert);
@@ -932,7 +942,7 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
   });
 
   it('does not record a fingerprint for unusable material, so a plain refresh re-reads it', () => {
-    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    writeFile('client.crt', pairB.cert);
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const adapter = fileAdapter();
@@ -946,7 +956,7 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
 
       // Simulate the race: the key landed after the read, so the files on disk
       // are now complete and a fingerprint taken now would match them.
-      fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+      writeFile('client.key', pairB.key);
       internals.tlsMaterialCheckedAt = 0;
       internals.refreshTlsMaterial();
       expect(internals.tlsMaterial.key?.toString()).toBe(pairB.key);
@@ -999,16 +1009,73 @@ describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', (
     const client = adapter.getClient();
 
     // Only the certificate has been replaced so far: the files do not match.
-    fs.writeFileSync(path.join(certDir, 'client.crt'), pairB.cert);
+    writeFile('client.crt', pairB.cert);
     client.emit('reconnecting');
     expect(certOf(client)).toBe(pairA.cert);
     expect(client.options.tls?.key?.toString()).toBe(pairA.key);
 
     // The key lands: the next refresh adopts the complete new pair.
-    fs.writeFileSync(path.join(certDir, 'client.key'), pairB.key);
+    writeFile('client.key', pairB.key);
     client.emit('reconnecting');
     expect(certOf(client)).toBe(pairB.cert);
     expect(client.options.tls?.key?.toString()).toBe(pairB.key);
+  });
+
+  it('re-reads before every reconnect but logs a change only when the files changed', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    const read = jest.spyOn(tlsMaterial, 'resolveTlsMaterial');
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const changedLogs = () =>
+      log.mock.calls.filter(([m]) => /TLS files changed on disk/.test(String(m))).length;
+    try {
+      client.emit('reconnecting');
+      client.emit('reconnecting');
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(changedLogs()).toBe(0);
+
+      writeFile('client.crt', pairA.cert);
+      client.emit('reconnecting');
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(changedLogs()).toBe(1);
+    } finally {
+      read.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('installs freshly read material on a forced reconnect when the fingerprint is unchanged', () => {
+    const fingerprint = jest.spyOn(tlsMaterial, 'tlsMaterialFingerprint').mockReturnValue('constant');
+    try {
+      const adapter = fileAdapter();
+      const client = adapter.getClient();
+      writePair(pairB);
+      client.emit('reconnecting');
+      expect(certOf(client)).toBe(pairB.cert);
+    } finally {
+      fingerprint.mockRestore();
+    }
+  });
+
+  it('warns once while the files stay unusable and logs when they recover', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      writeFile('client.crt', pairB.cert);
+      client.emit('reconnecting');
+      client.emit('reconnecting');
+      expect(warn.mock.calls.filter(([m]) => /Keeping previously loaded TLS files/.test(String(m)))).toHaveLength(1);
+
+      writeFile('client.key', pairB.key);
+      client.emit('reconnecting');
+      expect(log).toHaveBeenCalledWith('TLS files on disk are usable again');
+      expect(certOf(client)).toBe(pairB.cert);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it('keeps the previously loaded material when the rotated file is unreadable', () => {
