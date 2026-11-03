@@ -1,64 +1,75 @@
+# Prometheus alerting rules for BetterDB Monitor. Load with `rule_files:` in
+# prometheus.yml, or install them as a PrometheusRule with the Helm chart
+# (metrics.prometheusRule.enabled=true).
+#
+# Every alert carries the monitored instance in its `connection` label. Rules
+# that aggregate keep `connection` (`sum by (connection)`), so one monitor
+# watching many instances raises one alert per instance, named after it.
+#
+# The chart ships a byte-identical copy at
+# charts/betterdb-monitor/files/alert-rules.yaml. Edit this file, then run
+# `node scripts/sync-chart-observability.mjs` to refresh the copy.
 groups:
   - name: betterdb-anomaly-alerts
     rules:
       # Critical anomaly detected
       - alert: BetterDBCriticalAnomaly
-        expr: increase(betterdb_anomaly_events_total{severity="critical"}[5m]) > 0
+        expr: sum by (connection, metric_type) (increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Critical anomaly detected on {{ $labels.instance }}"
+          summary: "Critical anomaly detected on {{ $labels.connection }}"
           description: "BetterDB detected a critical anomaly for metric {{ $labels.metric_type }}. Check the Anomaly Dashboard for details."
 
       # Multiple warnings in short period
       - alert: BetterDBWarningSpike
-        expr: increase(betterdb_anomaly_events_total{severity="warning"}[5m]) > 5
+        expr: sum by (connection) (increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Multiple warning anomalies on {{ $labels.instance }}"
+          summary: "Multiple warning anomalies on {{ $labels.connection }}"
           description: "{{ $value }} warning-level anomalies detected in the last 5 minutes."
 
       # Memory pressure pattern
       - alert: BetterDBMemoryPressure
-        expr: increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m]) > 0
+        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Memory pressure detected on {{ $labels.instance }}"
+          summary: "Memory pressure detected on {{ $labels.connection }}"
           description: "BetterDB detected memory pressure pattern. Memory usage and evictions are elevated."
 
       # Auth attack pattern
       - alert: BetterDBAuthAnomaly
-        expr: increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m]) > 0
+        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "Authentication anomaly on {{ $labels.instance }}"
+          summary: "Authentication anomaly on {{ $labels.connection }}"
           description: "Multiple ACL denied events detected. Possible brute force attempt or misconfigured client."
 
       # Connection leak pattern
       - alert: BetterDBConnectionLeak
-        expr: increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m]) > 0
+        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Possible connection leak on {{ $labels.instance }}"
+          summary: "Possible connection leak on {{ $labels.connection }}"
           description: "Connections increasing without proportional command activity."
 
       # Detection system not ready
       - alert: BetterDBAnomalyDetectionWarming
-        expr: (sum(betterdb_anomaly_buffer_ready) / count(betterdb_anomaly_buffer_ready)) < 1
+        expr: min by (connection) (betterdb_anomaly_buffer_ready) < 1
         for: 5m
         labels:
           severity: info
         annotations:
-          summary: "Anomaly detection warming up on {{ $labels.instance }}"
+          summary: "Anomaly detection warming up on {{ $labels.connection }}"
           description: "Some metric buffers are still collecting baseline data. Detection accuracy may be reduced."
 
       # High number of unresolved critical anomalies
@@ -68,17 +79,17 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Multiple unresolved critical anomalies on {{ $labels.instance }}"
+          summary: "Multiple unresolved critical anomalies on {{ $labels.connection }}"
           description: "{{ $value }} critical anomalies remain unresolved. Review and resolve to prevent alert fatigue."
 
       # Traffic burst pattern
       - alert: BetterDBTrafficBurst
-        expr: increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m]) > 0
+        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: "Traffic burst detected on {{ $labels.instance }}"
+          summary: "Traffic burst detected on {{ $labels.connection }}"
           description: "Unusual spike in operations or network traffic detected."
 
       # Persistent anomalies
@@ -88,7 +99,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Persistent anomalies on {{ $labels.instance }}"
+          summary: "Persistent anomalies on {{ $labels.connection }}"
           description: "{{ $value }} anomalies detected in the last hour. System may be unstable."
 
       # Level alert: fires while unpatched (webhooks are fire-on-change)
@@ -154,3 +165,62 @@ groups:
         annotations:
           summary: "Repeated full resyncs served by {{ $labels.connection }}"
           description: "{{ $value }} full resynchronizations in the last 15 minutes. Each one forks and transfers the whole dataset. Check repl-backlog-size, client-output-buffer-limit replica and replica network stability."
+
+      # Growth rule (requires Pro key analytics): fires on a tracked key that
+      # grew by more than 100 MiB over the last hour. Tune the threshold to
+      # your workload; see docs/prometheus-metrics.md for the static variant.
+      - alert: BetterDBKeyMemoryGrowth
+        expr: delta(max_over_time(betterdb_key_memory_bytes[15m])[1h:5m]) > 104857600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Key {{ $labels.key }} on {{ $labels.connection }} is growing fast"
+          description: "Tracked key {{ $labels.key }} (db {{ $labels.db }}, {{ $labels.type }}) grew by {{ $value | humanize1024 }}B over the last hour."
+
+  # Built only on the series exported under both METRICS_EXPORT_PROFILE values
+  # (vitals and full), so they work on every deployment.
+  - name: betterdb-availability-alerts
+    rules:
+      # The monitor has had no successful INFO poll within the staleness bound
+      # (PROMETHEUS_STALENESS_MS). The instance's gauges are dropped from the
+      # exposition at that point, so this series is what still says so.
+      - alert: BetterDBConnectionStale
+        expr: betterdb_poll_stale == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "BetterDB cannot reach {{ $labels.connection }}"
+          description: "No successful INFO poll of {{ $labels.connection }} within the staleness bound. The instance is down, unreachable from the monitor, or rejecting its credentials."
+
+      # Close to maxmemory: evictions (or OOM errors under noeviction) follow.
+      # Instances without a maxmemory limit (0) are excluded.
+      - alert: BetterDBMemoryNearLimit
+        expr: betterdb_memory_used_bytes / (betterdb_memory_max_bytes > 0) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory above 90% of maxmemory on {{ $labels.connection }}"
+          description: "Used memory is {{ $value | humanizePercentage }} of maxmemory. Expect evictions, or write errors under maxmemory-policy noeviction."
+
+      # A replica lost its link to its primary and is serving stale data.
+      - alert: BetterDBReplicaLinkDown
+        expr: betterdb_master_link_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replica {{ $labels.connection }} lost its link to the primary"
+          description: "master_link_status is down: the replica is not receiving writes and serves stale reads until it resyncs."
+
+      # Slots in FAIL state are unserved: commands for keys in them error.
+      - alert: BetterDBClusterSlotsFailing
+        expr: betterdb_cluster_slots_fail > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cluster slots failing as seen from {{ $labels.connection }}"
+          description: "{{ $value }} hash slots are in FAIL state. Commands for keys in those slots are rejected until the cluster recovers or fails over."

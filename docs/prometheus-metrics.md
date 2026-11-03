@@ -807,26 +807,28 @@ count(betterdb_client_connections_by_name)
 
 ## Alertmanager Rules
 
-The following alert rules are production-ready. See `docs/alertmanager-rules.yml` for the complete YAML configuration.
+The following alert rules are production-ready. See `docs/alertmanager-rules.yml` for the complete YAML configuration; on Kubernetes the Helm chart installs the same file as a `PrometheusRule` (`metrics.prometheusRule.enabled=true`, see the [Kubernetes guide](install/kubernetes.md#prometheus-operator-and-grafana)).
+
+Every alert carries the monitored instance in its `connection` label, and rules that aggregate keep it (`sum by (connection)`), so a monitor watching several instances raises one alert per instance. Name the instance in your own rules' annotations through the `connection` label, not `instance`: `instance` is the scrape target, which is the monitor itself, not the Valkey/Redis instance.
 
 ### Critical Alerts
 
 **BetterDBCriticalAnomaly** - Fires immediately when a critical anomaly is detected
 
 ```promql
-increase(betterdb_anomaly_events_total{severity="critical"}[5m]) > 0
+sum by (connection, metric_type) (increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
 ```
 
 **BetterDBMemoryPressure** - Memory pressure pattern detected
 
 ```promql
-increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m]) > 0
+sum by (connection) (increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
 ```
 
 **BetterDBAuthAnomaly** - Potential authentication attack
 
 ```promql
-increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m]) > 0
+sum by (connection) (increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
 ```
 
 **BetterDBConnectionsRejected** - `maxclients` reached; new clients are being refused
@@ -840,20 +842,20 @@ increase(betterdb_rejected_connections_total[5m]) > 0
 **BetterDBWarningSpike** - Multiple warning anomalies in short period
 
 ```promql
-increase(betterdb_anomaly_events_total{severity="warning"}[5m]) > 5
+sum by (connection) (increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
 ```
 
 **BetterDBConnectionLeak** - Possible connection leak pattern
 
 ```promql
-increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m]) > 0
+sum by (connection) (increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
 for: 5m
 ```
 
 **BetterDBTrafficBurst** - Traffic burst detected
 
 ```promql
-increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m]) > 0
+sum by (connection) (increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
 ```
 
 **BetterDBUnresolvedCriticalAnomalies** - Multiple unresolved critical anomalies
@@ -901,12 +903,44 @@ for: 10m
 increase(betterdb_sync_full_total[15m]) > 2
 ```
 
+### Availability Alerts
+
+Built only on series exported under both `METRICS_EXPORT_PROFILE` values, so they work on every deployment.
+
+**BetterDBConnectionStale** - The monitor cannot reach the instance (no successful `INFO` poll within `PROMETHEUS_STALENESS_MS`)
+
+```promql
+betterdb_poll_stale == 1
+for: 2m
+```
+
+**BetterDBMemoryNearLimit** - Used memory above 90% of `maxmemory` (instances without a limit are excluded)
+
+```promql
+betterdb_memory_used_bytes / (betterdb_memory_max_bytes > 0) > 0.9
+for: 10m
+```
+
+**BetterDBReplicaLinkDown** - A replica lost its link to the primary
+
+```promql
+betterdb_master_link_up == 0
+for: 1m
+```
+
+**BetterDBClusterSlotsFailing** - Hash slots in FAIL state
+
+```promql
+betterdb_cluster_slots_fail > 0
+for: 1m
+```
+
 ### Info Alerts
 
 **BetterDBAnomalyDetectionWarming** - Anomaly detection system warming up
 
 ```promql
-(sum(betterdb_anomaly_buffer_ready) / count(betterdb_anomaly_buffer_ready)) < 1
+min by (connection) (betterdb_anomaly_buffer_ready) < 1
 for: 5m
 ```
 
@@ -914,10 +948,13 @@ for: 5m
 
 ### Import Ready-Made Dashboard
 
-1. Navigate to Grafana → Dashboards → Import
-2. Use BetterDB Monitor dashboard ID: `[Coming Soon]`
-3. Select your Prometheus datasource
-4. Click Import
+The dashboard pack lives in [`deploy/observability/dashboards/`](https://github.com/BetterDB-inc/monitor/tree/master/deploy/observability/dashboards):
+
+1. Navigate to Grafana → Dashboards → New → Import
+2. Upload one of the JSON files
+3. Pick your Prometheus from the **Data source** dropdown at the top of the dashboard
+
+On Kubernetes, `metrics.grafanaDashboards.enabled=true` in the Helm chart publishes the whole pack as ConfigMaps for the Grafana sidecar instead. See [deploy/observability/README.md](https://github.com/BetterDB-inc/monitor/blob/master/deploy/observability/README.md) for the dashboard variables.
 
 ### Creating Custom Dashboards
 

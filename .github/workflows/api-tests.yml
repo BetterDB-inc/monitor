@@ -16,6 +16,9 @@ on:
       - 'packages/**'
       - 'proprietary/**'
       - 'apps/web/**'
+      # Read by apps/api/src/prometheus/observability-assets.spec.ts
+      - 'deploy/observability/**'
+      - 'docs/alertmanager-rules.yml'
       - 'pnpm-lock.yaml'
       - 'package.json'
       - 'pnpm-workspace.yaml'
