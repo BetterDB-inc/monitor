@@ -1347,22 +1347,26 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         try {
           const keyType = types[index];
           const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE[keyType] : undefined;
+          let sentFreq = this.keyScanUsesLfu;
           const pipeline = client.pipeline();
           pipeline.memory('USAGE', key);
-          this.queueObjectProbe(pipeline, key);
+          this.queueObjectProbe(pipeline, key, sentFreq);
           pipeline.ttl(key);
           if (sizeCommand) pipeline.call(sizeCommand, key);
 
           const results = (await pipeline.exec()) || [];
           const [memResult, , ttlResult, sizeResult] = results;
           let objectResult = results[1];
+          // Set from the probe this key sent, not by toggling, so concurrent
+          // scans on one adapter can't flip it back.
           if (isLfuPolicyMismatch(objectResult?.[0])) {
-            this.keyScanUsesLfu = !this.keyScanUsesLfu;
-            objectResult = ((await this.queueObjectProbe(client.pipeline(), key).exec()) || [])[0];
+            sentFreq = !sentFreq;
+            this.keyScanUsesLfu = sentFreq;
+            const retry = this.queueObjectProbe(client.pipeline(), key, sentFreq);
+            objectResult = ((await retry.exec()) || [])[0];
           }
-          const usesLfu = this.keyScanUsesLfu;
-          const idleResult = usesLfu ? undefined : objectResult;
-          const freqResult = usesLfu ? objectResult : undefined;
+          const idleResult = sentFreq ? undefined : objectResult;
+          const freqResult = sentFreq ? objectResult : undefined;
 
           stats.count++;
 
@@ -1451,8 +1455,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     };
   }
 
-  private queueObjectProbe<P extends ReturnType<Valkey['pipeline']>>(pipeline: P, key: string): P {
-    if (this.keyScanUsesLfu) pipeline.object('FREQ', key);
+  private queueObjectProbe<P extends ReturnType<Valkey['pipeline']>>(
+    pipeline: P,
+    key: string,
+    freq: boolean,
+  ): P {
+    if (freq) pipeline.object('FREQ', key);
     else pipeline.object('IDLETIME', key);
     return pipeline;
   }

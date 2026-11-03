@@ -362,7 +362,11 @@ describe('retry amplification attribution', () => {
         first: at(60_000, 200, 1600),
         latest: at(120_000, 20_000, 4600),
         capture: [group({ name: 'BetterDB-Monitor', count: 2 })],
-        newConnections: [{ name: 'BetterDB-Monitor-Node-1', user: 'default', ip: '10.0.0.9', count: 9 }],
+        newConnections: [
+          { name: 'BetterDB-Monitor-Node-1', user: 'default', ip: '10.0.0.9', count: 9 },
+          { name: 'BetterDB-Agent', user: 'default', ip: '10.0.0.8', count: 9 },
+          { name: 'BetterDB-CLI', user: 'default', ip: '10.0.0.7', count: 9 },
+        ],
       });
 
       expect(ranked.map((c) => c.key)).toEqual(['api']);

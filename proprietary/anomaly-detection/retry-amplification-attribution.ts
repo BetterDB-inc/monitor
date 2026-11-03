@@ -10,11 +10,13 @@ export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
 export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
-// Prefix of every connection BetterDB opens (-keyscan, -Node-..., -Discovery).
-export const MONITOR_CLIENT_NAME_PREFIX = 'BetterDB-Monitor';
+// Names of the connections BetterDB itself opens: the monitor (and its
+// -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
+// BetterDB-Migration-* stays visible on purpose.
+const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
 
 function isMonitorClientName(name: string): boolean {
-  return name === MONITOR_CLIENT_NAME_PREFIX || name.startsWith(`${MONITOR_CLIENT_NAME_PREFIX}-`);
+  return OWN_CLIENT_NAMES.some((own) => name === own || name.startsWith(`${own}-`));
 }
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';

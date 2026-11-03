@@ -2,8 +2,26 @@ import Valkey from 'iovalkey';
 import type { KeyAnalyticsOptions, KeyDetail, KeyPatternData } from '@betterdb/shared';
 import { extractPattern, checkBlocked, checkSafeMode, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
+// OBJECT IDLETIME is rejected under an LFU maxmemory-policy and OBJECT FREQ
+// under any other; both errors name the LFU policy.
+function isLfuPolicyMismatch(error: Error | null | undefined): boolean {
+  return !!error && /LFU maxmemory policy/i.test(error.message);
+}
+
+const SIZE_COMMAND_BY_TYPE: Record<string, string> = {
+  string: 'STRLEN',
+  list: 'LLEN',
+  hash: 'HLEN',
+  set: 'SCARD',
+  zset: 'ZCARD',
+  stream: 'XLEN',
+};
+
 export class CommandExecutor {
   private readonly unsafeMode: boolean;
+  // Which OBJECT probe the key scan sends; flips when the server's eviction
+  // policy rejects the current one (see isLfuPolicyMismatch).
+  private keyScanUsesLfu = false;
 
   constructor(
     private readonly client: Valkey,
@@ -113,11 +131,16 @@ export class CommandExecutor {
     let scanned = 0;
 
     do {
-      const [newCursor, keys] = await this.client.scan(cursor, 'COUNT', options.scanBatchSize);
+      const [newCursor, scannedKeys] = await this.client.scan(cursor, 'COUNT', options.scanBatchSize);
       cursor = newCursor;
+      const keys = options.fullScan
+        ? scannedKeys
+        : scannedKeys.slice(0, Math.max(0, options.sampleSize - scanned));
+      // TYPE first, so each key gets only its own size probe. Probing every type
+      // returned WRONGTYPE for the rest, which inflated the server's error_replies.
+      const types = await this.readKeyTypes(keys);
 
-      for (const key of keys) {
-        if (!options.fullScan && scanned >= options.sampleSize) break;
+      for (const [index, key] of keys.entries()) {
         scanned++;
 
         const pattern = extractPattern(key);
@@ -137,31 +160,28 @@ export class CommandExecutor {
         };
 
         try {
+          const keyType = types[index];
+          const sizeCommand = keyType ? SIZE_COMMAND_BY_TYPE[keyType] : undefined;
+          let sentFreq = this.keyScanUsesLfu;
           const pipeline = this.client.pipeline();
           pipeline.memory('USAGE', key);
-          pipeline.object('IDLETIME', key);
-          pipeline.object('FREQ', key);
+          this.queueObjectProbe(pipeline, key, sentFreq);
           pipeline.ttl(key);
-          pipeline.type(key);
-          // Per-type size probes; wrong-type calls return WRONGTYPE errors we ignore,
-          // and we read only the one matching TYPE. Single round-trip per key.
-          pipeline.strlen(key);
-          pipeline.llen(key);
-          pipeline.hlen(key);
-          pipeline.scard(key);
-          pipeline.zcard(key);
-          pipeline.xlen(key);
+          if (sizeCommand) pipeline.call(sizeCommand, key);
 
           const results = (await pipeline.exec()) || [];
-          const [
-            memResult, idleResult, freqResult, ttlResult, typeResult,
-            strlenResult, llenResult, hlenResult, scardResult, zcardResult, xlenResult,
-          ] = results;
+          const [memResult, , ttlResult, sizeResult] = results;
+          let objectResult = results[1];
+          if (isLfuPolicyMismatch(objectResult?.[0])) {
+            sentFreq = !sentFreq;
+            this.keyScanUsesLfu = sentFreq;
+            const retry = this.queueObjectProbe(this.client.pipeline(), key, sentFreq);
+            objectResult = ((await retry.exec()) || [])[0];
+          }
+          const idleResult = sentFreq ? undefined : objectResult;
+          const freqResult = sentFreq ? objectResult : undefined;
 
           stats.count++;
-
-          const num = (r: [Error | null, unknown] | undefined): number | null =>
-            r && !r[0] && r[1] != null ? (r[1] as number) : null;
 
           const mem =
             memResult && !memResult[0] && memResult[1] != null ? (memResult[1] as number) : null;
@@ -170,17 +190,8 @@ export class CommandExecutor {
             if (mem > stats.maxMemory) stats.maxMemory = mem;
           }
 
-          const keyType =
-            typeResult && !typeResult[0] && typeResult[1] != null ? String(typeResult[1]) : null;
-          let cardinality: number | null = null;
-          switch (keyType) {
-            case 'string': cardinality = num(strlenResult); break;
-            case 'list': cardinality = num(llenResult); break;
-            case 'hash': cardinality = num(hlenResult); break;
-            case 'set': cardinality = num(scardResult); break;
-            case 'zset': cardinality = num(zcardResult); break;
-            case 'stream': cardinality = num(xlenResult); break;
-          }
+          const cardinality =
+            sizeResult && !sizeResult[0] && sizeResult[1] != null ? (sizeResult[1] as number) : null;
           if (cardinality !== null) {
             stats.totalCardinality += cardinality;
             if (cardinality > stats.maxCardinality) stats.maxCardinality = cardinality;
@@ -245,6 +256,34 @@ export class CommandExecutor {
       patterns: Array.from(patternsMap.values()),
       keyDetails: pruneKeyDetails(keyDetails),
       db,
+    });
+  }
+
+  private queueObjectProbe<P extends ReturnType<Valkey['pipeline']>>(
+    pipeline: P,
+    key: string,
+    freq: boolean,
+  ): P {
+    if (freq) pipeline.object('FREQ', key);
+    else pipeline.object('IDLETIME', key);
+    return pipeline;
+  }
+
+  private async readKeyTypes(keys: string[]): Promise<(string | null)[]> {
+    if (keys.length === 0) return [];
+    const pipeline = this.client.pipeline();
+    for (const key of keys) pipeline.type(key);
+    let results: Awaited<ReturnType<typeof pipeline.exec>>;
+    try {
+      results = await pipeline.exec();
+    } catch {
+      // Scan the batch without size probes rather than failing the whole scan.
+      return keys.map(() => null);
+    }
+    results = results || [];
+    return keys.map((_, i) => {
+      const result = results[i];
+      return result && !result[0] && result[1] != null ? String(result[1]) : null;
     });
   }
 }
