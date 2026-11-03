@@ -139,6 +139,10 @@ export function pushClientSnapshot(
   return [...preEpisode, snapshot];
 }
 
+export function hasRatePair(snapshots: EpisodeClientSnapshots): boolean {
+  return snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
+}
+
 export function selectClientSnapshots(
   history: ClientCommandSnapshot[],
   episodeStart: number,

@@ -299,6 +299,7 @@ import {
   rankRetryAmplificationContributors,
   estimateNewConnections,
   selectClientSnapshots,
+  hasRatePair,
   readClientCommandCounts,
 } from './retry-amplification-attribution';
 import {
@@ -4028,10 +4029,9 @@ export class AnomalyService
     }
     const connectionCaptures = await captureRead;
     const reconnectsKnown = snapshotsLoaded && capture.length > 0;
-    const ratesKnown =
-      snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
+    const ratesKnown = hasRatePair(snapshots);
     if (!reconnectsKnown && !ratesKnown) return null;
-    return rankRetryAmplificationContributors({
+    const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
       newConnections: estimateNewConnections(
@@ -4047,6 +4047,11 @@ export class AnomalyService
         episodeStart - 1,
       ).map((group) => ({ ...group, count: group.count * baselineScale })),
     });
+    const ratesCutOff =
+      !ratesKnown &&
+      notBefore !== null &&
+      hasRatePair(selectClientSnapshots(clientSnapshots, episodeStart, until));
+    return ratesCutOff && ranked.length === 0 ? null : ranked;
   }
 
   private async latestClientCapture(

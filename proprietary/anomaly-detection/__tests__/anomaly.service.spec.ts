@@ -4472,6 +4472,46 @@ describe('AnomalyService', () => {
       expect(ranked).toBeNull();
     });
 
+    describe('when the previous episode leaves no clean readings', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'storm', keyKind: 'name', totalCommands }]]),
+      });
+      const history = [reading(500_000, 0), reading(560_000, 60_000), reading(660_000, 120_000)];
+      const attribute = (reconnects: number) => {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([
+          { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 660_000 },
+        ]);
+        storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+          { capturedAt: 660_000, ...worker, count: 1, ageSum: 1 },
+        ]);
+        storage.getNewClientConnections = jest
+          .fn()
+          .mockImplementation(async (_id: string, start: number) =>
+            start === 600_000 ? [{ ...worker, count: reconnects }] : [],
+          );
+        storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([]);
+        return (service as any).attributeRetryAmplification(
+          mockCtx,
+          history,
+          600_000,
+          660_000,
+          580_000,
+        );
+      };
+
+      it('reports attribution as unavailable rather than that no client stood out', async () => {
+        expect(await attribute(0)).toBeNull();
+      });
+
+      it('still names a client that reconnected during the episode', async () => {
+        expect(await attribute(60)).toEqual([
+          expect.objectContaining({ key: 'worker', newConnections: 60 }),
+        ]);
+      });
+    });
+
     it('gives up on an attribution read that hangs', async () => {
       jest.useFakeTimers();
       try {
