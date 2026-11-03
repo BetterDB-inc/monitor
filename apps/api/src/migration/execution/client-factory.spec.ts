@@ -132,7 +132,7 @@ describe('createTargetClient (cluster) TLS refresh', () => {
 });
 
 describe('attachTlsRefresh', () => {
-  it('re-reads the files before a reconnect only when they changed on disk', () => {
+  it('re-reads the files before every reconnect and installs the new pair', () => {
     const pair = generateTlsPair('a');
     const certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-refresh-'));
     const certPath = path.join(certDir, 'client.crt');
@@ -145,14 +145,14 @@ describe('attachTlsRefresh', () => {
       attachTlsRefresh(client, { tls: true, tlsConfig: { source: 'file', trustedPaths: true, certPath, keyPath } }, 'node1.example.com');
       client.emit('reconnecting');
       client.emit('reconnecting');
-      expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledTimes(2);
       expect(client.options.tls).toMatchObject({ servername: 'node1.example.com' });
 
       const next = generateTlsPair('d');
       writeFile(certPath, next.cert);
       writeFile(keyPath, next.key);
       client.emit('reconnecting');
-      expect(read).toHaveBeenCalledTimes(2);
+      expect(read).toHaveBeenCalledTimes(3);
       expect(client.options.tls?.cert?.toString()).toBe(next.cert);
     } finally {
       read.mockRestore();

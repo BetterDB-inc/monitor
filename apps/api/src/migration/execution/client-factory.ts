@@ -1,6 +1,6 @@
 import Valkey, { Cluster } from 'iovalkey';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
-import { assertUsableTlsMaterial, buildTlsOptions, clientCredentials, tlsMaterialFingerprint } from '../../database/adapters/tls-material';
+import { assertUsableTlsMaterial, buildTlsOptions, clientCredentials } from '../../database/adapters/tls-material';
 import { tlsIdentityOptions } from '../../database/adapters/tls-servername';
 
 /** Receives a one-line explanation when a TLS re-read is skipped. */
@@ -41,17 +41,14 @@ function tlsMaterialReloader(
   announcedHostname?: string,
   onError?: TlsRefreshErrorHandler,
 ): (label: string) => ReturnType<typeof buildTlsOptions> {
-  let last: string | undefined;
   let lastError: string | undefined;
+  // Re-reads on every call, like the adapter's reconnect refresh: a same-size
+  // rewrite within one timestamp tick can leave the stat fingerprint unchanged.
   return (label) => {
     try {
-      // Fingerprint before reading, so a change during the read is caught next time.
-      const fingerprint = tlsMaterialFingerprint(config.tlsConfig);
-      if (fingerprint !== undefined && fingerprint === last) return undefined;
       const { tls } = nodeClientAuthOptions(config, host, announcedHostname);
       if (!tls) return undefined;
       assertUsableTlsMaterial(tls);
-      last = fingerprint;
       lastError = undefined;
       return tls;
     } catch (error) {
@@ -69,7 +66,7 @@ function tlsMaterialReloader(
  * (iovalkey reads `options.tls` when it opens each socket). Material that does
  * not parse as a matching pair (a rotation caught mid-write) or cannot be read
  * keeps the previously loaded options; `onError` is told why, once per
- * distinct error. Unchanged files are not re-read. Inline material never
+ * distinct error. Inline material never
  * changes, so nothing is installed for it.
  */
 export function attachTlsRefresh(
@@ -92,7 +89,7 @@ export function attachTlsRefresh(
  * `retryStrategy: null`: a node whose socket drops is ended and rebuilt from the
  * Cluster's `redisOptions`, so `reconnecting` never fires on a node and a
  * per-node reconnect hook would never run. Instead, each time the pool adds a
- * node (`+node`, emitted before the lazy node's first dial) changed files are
+ * node (`+node`, emitted before the lazy node's first dial) the files are
  * re-read and validated, the new node is given the current material, and the
  * Cluster's `redisOptions.tls` is refreshed so every node the pool builds later
  * starts from it. Unusable or unreadable files leave both as they were.
