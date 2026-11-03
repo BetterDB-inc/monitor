@@ -579,7 +579,8 @@ Once running, access the web interface at:
 | Endpoint                  | Description                   |
 | ------------------------- | ----------------------------- |
 | `/`                       | Web UI dashboard              |
-| `/api/health`             | Health check endpoint         |
+| `/api/health`             | Health check endpoint (waits on the monitored database) |
+| `/api/health/live`        | Liveness: answers once the API is up, without touching any database; use it for container probes |
 | `/docs`                   | Swagger/OpenAPI documentation |
 | `/api/prometheus/metrics` | Prometheus metrics endpoint   |
 
