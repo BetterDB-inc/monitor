@@ -176,6 +176,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   private tlsMaterialFingerprint: string | undefined;
   private tlsMaterialCheckedAt = 0;
   private tlsSetupError: Error | null = null;
+  // Last unusable-material error logged, so a reconnect loop warns once per distinct problem.
+  private tlsMaterialWarning: string | undefined;
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
   private authenticatedUser: string | undefined;
@@ -244,10 +246,15 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     const material = this.config.tls ? resolveTlsMaterial(this.config.tlsConfig) : {};
     try {
       assertUsableTlsMaterial(material);
+      this.tlsMaterialWarning = undefined;
     } catch (error) {
-      this.logger.warn(`${error instanceof Error ? error.message : error}; the files are re-read before each reconnect`);
-      // Unusable material must not count as current, or a non-forced refresh
-      // would skip it until the files change again.
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== this.tlsMaterialWarning) {
+        this.logger.warn(`${message}; the files are re-read before each reconnect`);
+      }
+      this.tlsMaterialWarning = message;
+      // Unusable material must not count as current, or a refresh would skip
+      // it until the files change again.
       fingerprint = undefined;
     }
     this.tlsMaterial = material;
@@ -264,10 +271,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
    * check is a stat-based fingerprint compared at most once per
    * TLS_MATERIAL_RECHECK_MS, so the scratch client per database that key
    * analytics opens does not pay for file reads. `force` (used when iovalkey is
-   * about to reconnect) skips the throttle and re-reads unconditionally. A read
-   * failure, or material that does not parse as a matching certificate and key
-   * (a rotation caught between writing the two files), keeps the previously
-   * loaded material rather than breaking a working connection. Inline material
+   * about to reconnect) skips the throttle but still skips the read when the
+   * fingerprint is unchanged. A read failure, or material that does not parse
+   * as a matching certificate and key (a rotation caught between writing the
+   * two files), keeps the previously loaded material rather than breaking a
+   * working connection, and leaves the fingerprint stale so the next check
+   * retries; the warning is logged once per distinct error. Inline material
    * never changes after construction.
    */
   private refreshTlsMaterial(force = false): void {
@@ -277,8 +286,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     this.tlsMaterialCheckedAt = now;
     try {
       const fingerprint = tlsMaterialFingerprint(this.config.tlsConfig);
-      if (!force && fingerprint === this.tlsMaterialFingerprint) return;
-      const changed = fingerprint !== this.tlsMaterialFingerprint;
+      if (fingerprint === this.tlsMaterialFingerprint) return;
       const material = resolveTlsMaterial(this.config.tlsConfig);
       assertUsableTlsMaterial(material);
       this.tlsMaterial = material;
@@ -288,11 +296,13 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // createValkeyClient, and the cached CLI client reconnects on its own.
       if (this._client) this._client.options.tls = this.composeTlsOptions();
       if (this.cliClient) this.cliClient.options.tls = this.composeTlsOptions();
-      if (changed) this.logger.log('TLS files changed on disk; new sockets present the updated material');
+      if (this.tlsMaterialWarning) this.logger.log('TLS files on disk are usable again');
+      this.tlsMaterialWarning = undefined;
+      this.logger.log('TLS files changed on disk; new sockets present the updated material');
     } catch (error) {
-      this.logger.warn(
-        `Keeping previously loaded TLS files: ${error instanceof Error ? error.message : error}`,
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== this.tlsMaterialWarning) this.logger.warn(`Keeping previously loaded TLS files: ${message}`);
+      this.tlsMaterialWarning = message;
     }
   }
 
@@ -337,12 +347,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     });
 
     // iovalkey reads `options.tls` when it opens each socket, so refreshing it
-    // here lets an automatic reconnect present a rotated certificate from disk.
+    // here (which updates this client's options) lets an automatic reconnect
+    // present a rotated certificate from disk.
     client.on('reconnecting', () => {
       if (this._client !== client) return;
       this.refreshTlsMaterial(true);
-      const tls = this.composeTlsOptions();
-      if (tls) client.options.tls = tls;
     });
 
     // After an automatic reconnect the server may map the session to a
