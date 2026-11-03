@@ -134,6 +134,28 @@ describe('incident boundary anchor migration (sqlite)', () => {
       { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
     ]);
   });
+
+  it('fills an anchor left empty by an upgrade that stopped after adding the columns', async () => {
+    const first = new SqliteAdapter({ filepath });
+    await first.initialize();
+    const anchor = legacyEvent('conn-a');
+    await first.saveAnomalyEvent(anchor, 'conn-a');
+    await first.saveIncidentBoundaries([{ scopeId: 's1', startedAt: 1000, anomalyId: anchor.id }]);
+    await first.close();
+
+    const db = new Database(filepath);
+    db.exec(`UPDATE incident_boundaries SET metric_type = NULL, connection_id = NULL`);
+    db.close();
+
+    const reopened = new SqliteAdapter({ filepath });
+    await reopened.initialize();
+    const rows = await reopened.getIncidentBoundaries({ startTime: 0 });
+    await reopened.close();
+
+    expect(rows).toEqual([
+      { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id, metricType: 'connections', connectionId: 'conn-a' },
+    ]);
+  });
 });
 
 const postgres = adapters.filter(([name]) => name === 'PostgresAdapter');
