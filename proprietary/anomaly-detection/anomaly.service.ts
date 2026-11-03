@@ -6578,14 +6578,20 @@ export class AnomalyService
 
   private incidentEventToEvict(events: AnomalyEvent[]): number {
     const keys = events.map(signalKey);
-    const lastIndex = new Map(keys.map((key, i) => [key, i]));
-    const seen = new Set<string>();
-    const middle = keys.findIndex((key, i) => {
-      const repeated = seen.has(key) && lastIndex.get(key)! > i;
-      seen.add(key);
-      return repeated;
-    });
-    return middle === -1 ? 0 : middle;
+    const first = new Map<string, number>();
+    keys.forEach((key, i) => first.has(key) || first.set(key, i));
+    const last = new Map(keys.map((key, i) => [key, i]));
+    const newest = keys.length - 1;
+    const candidates: ((key: string, i: number) => boolean)[] = [
+      (key, i) => first.get(key)! < i && last.get(key)! > i,
+      (key, i) => first.get(key)! < i && i < newest,
+      (key) => first.get(key) === last.get(key),
+    ];
+    for (const evictable of candidates) {
+      const index = keys.findIndex(evictable);
+      if (index !== -1) return index;
+    }
+    return 0;
   }
 
   private forgetIncidentEvents(

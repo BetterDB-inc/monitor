@@ -11699,6 +11699,28 @@ describe('AnomalyService', () => {
         expect(kept.at(-1)).toBe('repeat');
       });
 
+      it('drops an older repeat before the first event of any signal', () => {
+        const now = Date.now();
+        const p99 = (id: string, offset: number, command: string) =>
+          service.ingestExternalAnomaly(
+            anomaly({
+              id,
+              timestamp: now - 50 * MIN + offset,
+              metricType: MetricType.COMMAND_P99,
+              commands: [command],
+            }),
+          );
+        for (let i = 0; i < 199; i += 1) p99(`p99-${i}`, i, `cmd-${i}`);
+        p99('repeat-0', 300, 'cmd-0');
+        p99('repeat-1', 301, 'cmd-1');
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept.slice(0, 2)).toEqual(['p99-0', 'p99-1']);
+        expect(kept).not.toContain('repeat-0');
+        expect(kept.at(-1)).toBe('repeat-1');
+      });
+
       it('drops the oldest event and records it when every signal is distinct', () => {
         const now = Date.now();
         for (let i = 0; i < 201; i += 1) {
