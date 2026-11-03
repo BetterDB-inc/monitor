@@ -159,8 +159,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       lastDiscoveryTime: Date.now(),
     });
 
+    // A failed node lingers in CLUSTER NODES until it is forgotten; keep it out
+    // of the role counts so a dead primary is not reported as a fourth master.
+    const failed = discovered.filter((n) => !n.healthy).length;
     this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.healthy && n.role === 'master').length} masters, ${discovered.filter(n => n.healthy && n.role === 'replica').length} replicas${failed > 0 ? `, ${failed} failed` : ''})`,
     );
 
     return discovered;
