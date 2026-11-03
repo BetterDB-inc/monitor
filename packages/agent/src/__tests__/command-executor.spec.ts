@@ -106,6 +106,26 @@ describe('CommandExecutor COLLECT_KEY_ANALYTICS', () => {
     expect(byName.get('proto')).toEqual(expect.objectContaining({ keyType: '__proto__', cardinality: null }));
   });
 
+  it('reports a key deleted after the batch TYPE as gone', async () => {
+    const client = fakeClient(
+      { gone: 1, kept: 1 },
+      {
+        reply: (command, key) => {
+          if (command === 'TTL') return [null, key === 'gone' ? -2 : -1];
+          return [null, key === 'gone' && command === 'STRLEN' ? 0 : 3];
+        },
+      },
+    );
+    const raw = await new CommandExecutor(client).execute('COLLECT_KEY_ANALYTICS', [
+      JSON.stringify({ sampleSize: 100, scanBatchSize: 100 }),
+    ]);
+
+    const result = JSON.parse(raw as string) as KeyAnalyticsResult;
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('gone')).toEqual(expect.objectContaining({ keyType: 'none', cardinality: null }));
+    expect(byName.get('kept')).toEqual(expect.objectContaining({ keyType: 'string', cardinality: 3 }));
+  });
+
   it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
     const sent: string[] = [];
     const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');

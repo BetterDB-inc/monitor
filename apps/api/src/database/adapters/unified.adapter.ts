@@ -1377,6 +1377,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
             sizeResult && !sizeResult[0] && sizeResult[1] != null ? (sizeResult[1] as number) : null;
           // The key changed type since the batch TYPE, so that type is stale.
           if (sizeResult?.[0]?.message.startsWith('WRONGTYPE')) keyType = null;
+          // The key was deleted since the batch TYPE (TTL -2): report it as gone,
+          // as a single pipeline did, not as its old type with size 0.
+          if (ttlResult && !ttlResult[0] && ttlResult[1] === -2) {
+            keyType = 'none';
+            cardinality = null;
+          }
           // Only FalkorDB's graph module registers the graphdata type, so TYPE
           // alone proves the GRAPH.* commands exist.
           if (keyType === 'graphdata') {

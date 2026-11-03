@@ -272,6 +272,19 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () =
     expect(sent.filter((c) => c === 'STRLEN')).toHaveLength(1);
   });
 
+  it('reports a key deleted after the batch TYPE as gone', async () => {
+    const adapter = makeAdapter({ gone: 'string', kept: 'string' }, (command, key) => {
+      if (command === 'TTL') return [null, key === 'gone' ? -2 : -1];
+      return [null, key === 'gone' && command === 'STRLEN' ? 0 : 3];
+    }, []);
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('gone')).toEqual(expect.objectContaining({ keyType: 'none', cardinality: null }));
+    expect(byName.get('kept')).toEqual(expect.objectContaining({ keyType: 'string', cardinality: 3 }));
+  });
+
   it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
     const sent: string[] = [];
     const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');
