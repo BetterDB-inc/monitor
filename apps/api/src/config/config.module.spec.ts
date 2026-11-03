@@ -27,6 +27,8 @@ const blocking = process.env.BETTERDB_TEST_KEEP_ENV !== 'true';
 
 const envFileKeys = ['CONFIG_MODULE_PROBE', 'BETTERDB_LICENSE_KEY', 'CLOUD_MODE', 'ENTITLEMENT_URL'];
 
+const initial = Object.fromEntries(envFileKeys.map((key) => [key, process.env[key]]));
+
 describe('ConfigModule', () => {
   let saved: Record<string, string | undefined>;
 
@@ -48,8 +50,7 @@ describe('ConfigModule', () => {
   });
 
   it('leaves no env file keys behind for later tests', () => {
-    expect(process.env.BETTERDB_LICENSE_KEY).toBe(saved.BETTERDB_LICENSE_KEY);
-    expect(process.env.CONFIG_MODULE_PROBE).toBeUndefined();
+    for (const key of envFileKeys) expect(process.env[key]).toBe(initial[key]);
   });
 
   it('loads the repo-root env file under jest', async () => {
