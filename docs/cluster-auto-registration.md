@@ -43,6 +43,19 @@ as disconnected. Configure `cluster-announce-ip` and `cluster-announce-port`
 on the cluster nodes so they announce addresses the monitor can actually
 reach.
 
+### Seeds that resolve to several nodes
+
+A seed host can be a DNS name that resolves to several cluster nodes, such as
+the headless Service a Kubernetes operator creates for a cluster. The seed then
+connects to whichever node the name resolves to, and to a different one after a
+reconnect. When the seed host resolves to more than one address, every node in
+`CLUSTER NODES` is registered as a child, including the node that answered the
+sync, so the children stay stable across syncs.
+
+Slow log and command log entries collected through such a seed are stored
+against the node that served them, not the seed's hostname, so history stays
+complete and attributable when the seed moves between nodes.
+
 ### TLS certificates
 
 `CLUSTER NODES` always reports nodes by IP address. When a node also
