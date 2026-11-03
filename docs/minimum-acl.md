@@ -22,10 +22,10 @@ When a command is blocked (`NOPERM`, or "command not available" on a managed ser
 
 ## Read-only monitoring user
 
-This user can poll every metric BetterDB collects in the background, and has no access to keys:
+This user can poll every metric BetterDB collects in the background. It has no key permissions, so it can't read or write keys. `SLOWLOG`, `COMMANDLOG` and `CLIENT LIST` do return command arguments, which can include key names and values:
 
 ```
-ACL SETUSER betterdb on >CHANGE_ME -@all +ping +info +select +client|setname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|myid +cluster|getkeysinslot +command|info +dbsize +lastsave +time +module|list
+ACL SETUSER betterdb on >CHANGE_ME -@all +ping +info +select +client|setname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|myid +command|info +dbsize +lastsave +time +module|list
 ```
 
 If `ACL SETUSER` rejects a rule with `Unknown command or category name`, your server doesn't have that command. Remove the rule and run it again. For example, Redis and Valkey before 8.1 have no `COMMANDLOG`, so drop `+commandlog|get` and `+commandlog|len`.
@@ -45,6 +45,7 @@ Append these rules to the line above for the features you use. Each line only ad
 | Session capture | `+monitor +acl\|getuser` | Monitor sessions (manual, scheduled and anomaly-triggered captures) and the capture preflight check. `MONITOR` streams every command the server runs, including values. |
 | Vector search | `%R~* +ft._list +ft.info +ft.search +ft.tagvals +ft.config\|get +ft.profile +hget +hgetall` | The vector search page and index snapshots. Use the key pattern your indexes cover instead of `~*` if you can. Some search modules don't have `FT.TAGVALS`, `FT.CONFIG` or `FT.PROFILE`; drop those rules if they are rejected. |
 | Session explorer | `%R~* +scan +exists +type +pttl +memory\|usage +object\|idletime +strlen +getrange +llen +lrange +hlen +hscan +hstrlen +hmget +hgetall +scard +sscan +smembers +zcard +zrange +xlen +xrange +json.debug\|memory +json.get` | Browsing keys and reading their values in the session explorer. Use the key pattern your sessions live under. |
+| Slot migration | `+cluster\|getkeysinslot` | Key names on the slot migration page. `CLUSTER GETKEYSINSLOT` returns key names from any slot regardless of key patterns. |
 | Migration analysis | Key sampling, plus `+function\|list +hrandfield +hexpiretime +acl\|users` | The migration analysis report on the source. |
 
 ## What each command enables
@@ -66,7 +67,7 @@ Append these rules to the line above for the features you use. Each line only ad
 | `ROLE` | Role lookups, key analytics node selection on clusters | Key analytics can't pick which nodes to scan |
 | `CLUSTER INFO`, `NODES`, `SHARDS`, `MYID` | Cluster page, node discovery, auto-registration, anomaly detection | Cluster views and per-node metrics are missing |
 | `CLUSTER SLOT-STATS` | Slot stats page, hot-slot and orphaned-key detection | Slot stats show as unavailable |
-| `CLUSTER GETKEYSINSLOT` | Slot migration page | Slot migration details are empty |
+| `CLUSTER GETKEYSINSLOT` | Slot migration page (add-on) | Slot migration details are empty |
 | `COMMAND INFO` | Classifying commands in cluster node stats, checking whether `MONITOR` is allowed | Node stats can't classify unfamiliar commands |
 | `DBSIZE`, `LASTSAVE`, `TIME` | Key counts, persistence checks, config hazard checks | Those values are empty |
 | `MODULE LIST` | CVE scan of loaded modules | Module CVEs aren't checked |
