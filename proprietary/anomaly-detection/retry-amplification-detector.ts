@@ -472,7 +472,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
         : run.length < RETRY_AMP_MIN_WINDOWS
           ? 'transient'
           : 'unconfirmed';
-    state.priorEpisodeEndedAt = state.lastEpisode?.endedAt ?? null;
+    state.priorEpisodeEndedAt = qualifyingEnd(state.lastEpisode) ?? state.priorEpisodeEndedAt;
     state.lastEpisode = {
       classification,
       level: state.episodeLevel,
@@ -718,9 +718,13 @@ export function openEpisodeStart(state: RetryAmplificationState): number | null 
   return state.hotRun[0]?.start ?? null;
 }
 
+function qualifyingEnd(episode: RetryAmplificationEpisode | null): number | null {
+  return episode && episode.classification !== 'transient' ? episode.endedAt : null;
+}
+
 export function precedingEpisodeEnd(state: RetryAmplificationState): number | null {
   return state.hotRun.length > 0
-    ? (state.lastEpisode?.endedAt ?? null)
+    ? (qualifyingEnd(state.lastEpisode) ?? state.priorEpisodeEndedAt)
     : state.priorEpisodeEndedAt;
 }
 
