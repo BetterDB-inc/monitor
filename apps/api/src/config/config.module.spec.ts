@@ -5,7 +5,14 @@ jest.mock('fs', () => {
     ...actual,
     existsSync: (path: string) => isEnvFile(path) || actual.existsSync(path),
     readFileSync: (path: string, ...rest: unknown[]) =>
-      isEnvFile(path) ? 'CONFIG_MODULE_PROBE=from-env-file' : actual.readFileSync(path, ...rest),
+      isEnvFile(path)
+        ? [
+            'CONFIG_MODULE_PROBE=from-env-file',
+            'BETTERDB_LICENSE_KEY=from-env-file',
+            'CLOUD_MODE=true',
+            'ENTITLEMENT_URL=https://entitlements.example.com',
+          ].join('\n')
+        : actual.readFileSync(path, ...rest),
   };
 });
 
@@ -16,22 +23,22 @@ const settle = async (): Promise<void> => {
   });
 };
 
-describe('ConfigModule', () => {
-  const jestWorkerId = process.env.JEST_WORKER_ID;
+const blocking = process.env.BETTERDB_TEST_KEEP_ENV !== 'true';
 
+describe('ConfigModule', () => {
   afterEach(() => {
-    process.env.JEST_WORKER_ID = jestWorkerId;
     delete process.env.CONFIG_MODULE_PROBE;
   });
 
-  it('leaves the repo-root env file out of jest runs', async () => {
-    await settle();
-    expect(process.env.CONFIG_MODULE_PROBE).toBeUndefined();
-  });
-
-  it('loads the repo-root env file outside jest', async () => {
-    delete process.env.JEST_WORKER_ID;
+  it('loads the repo-root env file under jest', async () => {
     await settle();
     expect(process.env.CONFIG_MODULE_PROBE).toBe('from-env-file');
+  });
+
+  (blocking ? it : it.skip)('keeps the license and cloud keys the test setup blocked', async () => {
+    await settle();
+    expect(process.env.BETTERDB_LICENSE_KEY).toBe('');
+    expect(process.env.CLOUD_MODE).toBe('');
+    expect(process.env.ENTITLEMENT_URL).toBe('http://127.0.0.1:9/api/v1/entitlements');
   });
 });

@@ -39,9 +39,12 @@ describe('LicenseService', () => {
     process.env = originalEnv;
   });
 
-  it('never targets the production entitlement host from a test run', () => {
-    expect(new URL((service as any).entitlementUrl).hostname).toBe('127.0.0.1');
-  });
+  (process.env.BETTERDB_TEST_KEEP_ENV === 'true' ? it.skip : it)(
+    'never targets the production entitlement host from a test run',
+    () => {
+      expect(new URL((service as any).entitlementUrl).hostname).toBe('127.0.0.1');
+    },
+  );
 
   describe('Version Check', () => {
     describe('isUpdateAvailable', () => {

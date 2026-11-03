@@ -9,7 +9,6 @@ import { join } from 'path';
       isGlobal: true,
       load: [configuration],
       envFilePath: join(__dirname, '../../../..', '.env'),
-      ignoreEnvFile: process.env.JEST_WORKER_ID !== undefined,
     }),
   ],
 })

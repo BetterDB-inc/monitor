@@ -35,10 +35,8 @@ if (process.env.BETTERDB_TEST_KEEP_ENV !== 'true') {
     'BETTERDB_OFFLINE_LICENSE',
     'BETTERDB_OFFLINE_LICENSE_FILE',
     'CLOUD_MODE',
-    'ENTITLEMENT_URL',
-    'DB_SCHEMA',
   ]) {
-    delete process.env[key];
+    process.env[key] = '';
   }
   process.env.ENTITLEMENT_URL = 'http://127.0.0.1:9/api/v1/entitlements';
 }
