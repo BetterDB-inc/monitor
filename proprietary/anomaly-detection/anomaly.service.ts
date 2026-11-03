@@ -79,7 +79,6 @@ import {
   ResyncEscalationState,
   backlogCoverageRecovered,
   observeBacklogCoverage,
-  resyncEventReplica,
   resyncSettled,
   createBacklogCoverageState,
   createResyncEscalationState,
@@ -168,7 +167,6 @@ import {
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
-import { SUSTAINED_DEGRADATION_MESSAGE } from '../latency-regression/regression-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
@@ -2109,7 +2107,7 @@ export class AnomalyService
     const tracked = this.resyncEscalationEvents.get(connectionId) ?? [];
     const untracked = open
       .filter((e) => !tracked.some((t) => t.id === e.id))
-      .map((e) => ({ id: e.id, addr: resyncEventReplica(e.message), since: e.timestamp }));
+      .map((e) => ({ id: e.id, addr: e.replicaAddr ?? null, since: e.timestamp }));
     if (untracked.length > 0) {
       this.resyncEscalationEvents.set(connectionId, [...tracked, ...untracked]);
     }
@@ -6547,6 +6545,7 @@ export class AnomalyService
       dedupeKey: anomaly.dedupeKey,
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
+      kind: anomaly.kind,
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs:
@@ -6946,10 +6945,7 @@ export class AnomalyService
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
         const quietAt = signal.since + POINT_IN_TIME_QUIET_MS;
         if (signal.until !== null && signal.until <= quietAt) return null;
-        if (
-          !this.buffers.has(signal.connectionId) ||
-          !signal.message.startsWith(SUSTAINED_DEGRADATION_MESSAGE)
-        ) {
+        if (!this.buffers.has(signal.connectionId) || signal.kind !== 'sustained_degradation') {
           return undefined;
         }
         return signal.now < quietAt ? undefined : quietAt;
@@ -7490,6 +7486,7 @@ export class AnomalyService
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
+      kind: s.kind,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,
@@ -7919,6 +7916,7 @@ export class AnomalyService
           `backlog coverage at disconnect ${coverage}).`
         : `Replica ${escalation.addr} came back after ${seconds.toFixed(0)}s and could not resume ` +
           `from the backlog (${counters}; backlog coverage at disconnect ${coverage}).`,
+      replicaAddr: escalation.addr,
       resolved: false,
       connectionId: ctx.connectionId,
     };

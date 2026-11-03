@@ -173,6 +173,7 @@ export interface AnomalyEvent {
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
+  kind?: string;
   resolved: boolean;
   resolvedAt?: number;
   connectionId?: string;

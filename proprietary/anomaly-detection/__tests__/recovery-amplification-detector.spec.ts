@@ -9,7 +9,6 @@ import {
   createResyncEscalationState,
   observeBacklogCoverage,
   observeResyncEscalation,
-  resyncEventReplica,
   resyncSettled,
   stepBacklogCoverage,
 } from '../recovery-amplification-detector';
@@ -659,11 +658,6 @@ describe('recovery amplification rule', () => {
     ];
 
     expect(matchSequence(entries, rule())).toBeNull();
-  });
-
-  it('reads the replica back from a stored message', () => {
-    expect(resyncEventReplica('Replica 10.0.0.2:6379 came back after 5s')).toBe('10.0.0.2:6379');
-    expect(resyncEventReplica('nothing useful')).toBeNull();
   });
 
   it('ignores a cost that came before the resync or outside the span', () => {

@@ -102,6 +102,7 @@ describe('LatencyRegressionService', () => {
     expect(event.commands).toEqual(['hmget']);
     expect(event).toMatchObject({
       metricType: 'command_p99',
+      kind: 'upgrade_regression',
       anomalyType: 'spike',
       severity: 'critical', // 3x factor
       value: 6000,

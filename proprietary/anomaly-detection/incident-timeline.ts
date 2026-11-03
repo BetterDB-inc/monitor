@@ -72,7 +72,7 @@ export interface RecoverySignal {
   stdDev: number;
   threshold: number;
   now: number;
-  message: string;
+  kind?: string;
 }
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
@@ -492,7 +492,7 @@ export class IncidentTimelineBuilder {
       stdDev: first.stdDev,
       threshold: first.threshold,
       now,
-      message: event.message,
+      kind: event.kind,
     });
   }
 
