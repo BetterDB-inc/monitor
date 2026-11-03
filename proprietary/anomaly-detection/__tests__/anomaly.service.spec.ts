@@ -11672,6 +11672,32 @@ describe('AnomalyService', () => {
         );
       });
 
+      it('matches a sequence through a repeat kept after the cap evicts earlier repeats', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 57 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 52 * MIN, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        storm(now);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', expect.stringMatching(/^mem-/)] }),
+          'conn-1',
+        );
+      });
+
       it('keeps an arriving repeat once the buffer holds only distinct signals', () => {
         const now = Date.now();
         for (let i = 0; i < 200; i += 1) {
