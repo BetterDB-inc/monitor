@@ -5,6 +5,7 @@ import { join } from 'path';
 import Database from 'better-sqlite3';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import { SqliteAdapter } from '../sqlite.adapter';
+import { PostgresAdapter } from '../postgres.adapter';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
 
 describe.each<[string, AdapterFactory]>(adapters)('incident boundaries (%s)', (_name, makeAdapter) => {
@@ -181,16 +182,19 @@ describe.each<[string, AdapterFactory]>(postgres)('incident boundary anchor migr
     ]);
     const internals = storage as unknown as {
       pool: { query: (sql: string) => Promise<unknown> };
-      createSchema: () => Promise<void>;
+      config: ConstructorParameters<typeof PostgresAdapter>[0];
     };
     await internals.pool.query(`
       ALTER TABLE incident_boundaries DROP COLUMN metric_type;
       ALTER TABLE incident_boundaries DROP COLUMN connection_id;
     `);
 
-    await internals.createSchema();
+    const upgraded = new PostgresAdapter(internals.config);
+    await upgraded.initialize();
+    const rows = await upgraded.getIncidentBoundaries({ startTime: 0 });
+    await upgraded.close();
 
-    expect(await storage.getIncidentBoundaries({ startTime: 0 })).toEqual([
+    expect(rows).toEqual([
       { scopeId: 's1', startedAt: 1000, anomalyId: anchor.id, metricType: 'connections', connectionId: 'conn-a' },
       { scopeId: 's1', startedAt: 2000, anomalyId: 'pruned' },
     ]);
