@@ -349,6 +349,25 @@ describe('retry amplification attribution', () => {
       );
     });
 
+    it("leaves BetterDB's own connections out of the ranking", () => {
+      const at = (takenAt: number, monitor: number, api: number) =>
+        snapshot(takenAt, [
+          client({ id: '1', name: 'BetterDB-Monitor', 'tot-cmds': String(monitor) }),
+          client({ id: '2', name: 'BetterDB-Monitor-keyscan', 'tot-cmds': String(monitor) }),
+          client({ id: '3', name: 'api', 'tot-cmds': String(api) }),
+        ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before: at(0, 100, 1000),
+        first: at(60_000, 200, 1600),
+        latest: at(120_000, 20_000, 4600),
+        capture: [group({ name: 'BetterDB-Monitor', count: 2 })],
+        newConnections: [{ name: 'BetterDB-Monitor-Node-1', user: 'default', ip: '10.0.0.9', count: 9 }],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+    });
+
     it('drops clients whose command rate barely moved', () => {
       const steady = (takenAt: number, total: string) =>
         snapshot(takenAt, [client({ id: '1', name: 'steady', 'tot-cmds': total })]);
