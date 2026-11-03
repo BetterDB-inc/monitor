@@ -168,6 +168,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       resolved: false,
       connectionId: ctx.connectionId,
     };
+    this.anomalyEventSink?.stampExternalAnomaly?.(event);
 
     try {
       await this.storage.saveAnomalyEvent(event, ctx.connectionId);

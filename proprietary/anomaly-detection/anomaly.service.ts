@@ -6847,10 +6847,15 @@ export class AnomalyService
     return age <= RETRY_AMP_LATENCY_VERDICT_TTL_MS ? verdict.degraded : undefined;
   }
 
+  stampExternalAnomaly(event: AnomalyEvent): void {
+    this.stampScope(event);
+    event.eventSequence ??= this.nextEventSequence++;
+  }
+
   ingestExternalAnomaly(event: AnomalyEvent): void {
     if (this.recentAnomalies.some((a) => a.id === event.id)) return;
     const ingested = { ...event, persisted: true };
-    this.stampScope(ingested);
+    this.stampExternalAnomaly(ingested);
     this.addRecentAnomaly(ingested);
     this.rememberIncidentEvent(ingested);
     this.countAnomaly(event, event.connectionId);

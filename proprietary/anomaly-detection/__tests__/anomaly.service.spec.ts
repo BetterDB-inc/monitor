@@ -9116,6 +9116,32 @@ describe('AnomalyService', () => {
       );
     });
 
+    it('stamps an external event with a sequence and scope before it is saved', () => {
+      const first: AnomalyEvent = p99Event();
+      const second: AnomalyEvent = { ...p99Event(), id: 'p99-2' };
+      service.stampExternalAnomaly(first);
+      service.stampExternalAnomaly(second);
+
+      expect(first.scopeId).toBe('conn-1');
+      expect(typeof first.eventSequence).toBe('number');
+      expect(second.eventSequence).toBeGreaterThan(first.eventSequence!);
+    });
+
+    it('keeps the stamped sequence when the event is ingested', () => {
+      const event: AnomalyEvent = p99Event();
+      service.stampExternalAnomaly(event);
+      const stamped = event.eventSequence;
+      service.ingestExternalAnomaly(event);
+
+      expect((service as any).recentAnomalies[0].eventSequence).toBe(stamped);
+    });
+
+    it('sequences an ingested event that was never stamped', () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      expect(typeof (service as any).recentAnomalies[0].eventSequence).toBe('number');
+    });
+
     it('ignores the same event delivered twice', () => {
       service.ingestExternalAnomaly(p99Event());
       service.ingestExternalAnomaly(p99Event());
