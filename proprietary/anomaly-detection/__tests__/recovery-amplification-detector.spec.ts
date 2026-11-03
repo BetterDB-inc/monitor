@@ -552,6 +552,13 @@ describe('observeResyncEscalation', () => {
       expect(resyncSettled(sample({ replicas: [line('online')] }), null, T0 - 1)).toBe(false);
       expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, after)).toBe(false);
       expect(resyncSettled(sample({ replicas: [line('online')] }), null, after)).toBe(true);
+      expect(
+        resyncSettled(
+          sample({ replicas: [line('online'), { ...line('send_bulk'), addr: '10.0.0.3:6379' }] }),
+          null,
+          after,
+        ),
+      ).toBe(false);
       expect(resyncSettled(sample({ replicas: [] }), null, after)).toBe(true);
     });
 
