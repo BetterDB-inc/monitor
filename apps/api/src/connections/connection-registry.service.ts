@@ -219,17 +219,23 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       for (const config of savedConnections) {
         // Decrypt password if encrypted; the env-owned default (and the nodes
         // discovered from it) follow the current environment, see syncWithEnvironment.
-        let decryptedConfig = this.decryptConfig(config);
+        const loadedConfig = this.decryptConfig(config);
+        const decryptedConfig = await this.syncWithEnvironment(loadedConfig);
         // Heal rows that hold plaintext secrets (written while ENCRYPTION_KEY was
         // unavailable, or before it was introduced) now that a cipher is present.
-        if (this.encryption && hasPlaintextSecrets(config) && decryptedConfig.credentialStatus !== 'decryption_failed') {
-          await this.storage.saveConnection(this.encryptConfig(decryptedConfig))
+        // A row the environment sync rebuilt was just saved encrypted already.
+        if (
+          decryptedConfig === loadedConfig &&
+          this.encryption &&
+          hasPlaintextSecrets(config) &&
+          loadedConfig.credentialStatus !== 'decryption_failed'
+        ) {
+          await this.storage.saveConnection(this.encryptConfig(loadedConfig))
             .then(() => this.logger.log(`${config.name}: re-encrypted secrets that were stored in plaintext`))
             .catch((err) => {
               this.logger.warn(`Failed to re-encrypt stored secrets for ${config.name}: ${err instanceof Error ? err.message : err}`);
             });
         }
-        decryptedConfig = await this.syncWithEnvironment(decryptedConfig);
 
         // If decryption already failed, skip connection attempt
         if (decryptedConfig.credentialStatus === 'decryption_failed') {
@@ -1067,8 +1073,10 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       const rejection = this.externalRequestRejection(request);
       return rejection ? { success: false, error: rejection } : { success: true, message: 'Waiting for first OTLP sample' };
     }
+    // Validate the sanitized material, as addConnection does, so test and save agree.
+    const tlsConfig = request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined;
     try {
-      assertAuthConfig(request);
+      assertAuthConfig({ tls: request.tls, tlsConfig, authMode: request.authMode });
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Invalid TLS configuration' };
     }
@@ -1078,7 +1086,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       username: request.username || 'default',
       password: request.password || '',
       tls: request.tls,
-      tlsConfig: request.tls ? sanitizeTlsConfigInput(request.tlsConfig) : undefined,
+      tlsConfig,
       authMode: request.authMode,
       dbIndex: request.dbIndex,
       // Unique id so a test tunnel never collides with a live connection's tunnel.
