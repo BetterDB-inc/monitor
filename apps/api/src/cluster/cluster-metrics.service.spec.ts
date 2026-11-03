@@ -441,6 +441,27 @@ used_cpu_user:20.3\r
   });
 
   describe('getSlotMigrations', () => {
+    const primaries = [
+      { id: 'abc123node1', address: '192.168.1.10:6379', role: 'master' as const, healthy: true, slots: [[0, 5460]] },
+      { id: 'def456node2', address: '192.168.1.11:6379', role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
+      { id: 'fff789node3', address: '192.168.1.12:6379', role: 'master' as const, healthy: true, slots: [] },
+    ];
+
+    function nodeClients(byNode: Record<string, { nodes?: string; jobs?: unknown; jobsError?: Error }>) {
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        status: 'ready',
+        call: jest.fn(async (cmd: string, sub: string) => {
+          const reply = byNode[nodeId] ?? {};
+          if (cmd === 'CLUSTER' && sub === 'NODES') return reply.nodes ?? '';
+          if (cmd === 'CLUSTER' && sub === 'GETSLOTMIGRATIONS') {
+            if (reply.jobsError) throw reply.jobsError;
+            return reply.jobs ?? [];
+          }
+          return null;
+        }),
+      }));
+    }
+
     it('should return empty array when no migrations', async () => {
       const migrations = await service.getSlotMigrations();
 
@@ -448,95 +469,101 @@ used_cpu_user:20.3\r
       expect(migrations.length).toBe(0);
     });
 
-    it('should parse migrating slots correctly when target node exists', async () => {
-      // Create nodes with matching IDs for migrations
-      const migrationMockNodes = [
-        {
-          id: 'abc123node1',
-          address: '192.168.1.10:6379',
-          role: 'master' as const,
-          healthy: true,
-          slots: [[0, 5460]],
+    it('reads legacy MIGRATING markers from the node that owns them', async () => {
+      // The marker is only on node1's own line, which only node1 reports.
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+      nodeClients({
+        abc123node1: {
+          nodes:
+            'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n' +
+            'def456node2 192.168.1.11:6379 master - 0 0 2 connected 5461-10922\n',
         },
-        {
-          id: 'def456node2',
-          address: '192.168.1.11:6379',
-          role: 'master' as const,
-          healthy: true,
-          slots: [[5461, 10922]],
-        },
-      ];
-
-      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(migrationMockNodes);
-
-      const mockClientWithMigration = {
-        call: jest.fn().mockImplementation((cmd, ...args) => {
-          if (cmd === 'CLUSTER' && args[0] === 'NODES') {
-            return Promise.resolve(
-              'abc123node1 192.168.1.10:6379 master - 0 0 1 connected 0-5460 [5461->-def456]\n' +
-                'def456node2 192.168.1.11:6379 master - 0 0 2 connected 5461-10922\n',
-            );
-          }
-          return Promise.resolve(null);
-        }),
-        status: 'ready',
-      };
-
-      mockConnectionRegistry.get.mockReturnValue({
-        getClient: jest.fn().mockReturnValue(mockClientWithMigration),
       });
 
-      const migrations = await service.getSlotMigrations();
+      const migrations = await service.getSlotMigrations('conn-1');
 
-      // Should find the migrating slot
-      expect(migrations.length).toBeGreaterThan(0);
-      const migratingSlots = migrations.filter((m) => m.state === 'migrating');
-      expect(migratingSlots.length).toBeGreaterThan(0);
-      expect(migratingSlots[0].slot).toBe(5461);
-      expect(migratingSlots[0].sourceNodeId).toBe('abc123node1');
-      expect(migratingSlots[0].targetNodeId).toBe('def456node2');
+      expect(migrations).toEqual([
+        expect.objectContaining({ slot: 5461, sourceNodeId: 'abc123node1', targetNodeId: 'def456node2', state: 'migrating' }),
+      ]);
+      expect(mockDiscoveryService.discoverNodes).toHaveBeenCalledWith('conn-1');
     });
 
-    it('should return empty array when source node not found for importing slots', async () => {
-      // Test case where importing slot references a node that's not in the discovered nodes list
-      // This can happen when the cluster is in an inconsistent state
-      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(mockNodes);
-
-      const mockClientWithImport = {
-        call: jest.fn().mockImplementation((cmd, ...args) => {
-          if (cmd === 'CLUSTER' && args[0] === 'NODES') {
-            // Reference a node ID that doesn't exist in mockNodes
-            return Promise.resolve(
-              'somenode 192.168.1.10:6379 master - 0 0 1 connected 0-5460\n' +
-                'othernode 192.168.1.11:6379 master - 0 0 2 connected 5461-10922 [5461-<-unknownnode]\n',
-            );
-          }
-          return Promise.resolve(null);
-        }),
-        status: 'ready',
-      };
-
-      mockConnectionRegistry.get.mockReturnValueOnce({
-        getClient: jest.fn().mockReturnValue(mockClientWithImport),
+    it('reports an atomic slot migration job once, from either end', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+      const job = (operation: string) => [
+        'name', 'job-1', 'operation', operation, 'slot_ranges', '0-1365',
+        'target_node', 'fff789node3', 'source_node', 'abc123node1', 'state', 'snapshotting',
+      ];
+      nodeClients({
+        abc123node1: { jobs: [job('EXPORT')] },
+        fff789node3: { jobs: [job('IMPORT')] },
       });
 
       const migrations = await service.getSlotMigrations();
 
-      // Should return empty or not include the migration since source node wasn't found
-      expect(Array.isArray(migrations)).toBe(true);
+      expect(migrations).toHaveLength(1);
+      expect(migrations[0]).toEqual(
+        expect.objectContaining({
+          slot: 0,
+          slotRange: '0-1365',
+          sourceNodeId: 'abc123node1',
+          sourceAddress: '192.168.1.10:6379',
+          targetNodeId: 'fff789node3',
+          targetAddress: '192.168.1.12:6379',
+          state: 'migrating',
+          phase: 'snapshotting',
+        }),
+      );
+    });
+
+    it('ignores finished atomic jobs and servers without GETSLOTMIGRATIONS', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+      nodeClients({
+        abc123node1: { jobs: [['name', 'done', 'operation', 'EXPORT', 'slot_ranges', '1-2', 'state', 'success']] },
+        def456node2: { jobsError: new Error('ERR unknown subcommand') },
+      });
+
+      await expect(service.getSlotMigrations()).resolves.toEqual([]);
     });
 
     it('should handle errors gracefully', async () => {
-      mockConnectionRegistry.get.mockReturnValue({
-        getClient: jest.fn().mockReturnValue({
-          call: jest.fn().mockRejectedValue(new Error('Connection failed')),
-        }),
-      });
+      mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Connection failed'));
 
       const migrations = await service.getSlotMigrations();
 
-      expect(Array.isArray(migrations)).toBe(true);
-      expect(migrations.length).toBe(0);
+      expect(migrations).toEqual([]);
+    });
+  });
+
+  describe('getClusterSlotStats', () => {
+    it('merges the slots of every primary and keeps the overall top N', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
+        { id: 'r1', address: '10.0.0.2:6379', role: 'replica', healthy: true, slots: [] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'ghost', address: '10.0.0.4:6379', role: 'master', healthy: false, slots: [] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
+        p2: [[9000, ['key-count', 70]], [9001, ['key-count', 1]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn().mockResolvedValue(replies[nodeId]),
+      }));
+
+      const stats = await service.getClusterSlotStats('key-count', 3, 'conn-1');
+
+      expect(Object.keys(stats).sort()).toEqual(['1', '2', '9000']);
+      expect(mockDiscoveryService.getNodeConnection.mock.calls.map((c) => c[0]).sort()).toEqual(['p1', 'p2']);
+    });
+
+    it('fails only when no primary answered', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockRejectedValue(new Error('boom')) });
+
+      await expect(service.getClusterSlotStats('key-count', 10)).rejects.toThrow('boom');
     });
   });
 });

@@ -89,6 +89,10 @@ export interface SlotMigration {
   targetAddress: string;
   state: 'migrating' | 'importing';
   keysRemaining?: number;
+  /** Atomic slot migration (Valkey 9+): the ranges the job moves. */
+  slotRange?: string;
+  /** Atomic slot migration job state, e.g. "snapshotting". */
+  phase?: string;
 }
 
 export interface ReplicationLagInfo {

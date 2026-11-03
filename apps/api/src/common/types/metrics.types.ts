@@ -484,6 +484,10 @@ export interface SlotStatsMetric {
   expires_count: number;
   total_reads: number;
   total_writes: number;
+  /** Valkey 8.0+ reports these when `cluster-slot-stats-enabled` is on. */
+  cpu_usec?: number;
+  network_bytes_in?: number;
+  network_bytes_out?: number;
 }
 
 export interface SlotStats {

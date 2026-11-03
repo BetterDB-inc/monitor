@@ -9,11 +9,26 @@ import {
   ClientInfo,
   CommandLogEntry,
   CommandLogType,
+  SlotStats,
 } from '../common/types/metrics.types';
+import { CLUSTER_TOTAL_SLOTS } from '../common/constants/cluster.constants';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
 import { isAmbiguousCommand, isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
+
+export type SlotStatsOrder = 'key-count' | 'cpu-usec';
+
+/**
+ * Merge per-node CLUSTER SLOT-STATS replies (each node only reports the slots it
+ * owns) and keep the overall top `limit` by the requested metric.
+ */
+export function mergeSlotStats(perNode: SlotStats[], orderBy: SlotStatsOrder, limit: number): SlotStats {
+  const metric = orderBy === 'cpu-usec' ? 'cpu_usec' : 'key_count';
+  const all = perNode.flatMap((stats) => Object.entries(stats));
+  all.sort(([, a], [, b]) => (b[metric] ?? 0) - (a[metric] ?? 0));
+  return Object.fromEntries(all.slice(0, limit));
+}
 
 export interface ClusterSlowlogEntry extends SlowLogEntry {
   nodeId: string;
@@ -86,6 +101,26 @@ export interface SlotMigration {
   targetAddress: string;
   state: 'migrating' | 'importing';
   keysRemaining?: number;
+  /** Atomic slot migration (Valkey 9+): the ranges the job moves, e.g. "0-1365 5462-6826". */
+  slotRange?: string;
+  /** Atomic slot migration job state as Valkey reports it, e.g. "snapshotting". */
+  phase?: string;
+}
+
+const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
+
+/** One CLUSTER GETSLOTMIGRATIONS job; RESP2 delivers each map as a flat name/value array. */
+export function parseSlotMigrationJobs(raw: unknown): Record<string, string>[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((job) => {
+    const fields: Record<string, string> = {};
+    if (Array.isArray(job)) {
+      for (let i = 0; i + 1 < job.length; i += 2) fields[String(job[i])] = String(job[i + 1]);
+    } else if (job && typeof job === 'object') {
+      for (const [k, v] of Object.entries(job)) fields[k] = String(v);
+    }
+    return fields;
+  });
 }
 
 @Injectable()
@@ -354,78 +389,160 @@ export class ClusterMetricsService {
     }
   }
 
+  /**
+   * Cluster-wide CLUSTER SLOT-STATS. The command only covers the slots of the
+   * node that answers, so asking the connection's own socket shows one shard;
+   * ask every slot-owning primary instead.
+   */
+  async getClusterSlotStats(
+    orderBy: SlotStatsOrder = 'key-count',
+    limit: number = 100,
+    connectionId?: string,
+  ): Promise<SlotStats> {
+    const validLimit = Math.max(1, Math.min(limit, CLUSTER_TOTAL_SLOTS));
+    const primaries = (await this.discoveryService.discoverNodes(connectionId)).filter(
+      (node) => node.role === 'master' && node.slots.length > 0,
+    );
+    const results = await Promise.allSettled(
+      primaries.map(async (node) => {
+        const client = await this.discoveryService.getNodeConnection(node.id, connectionId);
+        const raw = await client.call('CLUSTER', 'SLOT-STATS', 'ORDERBY', orderBy, 'LIMIT', validLimit);
+        return MetricsParser.parseSlotStats(raw as unknown[]);
+      }),
+    );
+
+    const perNode: SlotStats[] = [];
+    for (const [i, result] of results.entries()) {
+      if (result.status === 'fulfilled') {
+        perNode.push(result.value);
+      } else {
+        this.logger.warn(`Failed to fetch slot stats from ${primaries[i].address}: ${result.reason}`);
+      }
+    }
+    if (primaries.length > 0 && perNode.length === 0) {
+      const first = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      throw first?.reason instanceof Error ? first.reason : new Error(String(first?.reason));
+    }
+    return mergeSlotStats(perNode, orderBy, validLimit);
+  }
+
   async getNodeInfo(nodeId: string): Promise<Record<string, unknown>> {
     const client = await this.discoveryService.getNodeConnection(nodeId);
     const infoString = await client.info();
     return InfoParser.parse(infoString);
   }
 
-  async getSlotMigrations(): Promise<SlotMigration[]> {
+  /**
+   * Slot migrations in progress, asked of every primary: legacy MIGRATING /
+   * IMPORTING markers only appear on a node's own CLUSTER NODES line, and atomic
+   * slot migration jobs (Valkey 9+, CLUSTER MIGRATESLOTS) only show up in
+   * CLUSTER GETSLOTMIGRATIONS on the source and target nodes.
+   */
+  async getSlotMigrations(connectionId?: string): Promise<SlotMigration[]> {
     const migrations: SlotMigration[] = [];
-
+    let nodes: DiscoveredNode[];
     try {
-      // Use primary connection instead of individual node connections
-      const client = this.connectionRegistry.get().getClient();
-      const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
-      const lines = nodesString.trim().split('\n');
-
-      // Get all discovered nodes for lookup
-      const nodes = await this.discoveryService.discoverNodes();
-
-      for (const line of lines) {
-        const parts = line.split(' ');
-        if (parts.length < 8) continue;
-
-        const nodeId = parts[0];
-        const address = parts[1];
-        const slots = parts.slice(8);
-
-        for (const slotRange of slots) {
-          const migratingMatch = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
-          if (migratingMatch) {
-            const slot = parseInt(migratingMatch[1], 10);
-            const targetNodeId = migratingMatch[2];
-            const targetNode = nodes.find((n) => n.id.startsWith(targetNodeId));
-
-            if (targetNode) {
-              migrations.push({
-                slot,
-                sourceNodeId: nodeId,
-                sourceAddress: address,
-                targetNodeId: targetNode.id,
-                targetAddress: targetNode.address,
-                state: 'migrating',
-                keysRemaining: undefined, // Can't get this without node connection
-              });
-            }
-          }
-
-          const importingMatch = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
-          if (importingMatch) {
-            const slot = parseInt(importingMatch[1], 10);
-            const sourceNodeId = importingMatch[2];
-            const sourceNode = nodes.find((n) => n.id.startsWith(sourceNodeId));
-
-            if (sourceNode) {
-              migrations.push({
-                slot,
-                sourceNodeId: sourceNode.id,
-                sourceAddress: sourceNode.address,
-                targetNodeId: nodeId,
-                targetAddress: address,
-                state: 'importing',
-              });
-            }
-          }
-        }
-      }
+      nodes = await this.discoveryService.discoverNodes(connectionId);
     } catch (error) {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
+      return migrations;
     }
 
-    return migrations;
+    const findNode = (idOrPrefix: string) => nodes.find((n) => n.id.startsWith(idOrPrefix));
+    const seenLegacy = new Set<string>();
+    // Both ends of an atomic migration report the job; keep one per job name,
+    // preferring the source's EXPORT view so the entry does not flip between polls.
+    const atomicJobs = new Map<string, SlotMigration>();
+
+    // A new primary has no slots until its first import lands, so include every primary.
+    const primaries = nodes.filter((node) => node.role === 'master' && node.healthy);
+    await Promise.all(
+      primaries.map(async (primary) => {
+        let client: Valkey;
+        try {
+          client = await this.discoveryService.getNodeConnection(primary.id, connectionId);
+        } catch (error) {
+          this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
+          return;
+        }
+
+        try {
+          const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
+          for (const line of nodesString.trim().split('\n')) {
+            const parts = line.split(' ');
+            if (parts.length < 8) continue;
+            const [nodeId, address] = parts;
+            for (const slotRange of parts.slice(8)) {
+              const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
+              const target = migrating && findNode(migrating[2]);
+              if (migrating && target) {
+                const key = `${migrating[1]}:${nodeId}:${target.id}`;
+                if (!seenLegacy.has(key)) {
+                  seenLegacy.add(key);
+                  migrations.push({
+                    slot: parseInt(migrating[1], 10),
+                    sourceNodeId: nodeId,
+                    sourceAddress: address,
+                    targetNodeId: target.id,
+                    targetAddress: target.address,
+                    state: 'migrating',
+                    keysRemaining: undefined, // Can't get this without node connection
+                  });
+                }
+              }
+
+              const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
+              const source = importing && findNode(importing[2]);
+              if (importing && source) {
+                const key = `${importing[1]}:${source.id}:${nodeId}`;
+                if (!seenLegacy.has(key)) {
+                  seenLegacy.add(key);
+                  migrations.push({
+                    slot: parseInt(importing[1], 10),
+                    sourceNodeId: source.id,
+                    sourceAddress: source.address,
+                    targetNodeId: nodeId,
+                    targetAddress: address,
+                    state: 'importing',
+                  });
+                }
+              }
+            }
+          }
+        } catch (error) {
+          this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
+        }
+
+        let jobs: Record<string, string>[];
+        try {
+          jobs = parseSlotMigrationJobs(await client.call('CLUSTER', 'GETSLOTMIGRATIONS'));
+        } catch {
+          return; // Before Valkey 9 the subcommand does not exist.
+        }
+        for (const job of jobs) {
+          if (!job.name || FINISHED_MIGRATION_STATES.has(job.state)) continue;
+          const isImport = job.operation?.toUpperCase() === 'IMPORT';
+          if (isImport && atomicJobs.has(job.name)) continue;
+          const source = findNode(job.source_node ?? '');
+          const target = findNode(job.target_node ?? '');
+          const firstSlot = parseInt((job.slot_ranges ?? '').split(/[-\s]/)[0], 10);
+          atomicJobs.set(job.name, {
+            slot: Number.isNaN(firstSlot) ? -1 : firstSlot,
+            slotRange: job.slot_ranges,
+            sourceNodeId: source?.id ?? job.source_node ?? '',
+            sourceAddress: source?.address ?? '',
+            targetNodeId: target?.id ?? job.target_node ?? '',
+            targetAddress: target?.address ?? '',
+            state: isImport ? 'importing' : 'migrating',
+            phase: job.state,
+          });
+        }
+      }),
+    );
+
+    return [...migrations, ...atomicJobs.values()];
   }
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {

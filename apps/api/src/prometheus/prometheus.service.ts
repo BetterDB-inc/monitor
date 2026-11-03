@@ -2631,7 +2631,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     try {
-      const slotStats = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      const slotStats =
+        client.getCapabilities().clusterEnabled && this.clusterMetricsService
+          ? await this.clusterMetricsService.getClusterSlotStats('key-count', this.slotStatsTopN, connectionId)
+          : await client.getClusterSlotStats('key-count', this.slotStatsTopN);
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }

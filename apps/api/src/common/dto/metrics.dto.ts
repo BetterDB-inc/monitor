@@ -318,6 +318,15 @@ export class SlotStatsMetricDto implements SlotStatsMetric {
 
   @ApiProperty({ description: 'Total write operations', example: 500 })
   total_writes: number;
+
+  @ApiPropertyOptional({ description: 'CPU time spent on the slot (microseconds)', example: 1200 })
+  cpu_usec?: number;
+
+  @ApiPropertyOptional({ description: 'Bytes received for commands on the slot', example: 4096 })
+  network_bytes_in?: number;
+
+  @ApiPropertyOptional({ description: 'Bytes sent in replies for the slot', example: 8192 })
+  network_bytes_out?: number;
 }
 
 // Simple response DTOs for common patterns

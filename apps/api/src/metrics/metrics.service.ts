@@ -1,5 +1,6 @@
-import { Injectable, Inject, NotFoundException } from '@nestjs/common';
+import { Injectable, Inject, NotFoundException, Optional } from '@nestjs/common';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
 import {
   InfoResponse,
   SlowLogEntry,
@@ -26,6 +27,7 @@ export class MetricsService {
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
+    @Optional() private readonly clusterMetrics?: ClusterMetricsService,
   ) { }
 
   private getClient(connectionId?: string) {
@@ -150,6 +152,10 @@ export class MetricsService {
     const capabilities = client.getCapabilities();
     if (!capabilities.hasClusterSlotStats) {
       throw new Error('CLUSTER SLOT-STATS not supported on this database version');
+    }
+    // The connection's own socket only sees the slots of the node it landed on.
+    if (capabilities.clusterEnabled && this.clusterMetrics) {
+      return this.clusterMetrics.getClusterSlotStats(orderBy, limit, connectionId);
     }
     return client.getClusterSlotStats(orderBy, limit);
   }

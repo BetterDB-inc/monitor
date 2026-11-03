@@ -847,7 +847,7 @@ export class MetricsController {
   @ApiResponse({ status: 500, description: 'Failed to get slot migrations' })
   async getSlotMigrations(@ConnectionId() connectionId?: string): Promise<SlotMigration[]> {
     try {
-      return await this.clusterMetricsService.getSlotMigrations();
+      return await this.clusterMetricsService.getSlotMigrations(connectionId);
     } catch (error) {
       throw new HttpException(
         `Failed to get slot migrations: ${error instanceof Error ? error.message : 'Unknown error'}`,
