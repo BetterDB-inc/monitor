@@ -1,7 +1,8 @@
 import { InfoParser } from './info.parser';
 
 const REPLICA_LINE_KEY = /^(?:slave|replica)(\d+)$/;
-const REPLICA_ROLES: ReadonlySet<string> = new Set(['slave', 'replica', 'active-replica']);
+const READ_ONLY_REPLICA_ROLES: ReadonlySet<string> = new Set(['slave', 'replica']);
+const REPLICA_ROLES: ReadonlySet<string> = new Set([...READ_ONLY_REPLICA_ROLES, 'active-replica']);
 
 export interface ReplicaLine {
   key: string;
@@ -14,6 +15,10 @@ export interface ReplicaLine {
 
 export function isReplicaRole(role: string | undefined): boolean {
   return role !== undefined && REPLICA_ROLES.has(role);
+}
+
+export function isReadOnlyReplicaRole(role: string | undefined): boolean {
+  return role !== undefined && READ_ONLY_REPLICA_ROLES.has(role);
 }
 
 export function hasReplicaLines(replication: Record<string, string>): boolean {

@@ -171,7 +171,7 @@ import {
 import { SUSTAINED_DEGRADATION_MESSAGE } from '../latency-regression/regression-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
-import { isReplicaRole } from '@app/database/parsers/replication-info.parser';
+import { isReadOnlyReplicaRole } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { isWriteCommand } from '@app/cluster/write-commands';
 import {
@@ -1382,7 +1382,11 @@ export class AnomalyService
       const roleStr = info['role'];
       if (roleStr) {
         const currentRole =
-          roleStr === 'master' ? 1 : isReplicaRole(roleStr) ? 0 : -1;
+          roleStr === 'master' ? 1 : isReadOnlyReplicaRole(roleStr) ? 0 : -1;
+        if (roleStr === 'active-replica') {
+          this.lastReplicationRole.delete(ctx.connectionId);
+          this.prevReplSnapshot.delete(ctx.connectionId);
+        }
         if (currentRole !== -1) {
           const lastRole = this.lastReplicationRole.get(ctx.connectionId);
           if (lastRole !== undefined && currentRole !== lastRole) {
@@ -1474,7 +1478,7 @@ export class AnomalyService
       if (
         live &&
         replid &&
-        (roleStr === 'master' || isReplicaRole(roleStr))
+        (roleStr === 'master' || isReadOnlyReplicaRole(roleStr))
       ) {
         const snapshot = {
           role: (roleStr === 'master' ? 'master' : 'replica') as 'master' | 'replica',
@@ -2967,7 +2971,7 @@ export class AnomalyService
     try {
       const replid = info['master_replid'];
       const roleStr = info['role'];
-      const isReplicating = roleStr === 'master' || isReplicaRole(roleStr);
+      const isReplicating = roleStr === 'master' || isReadOnlyReplicaRole(roleStr);
       const clusterKey = clusterKeyFromNodes(clusterNodes);
 
       if (!replid || !isReplicating) {
@@ -3418,7 +3422,7 @@ export class AnomalyService
     try {
       const replid = info['master_replid'];
       const roleStr = info['role'];
-      const isReplicating = roleStr === 'master' || isReplicaRole(roleStr);
+      const isReplicating = roleStr === 'master' || isReadOnlyReplicaRole(roleStr);
 
       if (!replid || !isReplicating) {
         // Not (yet) part of a known replication group — drop any stale entry

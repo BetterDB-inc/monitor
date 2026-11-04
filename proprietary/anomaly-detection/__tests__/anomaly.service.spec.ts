@@ -549,6 +549,49 @@ describe('AnomalyService', () => {
       expect(failoverEvents[0].message).toContain('master to replica');
     });
 
+    const withRole = (role: string) =>
+      jest.fn().mockResolvedValue({
+        server: { role },
+        replication: { role, master_replid: 'replid-1', master_repl_offset: '100' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+
+    it('does not report a failover when a master becomes an active-replica', async () => {
+      await poll();
+      dbClient.getInfoParsed = withRole('active-replica');
+      await poll();
+
+      const failoverEvents = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
+      expect(failoverEvents).toHaveLength(0);
+    });
+
+    it('does not report a promotion when an active-replica becomes a master', async () => {
+      dbClient.getInfoParsed = withRole('replica');
+      await poll();
+      dbClient.getInfoParsed = withRole('active-replica');
+      await poll();
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
+      dbClient.getInfoParsed = withRole('master');
+      await poll();
+
+      const failoverEvents = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
+      expect(failoverEvents).toHaveLength(0);
+    });
+
     it('detects master→slave (legacy naming)', async () => {
       await poll(); // master
 
