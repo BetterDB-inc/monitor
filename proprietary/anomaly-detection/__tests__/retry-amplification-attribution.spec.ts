@@ -500,6 +500,25 @@ describe('retry amplification attribution', () => {
       expect(latest?.takenAt).toBe(240_000);
     });
 
+    it('skips snapshots taken up to the end of the previous episode', () => {
+      const history = [at(60_000), at(120_000), at(180_000), at(240_000), at(300_000)];
+
+      const { before, first, latest } = selectClientSnapshots(history, 250_000, 300_000, 130_000);
+
+      expect(before?.takenAt).toBe(180_000);
+      expect(first?.takenAt).toBe(240_000);
+      expect(latest?.takenAt).toBe(300_000);
+    });
+
+    it('drops the rate pair when the previous episode leaves one reading before this one', () => {
+      const history = [at(60_000), at(120_000), at(180_000), at(240_000), at(300_000)];
+
+      const { before, first } = selectClientSnapshots(history, 250_000, 300_000, 180_000);
+
+      expect(before).toBeNull();
+      expect(first?.takenAt).toBe(240_000);
+    });
+
     it('never pairs a snapshot with itself when the run outpaces the reads', () => {
       const { first, latest } = selectClientSnapshots([at(60_000)], 60_000, 120_000);
 

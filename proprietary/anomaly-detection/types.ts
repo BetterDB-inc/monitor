@@ -246,6 +246,7 @@ export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
 
 export interface AnomalyEventSink {
   ingestExternalAnomaly(event: AnomalyEvent): void;
+  stampExternalAnomaly?(event: AnomalyEvent): void;
   reportLatencyDegraded?(connectionId: string, degraded: boolean | null): void;
 }
 
