@@ -647,6 +647,7 @@ export class AnomalyService
   private divergenceRetiredSwept = new Set<string>();
   private divergencePendingWindows = new Map<string, ClosedDivergenceWindow[]>();
   private divergenceRetiredWindowEnd = new Map<string, number>();
+  private fanoutInFlight = new Set<string>();
   private openDivergenceReads = new Map<string, Promise<StoredAnomalyEvent[]>>();
   private topologyFanoutUnreachable = new Map<string, number>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
@@ -7965,12 +7966,17 @@ export class AnomalyService
     ]
       .filter((w) => w.end >= startTime && w.end <= endTime)
       .sort((a, b) => a.end - b.end);
+    const seenEnds = new Map(
+      [...series.entries()].map(([addr, windows]) => [addr, new Set(windows.map((w) => w.end))]),
+    );
     for (const { addr, ...window } of inMemory) {
-      const windows = series.get(addr) ?? [];
-      if (windows.length > 0 && window.end <= windows[windows.length - 1].end) continue;
-      windows.push(window);
-      series.set(addr, windows);
+      const ends = seenEnds.get(addr) ?? new Set<number>();
+      seenEnds.set(addr, ends);
+      if (ends.has(window.end)) continue;
+      ends.add(window.end);
+      series.set(addr, [...(series.get(addr) ?? []), window]);
     }
+    for (const windows of series.values()) windows.sort((a, b) => a.end - b.end);
     const now = Date.now();
     const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
     const orphaned = new Set(keys.flatMap((key) => [...(this.divergenceOrphans.get(key)?.keys() ?? [])]));
@@ -8256,7 +8262,12 @@ export class AnomalyService
     await this.sweepRetiredDivergenceNodes(ctx, kept);
     await this.settleRetiredDivergence(ctx.connectionId);
     if (targets.length === 0) {
-      this.topologyFanoutUnreachable.delete(ctx.connectionId);
+      if ((this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
+        this.logger.log(
+          `Replication divergence fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
+        );
+        this.topologyFanoutUnreachable.delete(ctx.connectionId);
+      }
       return;
     }
 
@@ -8271,7 +8282,7 @@ export class AnomalyService
           `Connecting to ${target.addr} timed out`,
         );
         const raw = await withTimeout(
-          client.info(),
+          this.fanoutCommand(topologyStateKey(ctx.connectionId, target.addr), () => client.info()),
           AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
           `INFO to ${target.addr} timed out`,
         );
@@ -8313,6 +8324,19 @@ export class AnomalyService
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
+  }
+
+  private fanoutCommand<T>(key: string, send: () => Promise<T>): Promise<T> {
+    if (this.fanoutInFlight.has(key)) {
+      return Promise.reject(new Error(`Previous command to ${key} has not answered`));
+    }
+    this.fanoutInFlight.add(key);
+    const sent = send();
+    sent.then(
+      () => this.fanoutInFlight.delete(key),
+      () => this.fanoutInFlight.delete(key),
+    );
+    return sent;
   }
 
   private retireDivergenceScope(key: string, ctx: ConnectionContext): void {
