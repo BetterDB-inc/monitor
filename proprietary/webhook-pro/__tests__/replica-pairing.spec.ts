@@ -72,6 +72,47 @@ describe('ReplicaPairing', () => {
     expect(pairing.primaryFor('a')).toBeNull();
   });
 
+  it('retries a failed host lookup after a short delay', async () => {
+    let now = 0;
+    const resolver = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('no dns'))
+      .mockResolvedValue(['10.0.0.3']);
+    const pairing = new ReplicaPairing(resolver, () => now);
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379', '10.0.0.3:6379'), {
+      host: 'primary',
+      port: 6379,
+    });
+    pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+    await flush();
+    pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+    expect(resolver).toHaveBeenCalledTimes(1);
+
+    now = 31_000;
+    pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+    await flush();
+
+    expect(pairing.primaryFor('b')?.replicaAddr).toBe('10.0.0.3:6379');
+  });
+
+  it('gives up on a host lookup that never settles', async () => {
+    jest.useFakeTimers();
+    try {
+      const resolver = jest.fn(() => new Promise<string[]>(() => undefined));
+      let now = 0;
+      const pairing = new ReplicaPairing(resolver, () => now);
+      pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+      await jest.advanceTimersByTimeAsync(5_000);
+
+      now = 31_000;
+      pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+
+      expect(resolver).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('does not pair a replica of a different primary', () => {
     const pairing = new ReplicaPairing(jest.fn());
     pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });

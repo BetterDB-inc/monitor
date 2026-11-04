@@ -194,22 +194,14 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     );
   }
 
-  async getSubscribedWebhookIds(
-    eventType: WebhookEventType,
-    connectionId?: string,
-  ): Promise<Set<string>> {
-    const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
-    return new Set(webhooks.map((webhook) => webhook.id));
-  }
-
   private async subscribedWebhookIdsExcept(
     eventType: WebhookEventType,
     connectionId: string | undefined,
     excludeWebhook: (webhookId: string) => boolean,
   ): Promise<string[] | undefined> {
     try {
-      const ids = await this.getSubscribedWebhookIds(eventType, connectionId);
-      return [...ids].filter((id) => !excludeWebhook(id));
+      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+      return webhooks.map((webhook) => webhook.id).filter((id) => !excludeWebhook(id));
     } catch (error) {
       this.logger.error(`Failed to look up webhooks for event ${eventType}:`, error);
       return undefined;

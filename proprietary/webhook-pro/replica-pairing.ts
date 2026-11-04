@@ -3,6 +3,8 @@ import { isIP } from 'net';
 import { parseReplicaLines } from '../anomaly-detection/replication-stream';
 
 const DNS_TTL_MS = 5 * 60_000;
+const DNS_RETRY_MS = 30_000;
+const DNS_TIMEOUT_MS = 5_000;
 
 export interface ReplicaPair {
   primaryConnectionId: string;
@@ -19,7 +21,7 @@ interface ReplicationView {
 
 interface ResolvedHost {
   ips: string[];
-  resolvedAt: number;
+  expiresAt: number;
 }
 
 export type HostResolver = (host: string) => Promise<string[]>;
@@ -117,11 +119,22 @@ export class ReplicaPairing {
   private refreshHost(host: string): void {
     if (isIP(host) || this.resolving.has(host)) return;
     const cached = this.hosts.get(host);
-    if (cached && this.now() - cached.resolvedAt < DNS_TTL_MS) return;
+    if (cached && this.now() < cached.expiresAt) return;
     this.resolving.add(host);
-    this.resolver(host)
-      .then((ips) => this.hosts.set(host, { ips, resolvedAt: this.now() }))
-      .catch(() => this.hosts.set(host, { ips: [], resolvedAt: this.now() }))
+    withTimeout(this.resolver(host), DNS_TIMEOUT_MS)
+      .then((ips) => this.hosts.set(host, { ips, expiresAt: this.now() + DNS_TTL_MS }))
+      .catch(() =>
+        this.hosts.set(host, { ips: cached?.ips ?? [], expiresAt: this.now() + DNS_RETRY_MS }),
+      )
       .finally(() => this.resolving.delete(host));
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('DNS lookup timed out')), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

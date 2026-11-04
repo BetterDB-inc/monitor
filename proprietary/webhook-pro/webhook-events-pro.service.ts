@@ -36,7 +36,7 @@ import { ReplicaPairing } from './replica-pairing';
 export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
   private readonly replicaPairing = new ReplicaPairing();
-  private readonly notAckingStalls = new Set<string>();
+  private readonly notAckingStalls = new Map<string, Set<string>>();
   private readonly skippedLagAlerts = new Set<string>();
 
   constructor(
@@ -127,7 +127,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         instance: data.instance,
       }),
       data.connectionId,
-      await this.webhooksAlertedForStall(data.connectionId),
+      this.webhooksAlertedForStall(data.connectionId),
     );
     this.forgetSkippedLagAlerts(data.connectionId, (webhookId) =>
       this.webhookDispatcher.isThresholdAlertActive(
@@ -153,7 +153,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
   forgetReplication(connectionId: string): void {
     this.replicaPairing.forget(connectionId);
-    for (const key of this.notAckingStalls) {
+    for (const key of this.notAckingStalls.keys()) {
       if (key.startsWith(`${connectionId}\0`)) this.notAckingStalls.delete(key);
     }
     this.forgetSkippedLagAlerts(connectionId);
@@ -175,27 +175,18 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     this.notAckingStalls.delete(stallKey(connectionId, replica));
   }
 
-  private async webhooksAlertedForStall(
+  private webhooksAlertedForStall(
     replicaConnectionId: string,
-  ): Promise<((webhookId: string) => boolean) | undefined> {
+  ): ((webhookId: string) => boolean) | undefined {
     const pair = this.replicaPairing.primaryFor(replicaConnectionId);
-    if (!pair || !this.notAckingStalls.has(stallKey(pair.primaryConnectionId, pair.replicaAddr))) {
-      return undefined;
-    }
-    try {
-      const alerted = await this.webhookDispatcher.getSubscribedWebhookIds(
-        WebhookEventType.REPLICATION_DIVERGENCE,
-        pair.primaryConnectionId,
-      );
-      return (webhookId) => {
-        if (!alerted.has(webhookId)) return false;
-        this.skippedLagAlerts.add(stallKey(replicaConnectionId, webhookId));
-        return true;
-      };
-    } catch (error) {
-      this.logger.error('Failed to look up replication.divergence subscribers', error);
-      return undefined;
-    }
+    const alerted =
+      pair && this.notAckingStalls.get(stallKey(pair.primaryConnectionId, pair.replicaAddr));
+    if (!alerted) return undefined;
+    return (webhookId) => {
+      if (!alerted.has(webhookId)) return false;
+      this.skippedLagAlerts.add(stallKey(replicaConnectionId, webhookId));
+      return true;
+    };
   }
 
   private webhooksWithOpenLagAlert(
@@ -509,8 +500,14 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     if (connectionId) {
       const key = stallKey(connectionId, data.replica);
       if (data.reason === 'not_acking') {
-        this.notAckingStalls.add(key);
-        excludeWebhook = this.webhooksWithOpenLagAlert(connectionId, data.replica);
+        const alerted = this.notAckingStalls.get(key) ?? new Set<string>();
+        this.notAckingStalls.set(key, alerted);
+        const hasOpenLagAlert = this.webhooksWithOpenLagAlert(connectionId, data.replica);
+        excludeWebhook = (webhookId) => {
+          if (hasOpenLagAlert?.(webhookId)) return true;
+          alerted.add(webhookId);
+          return false;
+        };
       } else {
         this.notAckingStalls.delete(key);
       }
