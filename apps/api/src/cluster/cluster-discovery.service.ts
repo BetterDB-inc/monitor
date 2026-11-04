@@ -170,7 +170,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Bind the node client to the connection that owns it now, so a later
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
-    const key = this.nodeClientKey(nodeId, ownerId);
     const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
@@ -178,6 +177,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       throw new Error(`Node ${nodeId} not found in cluster`);
     }
 
+    const key = this.nodeClientKey(nodeId, ownerId);
     const existing = this.discoveredNodes.get(key);
     if (existing && existing.node.address.split('@')[0] !== node.address.split('@')[0]) {
       this.discoveredNodes.delete(key);
