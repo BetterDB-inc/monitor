@@ -340,12 +340,17 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
-      const replaced = this.discoveredNodes.get(key);
+      let storeKey = key;
+      let replaced = this.discoveredNodes.get(storeKey);
+      if (replaced && replaced.client !== client && replaced.connectionId !== ownerId) {
+        storeKey = `node:${ownerId}:${node.id}`;
+        replaced = this.discoveredNodes.get(storeKey);
+      }
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
       }
 
-      this.discoveredNodes.set(key, connection);
+      this.discoveredNodes.set(storeKey, connection);
       this.logger.log(`Connected to node ${key} at ${host}:${port}`);
 
       // Clear logged errors for this node on successful connection
