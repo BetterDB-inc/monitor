@@ -37,16 +37,26 @@ describe('ClusterTopologySource', () => {
     expect(source.resolveHost).toHaveBeenCalledWith('valkey.ns.svc.cluster.local');
   });
 
-  it('still drops myself when the seed host resolves to a single address or not at all', async () => {
-    const nodes = [
-      { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, healthy: true },
-      { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, healthy: true },
-    ];
-    for (const addresses of [['10.0.0.1'], []]) {
-      const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
-      source.resolveHost = jest.fn().mockResolvedValue(addresses);
-      const result = await source.discover({ ...seed, host: 'node-1.local', port: 6379 } as never, 10_000);
-      expect(result?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
-    }
+  const nodes = [
+    { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, healthy: true },
+    { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, healthy: true },
+  ];
+  const discoverWith = async (addresses: string[]) => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    source.resolveHost = jest.fn().mockResolvedValue(addresses);
+    return source.discover({ ...seed, host: 'node-1.example', port: 6379 } as never, 10_000);
+  };
+
+  it('drops myself when the seed resolves to that one node, also over IPv4 and IPv6', async () => {
+    expect((await discoverWith(['10.0.0.1']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
+    expect((await discoverWith(['10.0.0.1', 'fd00::1']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
+  });
+
+  it('keeps myself when the seed resolves to no cluster node (a Service VIP or load balancer)', async () => {
+    expect((await discoverWith(['10.96.0.10']))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  });
+
+  it('leaves membership unchanged when the seed host does not resolve', async () => {
+    await expect(discoverWith([])).resolves.toBeNull();
   });
 });

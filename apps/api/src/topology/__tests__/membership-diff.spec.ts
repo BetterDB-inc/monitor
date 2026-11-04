@@ -8,6 +8,7 @@ import {
   exceedsRetirementThreshold,
   parseNodeAddress,
   retirementKey,
+  seedIsAlias,
 } from '../membership-diff';
 
 function node(id: string, address: string, flags: string[] = ['master']): DiscoveredNode {
@@ -73,6 +74,33 @@ describe('desiredFromDiscovery', () => {
   it('stamps cluster source in desiredFromDiscovery', () => {
     const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, healthy: true }];
     expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
+  });
+});
+
+describe('seedIsAlias', () => {
+  const seed = { host: 'seed.example', port: 6379 };
+  const nodes = [
+    node('a', '10.0.0.1:6379@16379', ['myself', 'master']),
+    node('b', '10.0.0.2:6379@16379', ['slave']),
+  ];
+
+  it.each([
+    ['resolves to the answering node only', ['10.0.0.1'], false],
+    ['is dual-stack for the answering node', ['10.0.0.1', 'fd00::1'], false],
+    ['resolves to several nodes', ['10.0.0.1', '10.0.0.2'], true],
+    ['resolves to no node', ['10.96.0.10'], true],
+    ['resolves to another node only', ['10.0.0.2'], true],
+  ])('a seed that %s', (_label, addresses, expected) => {
+    expect(seedIsAlias(seed, addresses as string[], nodes)).toBe(expected);
+  });
+
+  it('ignores addresses on another port', () => {
+    expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBe(true);
+  });
+
+  it('matches a node by its announced hostname', () => {
+    const named = [{ ...node('a', '10.0.0.1:6379@16379', ['myself', 'master']), hostname: 'SEED.example' }];
+    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBe(false);
   });
 });
 

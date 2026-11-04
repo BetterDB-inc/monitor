@@ -4,7 +4,7 @@ import { isIP } from 'node:net';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../common/interfaces/database-port.interface';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
-import { desiredFromDiscovery } from './membership-diff';
+import { desiredFromDiscovery, seedIsAlias } from './membership-diff';
 import type { TopologyDiscovery, TopologySource } from './topology-source';
 
 const RESOLVE_TIMEOUT_MS = 2_000;
@@ -50,8 +50,11 @@ export class ClusterTopologySource implements TopologySource {
       this.resolveHost(seed.host),
     ]);
     if (nodes.length === 0) return null;
+    // Without the seed's addresses `myself` cannot be told apart from the seed;
+    // leave membership as it is for this sync rather than guess.
+    if (seedAddresses.length === 0) return null;
     return {
-      nodes: desiredFromDiscovery(seed, nodes, { seedIsAlias: seedAddresses.length > 1 }),
+      nodes: desiredFromDiscovery(seed, nodes, { seedIsAlias: seedIsAlias(seed, seedAddresses, nodes) }),
       unknownGroups: [],
     };
   }

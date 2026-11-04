@@ -61,11 +61,33 @@ export function parseNodeAddress(address: string): { host: string; port: number 
 
 export interface DiscoveryOptions {
   /**
-   * The seed host resolves to several cluster nodes (a Kubernetes headless
-   * Service, round-robin DNS). Each discovery then lands on an arbitrary node,
-   * so `myself` is just whichever node answered, not the seed, and must be kept.
+   * The seed host stands for more than one node (see `seedIsAlias`): discovery
+   * lands on whichever node it routes to, so `myself` is a real node to keep.
    */
   seedIsAlias?: boolean;
+}
+
+/**
+ * Whether the seed host is an alias rather than one node. It is one node when
+ * its resolved addresses (or an announced hostname) match exactly the node that
+ * answered discovery: an IP literal, a pod DNS name, a dual-stack name for one
+ * node. When they match several nodes (a Kubernetes headless Service,
+ * round-robin DNS) or none (a ClusterIP Service or load balancer VIP), each
+ * discovery lands on an arbitrary node and `myself` is not the seed.
+ */
+export function seedIsAlias(
+  seed: { host: string; port: number },
+  seedAddresses: string[],
+  nodes: DiscoveredNode[],
+): boolean {
+  const resolved = new Set(seedAddresses.map((address) => address.toLowerCase()));
+  const seedHost = seed.host.toLowerCase();
+  const matched = nodes.filter((node) => {
+    if (node.hostname?.toLowerCase() === seedHost) return true;
+    const parsed = parseNodeAddress(node.address);
+    return parsed !== null && parsed.port === seed.port && resolved.has(parsed.host.toLowerCase());
+  });
+  return !(matched.length === 1 && matched[0].flags.includes('myself'));
 }
 
 export function desiredFromDiscovery(

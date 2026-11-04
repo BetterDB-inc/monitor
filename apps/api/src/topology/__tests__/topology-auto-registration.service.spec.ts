@@ -7,6 +7,16 @@ function discovered(id: string, address: string, flags = ['master']): Discovered
   return { id, address, flags, role: 'master', slots: [], configEpoch: 0, healthy: true };
 }
 
+// The seed host resolves to the node that answers discovery (a single-node
+// seed), or to an address that matches no node when there is no `myself`.
+function seedResolver(nodes: DiscoveredNode[] | Error | undefined, addresses?: string[]) {
+  return async () => {
+    if (addresses) return addresses;
+    const self = Array.isArray(nodes) ? nodes.find((n) => n.flags.includes('myself')) : undefined;
+    return [self ? self.address.split(':')[0] : '192.0.2.1'];
+  };
+}
+
 function build(options: {
   seed?: Partial<DatabaseConnectionConfig>;
   members?: DatabaseConnectionConfig[];
@@ -15,6 +25,7 @@ function build(options: {
   retentionDays?: number | null;
   clusterEnabled?: boolean;
   connected?: boolean;
+  seedAddresses?: string[];
 } = {}) {
   const seed: DatabaseConnectionConfig = {
     id: 'seed', name: 'prod', host: 'seed.local', port: 7001, isDefault: true, createdAt: 1,
@@ -46,7 +57,7 @@ function build(options: {
   const config = { get: jest.fn(() => options.envDefault) };
   const retention = { getRetentionDays: jest.fn(() => options.retentionDays ?? null) };
   const clusterSource = new ClusterTopologySource(discovery as never);
-  clusterSource.resolveHost = async () => [];
+  clusterSource.resolveHost = seedResolver(options.nodes, options.seedAddresses);
   const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
   return { service, registry, discovery, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
 }
@@ -318,8 +329,8 @@ describe('TopologyAutoRegistrationService', () => {
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
     const clusterSource = new ClusterTopologySource(discovery as never);
-  clusterSource.resolveHost = async () => [];
-  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
+    clusterSource.resolveHost = async () => ['192.0.2.1'];
+    const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     await Promise.all([service.reconcile('a'), service.reconcile('b')]);
 
@@ -438,8 +449,8 @@ describe('TopologyAutoRegistrationService', () => {
     const config = { get: jest.fn(() => false) };
     const retention = { getRetentionDays: jest.fn(() => null) };
     const clusterSource = new ClusterTopologySource(discovery as never);
-  clusterSource.resolveHost = async () => [];
-  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
+    clusterSource.resolveHost = async () => ['192.0.2.1'];
+    const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     const runA = service.reconcile('a');
     await new Promise((resolve) => setImmediate(resolve));
@@ -488,8 +499,8 @@ describe('TopologyAutoRegistrationService', () => {
     const config = { get: jest.fn(() => 'true') };
     const retention = { getRetentionDays: jest.fn(() => null) };
     const clusterSource = new ClusterTopologySource(discovery as never);
-  clusterSource.resolveHost = async () => [];
-  const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
+    clusterSource.resolveHost = async () => ['192.0.2.1'];
+    const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
 
     const runA = service.reconcile('a');
     await new Promise((resolve) => setImmediate(resolve));
@@ -501,5 +512,24 @@ describe('TopologyAutoRegistrationService', () => {
     await Promise.all([runA, runB]);
 
     expect(configs.get('solo')?.membership?.seedId).toBe('a');
+  });
+});
+
+describe('TopologyAutoRegistrationService with a seed that fronts several nodes', () => {
+  it('registers the node that answered discovery as a child', async () => {
+    // Headless Service: the name resolves to every pod, discovery landed on n1.
+    const { service, registry } = build({
+      seed: { host: 'valkey.ns.svc.cluster.local', port: 6379 },
+      nodes: [
+        discovered('n1', '10.0.0.1:6379@16379', ['myself', 'master']),
+        discovered('n2', '10.0.0.2:6379@16379', ['slave']),
+      ],
+      seedAddresses: ['10.0.0.1', '10.0.0.2'],
+    });
+
+    await service.reconcile('seed');
+
+    expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.1', nodeId: 'n1' }));
+    expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.2', nodeId: 'n2' }));
   });
 });
