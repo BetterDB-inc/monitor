@@ -87,6 +87,26 @@ describe('parseReplicaLines', () => {
       },
     },
     {
+      name: 'line with ip but no port',
+      replication: { slave0: 'ip=10.0.0.2,state=online,offset=7,lag=0' },
+      expected: { key: 'slave0', addr: null, offset: 7 },
+    },
+    {
+      name: 'line with an empty ip',
+      replication: { slave0: 'ip=,port=6379,state=online,offset=7,lag=0' },
+      expected: { key: 'slave0', addr: null, offset: 7 },
+    },
+    {
+      name: 'decimal lag',
+      replication: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=7,lag=30.5' },
+      expected: { lagSec: 30.5 },
+    },
+    {
+      name: 'hex offset',
+      replication: { slave0: 'ip=10.0.0.2,port=6379,state=online,offset=0x10,lag=0' },
+      expected: { offset: 16 },
+    },
+    {
       name: 'garbage value',
       replication: { slave0: 'garbage' },
       expected: {
@@ -100,20 +120,6 @@ describe('parseReplicaLines', () => {
     },
   ])('parses a $name', ({ replication, expected }) => {
     expect(parseReplicaLines(replication)).toEqual([expect.objectContaining(expected)]);
-  });
-
-  it('keeps the raw fields', () => {
-    const [line] = parseReplicaLines({
-      slave0: 'ip=10.0.0.2,port=6379,state=online,offset=9,lag=0,type=replica',
-    });
-    expect(line.fields).toEqual({
-      ip: '10.0.0.2',
-      port: '6379',
-      state: 'online',
-      offset: '9',
-      lag: '0',
-      type: 'replica',
-    });
   });
 
   it('orders mixed slaveN and replicaN lines by numeric index', () => {

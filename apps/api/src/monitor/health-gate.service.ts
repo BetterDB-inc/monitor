@@ -8,6 +8,7 @@ import {
   hasReplicaLines,
   isReplicaRole,
   parseReplicaLines,
+  toFiniteNumber,
 } from '../database/parsers/replication-info.parser';
 import {
   HealthGateResult,
@@ -379,7 +380,7 @@ function parseAckSample(
   replication: Record<string, string>,
   replicaLines = parseReplicaLines(replication),
 ): ReplicaAckSample | null {
-  const primaryOffset = parseNumber(replication.master_repl_offset);
+  const primaryOffset = toFiniteNumber(replication.master_repl_offset);
   return primaryOffset === null ? null : { primaryOffset, acks: readAcks(replicaLines) };
 }
 

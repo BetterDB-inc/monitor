@@ -10,7 +10,6 @@ export interface ReplicaLine {
   state: string | null;
   offset: number | null;
   lagSec: number | null;
-  fields: Record<string, string>;
 }
 
 export function isReplicaRole(role: string | undefined): boolean {
@@ -34,13 +33,12 @@ export function parseReplicaLines(replication: Record<string, string>): ReplicaL
       state: fields.state ?? null,
       offset: toFiniteNumber(fields.offset),
       lagSec: toFiniteNumber(fields.lag),
-      fields,
     });
   }
   return lines.sort((a, b) => a.index - b.index);
 }
 
-function toFiniteNumber(raw: string | undefined): number | null {
+export function toFiniteNumber(raw: string | undefined): number | null {
   if (raw === undefined || raw.trim() === '') return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
