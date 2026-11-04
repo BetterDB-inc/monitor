@@ -1989,6 +1989,125 @@ describe('AnomalyService', () => {
       expect(skewEvents()[0].resolved).toBe(true);
     });
 
+    describe('with only the seed registered', () => {
+      function reshardNode(id: string, ops: number, marker = '') {
+        const nodeId = `${id}0000000`;
+        const info = [
+          '# Replication',
+          'role:master',
+          'connected_slaves:0',
+          '# Memory',
+          'used_memory:1000000',
+          '# Stats',
+          `instantaneous_ops_per_sec:${ops}`,
+        ].join('\r\n');
+        const nodesReply = `${nodeId} 10.0.0.${id.charCodeAt(0)}:6379@16379 myself,master - 0 0 1 connected ${marker}`;
+        return {
+          info: jest.fn().mockResolvedValue(info),
+          call: jest.fn().mockResolvedValue(nodesReply),
+        };
+      }
+
+      function discover(clients: Record<string, ReturnType<typeof reshardNode>>) {
+        (service as any).clusterDiscovery = {
+          getNodeConnection: jest.fn(async (nodeId: string) => clients[nodeId]),
+        };
+      }
+
+      async function pollSeed(times: number, aOps: number, migrating: boolean) {
+        for (let i = 0; i < times; i += 1) {
+          clock += 1000;
+          await poll(shardCtx('a', aOps, migrating));
+        }
+      }
+
+      it('judges the seed against primaries it reads itself', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 18_000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({ connectionId: 'conn-a', value: 3 });
+        expect(skewEvents()[0].nodeAddr).toBeUndefined();
+        expect(skewEvents()[0].message).toContain('a0000000');
+      });
+
+      it('alerts on a hot shard that is not registered', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({
+          connectionId: 'conn-a',
+          nodeAddr: '10.0.0.98:6379',
+          value: 3,
+        });
+        expect(skewEvents()[0].message).toContain('b0000000 at 10.0.0.98:6379 (target)');
+        expect(skewEvents()[0].syntheticPattern).toBeUndefined();
+      });
+
+      it('sees a reshard that only an unregistered primary is part of', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1->-c0000000]'),
+          c0000000: reshardNode('c', 6000, '[1-<-b0000000]'),
+        });
+
+        await pollSeed(6, 6000, false);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({ nodeAddr: '10.0.0.98:6379' });
+        expect(skewEvents()[0].message).toContain('(source)');
+      });
+
+      it('drops a primary that leaves the fan-out but keeps its alert until it can be judged', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+        await pollSeed(6, 6000, true);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        for (let i = 0; i < 3; i += 1) {
+          clock += 1000;
+          const ctx = shardCtx('a', 6000, true);
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(
+            shardNodes('a', true).map((node) =>
+              node.id === 'b0000000' ? { ...node, flags: ['master', 'fail'] } : node,
+            ),
+          );
+          await poll(ctx);
+        }
+
+        expect([...(service as any).reshardSnapshot.keys()]).not.toContain('conn-a@10.0.0.98:6379');
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
+      it('forgets the primaries it read once the seed is removed', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+        await pollSeed(2, 6000, true);
+        expect((service as any).reshardSnapshot.size).toBe(3);
+
+        (service as any).onConnectionRemoved('conn-a');
+
+        expect((service as any).reshardSnapshot.size).toBe(0);
+      });
+
+      it('leaves a primary unjudged when its own topology cannot be read', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        b.call.mockRejectedValue(new Error('NOPERM'));
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(0);
+        expect([...(service as any).reshardSnapshot.keys()]).not.toContain('conn-a@10.0.0.98:6379');
+      });
+    });
+
     it('keeps one open alert when a node joins during the reshard', async () => {
       for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
 
