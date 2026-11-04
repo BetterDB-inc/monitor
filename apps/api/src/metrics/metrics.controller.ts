@@ -600,6 +600,7 @@ export class MetricsController {
       `addresses are listed, comma-separated, in the ${SLOT_STATS_FAILED_NODES_HEADER} header and their slots are missing.`,
     schema: { type: 'object' },
   })
+  @ApiResponse({ status: 400, description: 'Invalid limit parameter' })
   @ApiResponse({ status: 501, description: 'Cluster slot stats not supported' })
   @ApiResponse({ status: 500, description: 'Failed to get cluster slot stats' })
   async getClusterSlotStats(
@@ -608,9 +609,12 @@ export class MetricsController {
     @ConnectionId() connectionId?: string,
     @Res({ passthrough: true }) reply?: FastifyReply,
   ): Promise<SlotStats> {
+    const parsedLimit = limit ? parseInt(limit, 10) : undefined;
+    if (parsedLimit !== undefined && isNaN(parsedLimit)) {
+      throw new HttpException('Invalid limit parameter: must be a number', HttpStatus.BAD_REQUEST);
+    }
     try {
       const parsedOrderBy = orderBy as 'key-count' | 'cpu-usec' | undefined;
-      const parsedLimit = limit ? parseInt(limit, 10) : undefined;
       const { stats, failedNodes } = await this.metricsService.getClusterSlotStatsResult(
         parsedOrderBy,
         parsedLimit,
