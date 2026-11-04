@@ -91,25 +91,33 @@ export class SpikeDetector {
     const absZScore = isDrop && !countsAsDrop ? 0 : Math.abs(zScore);
 
     // Check Z-score thresholds
-    let severity: AnomalySeverity | null = null;
-    let threshold: number = 0;
-
+    let zSeverity: AnomalySeverity | null = null;
+    let zThreshold = 0;
     if (this.options.zScoreCritical && absZScore >= this.config.criticalZScore) {
-      severity = AnomalySeverity.CRITICAL;
-      threshold = this.config.criticalZScore;
+      zSeverity = AnomalySeverity.CRITICAL;
+      zThreshold = this.config.criticalZScore;
     } else if (absZScore >= this.config.warningZScore) {
-      severity = AnomalySeverity.WARNING;
-      threshold = this.config.warningZScore;
+      zSeverity = AnomalySeverity.WARNING;
+      zThreshold = this.config.warningZScore;
     }
 
-    // Also check absolute thresholds
+    let absSeverity: AnomalySeverity | null = null;
+    let absThreshold = 0;
     if (currentValue >= this.config.criticalThreshold) {
-      severity = AnomalySeverity.CRITICAL;
-      threshold = this.config.criticalThreshold;
-    } else if (currentValue >= this.config.warningThreshold && !severity) {
-      severity = AnomalySeverity.WARNING;
-      threshold = this.config.warningThreshold;
+      absSeverity = AnomalySeverity.CRITICAL;
+      absThreshold = this.config.criticalThreshold;
+    } else if (currentValue >= this.config.warningThreshold) {
+      absSeverity = AnomalySeverity.WARNING;
+      absThreshold = this.config.warningThreshold;
     }
+
+    const byThreshold =
+      absSeverity !== null &&
+      (zSeverity === null ||
+        absSeverity === AnomalySeverity.CRITICAL ||
+        zSeverity === AnomalySeverity.WARNING);
+    const severity = byThreshold ? absSeverity : zSeverity;
+    const threshold = byThreshold ? absThreshold : zThreshold;
 
     if (!severity) {
       // Reset consecutive counter
@@ -140,9 +148,10 @@ export class SpikeDetector {
     this.lastAlertTime.set(this.metricType, timestamp);
     this.consecutiveCounts.delete(this.metricType); // Reset after alert
 
-    const anomalyType = countsAsDrop && !exceedsAbsolute ? AnomalyType.DROP : AnomalyType.SPIKE;
+    const anomalyType = countsAsDrop && !byThreshold ? AnomalyType.DROP : AnomalyType.SPIKE;
     const message = this.generateMessage(
       anomalyType,
+      byThreshold,
       severity,
       currentValue,
       mean,
@@ -168,13 +177,14 @@ export class SpikeDetector {
 
   private generateMessage(
     type: AnomalyType,
+    byThreshold: boolean,
     severity: AnomalySeverity,
     value: number,
     baseline: number,
     zScore: number,
     threshold: number,
   ): string {
-    if (type === AnomalyType.SPIKE && zScore < 0) {
+    if (byThreshold) {
       return (
         `${severity.toUpperCase()}: ${this.metricType} above threshold. ` +
         `Value: ${this.formatBoundary(value)}, Threshold: ${this.formatBoundary(threshold)} ` +
@@ -199,7 +209,7 @@ export class SpikeDetector {
   }
 
   private formatBoundary(value: number): string {
-    return String(Number(value.toPrecision(6)));
+    return String(Number(value.toPrecision(12)));
   }
 
   private formatValue(value: number): string {

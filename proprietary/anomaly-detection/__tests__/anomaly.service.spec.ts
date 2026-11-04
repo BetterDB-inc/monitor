@@ -5758,7 +5758,7 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
       expect(events[0].connectionId).toBe('conn-1');
       expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
-      expect(events[0].message).toContain('above normal');
+      expect(events[0].message).toContain('above threshold. Value: 3000, Threshold: 2000 ');
       expect(events[0].message).toContain('top error types: TIMEOUT +2000, BUSY +900, ERR +100');
     });
 

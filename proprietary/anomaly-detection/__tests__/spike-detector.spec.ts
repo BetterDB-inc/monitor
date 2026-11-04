@@ -246,8 +246,61 @@ describe('SpikeDetector', () => {
 
       const result = detector.detect(buffer, 500, 50000);
 
-      expect(result!.message).toContain('Baseline: 0 (above a zero baseline');
+      expect(result!.message).toContain('above threshold. Value: 500, Threshold: 200 ');
       expect(result!.message).not.toMatch(/Infinity|NaN/);
+    });
+
+    it('prints a large reading in full next to its threshold', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.ERROR_REPLIES,
+        { warningThreshold: 1_000_000, criticalThreshold: 5_000_000, consecutiveRequired: 1, cooldownMs: 0 },
+        { absoluteBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(4_000_000 + (i % 2), i * 1000);
+      const result = detector.detect(buffer, 1_000_004, 50000);
+
+      expect(result!.message).toContain('Value: 1000004, Threshold: 1000000 ');
+    });
+
+    it('words an alert by the absolute threshold that set its severity', () => {
+      const buffer = new MetricBuffer(MetricType.ERROR_REPLIES, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(MetricType.ERROR_REPLIES, {
+        warningThreshold: 50,
+        criticalThreshold: 500,
+        consecutiveRequired: 1,
+        cooldownMs: 0,
+      });
+      for (let i = 0; i < 30; i++) buffer.addSample(38 + (i % 2) * 20, i * 1000);
+      const result = detector.detect(buffer, 52, 50000);
+
+      expect(result!.zScore).toBeLessThan(2);
+      expect(result!.message).toBe(
+        'WARNING: error_replies above threshold. Value: 52, Threshold: 50 ' +
+          `(Baseline: 48, Z-score: ${result!.zScore.toFixed(2)})`,
+      );
+    });
+
+    it('names the absolute threshold when it ties a below-mean z-score', () => {
+      const buffer = new MetricBuffer(MetricType.CONNECTIONS, 100, MIN_SAMPLES);
+      const detector = new SpikeDetector(
+        MetricType.CONNECTIONS,
+        {
+          criticalZScore: 10,
+          warningThreshold: 400,
+          criticalThreshold: 5000,
+          consecutiveRequired: 1,
+          cooldownMs: 0,
+          detectDrops: true,
+        },
+        { absoluteBelowMean: true },
+      );
+      for (let i = 0; i < 30; i++) buffer.addSample(900 + (i % 2) * 200, i * 1000);
+      const result = detector.detect(buffer, 500, 50000);
+
+      expect(result!.anomalyType).toBe(AnomalyType.SPIKE);
+      expect(result!.threshold).toBe(400);
+      expect(result!.message).toContain('above threshold. Value: 500, Threshold: 400 ');
     });
 
     describe('zScoreCritical', () => {
