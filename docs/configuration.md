@@ -603,7 +603,7 @@ curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
 curl -b cookies.txt -c cookies.txt http://localhost:3001/api/connections
 ```
 
-These routes stay open without a session: `/api/health`, `/api/version`,
+These routes stay open without a session: `/api/health` (including `/api/health/live`), `/api/version`,
 `/api/system/workspace`, `/api/prometheus/metrics`, the Swagger UI at `/docs`, the `/api/auth` and
 `/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
 changes — approving or rejecting cache and memory proposals — need a session too.
