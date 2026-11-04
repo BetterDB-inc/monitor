@@ -66,6 +66,15 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(rows.map((r) => r.nodeAddr).sort()).toEqual(['10.0.1.5:6379', '10.0.1.7:6379']);
     });
 
+    it('keeps the node address when a later batch save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ nodeAddr: '10.0.1.5:6379' }), CONN);
+      await storage.saveAnomalyEvents([event()], CONN);
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.nodeAddr)).toEqual(['10.0.1.5:6379']);
+    });
+
     it('stores the dedupe key', async () => {
       await storage.saveAnomalyEvent(event({ dedupeKey: 'a' }), CONN);
       await storage.saveAnomalyEvents([event({ id: randomUUID(), dedupeKey: 'b' })], CONN);

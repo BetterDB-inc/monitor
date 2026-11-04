@@ -217,6 +217,7 @@ describe('ClusterDiscoveryService', () => {
         client: { status: string; quit: jest.Mock };
         lastHealthCheck: number;
         healthy: boolean;
+        connectionId?: string;
       };
       const internal = service as unknown as {
         discoveredNodes: Map<string, FakeConn>;
@@ -229,6 +230,7 @@ describe('ClusterDiscoveryService', () => {
         client: readyClient,
         lastHealthCheck: staleStamp,
         healthy: true,
+        connectionId: 'test-connection',
       });
 
       const returned = await service.getNodeConnection(target.id);
@@ -240,6 +242,26 @@ describe('ClusterDiscoveryService', () => {
       const entry = internal.discoveredNodes.get(target.id)!;
       expect(entry.client).toBe(readyClient);
       expect(entry.lastHealthCheck).toBeGreaterThan(staleStamp);
+    });
+
+    it("does not hand one connection another connection's node client", async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      internal.discoveredNodes.set(target.id, {
+        node: target,
+        client: othersClient,
+        lastHealthCheck: Date.now(),
+        healthy: true,
+        connectionId: 'other-connection',
+      });
+
+      const returned = await service.getNodeConnection(target.id, 'test-connection');
+
+      expect(returned).not.toBe(othersClient);
+      expect((internal.discoveredNodes.get(target.id) as { client: unknown }).client).toBe(othersClient);
+      expect(await service.getNodeConnection(target.id, 'test-connection')).toBe(returned);
     });
 
     it('should throw error for invalid node address', async () => {
