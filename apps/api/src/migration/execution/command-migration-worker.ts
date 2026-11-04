@@ -3,6 +3,8 @@ import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
 import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
+import { MetricsParser } from '../../database/parsers/metrics.parser';
+import { parseNodeAddress } from '../function-presence';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
@@ -183,29 +185,12 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
 
 export function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number; hostname?: string }> {
   const results: Array<{ host: string; port: number; hostname?: string }> = [];
-  for (const line of nodesRaw.split('\n')) {
-    if (!line.trim()) continue;
-    const parts = line.split(' ');
-    const flags = parts[2] ?? '';
-    if (!flags.includes('master')) continue;
-    if (flags.includes('fail') || flags.includes('noaddr')) continue;
-    // address format: host:port@clusterport[,hostname] (host may be IPv6, e.g.
-    // [::1]:6379@16379). The optional trailing hostname is the one the node
-    // announces (cluster-announce-hostname) and is what its certificate names.
-    const addressField = parts[1] ?? '';
-    const commaIdx = addressField.indexOf(',');
-    const hostname = commaIdx === -1 ? undefined : addressField.slice(commaIdx + 1) || undefined;
-    const addrPart = (commaIdx === -1 ? addressField : addressField.slice(0, commaIdx)).split('@')[0];
-    const lastColon = addrPart.lastIndexOf(':');
-    let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-    const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-    // Strip IPv6 brackets — iovalkey expects bare addresses
-    if (host.startsWith('[') && host.endsWith(']')) {
-      host = host.slice(1, -1);
-    }
-    if (host && !isNaN(port)) {
-      results.push(hostname ? { host, port, hostname } : { host, port });
-    }
+  for (const node of MetricsParser.parseClusterNodes(nodesRaw)) {
+    // Exact flag match: a `fail?` (pfail) master is only suspected down and still serves.
+    if (!node.flags.includes('master') || node.flags.includes('fail') || node.flags.includes('noaddr')) continue;
+    const { host, port } = parseNodeAddress(node.address);
+    // The announced hostname (cluster-announce-hostname) is what the node's certificate names.
+    if (host && !isNaN(port)) results.push(node.hostname ? { host, port, hostname: node.hostname } : { host, port });
   }
   return results;
 }

@@ -100,11 +100,15 @@ describe('parseClusterMasters', () => {
       'c 10.0.0.3:6379@16379 slave a 0 0 1 connected',
       'd [::1]:6379@16379,node-d.internal master - 0 0 3 connected',
       'e 10.0.0.5:6379@16379 master,fail - 0 0 4 connected',
+      'f 10.0.0.6:6379@16379 master,fail? - 0 0 5 connected',
+      'g :0@0 master,noaddr - 0 0 6 connected',
     ].join('\n');
     expect(parseClusterMasters(raw)).toEqual([
       { host: '10.0.0.1', port: 6379, hostname: 'node-a.internal' },
       { host: '10.0.0.2', port: 6379 },
       { host: '::1', port: 6379, hostname: 'node-d.internal' },
+      // Only suspected down (pfail): still a reachable master.
+      { host: '10.0.0.6', port: 6379 },
     ]);
   });
 });
