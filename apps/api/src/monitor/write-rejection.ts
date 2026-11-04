@@ -1,5 +1,4 @@
 import type { ErrorStatsInfo, PersistenceInfo } from '../common/types/metrics.types';
-import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 /**
  * Error codes the server returns when it refuses a write it would otherwise
@@ -165,7 +164,7 @@ export function evaluateWriteRejection(
   const { persistence, errorstats, now } = input;
   const causes = new Set<WriteRejectionCause>();
   const rejectedSinceLastPoll: Partial<Record<WriteRejectionCode, number>> = {};
-  const isReplica = isReplicaRole(input.role);
+  const isReplica = input.role === 'slave' || input.role === 'replica';
 
   if (persistence?.rdb_last_bgsave_status === 'err' && input.rdbStopsWrites !== false) {
     causes.add('rdb_bgsave_failed');
