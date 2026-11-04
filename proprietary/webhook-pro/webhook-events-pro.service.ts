@@ -183,14 +183,15 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
   }
 
   private lagAlertFilter(replicaConnectionId: string): DispatchFilter {
-    const pair = this.replicaPairing.primaryFor(replicaConnectionId);
-    const stall = pair && this.stalls.get(stallKey(pair.primaryConnectionId, pair.replicaAddr));
     return {
-      skip: stall
-        ? (webhook) =>
-            stall.notAcking.has(webhook.id) &&
-            webhook.events.includes(WebhookEventType.REPLICATION_DIVERGENCE)
-        : undefined,
+      skip: (webhook) => {
+        const pair = this.replicaPairing.primaryFor(replicaConnectionId);
+        const stall = pair && this.stalls.get(stallKey(pair.primaryConnectionId, pair.replicaAddr));
+        return (
+          !!stall?.notAcking.has(webhook.id) &&
+          webhook.events.includes(WebhookEventType.REPLICATION_DIVERGENCE)
+        );
+      },
       onDelivered: (webhookId) => this.lagAlerts.add(stallKey(replicaConnectionId, webhookId)),
     };
   }

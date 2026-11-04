@@ -226,4 +226,33 @@ describe('ReplicaPairing', () => {
 
     expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
   });
+
+  it('keeps the cached host lookup through a poll without a role', async () => {
+    const resolver = jest.fn(async () => ['10.0.0.2']);
+    const pairing = new ReplicaPairing(resolver);
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+    await flush();
+    pairing.observe('a', undefined, { host: 'replica.svc', port: 6379 });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+
+    expect(pairing.primaryFor('a')?.replicaAddr).toBe('10.0.0.2:6379');
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a lookup that settles after its connection is forgotten', async () => {
+    let settle: (ips: string[]) => void = () => undefined;
+    const resolver = jest
+      .fn()
+      .mockImplementationOnce(() => new Promise<string[]>((resolve) => (settle = resolve)))
+      .mockResolvedValue(['10.0.0.2']);
+    const pairing = new ReplicaPairing(resolver);
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+    pairing.forget('a');
+    settle(['10.0.0.9']);
+    await flush();
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
 });

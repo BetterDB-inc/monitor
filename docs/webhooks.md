@@ -365,7 +365,7 @@ Sent when a divergence opens or escalates, once the event has been saved. If sto
 
 When the primary and the stalled replica are both monitored, a webhook subscribed to both `replication.lag` and `replication.divergence` gets one alert when the replica stops acknowledging writes, whichever is delivered first:
 
-- **Divergence first.** Once the webhook has received a divergence for the open stall, the replica's `replication.lag` alert is skipped. The skipped alert stays latched, so it is not sent until lag drops below the recovery level and crosses the threshold again, even if the stall recovers in between.
+- **Divergence first.** Once the webhook has received a `not_acking` divergence for the open stall, the replica's `replication.lag` alert is skipped. A divergence with another reason does not skip it. The skipped alert stays latched, so it is not sent until lag drops below the recovery level and crosses the threshold again, even if the stall recovers in between.
 - **Lag first.** If the webhook's lag alert is still active when the stall opens with `not_acking`, that divergence is skipped, and so is the stall's `replication.recovered`. A lag alert covers one stall only: an escalation to `critical` is sent (followed by `replication.recovered`), and so is any later stall.
 
 An alert only counts once its delivery succeeds, so a failed or dropped delivery never suppresses the other one. Divergences with other reasons are always sent. The anomaly event is still recorded either way.

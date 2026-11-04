@@ -102,6 +102,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   // Track alert states with LRU cache to prevent memory leak
   private alertStates: LRUCache<string, AlertState>;
   private readonly pendingLookups = new Map<string, { count: number; generation: number }>();
+  private readonly retryingDeliveries = new LRUCache<string, () => void>({
+    max: this.ALERT_STATE_MAX,
+    ttl: this.ALERT_STATE_CACHE_TTL_MS,
+  });
 
   // Instance context
   private readonly sourceHost: string;
@@ -590,9 +594,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
             };
 
             await this.dispatchPendingEvent(
-              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], {
-                onDelivered: filter?.onDelivered,
-              }),
+              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], filter),
               [webhook],
             );
           }
@@ -679,7 +681,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       return null;
     }
     const status = await this.sendWebhook(webhook, deliveryId, payload);
-    if (status === DeliveryStatus.SUCCESS) event.onDelivered?.(webhook.id);
+    const onDelivered = event.onDelivered;
+    if (status === DeliveryStatus.SUCCESS) onDelivered?.(webhook.id);
+    if (status === DeliveryStatus.RETRYING && onDelivered) {
+      this.retryingDeliveries.set(deliveryId, () => onDelivered(webhook.id));
+    }
     return status;
   }
 
@@ -854,6 +860,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       durationMs,
     });
 
+    if (status !== DeliveryStatus.RETRYING) {
+      const onDelivered = this.retryingDeliveries.get(deliveryId);
+      this.retryingDeliveries.delete(deliveryId);
+      if (status === DeliveryStatus.SUCCESS) onDelivered?.();
+    }
     return status;
   }
 

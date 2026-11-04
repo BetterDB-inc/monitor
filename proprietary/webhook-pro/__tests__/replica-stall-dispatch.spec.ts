@@ -1,4 +1,4 @@
-import { DeliveryStatus, WebhookEventType, type Webhook } from '@betterdb/shared';
+import { WebhookEventType, type Webhook, type WebhookPayload } from '@betterdb/shared';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
 import { WebhookEventsProService } from '../webhook-events-pro.service';
 
@@ -26,18 +26,37 @@ function setup(hooks: Webhook[], { pairReplica = true, tier = 'pro' } = {}) {
   const getWebhooksByEvent = jest.fn(async (event: WebhookEventType) =>
     hooks.filter((hook) => hook.events.includes(event)),
   );
+  let nextDeliveryId = 0;
+  const storage = {
+    createDelivery: jest.fn(async () => ({ id: `delivery-${nextDeliveryId++}` })),
+    getDelivery: jest.fn(async () => ({ attempts: 0 })),
+    updateDelivery: jest.fn(async () => undefined),
+    getDeliveriesByWebhook: jest.fn(async () => []),
+  };
   const dispatcher = new WebhookDispatcherService(
-    { createDelivery: jest.fn(async () => ({ id: 'delivery' })) } as never,
-    { getWebhooksByEvent } as never,
+    storage as never,
+    { getWebhooksByEvent, generateSignature: () => 'signature' } as never,
     { get: (_key: string, fallback: unknown) => fallback } as never,
   );
   const failing = new Set<string>();
+  const retrying = new Set<string>();
   const delivered: Array<{ event: WebhookEventType; webhookId: string; level?: unknown }> = [];
-  jest.spyOn(dispatcher, 'sendWebhook').mockImplementation(async (hook, _id, payload) => {
-    if (failing.has(hook.id)) return DeliveryStatus.DEAD_LETTER;
-    delivered.push({ event: payload.event, webhookId: hook.id, level: payload.data.level });
-    return DeliveryStatus.SUCCESS;
-  });
+  const attempts: Array<{ hook: Webhook; deliveryId: string; payload: WebhookPayload }> = [];
+  jest.spyOn(dispatcher as never, 'post').mockImplementation((async (
+    _url: string,
+    headers: Record<string, string>,
+    body: string,
+  ) => {
+    const webhookId = headers['X-Webhook-Id'];
+    const payload = JSON.parse(body) as WebhookPayload;
+    const hook = hooks.find((candidate) => candidate.id === webhookId)!;
+    attempts.push({ hook, deliveryId: headers['X-Webhook-Delivery-Id'], payload });
+    const status = failing.has(webhookId) ? 400 : retrying.has(webhookId) ? 503 : 200;
+    if (status === 200) {
+      delivered.push({ event: payload.event, webhookId, level: payload.data.level });
+    }
+    return { ok: status === 200, status, text: async () => '' };
+  }) as never);
 
   const license = { tier };
   const pro = new WebhookEventsProService(dispatcher, {
@@ -107,8 +126,11 @@ function setup(hooks: Webhook[], { pairReplica = true, tier = 'pro' } = {}) {
   return {
     pro,
     dispatcher,
+    storage,
     getWebhooksByEvent,
     failing,
+    retrying,
+    attempts,
     license,
     delivered,
     lag,
@@ -433,5 +455,60 @@ describe('one webhook per replica stall', () => {
       WebhookEventType.REPLICATION_LAG,
       WebhookEventType.REPLICATION_DIVERGENCE,
     ]);
+  });
+
+  it('records a lag alert that succeeds on retry', async () => {
+    const { dispatcher, lag, divergence, retrying, attempts, sent } = setup([
+      webhook('both', BOTH),
+    ]);
+
+    retrying.add('both');
+    await lag(30);
+    retrying.delete('both');
+    const [first] = attempts;
+    await dispatcher.sendWebhook(first.hook, first.deliveryId, first.payload);
+    await divergence();
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_LAG]);
+  });
+
+  it('skips the lag alert when not_acking lands during the lag lookup', async () => {
+    const { getWebhooksByEvent, lag, divergence, sent } = setup([webhook('both', BOTH, 120)]);
+    let release: () => void = () => undefined;
+    const original = getWebhooksByEvent.getMockImplementation()!;
+    getWebhooksByEvent.mockImplementationOnce(
+      (event) =>
+        new Promise((resolve) => {
+          release = () => resolve(original(event));
+        }),
+    );
+
+    const pendingLag = lag(150);
+    await divergence();
+    release();
+    await pendingLag;
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_DIVERGENCE]);
+  });
+
+  it('applies the lag exclusion when a buffered lag alert is replayed', async () => {
+    const { dispatcher, storage, lag, divergence, retrying, attempts, sent } = setup([
+      webhook('both', BOTH, 120),
+    ]);
+
+    retrying.add('both');
+    await divergence();
+    retrying.delete('both');
+    storage.createDelivery.mockRejectedValueOnce(new Error('storage down'));
+    await lag(150);
+    expect(dispatcher.getStorageRetryBufferStats().bufferedEvents).toBe(1);
+
+    const [first] = attempts;
+    await dispatcher.sendWebhook(first.hook, first.deliveryId, first.payload);
+    await (dispatcher as unknown as { drainStorageRetryBuffer(): Promise<void> })
+      .drainStorageRetryBuffer();
+    dispatcher.onModuleDestroy();
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_DIVERGENCE]);
   });
 });

@@ -33,7 +33,7 @@ const resolveHost: HostResolver = async (host) =>
 export class ReplicaPairing {
   private readonly views = new Map<string, ReplicationView>();
   private readonly hosts = new Map<string, ResolvedHost>();
-  private readonly resolving = new Set<string>();
+  private readonly resolving = new Map<string, object>();
 
   constructor(
     private readonly resolver: HostResolver = resolveHost,
@@ -49,7 +49,7 @@ export class ReplicaPairing {
     const replid = replication?.master_replid;
     const isReplica = role !== undefined && REPLICA_ROLES.has(role);
     if (!replication || !replid || (role !== 'master' && !isReplica)) {
-      this.forget(connectionId);
+      this.views.delete(connectionId);
       return;
     }
     this.views.set(connectionId, {
@@ -69,6 +69,7 @@ export class ReplicaPairing {
     this.views.delete(connectionId);
     if (view && ![...this.views.values()].some((other) => other.host === view.host)) {
       this.hosts.delete(view.host);
+      this.resolving.delete(view.host);
     }
   }
 
@@ -123,15 +124,24 @@ export class ReplicaPairing {
     if (isIP(host) || this.resolving.has(host)) return;
     const cached = this.hosts.get(host);
     if (cached && this.now() < cached.expiresAt) return;
-    this.resolving.add(host);
+    const lookup = {};
+    const current = () => this.resolving.get(host) === lookup;
+    this.resolving.set(host, lookup);
     withTimeout(this.resolver(host), DNS_TIMEOUT_MS)
-      .then((ips) => this.hosts.set(host, { ips, expiresAt: this.now() + DNS_TTL_MS, failures: 0 }))
+      .then((ips) => {
+        if (current()) {
+          this.hosts.set(host, { ips, expiresAt: this.now() + DNS_TTL_MS, failures: 0 });
+        }
+      })
       .catch(() => {
+        if (!current()) return;
         const failures = (cached?.failures ?? 0) + 1;
         const retryIn = Math.min(DNS_RETRY_MS * 2 ** (failures - 1), DNS_TTL_MS);
         this.hosts.set(host, { ips: [], expiresAt: this.now() + retryIn, failures });
       })
-      .finally(() => this.resolving.delete(host));
+      .finally(() => {
+        if (current()) this.resolving.delete(host);
+      });
   }
 }
 
