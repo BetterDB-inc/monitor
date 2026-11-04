@@ -1,7 +1,12 @@
-import { mkdtempSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { applyEnvFile, BLOCKED_KEYS, KEEP_ENV, ROOT_ENV_FILE, STUB_ENTITLEMENT_URL } from './test-env';
 
 process.env.STORAGE_TYPE = 'memory';
+
+if (existsSync(ROOT_ENV_FILE)) {
+  applyEnvFile(readFileSync(ROOT_ENV_FILE, 'utf8'));
+}
 
 if (!process.env.DB_HOST) {
   process.env.DB_HOST = process.env.TEST_DB_HOST || 'localhost';
@@ -29,16 +34,11 @@ process.env.MIGRATION_VERDICT_DIR = join(process.env.BETTERDB_DATA_DIR, 'migrati
 
 // Opt out to run against a real entitlement server or in cloud mode:
 // BETTERDB_TEST_KEEP_ENV=true CLOUD_MODE=true pnpm test
-if (process.env.BETTERDB_TEST_KEEP_ENV !== 'true') {
-  for (const key of [
-    'BETTERDB_LICENSE_KEY',
-    'BETTERDB_OFFLINE_LICENSE',
-    'BETTERDB_OFFLINE_LICENSE_FILE',
-    'CLOUD_MODE',
-  ]) {
-    process.env[key] = '';
+if (!KEEP_ENV) {
+  for (const key of BLOCKED_KEYS) {
+    delete process.env[key];
   }
-  process.env.ENTITLEMENT_URL = 'http://127.0.0.1:9/api/v1/entitlements';
+  process.env.ENTITLEMENT_URL = STUB_ENTITLEMENT_URL;
 }
 
 // Disable telemetry during tests
