@@ -6571,8 +6571,8 @@ export class AnomalyService
     while (at > 0 && events[at - 1].timestamp > anomaly.timestamp) at -= 1;
     events.splice(at, 0, anomaly);
     this.incidentEventsById.set(anomaly.id, anomaly);
+    const liveFrom = events[events.length - 1].timestamp - 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
-      const liveFrom = events[events.length - 1].timestamp - 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
       const stale = events.findIndex((event) => event.timestamp >= liveFrom);
       events
         .splice(0, stale === -1 ? events.length : stale)
@@ -6581,9 +6581,9 @@ export class AnomalyService
     while (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
       const [evicted] = events.splice(this.incidentEventToEvict(events), 1);
       this.dropIncidentEvent(connectionId, evicted);
-      this.extendDroppedSpan(connectionId, evicted.timestamp);
+      this.extendDroppedSpan(connectionId, evicted);
     }
-    this.pruneDroppedSpans(connectionId, events[0]?.timestamp);
+    this.pruneDroppedSpans(connectionId, liveFrom);
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
   }
@@ -6594,12 +6594,20 @@ export class AnomalyService
     this.incidentEventsDroppedThrough.set(connectionId, Math.max(droppedThrough, evicted.timestamp));
   }
 
-  private extendDroppedSpan(connectionId: string, timestamp: number): void {
+  private extendDroppedSpan(connectionId: string, evicted: AnomalyEvent): void {
     const gapMs = DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs;
-    const merged: DroppedSpan = { from: timestamp, through: timestamp };
+    const merged: DroppedSpan = {
+      from: evicted.timestamp,
+      through: evicted.timestamp,
+      scopeId: evicted.scopeId,
+    };
     const kept: DroppedSpan[] = [];
     for (const span of this.incidentEventsDroppedSpans.get(connectionId) ?? []) {
-      if (span.from - merged.through <= gapMs && merged.from - span.through <= gapMs) {
+      if (
+        span.scopeId === merged.scopeId &&
+        span.from - merged.through <= gapMs &&
+        merged.from - span.through <= gapMs
+      ) {
         merged.from = Math.min(merged.from, span.from);
         merged.through = Math.max(merged.through, span.through);
       } else {
@@ -6613,10 +6621,10 @@ export class AnomalyService
     );
   }
 
-  private pruneDroppedSpans(connectionId: string, oldest: number | undefined): void {
+  private pruneDroppedSpans(connectionId: string, liveFrom: number): void {
     const spans = this.incidentEventsDroppedSpans.get(connectionId);
     if (!spans) return;
-    const live = oldest === undefined ? [] : spans.filter((span) => span.through >= oldest);
+    const live = spans.filter((span) => span.through >= liveFrom);
     if (live.length > 0) this.incidentEventsDroppedSpans.set(connectionId, live);
     else this.incidentEventsDroppedSpans.delete(connectionId);
   }
@@ -7258,7 +7266,15 @@ export class AnomalyService
       endTime,
     );
     return this.incidentTimelineBuilder
-      .build(events, Date.now(), this.incidentHistoryProbe, boundaries)
+      .build(
+        events,
+        Date.now(),
+        this.incidentHistoryProbe,
+        boundaries,
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        this.incidentEventsDroppedSpans,
+      )
       .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
@@ -7289,7 +7305,15 @@ export class AnomalyService
     );
     const find = (all: AnomalyEvent[]) =>
       this.incidentTimelineBuilder
-        .build(all, Date.now(), this.incidentHistoryProbe, boundaries)
+        .build(
+          all,
+          Date.now(),
+          this.incidentHistoryProbe,
+          boundaries,
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          this.incidentEventsDroppedSpans,
+        )
         .find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;

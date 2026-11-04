@@ -421,6 +421,46 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.lastEventAt).toBe(T0 + MIN);
     });
 
+    describe('across dropped spans', () => {
+      const bridged = (span: { from: number; through: number; scopeId?: string }) =>
+        new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
+          [event({ timestamp: T0 }), event({ timestamp: T0 + 5 * MIN })],
+          T0 + 6 * MIN,
+          neverRecovers,
+          [],
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          new Map([['conn-a', [span]]]),
+        );
+
+      it('keeps one incident across a span of dropped events', () => {
+        expect(bridged({ from: T0 + MIN, through: T0 + 4 * MIN })).toHaveLength(1);
+      });
+
+      it('keeps one incident across a span another connection dropped in the same scope', () => {
+        const incidents = new IncidentTimelineBuilder({ gapMs: 2 * MIN }, () => 'cluster').build(
+          [
+            event({ timestamp: T0, connectionId: 'conn-b' }),
+            event({ timestamp: T0 + 5 * MIN }),
+          ],
+          T0 + 6 * MIN,
+          neverRecovers,
+          [],
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 4 * MIN }]]]),
+        );
+
+        expect(incidents).toHaveLength(1);
+      });
+
+      it('ignores a span dropped while the connection was in another scope', () => {
+        expect(
+          bridged({ from: T0 + MIN, through: T0 + 4 * MIN, scopeId: 'other' }),
+        ).toHaveLength(2);
+      });
+    });
+
     it('opens a new incident after a quiet gap', () => {
       const incidents = new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
         [event({ timestamp: T0 }), event({ timestamp: T0 + 3 * MIN })],

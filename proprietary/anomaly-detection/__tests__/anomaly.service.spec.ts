@@ -11795,6 +11795,14 @@ describe('AnomalyService', () => {
         expect(incidents.map((i: any) => i.startedAt)).toEqual([start, later]);
       });
 
+      it('passes the dropped spans to history builds', async () => {
+        const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+
+        await service.getIncidentTimelines('conn-1');
+
+        expect(build.mock.calls[0][6]).toBe((service as any).incidentEventsDroppedSpans);
+      });
+
       it('splits incidents across a quiet gap that the dropped span does not cover', async () => {
         const now = Date.now();
         const start = now - 40 * MIN;

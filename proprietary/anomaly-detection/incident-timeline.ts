@@ -52,6 +52,7 @@ export interface IncidentBoundary {
 export interface DroppedSpan {
   from: number;
   through: number;
+  scopeId?: string;
 }
 
 export interface IncidentTimelineOptions {
@@ -382,7 +383,8 @@ export class IncidentTimelineBuilder {
     const members = new Set(events.map((event) => event.connectionId ?? ''));
     return [...droppedSpans]
       .filter(([connectionId]) => members.has(connectionId) || this.resolveScope(connectionId) === scope)
-      .flatMap(([, spans]) => spans);
+      .flatMap(([, spans]) => spans)
+      .filter((span) => span.scopeId === undefined || span.scopeId === scope);
   }
 
   private bridges(span: DroppedSpan, from: number, to: number): boolean {
