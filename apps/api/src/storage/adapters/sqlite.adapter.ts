@@ -824,8 +824,11 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN event_sequence INTEGER');
     }
     if (!anomalyEventInfo.some((col) => col.name === 'kind')) {
-      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN kind TEXT');
-      this.db.exec(SQLITE_LEGACY_ANOMALY_BACKFILL.join(';\n'));
+      const db = this.db;
+      db.transaction(() => {
+        db.exec('ALTER TABLE anomaly_events ADD COLUMN kind TEXT');
+        db.exec(SQLITE_LEGACY_ANOMALY_BACKFILL.join(';\n'));
+      })();
     }
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.

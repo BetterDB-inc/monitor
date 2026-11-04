@@ -112,6 +112,32 @@ describe('SqliteAdapter anomaly kind backfill', () => {
     expect(row.kind).toBeUndefined();
   });
 
+  it('adds the kind column again when its backfill fails', async () => {
+    const id = randomUUID();
+    const seeded = new SqliteAdapter({ filepath: dbPath });
+    await seeded.initialize();
+    await seeded.saveAnomalyEvent(
+      event(id, 'command_p99', 'Sustained P99 latency degradation: GET 2x.'),
+      CONN,
+    );
+    await seeded.close();
+    forgetKinds();
+    const exec = Database.prototype.exec;
+    const failing = jest.spyOn(Database.prototype, 'exec').mockImplementation(function (
+      this: Database.Database,
+      sql: string,
+    ) {
+      if (sql.includes("SET kind = 'sustained_degradation'")) throw new Error('backfill failed');
+      return exec.call(this, sql);
+    });
+
+    await expect(reopen()).rejects.toThrow('backfill failed');
+    failing.mockRestore();
+    const [row] = await reopen();
+
+    expect(row.kind).toBe('sustained_degradation');
+  });
+
   it('keeps a kind that is already set', async () => {
     const id = randomUUID();
     const seeded = new SqliteAdapter({ filepath: dbPath });

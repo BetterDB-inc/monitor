@@ -524,9 +524,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         });
         try {
           await this.migrateConnectionId();
-          const needsLegacyAnomalyBackfill = !(await this.hasAnomalyKindColumn());
           await this.createSchema();
-          if (needsLegacyAnomalyBackfill) await this.backfillLegacyAnomalyEvents();
+          if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
           await this.backfillMemoryProposalDiscriminators();
         } finally {
@@ -1513,10 +1512,21 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.length > 0;
   }
 
-  private async backfillLegacyAnomalyEvents(): Promise<void> {
+  private async addAnomalyKindColumn(): Promise<void> {
     if (!this.pool) return;
-    for (const sql of POSTGRES_LEGACY_ANOMALY_BACKFILL) {
-      await this.pool.query(sql);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS kind TEXT');
+      for (const sql of POSTGRES_LEGACY_ANOMALY_BACKFILL) {
+        await client.query(sql);
+      }
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -1714,7 +1724,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
-      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS kind TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
