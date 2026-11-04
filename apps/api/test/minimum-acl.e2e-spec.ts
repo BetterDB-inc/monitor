@@ -118,6 +118,7 @@ const ADD_ONS: Record<string, { allowed: Command[]; denied: Command[]; with?: st
     ],
     denied: [
       ['FT.CREATE', 'idx2', 'SCHEMA', 'f', 'TEXT'],
+      ['FT.DROPINDEX', 'idx'],
       ['HSET', 'k', 'f', 'v'],
     ],
   },
@@ -193,11 +194,7 @@ describe('Minimum ACL page (E2E)', () => {
 
   const dryRun = async (cmd: Command): Promise<string> => {
     if (!known.has(cmd[0].toLowerCase())) return 'unsupported';
-    try {
-      return String(await admin.call('ACL', 'DRYRUN', USER, ...cmd));
-    } catch (err) {
-      return (err as Error).message;
-    }
+    return String(await admin.call('ACL', 'DRYRUN', USER, ...cmd));
   };
 
   const expectAllowed = async (commands: Command[]) => {
@@ -217,7 +214,7 @@ describe('Minimum ACL page (E2E)', () => {
       const result = await dryRun(cmd);
       if (result === 'unsupported') continue;
       checked++;
-      expect({ cmd: cmd.join(' '), denied: result !== 'OK' }).toEqual({
+      expect({ cmd: cmd.join(' '), denied: /has no permissions/.test(result) }).toEqual({
         cmd: cmd.join(' '),
         denied: true,
       });

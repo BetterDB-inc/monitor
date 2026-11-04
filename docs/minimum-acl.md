@@ -54,7 +54,7 @@ Key analytics, KV cache monitoring and the cache simulator. `%R~*` grants read-o
 
 ### AI observability
 
-The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection.
+The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection. `%R~*:__*` also lets this user read any other key with `:__` in its name; if that is a concern, use one pattern per cache instead, such as `%R~faq:__*`.
 
 ```
 %R~__betterdb:* %R~*:__* +get +hget +hgetall +lrange +zrange
@@ -78,7 +78,7 @@ Monitor sessions (manual, scheduled and anomaly-triggered captures) and the capt
 
 ### Vector search
 
-The vector search page, key browsing on it, and index snapshots. Use the key pattern your indexes cover instead of `~*` if you can. `SCAN` still lists key names outside that pattern. Some search modules don't have `FT.TAGVALS`, `FT.CONFIG` or `FT.PROFILE`; drop those rules if they are rejected. BetterDB checks for search with `FT._LIST` when it connects, so reconnect after adding these rules.
+The vector search page, key browsing on it, and index snapshots. `HGET` and `HGETALL` read the values of every hash the key pattern matches, so use the pattern your indexes cover instead of `~*` if you can. `SCAN` still lists key names outside that pattern. Some search modules don't have `FT.TAGVALS`, `FT.CONFIG` or `FT.PROFILE`; drop those rules if they are rejected. BetterDB checks for search with `FT._LIST` when it connects, so reconnect after adding these rules.
 
 ```
 %R~* +scan +ft._list +ft.info +ft.search +ft.tagvals +ft.config|get +ft.profile +hget +hgetall
