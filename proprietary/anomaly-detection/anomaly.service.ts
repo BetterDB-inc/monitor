@@ -260,6 +260,7 @@ import {
   observeDivergence,
 } from './replication-divergence-detector';
 import {
+  RegisteredAddress,
   TopologyScope,
   TopologyTarget,
   TopologyTargetClaims,
@@ -8168,14 +8169,14 @@ export class AnomalyService
     return masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
   }
 
-  private registeredAddresses(): (host: string, port: number) => boolean {
-    const registered = new Set(
-      this.connectionRegistry
-        .list()
-        .filter((c) => c.isConnected)
-        .map((c) => `${c.host.toLowerCase()}:${c.port}`),
+  private registeredAddresses(): RegisteredAddress {
+    const connected = this.connectionRegistry.list().filter((c) => c.isConnected);
+    const registered = new Set(connected.map((c) => `${c.host.toLowerCase()}:${c.port}`));
+    const clusterNodeIds = new Set(
+      connected.flatMap((c) => (c.membership?.source === 'cluster' ? [c.membership.nodeId] : [])),
     );
-    return (host, port) => registered.has(`${host.toLowerCase()}:${port}`);
+    return (host, port, nodeId) =>
+      registered.has(`${host.toLowerCase()}:${port}`) || (!!nodeId && clusterNodeIds.has(nodeId));
   }
 
   private divergenceKeysOf(connectionId: string): string[] {

@@ -13623,6 +13623,23 @@ describe('AnomalyService', () => {
         expect(registered('10.0.1.9', 6379)).toBe(false);
       });
 
+      it('skips a cluster primary registered under its hostname', () => {
+        (service as any).connectionRegistry.list.mockReturnValue([
+          {
+            id: 'a',
+            host: 'node-b.example',
+            port: 6379,
+            isConnected: true,
+            membership: { seedId: 'conn-1', nodeId: 'node-b', origin: 'auto', source: 'cluster' },
+          },
+        ]);
+
+        const registered = (service as any).registeredAddresses();
+
+        expect(registered('10.0.1.5', 6379, 'node-b')).toBe(true);
+        expect(registered('10.0.1.5', 6379)).toBe(false);
+      });
+
       it('logs unreachable primaries once and keeps their state', async () => {
         const client = nodeClient([2, 4]);
         const getNodeConnection = jest.fn().mockResolvedValue(client);

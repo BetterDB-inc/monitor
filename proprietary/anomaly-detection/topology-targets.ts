@@ -12,7 +12,7 @@ export interface TopologyTarget {
   nodeId?: string;
 }
 
-export type RegisteredAddress = (host: string, port: number) => boolean;
+export type RegisteredAddress = (host: string, port: number, nodeId?: string) => boolean;
 
 export interface TopologyScope {
   targets: TopologyTarget[];
@@ -48,7 +48,7 @@ export function clusterTargets(nodes: ClusterNode[], isRegistered: RegisteredAdd
   for (const node of nodes) {
     if (!node.flags.includes('master') || node.flags.includes('myself')) continue;
     const address = splitHostPort(node.address);
-    if (!address || isRegistered(address.host, address.port)) continue;
+    if (!address || isRegistered(address.host, address.port, node.id)) continue;
     const addr = `${address.host}:${address.port}`;
     if (UNREACHABLE_CLUSTER_FLAGS.some((flag) => node.flags.includes(flag))) {
       down.add(addr);
