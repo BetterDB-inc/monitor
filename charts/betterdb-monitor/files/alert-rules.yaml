@@ -3,8 +3,16 @@
 # (metrics.prometheusRule.enabled=true).
 #
 # Every alert carries the monitored instance in its `connection` label. Rules
-# that aggregate keep `connection` (`sum by (connection)`), so one monitor
-# watching many instances raises one alert per instance, named after it.
+# that aggregate keep `namespace`, `job` and `connection`, so one monitor
+# watching many instances raises one alert per instance, two releases watching
+# the same instance stay apart, and namespaced AlertmanagerConfigs still match.
+# (Outside Kubernetes `namespace` is simply absent, which is harmless.)
+#
+# The anomaly and correlated-group counters are created on their first
+# increment, so a new label set first appears already at 1 and increase()
+# alone reports 0 for it. The `(m unless m offset W) or increase(m[W])` form
+# counts a series that was absent W ago at its current value, so the first
+# event after a monitor restart (or the first of its kind) still alerts.
 #
 # The chart ships a byte-identical copy at
 # charts/betterdb-monitor/files/alert-rules.yaml. Edit this file, then run
@@ -14,7 +22,7 @@ groups:
     rules:
       # Critical anomaly detected
       - alert: BetterDBCriticalAnomaly
-        expr: sum by (connection, metric_type) (increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
+        expr: sum by (namespace, job, connection, metric_type) ((betterdb_anomaly_events_total{severity="critical"} unless betterdb_anomaly_events_total{severity="critical"} offset 5m) or increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
         for: 0m
         labels:
           severity: critical
@@ -24,7 +32,7 @@ groups:
 
       # Multiple warnings in short period
       - alert: BetterDBWarningSpike
-        expr: sum by (connection) (increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
+        expr: sum by (namespace, job, connection) ((betterdb_anomaly_events_total{severity="warning"} unless betterdb_anomaly_events_total{severity="warning"} offset 5m) or increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
         for: 0m
         labels:
           severity: warning
@@ -34,7 +42,7 @@ groups:
 
       # Memory pressure pattern
       - alert: BetterDBMemoryPressure
-        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
+        expr: sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="memory_pressure"} unless betterdb_correlated_groups_total{pattern="memory_pressure"} offset 10m) or increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
         for: 0m
         labels:
           severity: critical
@@ -44,7 +52,7 @@ groups:
 
       # Auth attack pattern
       - alert: BetterDBAuthAnomaly
-        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
+        expr: sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="auth_attack"} unless betterdb_correlated_groups_total{pattern="auth_attack"} offset 5m) or increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
         for: 0m
         labels:
           severity: critical
@@ -54,7 +62,7 @@ groups:
 
       # Connection leak pattern
       - alert: BetterDBConnectionLeak
-        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
+        expr: sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="connection_leak"} unless betterdb_correlated_groups_total{pattern="connection_leak"} offset 10m) or increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -64,7 +72,7 @@ groups:
 
       # Detection system not ready
       - alert: BetterDBAnomalyDetectionWarming
-        expr: min by (connection) (betterdb_anomaly_buffer_ready) < 1
+        expr: min by (namespace, job, connection) (betterdb_anomaly_buffer_ready) < 1
         for: 5m
         labels:
           severity: info
@@ -84,7 +92,7 @@ groups:
 
       # Traffic burst pattern
       - alert: BetterDBTrafficBurst
-        expr: sum by (connection) (increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
+        expr: sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="traffic_burst"} unless betterdb_correlated_groups_total{pattern="traffic_burst"} offset 5m) or increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
         for: 0m
         labels:
           severity: warning

@@ -809,26 +809,26 @@ count(betterdb_client_connections_by_name)
 
 The following alert rules are production-ready. See `docs/alertmanager-rules.yml` for the complete YAML configuration; on Kubernetes the Helm chart installs the same file as a `PrometheusRule` (`metrics.prometheusRule.enabled=true`, see the [Kubernetes guide](install/kubernetes.md#prometheus-operator-and-grafana)).
 
-Every alert carries the monitored instance in its `connection` label, and rules that aggregate keep it (`sum by (connection)`), so a monitor watching several instances raises one alert per instance. Name the instance in your own rules' annotations through the `connection` label, not `instance`: `instance` is the scrape target, which is the monitor itself, not the Valkey/Redis instance.
+Every alert carries the monitored instance in its `connection` label, and rules that aggregate keep `namespace`, `job` and `connection`, so a monitor watching several instances raises one alert per instance and two releases watching the same instance stay separate. The anomaly and correlated-group counters only appear on their first increment, so the counter rules use `(m unless m offset W) or increase(m[W])`: a series that did not exist `W` ago counts at its current value, and the first event after a restart still alerts. Name the instance in your own rules' annotations through the `connection` label, not `instance`: `instance` is the scrape target, which is the monitor itself, not the Valkey/Redis instance.
 
 ### Critical Alerts
 
 **BetterDBCriticalAnomaly** - Fires immediately when a critical anomaly is detected
 
 ```promql
-sum by (connection, metric_type) (increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
+sum by (namespace, job, connection, metric_type) ((betterdb_anomaly_events_total{severity="critical"} unless betterdb_anomaly_events_total{severity="critical"} offset 5m) or increase(betterdb_anomaly_events_total{severity="critical"}[5m])) > 0
 ```
 
 **BetterDBMemoryPressure** - Memory pressure pattern detected
 
 ```promql
-sum by (connection) (increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
+sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="memory_pressure"} unless betterdb_correlated_groups_total{pattern="memory_pressure"} offset 10m) or increase(betterdb_correlated_groups_total{pattern="memory_pressure"}[10m])) > 0
 ```
 
 **BetterDBAuthAnomaly** - Potential authentication attack
 
 ```promql
-sum by (connection) (increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
+sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="auth_attack"} unless betterdb_correlated_groups_total{pattern="auth_attack"} offset 5m) or increase(betterdb_correlated_groups_total{pattern="auth_attack"}[5m])) > 0
 ```
 
 **BetterDBConnectionsRejected** - `maxclients` reached; new clients are being refused
@@ -842,20 +842,20 @@ increase(betterdb_rejected_connections_total[5m]) > 0
 **BetterDBWarningSpike** - Multiple warning anomalies in short period
 
 ```promql
-sum by (connection) (increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
+sum by (namespace, job, connection) ((betterdb_anomaly_events_total{severity="warning"} unless betterdb_anomaly_events_total{severity="warning"} offset 5m) or increase(betterdb_anomaly_events_total{severity="warning"}[5m])) > 5
 ```
 
 **BetterDBConnectionLeak** - Possible connection leak pattern
 
 ```promql
-sum by (connection) (increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
+sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="connection_leak"} unless betterdb_correlated_groups_total{pattern="connection_leak"} offset 10m) or increase(betterdb_correlated_groups_total{pattern="connection_leak"}[10m])) > 0
 for: 5m
 ```
 
 **BetterDBTrafficBurst** - Traffic burst detected
 
 ```promql
-sum by (connection) (increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
+sum by (namespace, job, connection) ((betterdb_correlated_groups_total{pattern="traffic_burst"} unless betterdb_correlated_groups_total{pattern="traffic_burst"} offset 5m) or increase(betterdb_correlated_groups_total{pattern="traffic_burst"}[5m])) > 0
 ```
 
 **BetterDBUnresolvedCriticalAnomalies** - Multiple unresolved critical anomalies
@@ -890,6 +890,12 @@ for: 10m
 > `betterdb_key_pattern_max_memory_bytes`: on a keyspace larger than the sample
 > the pattern max is the largest key *among the sampled keys of one run*, so each
 > run can pick a different key and the value jumps with no real growth.
+>
+> **Key names reach your alert receivers.** The alert keeps the `key` label and
+> names the key in its summary, so Alertmanager passes key names to whatever
+> receives it (Slack, PagerDuty, email). If key names can carry user
+> identifiers, rewrite the `key` label with Prometheus `alert_relabel_configs`
+> (and drop it from the summary) before enabling this rule.
 >
 > Because `delta()` is the difference between the first and last samples *within
 > the window*, a key that simply enters the tracked top-N at a steady large size
@@ -940,7 +946,7 @@ for: 1m
 **BetterDBAnomalyDetectionWarming** - Anomaly detection system warming up
 
 ```promql
-min by (connection) (betterdb_anomaly_buffer_ready) < 1
+min by (namespace, job, connection) (betterdb_anomaly_buffer_ready) < 1
 for: 5m
 ```
 
