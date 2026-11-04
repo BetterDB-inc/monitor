@@ -4139,9 +4139,13 @@ describe('AnomalyService', () => {
         saturated?: (window: number) => boolean;
         windows?: number;
         runId?: string;
+        nodeAddr?: string;
       } = {},
     ) {
       const recorded: any[] = [];
+      const ctx = opts.nodeAddr
+        ? { ...mockCtx, host: opts.nodeAddr.split(':')[0], port: Number(opts.nodeAddr.split(':')[1]) }
+        : mockCtx;
       if (!opts.realEmit) {
         jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
           a.persisted = true;
@@ -4192,8 +4196,9 @@ describe('AnomalyService', () => {
                 total_commands_processed: String(Math.round(commands)),
                 total_error_replies: String(Math.round(errors)),
               },
-              mockCtx,
+              ctx,
               ts,
+              opts.nodeAddr,
             );
           } catch (e) {
             errorsCaught.push(e);
@@ -4217,6 +4222,55 @@ describe('AnomalyService', () => {
       expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
       expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
       expect(recorded[0].retryTrigger).toBe('latency');
+    });
+
+    describe('on a node reached through the seed', () => {
+      const NODE = '10.0.1.5:6379';
+
+      it('scopes the event and the webhook to the node', async () => {
+        captureClients = growingClients();
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+        await runRetry({ realEmit: true, nodeAddr: NODE });
+        const [event] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+        expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'latency' });
+        expect(event.message).toContain('Client attribution unavailable.');
+        expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+          expect.objectContaining({
+            connectionId: 'conn-1',
+            instance: { host: '10.0.1.5', port: 6379 },
+            topContributors: null,
+          }),
+        );
+        expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      });
+
+      it('keeps node state apart from the seed', async () => {
+        await runRetry({ nodeAddr: NODE });
+
+        expect((service as any).retryAmplificationState.has(`conn-1@${NODE}`)).toBe(true);
+        expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
+      });
+
+      it('alerts on the node and the seed separately', async () => {
+        const { recorded: onNode } = await runRetry({ nodeAddr: NODE });
+        const { recorded: onSeed } = await runRetry();
+
+        expect(onNode.map((e) => e.nodeAddr)).toEqual([NODE]);
+        expect(onSeed.filter((e) => e.nodeAddr === undefined)).toHaveLength(1);
+      });
+
+      it('forgets a node that leaves the topology', async () => {
+        await runRetry({ nodeAddr: NODE, windows: 2 });
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+
+        await (service as any).detectTopologyAnomalies(mockCtx, []);
+
+        expect((service as any).retryAmplificationState.has(`conn-1@${NODE}`)).toBe(false);
+      });
     });
 
     it('dispatches retry_amplification.detected with the finding and contributors', async () => {
@@ -4707,6 +4761,7 @@ describe('AnomalyService', () => {
       const report = (level: string) =>
         (service as any).reportRetryAmplification({
           ctx: mockCtx,
+          key: 'conn-1',
           state,
           finding: { level, trigger: 'latency', windows: 2, loadRatio: 2, message: 'm' },
           clientSnapshots: [],
@@ -13323,7 +13378,7 @@ describe('AnomalyService', () => {
         let t = start;
         for (let i = 0; i < times; i++) {
           jest.spyOn(Date, 'now').mockReturnValue(t);
-          await (service as any).detectTopologyDivergence(mockCtx, targets);
+          await (service as any).detectTopologyAnomalies(mockCtx, targets);
           t += 10_000;
         }
         return t;
@@ -13349,6 +13404,21 @@ describe('AnomalyService', () => {
         expect((await divergenceHistory()).map((h) => h.replica)).toContain(NODE_REPLICA);
       });
 
+      it('evaluates retry amplification with the node INFO', async () => {
+        const client = nodeClient([2]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const retry = jest.spyOn(service as any, 'detectRetryAmplification');
+
+        await poll([target], 1, T0);
+
+        expect(retry).toHaveBeenCalledWith(
+          expect.objectContaining({ role: 'master', connected_slaves: '1' }),
+          expect.objectContaining({ connectionId: 'conn-1', host: '10.0.1.5', port: 6379 }),
+          T0,
+          NODE,
+        );
+      });
+
       it('reaches a Sentinel-managed primary by address', async () => {
         const client = nodeClient([2]);
         const getAddressConnection = jest.fn().mockResolvedValue(client);
@@ -13357,7 +13427,7 @@ describe('AnomalyService', () => {
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
-        expect(client.info).toHaveBeenCalledWith('replication');
+        expect(client.info).toHaveBeenCalledWith();
       });
 
       describe('Sentinel targets', () => {
