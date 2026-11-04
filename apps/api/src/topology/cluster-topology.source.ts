@@ -4,7 +4,7 @@ import { isIP } from 'node:net';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import type { DatabaseCapabilities } from '../common/interfaces/database-port.interface';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
-import { desiredFromDiscovery, seedIsAlias } from './membership-diff';
+import { addressKey, desiredFromDiscovery, seedIsAlias } from './membership-diff';
 import type { TopologyDiscovery, TopologySource } from './topology-source';
 
 const RESOLVE_TIMEOUT_MS = 2_000;
@@ -38,6 +38,13 @@ export class ClusterTopologySource implements TopologySource {
   /** Overridable in tests. */
   resolveHost: (host: string) => Promise<string[]> = resolveHostAddresses;
 
+  /**
+   * Seeds (by id and address) seen as an alias at least once. A Service whose
+   * DNS answer shrinks to one node for a while (a rollout) would otherwise flip
+   * to a single-node seed and retire `myself`, then restore it on the next sync.
+   */
+  private readonly aliasSeeds = new Set<string>();
+
   constructor(private readonly discovery: ClusterDiscoveryService) {}
 
   handles(caps: DatabaseCapabilities): boolean {
@@ -53,8 +60,10 @@ export class ClusterTopologySource implements TopologySource {
     // Without the seed's addresses `myself` cannot be told apart from the seed;
     // leave membership as it is for this sync rather than guess.
     if (seedAddresses.length === 0) return null;
+    const aliasKey = `${seed.id}|${addressKey(seed.host, seed.port)}`;
+    if (seedIsAlias(seed, seedAddresses, nodes)) this.aliasSeeds.add(aliasKey);
     return {
-      nodes: desiredFromDiscovery(seed, nodes, { seedIsAlias: seedIsAlias(seed, seedAddresses, nodes) }),
+      nodes: desiredFromDiscovery(seed, nodes, { seedIsAlias: this.aliasSeeds.has(aliasKey) }),
       unknownGroups: [],
     };
   }

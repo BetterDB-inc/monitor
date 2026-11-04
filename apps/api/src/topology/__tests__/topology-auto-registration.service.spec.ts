@@ -59,7 +59,7 @@ function build(options: {
   const clusterSource = new ClusterTopologySource(discovery as never);
   clusterSource.resolveHost = seedResolver(options.nodes, options.seedAddresses);
   const service = new TopologyAutoRegistrationService(registry as never, [clusterSource], config as never, retention as never);
-  return { service, registry, discovery, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
+  return { service, registry, discovery, clusterSource, setMembers: (next: DatabaseConnectionConfig[]) => { members = next; } };
 }
 
 function child(id: string, host: string, port: number, extra: Partial<DatabaseConnectionConfig['membership']> = {}): DatabaseConnectionConfig {
@@ -531,5 +531,29 @@ describe('TopologyAutoRegistrationService with a seed that fronts several nodes'
 
     expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.1', nodeId: 'n1' }));
     expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.2', nodeId: 'n2' }));
+  });
+
+  it('retires no child when a later sync lands on another node or the DNS answer shrinks', async () => {
+    const { service, registry, discovery, clusterSource } = build({
+      seed: { host: 'valkey.ns.svc.cluster.local', port: 6379 },
+      members: [child('n1', '10.0.0.1', 6379), child('n2', '10.0.0.2', 6379)],
+      nodes: [
+        discovered('n1', '10.0.0.1:6379@16379', ['myself', 'master']),
+        discovered('n2', '10.0.0.2:6379@16379', ['slave']),
+      ],
+      seedAddresses: ['10.0.0.1', '10.0.0.2'],
+    });
+    await service.reconcile('seed');
+
+    // Next sync: discovery lands on n2, and a rollout leaves only n2 behind the Service.
+    discovery.discoverNodesIsolated.mockResolvedValueOnce([
+      discovered('n1', '10.0.0.1:6379@16379', ['slave']),
+      discovered('n2', '10.0.0.2:6379@16379', ['myself', 'master']),
+    ]);
+    clusterSource.resolveHost = async () => ['10.0.0.2'];
+    await service.reconcile('seed');
+
+    expect(registry.retireChild).not.toHaveBeenCalled();
+    expect(registry.addManagedChild).not.toHaveBeenCalled();
   });
 });

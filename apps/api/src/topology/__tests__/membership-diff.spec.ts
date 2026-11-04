@@ -98,9 +98,15 @@ describe('seedIsAlias', () => {
     expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBe(true);
   });
 
-  it('matches a node by its announced hostname', () => {
+  it('does not take an announced hostname alone as the seed being one node', () => {
+    // A Service VIP that matches no node address, and the answering node announces the seed name.
     const named = [{ ...node('a', '10.0.0.1:6379@16379', ['myself', 'master']), hostname: 'SEED.example' }];
-    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBe(false);
+    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBe(true);
+  });
+
+  it('matches a node whose address is the seed host itself', () => {
+    const byName = [node('a', 'SEED.example:6379@16379', ['myself', 'master']), node('b', 'other.example:6379@16379', ['slave'])];
+    expect(seedIsAlias(seed, ['192.0.2.1'], byName)).toBe(false);
   });
 });
 

@@ -59,4 +59,14 @@ describe('ClusterTopologySource', () => {
   it('leaves membership unchanged when the seed host does not resolve', async () => {
     await expect(discoverWith([])).resolves.toBeNull();
   });
+
+  it('keeps treating a seed as an alias when its DNS answer shrinks to the answering node', async () => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    const service = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+    source.resolveHost = jest.fn().mockResolvedValueOnce(['10.0.0.1', '10.0.0.2']).mockResolvedValueOnce(['10.0.0.1']);
+
+    expect((await source.discover(service as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+    // A rollout leaves one ready pod behind the Service; myself must not be retired.
+    expect((await source.discover(service as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  });
 });
