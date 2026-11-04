@@ -13476,6 +13476,26 @@ describe('AnomalyService', () => {
         expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
       });
 
+      it('closes a stored alert of a failed primary once it leaves the topology', async () => {
+        storage.getAnomalyEvents.mockResolvedValue([
+          {
+            id: 'failed-node-event',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            connectionId: 'conn-1',
+            nodeAddr: NODE,
+            replicaAddr: NODE_REPLICA,
+            resolved: false,
+          },
+        ]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+        const t = await poll([], 1, T0, new Set([NODE]));
+        expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('failed-node-event', expect.any(Number));
+
+        await poll([], 1, t);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('failed-node-event', expect.any(Number));
+      });
+
       it('saves the closed windows of a retired primary once storage recovers', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
         (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
