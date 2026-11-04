@@ -115,6 +115,7 @@
     "@types/ssh2": "^1.15.5",
     "@types/supertest": "^7.2.0",
     "@types/ws": "^8.18.1",
+    "dotenv": "17.3.1",
     "eslint": "^10.1.0",
     "globals": "^17.4.0",
     "jest": "^30.3.0",
