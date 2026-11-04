@@ -37,6 +37,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
   private readonly logger = new Logger(WebhookEventsProService.name);
   private readonly replicaPairing = new ReplicaPairing();
   private readonly notAckingStalls = new Set<string>();
+  private readonly skippedLagAlerts = new Set<string>();
 
   constructor(
     private readonly webhookDispatcher: WebhookDispatcherService,
@@ -132,6 +133,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
   clearReplicationLag(connectionId: string): void {
     this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
+    this.forgetSkippedLagAlerts(connectionId);
   }
 
   observeReplication(
@@ -146,6 +148,13 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     this.replicaPairing.forget(connectionId);
     for (const key of this.notAckingStalls) {
       if (key.startsWith(`${connectionId}\0`)) this.notAckingStalls.delete(key);
+    }
+    this.forgetSkippedLagAlerts(connectionId);
+  }
+
+  private forgetSkippedLagAlerts(replicaConnectionId: string): void {
+    for (const key of this.skippedLagAlerts) {
+      if (key.startsWith(`${replicaConnectionId}\0`)) this.skippedLagAlerts.delete(key);
     }
   }
 
@@ -165,7 +174,11 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         WebhookEventType.REPLICATION_DIVERGENCE,
         pair.primaryConnectionId,
       );
-      return (webhookId) => alerted.has(webhookId);
+      return (webhookId) => {
+        if (!alerted.has(webhookId)) return false;
+        this.skippedLagAlerts.add(stallKey(replicaConnectionId, webhookId));
+        return true;
+      };
     } catch (error) {
       this.logger.error('Failed to look up replication.divergence subscribers', error);
       return undefined;
@@ -181,12 +194,19 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       replica,
     );
     if (!replicaConnectionId) return undefined;
-    return (webhookId) =>
-      this.webhookDispatcher.isThresholdAlertActive(
+    return (webhookId) => {
+      const skipped = stallKey(replicaConnectionId, webhookId);
+      const open = this.webhookDispatcher.isThresholdAlertActive(
         'replication_lag',
         replicaConnectionId,
         webhookId,
       );
+      if (!open) {
+        this.skippedLagAlerts.delete(skipped);
+        return false;
+      }
+      return !this.skippedLagAlerts.has(skipped);
+    };
   }
 
   /**

@@ -150,6 +150,23 @@ describe('one webhook per replica stall', () => {
     ]);
   });
 
+  it('still sends a later not_acking when the lag alert was skipped', async () => {
+    const { lag, divergence, recovered, sent } = setup([
+      webhook('both', [...BOTH, WebhookEventType.REPLICATION_RECOVERED], 120),
+    ]);
+
+    await divergence();
+    await lag(150);
+    await recovered();
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_RECOVERED,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
+
   it('alerts again on a new stall after both recover', async () => {
     const { lag, divergence, recovered, sent } = setup([webhook('both', BOTH)]);
 
