@@ -3,17 +3,26 @@
 One ConfigMap per dashboard keeps each well under the 1 MiB ConfigMap limit.
 dashboards/*.json are byte-identical copies of deploy/observability/dashboards
 (scripts/sync-chart-observability.mjs). .Files.Get returns them as data, so
-Grafana's own legend templates are not evaluated by Helm. The fullname is cut
-to 30 characters so the longest dashboard suffix still fits in 63 and two
-dashboards can never truncate to the same name.
+Grafana's own legend templates are not evaluated by Helm.
+
+Names must stay within 63 characters and be unique per release. A fullname of
+up to 34 characters is used as is (the longest suffix, -dashboard-
+monitor-internals, adds 28). A longer one is cut to 27 characters and followed
+by 6 characters of its sha256, so two releases sharing a long prefix in one
+namespace still get distinct ConfigMaps.
 */}}
+{{- $fullname := include "betterdb-monitor.fullname" . }}
+{{- $prefix := $fullname }}
+{{- if gt (len $fullname) 34 }}
+{{- $prefix = printf "%s-%s" ($fullname | trunc 27 | trimSuffix "-") ($fullname | sha256sum | trunc 6) }}
+{{- end }}
 {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
 {{- $dashboard := base $path | trimSuffix ".json" | trimPrefix "betterdb-" }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ printf "%s-dashboard-%s" (include "betterdb-monitor.fullname" $ | trunc 30 | trimSuffix "-") $dashboard }}
+  name: {{ printf "%s-dashboard-%s" $prefix $dashboard }}
   namespace: {{ $.Values.metrics.grafanaDashboards.namespace | default $.Release.Namespace }}
   labels:
     {{- include "betterdb-monitor.labels" $ | nindent 4 }}
