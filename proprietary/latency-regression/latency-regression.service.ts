@@ -168,6 +168,13 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       resolved: false,
       connectionId: ctx.connectionId,
     };
+    try {
+      this.anomalyEventSink?.stampExternalAnomaly?.(event);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to stamp latency regression event: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     try {
       await this.storage.saveAnomalyEvent(event, ctx.connectionId);

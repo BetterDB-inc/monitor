@@ -10,6 +10,7 @@ export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
 export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
+export const RETRY_AMP_MAX_BASELINE_SCALE = 2;
 // Names of the connections BetterDB itself opens: the monitor (and its
 // -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
 // BetterDB-Migration-* stays visible on purpose.
@@ -147,12 +148,25 @@ export function pushClientSnapshot(
   return [...preEpisode, snapshot];
 }
 
+export function hasRatePair<T extends EpisodeClientSnapshots>(
+  snapshots: T,
+): snapshots is T & {
+  before: ClientCommandSnapshot;
+  first: ClientCommandSnapshot;
+  latest: ClientCommandSnapshot;
+} {
+  return snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
+}
+
 export function selectClientSnapshots(
   history: ClientCommandSnapshot[],
   episodeStart: number,
   until: number,
+  notBefore: number | null = null,
 ): EpisodeClientSnapshots {
-  const preEpisode = history.filter((s) => s.takenAt <= episodeStart);
+  const preEpisode = history.filter(
+    (s) => s.takenAt <= episodeStart && (notBefore === null || s.takenAt > notBefore),
+  );
   const during = history.filter((s) => s.takenAt > episodeStart && s.takenAt <= until);
   return {
     before: preEpisode[preEpisode.length - 2] ?? null,
@@ -255,7 +269,7 @@ export function rankRetryAmplificationContributors(
   input: AttributionInput,
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
-  if (input.before !== null && input.first !== null && input.latest !== null) {
+  if (hasRatePair(input)) {
     addCommandGrowth(map, input.before, input.first, input.latest);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
