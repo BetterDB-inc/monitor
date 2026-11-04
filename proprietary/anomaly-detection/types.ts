@@ -1,4 +1,5 @@
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
+import type { RegressionKind } from '../latency-regression/types';
 
 export enum MetricType {
   CONNECTIONS = 'connections',
@@ -173,6 +174,7 @@ export interface AnomalyEvent {
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
+  kind?: RegressionKind;
   resolved: boolean;
   resolvedAt?: number;
   connectionId?: string;

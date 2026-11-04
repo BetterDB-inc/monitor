@@ -204,6 +204,7 @@ export class RowMappers {
       relatedMetrics: this.dialect.fromArray(row.related_metrics),
       replicaAddr: row.replica_addr ?? undefined,
       dedupeKey: row.dedupe_key ?? undefined,
+      kind: row.kind ?? undefined,
       commands: row.commands ? this.dialect.fromArray(row.commands) : undefined,
       eventSequence: row.event_sequence == null ? undefined : Number(row.event_sequence),
       resolved: this.dialect.fromBoolean(row.resolved),

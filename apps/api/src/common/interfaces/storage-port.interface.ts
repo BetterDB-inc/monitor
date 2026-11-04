@@ -149,6 +149,8 @@ import type {
 import type { AgentToken, TokenType } from '@betterdb/shared';
 
 // Anomaly Event Types
+export type AnomalyKind = 'upgrade_regression' | 'sustained_degradation';
+
 export interface StoredAnomalyEvent {
   id: string;
   timestamp: number;
@@ -167,6 +169,7 @@ export interface StoredAnomalyEvent {
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
+  kind?: AnomalyKind;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;

@@ -269,10 +269,6 @@ export function resyncSettled(
     : sample.timestamp - since > RESYNC_ESCALATION_WINDOW_MS;
 }
 
-export function resyncEventReplica(message: string): string | null {
-  return /^Replica (\S+) /.exec(message)?.[1] ?? null;
-}
-
 registerSequenceRule({
   pattern: AnomalyPattern.RECOVERY_AMPLIFICATION,
   steps: [

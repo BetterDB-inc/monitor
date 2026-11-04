@@ -10525,7 +10525,8 @@ describe('AnomalyService', () => {
         anomaly({
           timestamp: now - 40 * MIN,
           metricType: MetricType.COMMAND_P99,
-          message: 'P99 latency regression after upgrade 8.0.0 -> 9.0.0: GET 2x.',
+          kind: 'upgrade_regression',
+          message: 'Sustained P99 latency degradation after upgrade 8.0.0 -> 9.0.0: GET 2x.',
         }),
       );
 
@@ -10545,7 +10546,8 @@ describe('AnomalyService', () => {
           timestamp,
           metricType: MetricType.COMMAND_P99,
           commands: [command],
-          message: 'Sustained P99 latency degradation: 5.0x.',
+          kind: 'sustained_degradation',
+          message: 'P99 is 5x its baseline.',
         });
 
       it('does not hold an incident open on a later alert for another command', async () => {
@@ -10581,7 +10583,8 @@ describe('AnomalyService', () => {
         anomaly({
           timestamp: now - 40 * MIN,
           metricType: MetricType.COMMAND_P99,
-          message: 'Sustained P99 latency degradation: GET 2x.',
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
         }),
       );
 
@@ -10597,7 +10600,8 @@ describe('AnomalyService', () => {
         anomaly({
           timestamp: now - 40 * MIN,
           metricType: MetricType.COMMAND_P99,
-          message: 'Sustained P99 latency degradation: GET 2x.',
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
         }),
         anomaly({
           timestamp: now - 40 * MIN,
@@ -11566,18 +11570,35 @@ describe('AnomalyService', () => {
         (service as any).buffers.set('conn-1', new Map());
         const p99 = {
           metricType: MetricType.COMMAND_P99,
-          message: 'Sustained P99 latency degradation: GET 2x.',
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
         };
 
         expect(probe()(signal({ ...p99, now: T + 15 * MIN }))).toBeUndefined();
         expect(probe()(signal({ ...p99, now: T + 31 * MIN - 1 }))).toBeUndefined();
       });
 
+      it('does not quiet-recover an upgrade regression whose message reads as sustained', () => {
+        (service as any).buffers.set('conn-1', new Map());
+
+        expect(
+          probe()(
+            signal({
+              metricType: MetricType.COMMAND_P99,
+              kind: 'upgrade_regression',
+              message: 'Sustained P99 latency degradation: GET 2x.',
+              now: T + 31 * MIN,
+            }),
+          ),
+        ).toBeUndefined();
+      });
+
       it('recovers a point-in-time signal once the cooldown passes without a re-fire', () => {
         (service as any).buffers.set('conn-1', new Map());
         const p99 = {
           metricType: MetricType.COMMAND_P99,
-          message: 'Sustained P99 latency degradation: GET 2x.',
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
         };
 
         expect(probe()(signal({ ...p99, now: T + 31 * MIN }))).toBe(T + 31 * MIN);
@@ -12123,6 +12144,7 @@ describe('AnomalyService', () => {
 
       const [escalation, ...rest] = events(MetricType.RESYNC_ESCALATION);
       expect(rest).toEqual([]);
+      expect(escalation.replicaAddr).toBe('10.0.0.2:6379');
       expect(escalation.message).toContain('10.0.0.2:6379');
       expect(escalation.message).toContain('sync_full +1');
     });
@@ -12294,7 +12316,8 @@ describe('AnomalyService', () => {
                 {
                   id: 'old-1',
                   timestamp: clock,
-                  message: 'Replica 10.0.0.2:6379 came back after 5s and could not resume',
+                  replicaAddr: '10.0.0.2:6379',
+                  message: 'A replica needed a full resync.',
                 },
               ]
             : [],
@@ -12304,6 +12327,29 @@ describe('AnomalyService', () => {
         expect(storage.resolveAnomaly).not.toHaveBeenCalled();
 
         await pollPrimary({ bytes: 2000 });
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      });
+
+      it('settles a row without a replica address once the window passes', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [
+                {
+                  id: 'old-1',
+                  timestamp: clock,
+                  message: 'A replica needed a full resync.',
+                },
+              ]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+        clock += RESYNC_ESCALATION_WINDOW_MS + 1;
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
 
         expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
       });
@@ -13572,7 +13618,11 @@ describe('AnomalyService', () => {
                 affectedSlots: [7],
               };
               const signature = replicaSlotSignature(finding as ReplicaSlotAnomaly);
-              const message = () => (service as any).buildReplicaSlotMessage(finding);
+              const message = () =>
+                'WARNING: Replica 10.0.0.1:6379 (abcdef01) is reporting slot(s) 7 in MIGRATING state — ' +
+                'replicas must never carry slot-migration state, so this is a stuck, inconsistent ' +
+                'cluster state (valkey#1664). Run `CLUSTER SETSLOT <slot> STABLE` on 10.0.0.1:6379 ' +
+                'for each affected slot (7) to clear it.';
               const legacyRow = (id: string, text: string, timestamp = T0) => ({
                 ...row(id, timestamp),
                 message: text,
