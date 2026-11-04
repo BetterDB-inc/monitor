@@ -13835,10 +13835,50 @@ describe('AnomalyService', () => {
       it('clears the unreachable count once no primary is left to read', async () => {
         (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
         (service as any).topologyFanoutUnreachable.set('conn-1', 1);
+        const log = jest.spyOn((service as any).logger, 'log');
 
         await poll([], 1, T0);
 
         expect((service as any).topologyFanoutUnreachable.has('conn-1')).toBe(false);
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('no reachable primaries left'));
+      });
+
+      it('does not queue another INFO on a primary that has not answered the last one', async () => {
+        jest.useFakeTimers();
+        try {
+          const client = { info: jest.fn(() => new Promise(() => {})) };
+          (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          for (let i = 0; i < 3; i++) {
+            const done = poll([target], 1, T0 + i * 10_000);
+            await jest.advanceTimersByTimeAsync(5_000);
+            await done;
+          }
+
+          expect(client.info).toHaveBeenCalledTimes(1);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('serves an unsaved window older than the stored ones', async () => {
+        storage.getReplicationDivergenceWindows.mockResolvedValue([
+          {
+            replicaAddr: NODE_REPLICA,
+            windowStart: T0 + 5000,
+            windowEnd: T0 + 6000,
+            gapBytes: 1,
+            bytesPerSec: 1,
+            secondsBehind: 1,
+          },
+        ]);
+        (service as any).divergencePendingWindows.set('conn-1', [
+          { addr: NODE_REPLICA, start: T0, end: T0 + 1000, gapBytes: 1, bytesPerSec: 1, secondsBehind: 1 },
+        ]);
+
+        const [history] = await divergenceHistory();
+
+        expect(history.windows.map((w: { start: number }) => w.start)).toEqual([T0, T0 + 5000]);
       });
 
       it('serves unsaved windows of retired primaries in order', async () => {
@@ -13872,7 +13912,10 @@ describe('AnomalyService', () => {
 
         (service as any).queuePendingDivergenceWindows(mockCtx, windows);
 
-        expect((service as any).divergencePendingWindows.get('conn-1')).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
+        const kept = (service as any).divergencePendingWindows.get('conn-1').map((w: { start: number }) => w.start);
+        expect(kept).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
+        expect(kept[0]).toBe(2);
+        expect(kept[kept.length - 1]).toBe(DIVERGENCE_PERSIST_BACKLOG + 1);
         expect(warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2'));
       });
 
