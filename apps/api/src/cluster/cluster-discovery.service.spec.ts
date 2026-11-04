@@ -284,6 +284,37 @@ describe('ClusterDiscoveryService', () => {
       expect(await service.getNodeConnection(target.id, 'test-connection')).not.toBe(othersClient);
     });
 
+    it("keeps another connection's client that was stored while this one was connecting", async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, { client: unknown }> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn() };
+      const ownClient = {
+        status: 'ready',
+        connect: jest.fn(async () => {
+          internal.discoveredNodes.set(target.id, {
+            node: target,
+            client: othersClient,
+            lastHealthCheck: Date.now(),
+            healthy: true,
+            connectionId: 'other-connection',
+          } as never);
+        }),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce((() => ownClient) as never);
+
+      const returned = await service.getNodeConnection(target.id, 'test-connection');
+
+      expect(returned).toBe(ownClient);
+      expect(othersClient.quit).not.toHaveBeenCalled();
+      expect(othersClient.disconnect).not.toHaveBeenCalled();
+      expect(internal.discoveredNodes.get(target.id)?.client).toBe(othersClient);
+      expect(internal.discoveredNodes.get(`node:test-connection:${target.id}`)?.client).toBe(ownClient);
+    });
+
     it('drops the old client without waiting on it once the node moves to another address', async () => {
       const nodes = await service.discoverNodes();
       const target = nodes[0];
