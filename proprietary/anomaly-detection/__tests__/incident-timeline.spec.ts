@@ -113,6 +113,111 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
     });
 
+    it('keeps the stored start when a dropped span covers its first event', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 - MIN, through: T0 + 9 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('keeps the stored start across dropped spans chained from another connection', () => {
+      const late = event({ id: 'late', timestamp: T0 + 20 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder({}, () => 'cluster').build(
+        [late],
+        T0 + 21 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone', 'cluster')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([
+          ['conn-a', [{ from: T0 - MIN, through: T0 + 9 * MIN, scopeId: 'cluster' }]],
+          ['conn-b', [{ from: T0 + 10 * MIN, through: T0 + 19 * MIN, scopeId: 'cluster' }]],
+        ]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('starts afresh when no drop reached the stored start', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 9 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
+    });
+
+    it('bridges a gap through a dropped span that runs past the next event', () => {
+      const first = event({ timestamp: T0 });
+      const inside = event({ timestamp: T0 + 20 * MIN, metricType: MetricType.COMMAND_P99 });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, inside],
+        T0 + 31 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 30 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidents).toHaveLength(1);
+    });
+
+    it('ignores an unscoped dropped span from a connection outside the scope', () => {
+      const first = event({ timestamp: T0 });
+      const late = event({ timestamp: T0 + 20 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, late],
+        T0 + 21 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-z', [{ from: T0 + MIN, through: T0 + 19 * MIN }]]]),
+      );
+
+      expect(incidents).toHaveLength(2);
+    });
+
+    it('bridges a gap through adjacent dropped spans from two connections', () => {
+      const first = event({ timestamp: T0 });
+      const late = event({ timestamp: T0 + 30 * MIN, connectionId: 'conn-b' });
+
+      const incidents = new IncidentTimelineBuilder({}, () => 'cluster').build(
+        [first, late],
+        T0 + 31 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([
+          ['conn-a', [{ from: T0 + MIN, through: T0 + 14 * MIN, scopeId: 'cluster' }]],
+          ['conn-b', [{ from: T0 + 15 * MIN, through: T0 + 29 * MIN, scopeId: 'cluster' }]],
+        ]),
+      );
+
+      expect(incidents).toHaveLength(1);
+    });
+
     it('starts afresh when the dropped events ended before the gap', () => {
       const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
 
@@ -421,6 +526,46 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.lastEventAt).toBe(T0 + MIN);
     });
 
+    describe('across dropped spans', () => {
+      const bridged = (span: { from: number; through: number; scopeId?: string }) =>
+        new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
+          [event({ timestamp: T0 }), event({ timestamp: T0 + 5 * MIN })],
+          T0 + 6 * MIN,
+          neverRecovers,
+          [],
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          new Map([['conn-a', [span]]]),
+        );
+
+      it('keeps one incident across a span of dropped events', () => {
+        expect(bridged({ from: T0 + MIN, through: T0 + 4 * MIN })).toHaveLength(1);
+      });
+
+      it('keeps one incident across a span another connection dropped in the same scope', () => {
+        const incidents = new IncidentTimelineBuilder({ gapMs: 2 * MIN }, () => 'cluster').build(
+          [
+            event({ timestamp: T0, connectionId: 'conn-b' }),
+            event({ timestamp: T0 + 5 * MIN }),
+          ],
+          T0 + 6 * MIN,
+          neverRecovers,
+          [],
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 4 * MIN }]]]),
+        );
+
+        expect(incidents).toHaveLength(1);
+      });
+
+      it('ignores a span dropped while the connection was in another scope', () => {
+        expect(
+          bridged({ from: T0 + MIN, through: T0 + 4 * MIN, scopeId: 'other' }),
+        ).toHaveLength(2);
+      });
+    });
+
     it('opens a new incident after a quiet gap', () => {
       const incidents = new IncidentTimelineBuilder({ gapMs: 2 * MIN }).build(
         [event({ timestamp: T0 }), event({ timestamp: T0 + 3 * MIN })],
@@ -525,6 +670,31 @@ describe('IncidentTimelineBuilder', () => {
 
       expect(incident.recovery.status).toBe('recovered');
       expect(incident.recovery.recoveredAt).toBe(T0 + 90_000);
+    });
+
+    it('reports an unknown recovery for a resolved row without resolvedAt', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ resolved: true }),
+          event({ timestamp: T0 + MIN, resolved: true }),
+          event({
+            metricType: MetricType.CONNECTIONS,
+            timestamp: T0 + 2 * MIN,
+            resolved: true,
+            resolvedAt: T0 + 3 * MIN,
+          }),
+        ],
+        T0 + 5 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.recovery).toEqual({
+        status: 'unknown',
+        openSignals: [],
+        unknownSignals: [MetricType.MEMORY_USED],
+        recoveredAt: null,
+      });
+      expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
     });
 
     it('does not ask the probe before the settle time', () => {

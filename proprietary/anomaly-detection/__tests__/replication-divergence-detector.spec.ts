@@ -135,8 +135,8 @@ describe('baseline and outage handling', () => {
     const h = new Harness();
     h.windows(Array.from({ length: 6 }, () => ({ gap: 0, rate: MiB })));
     h.windows([
-      { gap: 100 * MiB, rate: MiB, lagSec: 20 },
-      { gap: 100 * MiB, rate: MiB, lagSec: 20 },
+      { gap: 100 * MiB, rate: MiB, lagSec: climbingLag(0) },
+      { gap: 100 * MiB, rate: MiB, lagSec: climbingLag(1) },
     ]);
     const resumed = divergences(h.windows(Array.from({ length: 7 }, () => ({ gap: 100 * MiB, rate: MiB }))));
     expect(resumed.at(-1)).toMatchObject({ level: 'critical', reason: 'not_catching_up' });
@@ -184,8 +184,14 @@ interface TimingRow {
   alerts: string[];
 }
 
-const polls = (count: number, after: number, gap: (i: number) => number, lagSec?: number): TimingStep[] =>
-  Array.from({ length: count }, (_, i) => ({ after, gap: gap(i), lagSec }));
+const polls = (
+  count: number,
+  after: number,
+  gap: (i: number) => number,
+  lagSec?: (i: number) => number,
+): TimingStep[] => Array.from({ length: count }, (_, i) => ({ after, gap: gap(i), lagSec: lagSec?.(i) }));
+
+const lagFrom = (startSec: number) => (i: number) => startSec + i * 10;
 
 const flat = () => 8;
 
@@ -304,8 +310,8 @@ const TIMING_ROWS: TimingRow[] = [
     alerts: [],
   },
   {
-    name: 'an unacked replica warns over contiguous windows',
-    steps: polls(7, 10_000, () => 20, 30),
+    name: 'an unacked replica warns over contiguous windows under a raised repl-timeout',
+    steps: polls(7, 10_000, () => 20, lagFrom(11)),
     windows: [],
     chain: 0,
     openedAt: 70_000,
@@ -314,9 +320,9 @@ const TIMING_ROWS: TimingRow[] = [
   {
     name: 'an outage restarts the unacked streak',
     steps: [
-      ...polls(4, 10_000, () => 20, 30),
-      { after: 300_000, gap: 20, lagSec: 30 },
-      ...polls(3, 10_000, () => 20, 30),
+      ...polls(4, 10_000, () => 20, lagFrom(11)),
+      { after: 300_000, gap: 20, lagSec: 11 },
+      ...polls(3, 10_000, () => 20, lagFrom(21)),
     ],
     windows: [],
     chain: 0,
@@ -396,7 +402,7 @@ describe('observeDivergence', () => {
     const harness = new Harness();
 
     const out = harness.windows(
-      Array.from({ length: 6 }, () => ({ gap: 500 * MiB, rate: MiB, lagSec: 30, offset: 0 })),
+      Array.from({ length: 2 }, (_, i) => ({ gap: 500 * MiB, rate: MiB, lagSec: climbingLag(i), offset: 0 })),
     );
 
     expect(divergences(out)).toEqual([]);
@@ -620,21 +626,26 @@ describe('observeDivergence', () => {
 
   it('stays quiet on a stale ack whose gap is under the floor at the current write rate', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: MiB - 1, rate: MiB, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: MiB - 1, rate: MiB, lagSec: climbingLag(i) })),
+    );
     expect(out.flat()).toEqual([]);
   });
 
   it('stays quiet on a stale ack only seconds behind a fast primary', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 8 * MiB, rate: 4 * MiB, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: 8 * MiB, rate: 4 * MiB, lagSec: climbingLag(i) })),
+    );
     expect(out.flat()).toEqual([]);
   });
 
   it('counts stale windows only while the replica is behind', () => {
     const h = new Harness();
-    const behind = { gap: 40 * MiB, rate: MiB, lagSec: 30 };
-    const caughtUp = { gap: 0, rate: MiB, lagSec: 30 };
-    expect(divergences(h.windows([behind, caughtUp, behind]))).toEqual([]);
+    const out = h.windows(
+      [40 * MiB, 0, 40 * MiB].map((gap, i) => ({ gap, rate: MiB, lagSec: climbingLag(i) })),
+    );
+    expect(divergences(out)).toEqual([]);
   });
 
   it('raises no alert for a disconnect the last-IO path owns', () => {
