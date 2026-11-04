@@ -2214,6 +2214,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     const replication = info.replication;
     const role = replication?.role;
     const isReplica = isReplicaRole(role);
+    this.webhookEventsProService?.observeReplication(
+      connectionId,
+      replication as Record<string, string | undefined> | undefined,
+      { host: config?.host || 'localhost', port: config?.port || 6379 },
+    );
 
     if (replication === undefined || role === undefined) {
       this.masterLinkUp.remove(connLabel);
@@ -3862,6 +3867,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
+    this.webhookEventsProService?.forgetReplication(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete
     // finally then no-ops because the entry is already gone.

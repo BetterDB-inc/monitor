@@ -123,6 +123,7 @@ describe('AnomalyService', () => {
       dispatchAnomalyDetected: jest.fn().mockResolvedValue(undefined),
       dispatchSlowlogThreshold: jest.fn().mockResolvedValue(undefined),
       dispatchReplicationLag: jest.fn().mockResolvedValue(undefined),
+      endReplicationStall: jest.fn(),
       dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
@@ -12856,6 +12857,12 @@ describe('AnomalyService', () => {
       await feed([0, 0, 0], t);
       expect(recoveredHook).toHaveBeenCalledTimes(1);
       expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379', reason: 'caught_up' });
+      const endStall = (webhookEventsProService as any).endReplicationStall as jest.Mock;
+      expect(endStall).toHaveBeenCalledTimes(1);
+      expect(endStall).toHaveBeenCalledWith('conn-1', '10.0.0.2:6379');
+      expect(endStall.mock.invocationCallOrder[0]).toBeGreaterThan(
+        recoveredHook.mock.invocationCallOrder[0],
+      );
       expect((await divergenceHistory())[0].level).toBe('none');
     });
 

@@ -30,7 +30,7 @@ interface AlertState {
   value: number;
 }
 
-interface PendingEvent {
+interface PendingEvent extends DispatchFilter {
   sequence: number;
   eventType: WebhookEventType;
   data: Record<string, unknown>;
@@ -39,6 +39,11 @@ interface PendingEvent {
   payloads: Map<string, WebhookPayload>;
   pendingWebhookIds: Set<string> | null;
   unconfirmedWebhookIds: Set<string>;
+}
+
+export interface DispatchFilter {
+  skip?: (webhook: Webhook) => boolean;
+  onDelivered?: (webhookId: string) => void;
 }
 
 const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
@@ -97,6 +102,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
   // Track alert states with LRU cache to prevent memory leak
   private alertStates: LRUCache<string, AlertState>;
   private readonly pendingLookups = new Map<string, { count: number; generation: number }>();
+  private readonly retryingDeliveries = new LRUCache<string, () => void>({
+    max: this.ALERT_STATE_MAX,
+    ttl: this.ALERT_STATE_CACHE_TTL_MS,
+  });
 
   // Instance context
   private readonly sourceHost: string;
@@ -183,9 +192,36 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
+    filter?: DispatchFilter,
   ): Promise<boolean> {
     const enrichedData = connectionId ? { ...data, connectionId } : data;
-    return this.dispatchPendingEvent(this.createPendingEvent(eventType, enrichedData, connectionId));
+    const skip = filter?.skip;
+    if (!skip) {
+      return this.dispatchPendingEvent(
+        this.createPendingEvent(eventType, enrichedData, connectionId, undefined, filter),
+      );
+    }
+    let webhooks: Webhook[];
+    try {
+      webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+    } catch (error) {
+      this.logger.error(`Failed to look up webhooks for event ${eventType}:`, error);
+      return this.bufferEvent(
+        this.createPendingEvent(eventType, enrichedData, connectionId, undefined, filter),
+      );
+    }
+    const targets = webhooks.filter((webhook) => !skip(webhook));
+    if (targets.length === 0) return true;
+    return this.dispatchPendingEvent(
+      this.createPendingEvent(
+        eventType,
+        enrichedData,
+        connectionId,
+        targets.map((webhook) => webhook.id),
+        filter,
+      ),
+      targets,
+    );
   }
 
   private createPendingEvent(
@@ -193,6 +229,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown>,
     connectionId?: string,
     targetWebhookIds?: string[],
+    filter?: DispatchFilter,
   ): PendingEvent {
     return {
       sequence: this.nextEventSequence++,
@@ -203,6 +240,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       payloads: new Map(),
       pendingWebhookIds: targetWebhookIds ? new Set(targetWebhookIds) : null,
       unconfirmedWebhookIds: new Set(),
+      skip: filter?.skip,
+      onDelivered: filter?.onDelivered,
     };
   }
 
@@ -249,7 +288,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     const pending = event.pendingWebhookIds;
-    const targets = pending ? webhooks.filter((webhook) => pending.has(webhook.id)) : webhooks;
+    const targets = webhooks.filter(
+      (webhook) => (!pending || pending.has(webhook.id)) && !event.skip?.(webhook),
+    );
     event.pendingWebhookIds = new Set(targets.map((webhook) => webhook.id));
 
     if (targets.length === 0) {
@@ -415,6 +456,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return false;
   }
 
+  isThresholdAlertActive(alertKeyPrefix: string, connectionId: string, webhookId: string): boolean {
+    return this.alertStates.has(`${alertKeyPrefix}:${connectionId}:${webhookId}`);
+  }
+
   clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
     const generationKey = `${alertKeyPrefix}:${connectionId}`;
     const pending = this.pendingLookups.get(generationKey);
@@ -488,6 +533,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     isAbove: boolean,
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
+    filter?: DispatchFilter,
   ): Promise<boolean> {
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
@@ -527,6 +573,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               alertConfig.hysteresisFactor,
             )
           ) {
+            if (filter?.skip?.(webhook)) {
+              this.logger.debug(
+                `Threshold alert ${eventType} for webhook ${webhook.id} skipped: already alerted`,
+              );
+              return;
+            }
             this.logger.log(
               `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
             );
@@ -541,8 +593,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               ...(connectionId && { connectionId }),
             };
 
+            const firedState = this.alertStates.peek(alertKey);
+            const onDelivered = filter?.onDelivered;
             await this.dispatchPendingEvent(
-              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id]),
+              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], {
+                skip: filter?.skip,
+                onDelivered:
+                  onDelivered &&
+                  ((webhookId) => {
+                    if (this.alertStates.peek(alertKey) === firedState) onDelivered(webhookId);
+                  }),
+              }),
               [webhook],
             );
           }
@@ -628,7 +689,13 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     if (deliveryId === null) {
       return null;
     }
-    return this.sendWebhook(webhook, deliveryId, payload);
+    const status = await this.sendWebhook(webhook, deliveryId, payload);
+    const onDelivered = event.onDelivered;
+    if (status === DeliveryStatus.SUCCESS) onDelivered?.(webhook.id);
+    if (status === DeliveryStatus.RETRYING && onDelivered) {
+      this.retryingDeliveries.set(deliveryId, () => onDelivered(webhook.id));
+    }
+    return status;
   }
 
   private getOrCreatePayload(webhookId: string, event: PendingEvent): WebhookPayload {
@@ -802,6 +869,11 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       durationMs,
     });
 
+    if (status !== DeliveryStatus.RETRYING) {
+      const onDelivered = this.retryingDeliveries.get(deliveryId);
+      this.retryingDeliveries.delete(deliveryId);
+      if (status === DeliveryStatus.SUCCESS) onDelivered?.();
+    }
     return status;
   }
 
