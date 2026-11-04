@@ -5648,6 +5648,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * also get a partial unique index on (id, run id), so one process read through
    * two addresses is stored once; rows duplicated that way are collapsed first.
    * Only this schema's constraints are considered.
+   *
+   * If a CONCURRENTLY build fails, the build falls back to a blocking one that
+   * holds a SHARE lock, so log inserts from other replicas wait until it ends.
+   * That wait is not bounded on purpose: a build given up on a timeout would
+   * leave the tables on their old keys until the next start, storing one
+   * process's entries again under each address it is read through.
    */
   private async migrateLogSourceKeys(): Promise<void> {
     if (!this.pool) return;
