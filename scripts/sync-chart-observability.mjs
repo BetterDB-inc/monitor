@@ -54,7 +54,16 @@ function orphanedDashboards() {
 
 const rel = (path) => relative(repoRoot, path);
 
-if (process.argv.includes('--check')) {
+// Anything but no argument or exactly --check is a mistake; a typo such as
+// --chek must not fall through to the branch that rewrites and deletes files.
+const args = process.argv.slice(2);
+if (args.length > 1 || (args.length === 1 && args[0] !== '--check')) {
+  console.error(`Unknown argument(s): ${args.join(' ')}`);
+  console.error('Usage: node scripts/sync-chart-observability.mjs [--check]');
+  process.exit(2);
+}
+
+if (args[0] === '--check') {
   const problems = [];
   for (const [source, target] of expectedCopies()) {
     if (!existsSync(target)) {

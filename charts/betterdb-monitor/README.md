@@ -78,7 +78,14 @@ helm upgrade --install betterdb-monitor betterdb/betterdb-monitor -n betterdb \
 - The `release` label must match your Prometheus's `serviceMonitorSelector` /
   `ruleSelector` (kube-prometheus-stack selects on its own release name).
 - The token Secret is read by both the pod (`PROMETHEUS_METRICS_TOKEN`) and the
-  ServiceMonitor, so it lives in the release namespace with them.
+  ServiceMonitor, so it lives in the release namespace with them. Set the token
+  through `metrics.token` / `metrics.existingSecret`, not `extraEnv`: a token
+  passed only through `extraEnv`/`extraEnvFrom` makes the endpoint require it
+  while the ServiceMonitor sends none, so scrapes fail with 401.
+- The pod reads the token at start. After rotating an `existingSecret`, restart
+  it (`kubectl rollout restart deployment/<fullname> -n <namespace>`);
+  an inline `metrics.token` change rolls the pod automatically.
+- `metrics.serviceMonitor.scrapeTimeout` must not exceed `interval`.
 - Dashboards go to the namespace the Grafana sidecar watches. They are labelled
   `grafana_dashboard: "1"` and annotated `grafana_folder: BetterDB`; folder
   placement needs the sidecar's `folderAnnotation` set to `grafana_folder`.

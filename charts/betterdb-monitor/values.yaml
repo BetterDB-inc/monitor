@@ -115,6 +115,7 @@ metrics:
     # selects on its release name by default, e.g. release: kube-prometheus-stack
     labels: {}
     interval: 30s
+    # Must not exceed interval; Prometheus rejects the scrape config otherwise.
     scrapeTimeout: 10s
     relabelings: []
     metricRelabelings: []
