@@ -1207,6 +1207,7 @@ export class AnomalyService
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     let replicationSample: ReplicationStreamSample | null = null;
     let divergenceTargets: TopologyScope | null = null;
+    let sentinelDivergence = false;
     try {
       const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
@@ -1788,7 +1789,7 @@ export class AnomalyService
         aclClusterNodes = nodes;
         if (nodes) divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
       } else if (live && sentinelMode) {
-        divergenceTargets = this.sentinelDivergenceTargets(ctx.connectionId);
+        sentinelDivergence = true;
       } else if (live && sentinelMode === false) {
         divergenceTargets = { targets: [], members: new Set() };
       }
@@ -1908,8 +1909,11 @@ export class AnomalyService
           this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
         });
       }
-      if (divergenceTargets) {
-        await this.detectTopologyAnomalies(ctx, divergenceTargets).catch((err) => {
+      const scope = sentinelDivergence
+        ? this.sentinelDivergenceTargets(ctx.connectionId)
+        : divergenceTargets;
+      if (scope) {
+        await this.detectTopologyAnomalies(ctx, scope).catch((err) => {
           this.logger.error(`Failed to check ${ctx.connectionName}'s other nodes:`, err);
         });
       }
@@ -8045,13 +8049,19 @@ export class AnomalyService
         }`,
       );
     }
-    for (const replica of states.flatMap((s) => [...s.replicas.values()])) {
-      const windows = series.get(replica.addr) ?? [];
-      const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
-      windows.push(
-        ...replica.windows.filter((w) => w.end > storedEnd && w.end >= startTime && w.end <= endTime),
-      );
-      series.set(replica.addr, windows);
+    const inMemory = [
+      ...states.flatMap((s) =>
+        [...s.replicas.values()].flatMap((r) => r.windows.map((w) => ({ ...w, addr: r.addr }))),
+      ),
+      ...(this.divergencePendingWindows.get(connectionId) ?? []),
+    ]
+      .filter((w) => w.end >= startTime && w.end <= endTime)
+      .sort((a, b) => a.end - b.end);
+    for (const { addr, ...window } of inMemory) {
+      const windows = series.get(addr) ?? [];
+      if (windows.length > 0 && window.end <= windows[windows.length - 1].end) continue;
+      windows.push(window);
+      series.set(addr, windows);
     }
     const now = Date.now();
     const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
@@ -8345,14 +8355,21 @@ export class AnomalyService
     await this.persistPendingDivergenceWindows(ctx);
     await this.sweepRetiredDivergenceNodes(ctx, kept);
     await this.settleRetiredDivergence(ctx.connectionId);
-    if (targets.length === 0) return;
+    if (targets.length === 0) {
+      this.topologyFanoutUnreachable.delete(ctx.connectionId);
+      return;
+    }
 
     const timestamp = Date.now();
     const results = await Promise.allSettled(
       targets.map(async (target) => {
-        const client = target.nodeId
-          ? await this.clusterDiscovery!.getNodeConnection(target.nodeId, ctx.connectionId)
-          : await this.clusterDiscovery!.getAddressConnection(target.host, target.port, ctx.connectionId);
+        const client = await withTimeout(
+          target.nodeId
+            ? this.clusterDiscovery!.getNodeConnection(target.nodeId, ctx.connectionId)
+            : this.clusterDiscovery!.getAddressConnection(target.host, target.port, ctx.connectionId),
+          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+          `Connecting to ${target.addr} timed out`,
+        );
         const [raw, self] = await Promise.all([
           withTimeout(
             client.info(),
@@ -8415,10 +8432,7 @@ export class AnomalyService
       const closed = drainClosedWindows(state);
       if (closed.length > 0) {
         const pending = this.divergencePendingWindows.get(ctx.connectionId) ?? [];
-        this.divergencePendingWindows.set(
-          ctx.connectionId,
-          [...pending, ...closed].slice(-DIVERGENCE_PERSIST_BACKLOG),
-        );
+        this.queuePendingDivergenceWindows(ctx, [...pending, ...closed]);
       }
       const lastEnd = Math.max(
         ...[...state.replicas.values()].flatMap((r) => r.windows.map((w) => w.end)),
@@ -8640,6 +8654,19 @@ export class AnomalyService
     return read;
   }
 
+  private queuePendingDivergenceWindows(
+    ctx: ConnectionContext,
+    windows: ClosedDivergenceWindow[],
+  ): void {
+    const dropped = windows.length - DIVERGENCE_PERSIST_BACKLOG;
+    if (dropped > 0) {
+      this.logger.warn(
+        `Dropped ${dropped} unsaved replication divergence windows of retired primaries for ${ctx.connectionName}.`,
+      );
+    }
+    this.divergencePendingWindows.set(ctx.connectionId, windows.slice(-DIVERGENCE_PERSIST_BACKLOG));
+  }
+
   private async persistPendingDivergenceWindows(ctx: ConnectionContext): Promise<void> {
     const pending = this.divergencePendingWindows.get(ctx.connectionId);
     if (!pending) return;
@@ -8658,10 +8685,7 @@ export class AnomalyService
       );
     } catch (err) {
       const later = this.divergencePendingWindows.get(ctx.connectionId) ?? [];
-      this.divergencePendingWindows.set(
-        ctx.connectionId,
-        [...pending, ...later].slice(-DIVERGENCE_PERSIST_BACKLOG),
-      );
+      this.queuePendingDivergenceWindows(ctx, [...pending, ...later]);
       this.logger.warn(
         `Failed to persist replication divergence windows of retired primaries for ${ctx.connectionName}: ${
           err instanceof Error ? err.message : String(err)
