@@ -44,6 +44,7 @@ import {
   ConnectionChurnSample,
 } from './connection-churn';
 import {
+  DroppedSpan,
   IncidentBoundary,
   IncidentTimeline,
   IncidentTimelineBuilder,
@@ -55,6 +56,7 @@ import {
   RESOLVER_BACKED_METRICS,
   RecoveryProbe,
   incidentStartOf,
+  signalKey,
   mergeRuleSteps,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
@@ -81,7 +83,6 @@ import {
   ResyncEscalationState,
   backlogCoverageRecovered,
   observeBacklogCoverage,
-  resyncEventReplica,
   resyncSettled,
   createBacklogCoverageState,
   createResyncEscalationState,
@@ -170,7 +171,6 @@ import {
   replicaSlotSignature,
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
-import { SUSTAINED_DEGRADATION_MESSAGE } from '../latency-regression/regression-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
@@ -438,6 +438,7 @@ export class AnomalyService
   private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
   private readonly incidentEventsById = new Map<string, AnomalyEvent>();
   private readonly incidentEventsDroppedThrough = new Map<string, number>();
+  private readonly incidentEventsDroppedSpans = new Map<string, DroppedSpan[]>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly unsavedGroups = new Map<
     string,
@@ -1025,6 +1026,7 @@ export class AnomalyService
     this.reshardThinViewLogged.delete(connectionId);
     this.forgetIncidentEvents(connectionId, () => true);
     this.incidentEventsDroppedThrough.delete(connectionId);
+    this.incidentEventsDroppedSpans.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -2115,7 +2117,7 @@ export class AnomalyService
     const tracked = this.resyncEscalationEvents.get(connectionId) ?? [];
     const untracked = open
       .filter((e) => !tracked.some((t) => t.id === e.id))
-      .map((e) => ({ id: e.id, addr: resyncEventReplica(e.message), since: e.timestamp }));
+      .map((e) => ({ id: e.id, addr: e.replicaAddr ?? null, since: e.timestamp }));
     if (untracked.length > 0) {
       this.resyncEscalationEvents.set(connectionId, [...tracked, ...untracked]);
     }
@@ -6580,6 +6582,7 @@ export class AnomalyService
       dedupeKey: anomaly.dedupeKey,
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
+      kind: anomaly.kind,
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs:
@@ -6596,17 +6599,77 @@ export class AnomalyService
   private rememberIncidentEvent(anomaly: AnomalyEvent): void {
     const connectionId = anomaly.connectionId ?? '';
     const events = this.incidentEvents.get(connectionId) ?? [];
-    events.push(anomaly);
+    let at = events.length;
+    while (at > 0 && events[at - 1].timestamp > anomaly.timestamp) at -= 1;
+    events.splice(at, 0, anomaly);
     this.incidentEventsById.set(anomaly.id, anomaly);
+    const liveFrom = events[events.length - 1].timestamp - 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
-      const evicted = events.shift();
-      if (evicted) {
-        this.incidentEventsById.delete(evicted.id);
-        this.incidentEventsDroppedThrough.set(connectionId, evicted.timestamp);
-      }
+      const stale = events.findIndex((event) => event.timestamp >= liveFrom);
+      events
+        .splice(0, stale === -1 ? events.length : stale)
+        .forEach((event) => this.dropIncidentEvent(connectionId, event));
     }
+    while (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
+      const at = this.incidentEventToEvict(events);
+      const [evicted] = events.splice(at, 1);
+      if (at === 0) this.dropIncidentEvent(connectionId, evicted);
+      else this.incidentEventsById.delete(evicted.id);
+      this.extendDroppedSpan(connectionId, evicted);
+    }
+    this.pruneDroppedSpans(connectionId, liveFrom);
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
+  }
+
+  private dropIncidentEvent(connectionId: string, evicted: AnomalyEvent): void {
+    this.incidentEventsById.delete(evicted.id);
+    const droppedThrough = this.incidentEventsDroppedThrough.get(connectionId) ?? evicted.timestamp;
+    this.incidentEventsDroppedThrough.set(connectionId, Math.max(droppedThrough, evicted.timestamp));
+  }
+
+  private extendDroppedSpan(connectionId: string, evicted: AnomalyEvent): void {
+    const gapMs = DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs;
+    const merged: DroppedSpan = {
+      from: evicted.timestamp,
+      through: evicted.timestamp,
+      scopeId: evicted.scopeId,
+    };
+    const kept: DroppedSpan[] = [];
+    for (const span of this.incidentEventsDroppedSpans.get(connectionId) ?? []) {
+      if (
+        span.scopeId === merged.scopeId &&
+        span.from - merged.through <= gapMs &&
+        merged.from - span.through <= gapMs
+      ) {
+        merged.from = Math.min(merged.from, span.from);
+        merged.through = Math.max(merged.through, span.through);
+      } else {
+        kept.push(span);
+      }
+    }
+    kept.push(merged);
+    this.incidentEventsDroppedSpans.set(
+      connectionId,
+      kept.sort((a, b) => a.from - b.from),
+    );
+  }
+
+  private pruneDroppedSpans(connectionId: string, liveFrom: number): void {
+    const spans = this.incidentEventsDroppedSpans.get(connectionId);
+    if (!spans) return;
+    const live = spans.filter((span) => span.through >= liveFrom);
+    if (live.length > 0) this.incidentEventsDroppedSpans.set(connectionId, live);
+    else this.incidentEventsDroppedSpans.delete(connectionId);
+  }
+
+  private incidentEventToEvict(events: AnomalyEvent[]): number {
+    const keys = events.map(signalKey);
+    const first = new Map<string, number>();
+    keys.forEach((key, i) => first.has(key) || first.set(key, i));
+    const last = new Map(keys.map((key, i) => [key, i]));
+    const middle = keys.findIndex((key, i) => first.get(key)! < i && i < last.get(key)!);
+    return middle === -1 ? 0 : middle;
   }
 
   private forgetIncidentEvents(
@@ -6983,10 +7046,7 @@ export class AnomalyService
       if (POINT_IN_TIME_METRICS.has(signal.metricType)) {
         const quietAt = signal.since + POINT_IN_TIME_QUIET_MS;
         if (signal.until !== null && signal.until <= quietAt) return null;
-        if (
-          !this.buffers.has(signal.connectionId) ||
-          !signal.message.startsWith(SUSTAINED_DEGRADATION_MESSAGE)
-        ) {
+        if (!this.buffers.has(signal.connectionId) || signal.kind !== 'sustained_degradation') {
           return undefined;
         }
         return signal.now < quietAt ? undefined : quietAt;
@@ -7146,6 +7206,7 @@ export class AnomalyService
         this.liveBoundaries,
         this.incidentEventsDroppedThrough,
         now - windowMs,
+        this.incidentEventsDroppedSpans,
       );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;
@@ -7254,7 +7315,15 @@ export class AnomalyService
       endTime,
     );
     return this.incidentTimelineBuilder
-      .build(events, Date.now(), this.incidentHistoryProbe, boundaries)
+      .build(
+        events,
+        Date.now(),
+        this.incidentHistoryProbe,
+        boundaries,
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        this.incidentEventsDroppedSpans,
+      )
       .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
@@ -7285,7 +7354,15 @@ export class AnomalyService
     );
     const find = (all: AnomalyEvent[]) =>
       this.incidentTimelineBuilder
-        .build(all, Date.now(), this.incidentHistoryProbe, boundaries)
+        .build(
+          all,
+          Date.now(),
+          this.incidentHistoryProbe,
+          boundaries,
+          new Map(),
+          Number.NEGATIVE_INFINITY,
+          this.incidentEventsDroppedSpans,
+        )
         .find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
@@ -7541,6 +7618,7 @@ export class AnomalyService
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
+      kind: s.kind,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
       connectionId: s.connectionId,
@@ -7970,6 +8048,7 @@ export class AnomalyService
           `backlog coverage at disconnect ${coverage}).`
         : `Replica ${escalation.addr} came back after ${seconds.toFixed(0)}s and could not resume ` +
           `from the backlog (${counters}; backlog coverage at disconnect ${coverage}).`,
+      replicaAddr: escalation.addr,
       resolved: false,
       connectionId: ctx.connectionId,
     };

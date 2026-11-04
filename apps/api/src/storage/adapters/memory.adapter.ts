@@ -720,6 +720,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       dedupeKey: event.dedupeKey ?? existing.dedupeKey,
       commands: existing.commands ?? event.commands,
       eventSequence: existing.eventSequence ?? event.eventSequence,
+      kind: existing.kind ?? event.kind,
       resolved: existing.resolved || event.resolved,
       resolvedAt: existing.resolvedAt ?? event.resolvedAt,
       durationMs: existing.durationMs ?? event.durationMs,
