@@ -1,12 +1,18 @@
-import { existsSync, mkdtempSync, readFileSync } from 'fs';
+import { mkdtempSync } from 'fs';
 import { join } from 'path';
-import { applyEnvFile, BLOCKED_KEYS, KEEP_ENV, ROOT_ENV_FILE, STUB_ENTITLEMENT_URL } from './test-env';
+import {
+  applyTestDbOverrides,
+  BLOCKED_KEYS,
+  KEEP_ENV,
+  loadEnvFile,
+  ROOT_ENV_FILE,
+  STUB_ENTITLEMENT_URL,
+} from './test-env';
 
 process.env.STORAGE_TYPE = 'memory';
 
-if (existsSync(ROOT_ENV_FILE)) {
-  applyEnvFile(readFileSync(ROOT_ENV_FILE, 'utf8'));
-}
+applyTestDbOverrides();
+loadEnvFile(ROOT_ENV_FILE);
 
 if (!process.env.DB_HOST) {
   process.env.DB_HOST = process.env.TEST_DB_HOST || 'localhost';
