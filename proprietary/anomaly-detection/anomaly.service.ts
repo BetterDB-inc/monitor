@@ -6627,8 +6627,9 @@ export class AnomalyService
     return this.incidentEventsById.get(anomalyId);
   }
 
-  private stampScope(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
+    anomaly.eventSequence ??= this.nextEventSequence++;
   }
 
   private async addAnomaly(
@@ -6636,8 +6637,7 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.stampScope(anomaly, ctx?.connectionId || anomaly.connectionId);
-    anomaly.eventSequence ??= this.nextEventSequence++;
+    this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
     this.addRecentAnomaly(anomaly);
     this.rememberIncidentEvent(anomaly);
 
@@ -6875,8 +6875,7 @@ export class AnomalyService
   }
 
   stampExternalAnomaly(event: AnomalyEvent): void {
-    this.stampScope(event);
-    event.eventSequence ??= this.nextEventSequence++;
+    this.stamp(event);
   }
 
   ingestExternalAnomaly(event: AnomalyEvent): void {
