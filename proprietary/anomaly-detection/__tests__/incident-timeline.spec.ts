@@ -113,6 +113,38 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
     });
 
+    it('keeps the stored start when a dropped span covers its first event', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 - MIN, through: T0 + 9 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
+    it('starts afresh when no drop reached the stored start', () => {
+      const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder().build(
+        [late],
+        T0 + 11 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 9 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
+    });
+
     it('starts afresh when the dropped events ended before the gap', () => {
       const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
 

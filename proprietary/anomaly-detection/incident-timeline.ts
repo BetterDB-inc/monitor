@@ -359,11 +359,12 @@ export class IncidentTimelineBuilder {
         start = undefined;
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
+        const anchorDroppedAt = this.anchorDroppedAt(stored, droppedAt, spans);
         const anchorDropped =
           positionOf(stored.anomalyId) < 0 &&
-          stored.startedAt <= droppedAt &&
-          (event.timestamp - droppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, stored, droppedAt));
+          stored.startedAt <= anchorDroppedAt &&
+          (event.timestamp - anchorDroppedAt <= this.opts.gapMs ||
+            this.bridgesFromDropped(event, stored, anchorDroppedAt));
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -377,6 +378,17 @@ export class IncidentTimelineBuilder {
     }
     if (current.length > 0) clusters.push({ events: current, start });
     return clusters;
+  }
+
+  private anchorDroppedAt(
+    stored: IncidentBoundary,
+    droppedAt: number,
+    spans: readonly DroppedSpan[],
+  ): number {
+    const covering = spans.find(
+      (span) => span.from <= stored.startedAt && stored.startedAt <= span.through,
+    );
+    return covering ? Math.max(droppedAt, covering.through) : droppedAt;
   }
 
   private droppedThroughScope(

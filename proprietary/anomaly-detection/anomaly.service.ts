@@ -6612,8 +6612,10 @@ export class AnomalyService
         .forEach((event) => this.dropIncidentEvent(connectionId, event));
     }
     while (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
-      const [evicted] = events.splice(this.incidentEventToEvict(events), 1);
-      this.dropIncidentEvent(connectionId, evicted);
+      const at = this.incidentEventToEvict(events);
+      const [evicted] = events.splice(at, 1);
+      if (at === 0) this.dropIncidentEvent(connectionId, evicted);
+      else this.incidentEventsById.delete(evicted.id);
       this.extendDroppedSpan(connectionId, evicted);
     }
     this.pruneDroppedSpans(connectionId, liveFrom);

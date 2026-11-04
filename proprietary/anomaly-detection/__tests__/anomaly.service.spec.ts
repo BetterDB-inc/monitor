@@ -12072,6 +12072,21 @@ describe('AnomalyService', () => {
         expect(incidents.map((i: any) => i.startedAt)).toEqual([start, later]);
       });
 
+      it('moves the drop watermark only when the oldest event is evicted', () => {
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'short', timestamp: now - 50 * MIN }));
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 30 * MIN + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept[0]).toBe('short');
+        expect((service as any).incidentEventsDroppedThrough.has('conn-1')).toBe(false);
+        expect((service as any).incidentEventsById.has('mem-1')).toBe(false);
+      });
+
       it('passes the dropped spans to history builds', async () => {
         const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
 
