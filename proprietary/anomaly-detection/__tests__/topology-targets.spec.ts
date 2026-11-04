@@ -70,6 +70,15 @@ describe('topology targets', () => {
       expect(members.size).toBe(0);
     });
 
+    it('skips primaries registered by cluster node id', () => {
+      const { targets } = clusterTargets(
+        [clusterNode('b', '10.0.0.2:6379@16379', ['master'])],
+        (_host, _port, nodeId) => nodeId === 'b',
+      );
+
+      expect(targets).toEqual([]);
+    });
+
     it('caps the fan-out and leaves capped primaries out of scope', () => {
       const nodes = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 5 }, (_, i) =>
         clusterNode(`n${i}`, `10.0.1.${i}:6379@16379`, ['master']),
