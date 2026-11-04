@@ -21,7 +21,9 @@ describe('SlowLogAnalyticsService source tracking', () => {
   let repo: SlowLogMemoryRepository;
   let service: SlowLogAnalyticsService;
   let endpoint: { host: string; port: number } | null;
+  let runId: string | null;
   let served: SlowLogEntry[];
+  let onRead: () => void;
 
   const ctx = () => ({
     connectionId: 'seed',
@@ -29,13 +31,23 @@ describe('SlowLogAnalyticsService source tracking', () => {
     host: 'valkey.ns.svc.cluster.local',
     port: 6379,
     client: {
-      getSlowLog: jest.fn(async () => served),
+      getSlowLog: jest.fn(async () => {
+        const batch = served;
+        onRead();
+        return batch;
+      }),
       getServingEndpoint: () => endpoint,
+      getInfo: jest.fn(async () => {
+        if (runId === null) throw new Error('NOPERM');
+        return { server: { run_id: runId } };
+      }),
     },
   });
   const poll = () => (service as unknown as Pollable).pollConnection(ctx());
 
   beforeEach(() => {
+    runId = null;
+    onRead = () => undefined;
     repo = new SlowLogMemoryRepository();
     const storage = {
       saveSlowLogEntries: repo.saveSlowLogEntries.bind(repo),
@@ -88,5 +100,50 @@ describe('SlowLogAnalyticsService source tracking', () => {
       'valkey.ns.svc.cluster.local:6379',
       'valkey.ns.svc.cluster.local:6379',
     ]);
+  });
+
+  it('does not replay a process reached through a different address', async () => {
+    // Same server behind two addresses (NLB IP per zone, IPv4 vs IPv6).
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2, 3, 4], 1000);
+    await poll();
+
+    endpoint = { host: '10.0.1.1', port: 6379 };
+    served = entries([0, 1, 2, 3, 4, 5, 6], 1000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 1000 });
+    expect(stored.map((e) => e.id).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(stored.every((e) => e.sourceRunId === 'run-a')).toBe(true);
+  });
+
+  it('keeps the entries of a restarted process on the same address', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 1000);
+    await poll();
+
+    // The node restarts (or a new pod reuses the IP): log IDs start over.
+    runId = 'run-b';
+    served = entries([0, 1, 2], 2000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 1000 });
+    expect(stored.filter((e) => e.sourceRunId === 'run-b').map((e) => e.timestamp).sort()).toEqual([2000, 2001, 2002]);
+    expect(stored.filter((e) => e.sourceRunId === 'run-a')).toHaveLength(10);
+  });
+
+  it('skips a batch read while the connection moved to another process', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2], 1000);
+    onRead = () => {
+      runId = 'run-b';
+      endpoint = { host: '10.0.0.2', port: 6379 };
+    };
+    await poll();
+
+    expect(await repo.getSlowLogEntries({ connectionId: 'seed' })).toEqual([]);
   });
 });

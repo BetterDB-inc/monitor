@@ -275,12 +275,15 @@ export interface AnomalyStats {
 
 // Slow Log Entry Types
 /**
- * The node a slow/command log entry was read from. Log IDs are per node, so a
- * connection whose host fronts several nodes tracks and dedups per source.
+ * The server a slow/command log entry was read from. Log IDs are per server
+ * process, so entries are tracked and deduplicated per process (`runId`, from
+ * INFO server). host/port is where the process was reached; it is only the key
+ * when the run id is unavailable (empty).
  */
 export interface LogSource {
   host: string;
   port: number;
+  runId?: string;
 }
 
 export interface StoredSlowLogEntry {
@@ -293,6 +296,8 @@ export interface StoredSlowLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 
@@ -331,6 +336,8 @@ export interface StoredCommandLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 

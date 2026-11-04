@@ -1,16 +1,38 @@
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
 import { DatabasePort } from '../interfaces/database-port.interface';
+import type { LogSource } from '../interfaces/storage-port.interface';
 
 /**
  * Context passed to pollConnection() with all relevant connection information
  */
 /**
- * Where a connection's slow/command log entries come from: the node its socket
- * is attached to, or the configured address when that is not known.
+ * The server process a connection's slow/command log reads are served by. Log
+ * IDs are per process, so the run id (INFO server) identifies the source; the
+ * address is where the process was reached and only stands in for the identity
+ * when the run id is unavailable. The same process reached through another
+ * address (a load balancer IP per zone, IPv4 vs IPv6) keeps its identity, and a
+ * restarted process gets a new one even on the same address.
  */
-export function logSourceOf(ctx: ConnectionContext): { host: string; port: number } {
-  return ctx.client.getServingEndpoint?.() ?? { host: ctx.host, port: ctx.port };
+export async function readLogSource(ctx: ConnectionContext): Promise<LogSource> {
+  const endpoint = ctx.client.getServingEndpoint?.() ?? { host: ctx.host, port: ctx.port };
+  let runId = '';
+  try {
+    const info = await ctx.client.getInfo(['server']);
+    runId = (info.server as Record<string, string> | undefined)?.run_id ?? '';
+  } catch {
+    // INFO denied or unsupported: fall back to tracking by address.
+  }
+  return { ...endpoint, runId };
+}
+
+/** Tracking key for a log source: the run id when known, otherwise the address. */
+export function logSourceKey(source: LogSource): string {
+  return source.runId ? `run:${source.runId}` : `addr:${source.host}:${source.port}`;
+}
+
+export function describeLogSource(source: LogSource): string {
+  return `${source.host}:${source.port}${source.runId ? ` (run ${source.runId.slice(0, 8)})` : ''}`;
 }
 
 export interface ConnectionContext {

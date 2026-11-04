@@ -206,6 +206,44 @@ describe('SqliteAdapter legacy connection_id migration', () => {
     expect(leftover).toHaveLength(0);
   });
 
+  it('adds source_run_id to the log tables and keeps their rows', async () => {
+    // The previous log-table shape: unique on (id, host, port, connection_id).
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE slow_log_entries (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT,
+        slowlog_id INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        duration INTEGER NOT NULL,
+        command TEXT NOT NULL DEFAULT '[]',
+        client_address TEXT,
+        client_name TEXT,
+        captured_at INTEGER NOT NULL,
+        source_host TEXT NOT NULL,
+        source_port INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
+        UNIQUE(slowlog_id, source_host, source_port, connection_id)
+      );
+      INSERT INTO slow_log_entries (slowlog_id, timestamp, duration, captured_at, source_host, source_port, connection_id)
+      VALUES (1, 100, 10, 1, '10.0.0.1', 6379, 'c1'), (2, 101, 10, 1, '10.0.0.1', 6379, 'c1');
+    `);
+    legacy.close();
+
+    const adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+    const entry = {
+      id: 1, timestamp: 200, duration: 10, command: ['GET'], clientAddress: '', clientName: '',
+      capturedAt: 2, sourceHost: '10.0.0.1', sourcePort: 6379, sourceRunId: 'run-new', connectionId: 'c1',
+    };
+    // Same id and address, new server process: kept.
+    expect(await adapter.saveSlowLogEntries([entry], 'c1')).toBe(1);
+    expect(await adapter.saveSlowLogEntries([entry], 'c1')).toBe(0);
+    const rows = await adapter.getSlowLogEntries({ connectionId: 'c1', limit: 10 });
+    await adapter.close();
+
+    expect(rows.map((r) => r.timestamp).sort()).toEqual([100, 101, 200]);
+  });
+
   it('still initializes a brand-new database', async () => {
     const adapter = new SqliteAdapter({ filepath: dbPath });
     await adapter.initialize();

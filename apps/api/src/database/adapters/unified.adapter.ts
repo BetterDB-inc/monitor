@@ -1725,7 +1725,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
 
   getServingEndpoint(): { host: string; port: number } | null {
     // Through a tunnel the socket peer is the local forwarder, not the node.
-    if (this.usesTunnel || !this._client) return null;
+    // Before `ready` the socket may be open but the connection is not usable.
+    if (this.usesTunnel || this._client?.status !== 'ready') return null;
     const { remoteAddress, remotePort } = this._client.stream ?? {};
     if (!remoteAddress || !remotePort) return null;
     return { host: remoteAddress.replace(/^::ffff:/, ''), port: remotePort };

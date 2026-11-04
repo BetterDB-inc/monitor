@@ -443,8 +443,9 @@ const SLOW_LOG_ENTRIES_COLUMNS = `
   captured_at INTEGER NOT NULL,
   source_host TEXT NOT NULL,
   source_port INTEGER NOT NULL,
+  source_run_id TEXT NOT NULL DEFAULT '',
   connection_id TEXT NOT NULL DEFAULT 'env-default',
-  UNIQUE(slowlog_id, source_host, source_port, connection_id)
+  UNIQUE(slowlog_id, source_host, source_port, source_run_id, connection_id)
 `;
 
 const SLOW_LOG_ENTRIES_INDEXES = `
@@ -454,6 +455,7 @@ const SLOW_LOG_ENTRIES_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
   CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
   CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_connection_source ON slow_log_entries(connection_id, source_run_id, source_host, source_port, slowlog_id);
 `;
 
 const COMMAND_LOG_ENTRIES_COLUMNS = `
@@ -468,8 +470,9 @@ const COMMAND_LOG_ENTRIES_COLUMNS = `
   captured_at INTEGER NOT NULL,
   source_host TEXT NOT NULL,
   source_port INTEGER NOT NULL,
+  source_run_id TEXT NOT NULL DEFAULT '',
   connection_id TEXT NOT NULL DEFAULT 'env-default',
-  UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+  UNIQUE(commandlog_id, log_type, source_host, source_port, source_run_id, connection_id)
 `;
 
 const COMMAND_LOG_ENTRIES_INDEXES = `
@@ -479,20 +482,30 @@ const COMMAND_LOG_ENTRIES_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
   CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
   CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_connection_source ON command_log_entries(log_type, connection_id, source_run_id, source_host, source_port, commandlog_id);
 `;
 
 // Rebuild spec per table, consumed by migrateConnectionIdUniqueConstraints.
+// `uniqueColumns` are the columns the canonical unique constraint must include;
+// a table whose unique constraints lack any of them is rebuilt.
 const CONNECTION_ID_UNIQUE_REBUILDS = [
-  { table: 'acl_audit', columns: ACL_AUDIT_COLUMNS, indexes: ACL_AUDIT_INDEXES },
+  {
+    table: 'acl_audit',
+    columns: ACL_AUDIT_COLUMNS,
+    indexes: ACL_AUDIT_INDEXES,
+    uniqueColumns: ['connection_id'],
+  },
   {
     table: 'slow_log_entries',
     columns: SLOW_LOG_ENTRIES_COLUMNS,
     indexes: SLOW_LOG_ENTRIES_INDEXES,
+    uniqueColumns: ['connection_id', 'source_run_id'],
   },
   {
     table: 'command_log_entries',
     columns: COMMAND_LOG_ENTRIES_COLUMNS,
     indexes: COMMAND_LOG_ENTRIES_INDEXES,
+    uniqueColumns: ['connection_id', 'source_run_id'],
   },
 ] as const;
 
@@ -927,7 +940,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!this.db) return;
     const db = this.db;
 
-    for (const { table, columns, indexes: indexesDdl } of CONNECTION_ID_UNIQUE_REBUILDS) {
+    for (const { table, columns, indexes: indexesDdl, uniqueColumns } of CONNECTION_ID_UNIQUE_REBUILDS) {
       try {
         // PRAGMA statements return an empty result (not an error) for a missing
         // table, so check existence explicitly: a brand-new database has none of
@@ -946,10 +959,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
               (c) => c.name,
             ),
           );
-        const hasCanonicalUnique = uniqueColumnSets.some((cols) => cols.includes('connection_id'));
-        const hasStaleUnique = uniqueColumnSets.some((cols) => !cols.includes('connection_id'));
-        // Canonical already: exactly the connection_id-inclusive constraint and
-        // no leftover narrow one. Nothing to do.
+        const isCanonical = (cols: string[]) => uniqueColumns.every((column) => cols.includes(column));
+        const hasCanonicalUnique = uniqueColumnSets.some(isCanonical);
+        const hasStaleUnique = uniqueColumnSets.some((cols) => !isCanonical(cols));
+        // Canonical already: exactly the canonical constraint and no leftover
+        // narrower one. Nothing to do. (Log tables gained source_run_id in their
+        // key: widening keeps every existing row unique, so the copy keeps them all.)
         if (hasCanonicalUnique && !hasStaleUnique) continue;
 
         const existingColumns = (
@@ -3943,8 +3958,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO command_log_entries (
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -3961,6 +3976,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           entry.capturedAt,
           entry.sourceHost,
           entry.sourcePort,
+          entry.sourceRunId ?? '',
           connId,
         );
         if (result.changes > 0) count++;
@@ -4036,27 +4052,26 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.db) throw new Error('Database not initialized');
 
-    if (connectionId && source) {
-      const row = this.db
-        .prepare(
-          'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ? AND source_host = ? AND source_port = ?',
-        )
-        .get(type, connectionId, source.host, source.port) as any;
-      return row?.max_id ?? null;
-    }
-
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    conditions.push('log_type = ?');
+    params.push(type);
     if (connectionId) {
-      const row = this.db
-        .prepare(
-          'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ?',
-        )
-        .get(type, connectionId) as any;
-      return row?.max_id ?? null;
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
     }
-
+    if (source) {
+      conditions.push('source_run_id = ?');
+      params.push(source.runId ?? '');
+      if (!source.runId) {
+        conditions.push('source_host = ?', 'source_port = ?');
+        params.push(source.host, source.port);
+      }
+    }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     const row = this.db
-      .prepare('SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ?')
-      .get(type) as any;
+      .prepare(`SELECT MAX(commandlog_id) as max_id FROM command_log_entries${where}`)
+      .get(...params) as { max_id: number | null } | undefined;
     return row?.max_id ?? null;
   }
 

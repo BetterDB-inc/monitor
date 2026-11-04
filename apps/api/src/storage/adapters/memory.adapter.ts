@@ -110,7 +110,7 @@ import {
   type ClientStatsGroup,
 } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
-import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
+import { SlowLogMemoryRepository, matchesLogSource } from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
@@ -1205,6 +1205,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
           e.type === entry.type &&
           e.sourceHost === entry.sourceHost &&
           e.sourcePort === entry.sourcePort &&
+          (e.sourceRunId ?? '') === (entry.sourceRunId ?? '') &&
           e.connectionId === connectionId,
       );
       if (!exists) {
@@ -1261,7 +1262,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       entriesOfType = entriesOfType.filter((e) => e.connectionId === connectionId);
     }
     if (source) {
-      entriesOfType = entriesOfType.filter((e) => e.sourceHost === source.host && e.sourcePort === source.port);
+      entriesOfType = entriesOfType.filter((e) => matchesLogSource(e, source));
     }
     if (entriesOfType.length === 0) return null;
     return Math.max(...entriesOfType.map((e) => e.id));

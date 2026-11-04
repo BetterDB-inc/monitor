@@ -2023,8 +2023,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(slowlog_id, source_host, source_port, connection_id)
+        UNIQUE(slowlog_id, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
@@ -2043,9 +2044,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         -- Constraint doesn't exist, ignore
       END $$;
 
-      -- Add unique constraint if missing (for tables created before this constraint was added)
+      -- Log IDs are per server process: source_run_id (INFO server run_id) joins
+      -- the unique key, so the same id from two processes behind one address
+      -- (a restart, a reused pod IP) is kept. Widening the key keeps every
+      -- existing row unique; legacy rows keep source_run_id = ''.
+      ALTER TABLE slow_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
+      CREATE INDEX IF NOT EXISTS idx_slowlog_connection_source ON slow_log_entries(connection_id, source_run_id, source_host, source_port, slowlog_id);
+
       DO $$
+      DECLARE
+        narrow RECORD;
       BEGIN
+        FOR narrow IN
+          SELECT c.conname FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'slow_log_entries'
+            AND c.contype = 'u'
+            AND NOT c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'source_run_id'
+            )
+        LOOP
+          EXECUTE format('ALTER TABLE slow_log_entries DROP CONSTRAINT %I', narrow.conname);
+        END LOOP;
+
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint c
           JOIN pg_class t ON c.conrelid = t.oid
@@ -2053,20 +2074,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
             AND c.contype = 'u'
             AND c.conkey @> ARRAY(
               SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'connection_id')
+              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'source_run_id', 'connection_id')
             )
         ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM slow_log_entries a USING slow_log_entries b
-          WHERE a.pk < b.pk
-            AND a.slowlog_id = b.slowlog_id
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
           ALTER TABLE slow_log_entries
-          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_conn_key
-          UNIQUE (slowlog_id, source_host, source_port, connection_id);
+          ADD CONSTRAINT slow_log_entries_id_host_port_run_conn_key
+          UNIQUE (slowlog_id, source_host, source_port, source_run_id, connection_id);
         END IF;
       EXCEPTION WHEN duplicate_object THEN
         -- Constraint already exists, ignore
@@ -2085,8 +2098,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+        UNIQUE(commandlog_id, log_type, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
@@ -2105,9 +2119,29 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         -- Constraint doesn't exist, ignore
       END $$;
 
-      -- Add unique constraint if missing (for tables created before this constraint was added)
+      -- Log IDs are per server process: source_run_id (INFO server run_id) joins
+      -- the unique key, so the same id from two processes behind one address
+      -- (a restart, a reused pod IP) is kept. Widening the key keeps every
+      -- existing row unique; legacy rows keep source_run_id = ''.
+      ALTER TABLE command_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
+      CREATE INDEX IF NOT EXISTS idx_commandlog_connection_source ON command_log_entries(log_type, connection_id, source_run_id, source_host, source_port, commandlog_id);
+
       DO $$
+      DECLARE
+        narrow RECORD;
       BEGIN
+        FOR narrow IN
+          SELECT c.conname FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          WHERE t.relname = 'command_log_entries'
+            AND c.contype = 'u'
+            AND NOT c.conkey @> ARRAY(
+              SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'source_run_id'
+            )
+        LOOP
+          EXECUTE format('ALTER TABLE command_log_entries DROP CONSTRAINT %I', narrow.conname);
+        END LOOP;
+
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint c
           JOIN pg_class t ON c.conrelid = t.oid
@@ -2115,21 +2149,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
             AND c.contype = 'u'
             AND c.conkey @> ARRAY(
               SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id')
+              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'source_run_id', 'connection_id')
             )
         ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM command_log_entries a USING command_log_entries b
-          WHERE a.pk < b.pk
-            AND a.commandlog_id = b.commandlog_id
-            AND a.log_type = b.log_type
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
           ALTER TABLE command_log_entries
-          ADD CONSTRAINT command_log_entries_cmdlog_id_type_host_port_conn_key
-          UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
+          ADD CONSTRAINT command_log_entries_id_type_host_port_run_conn_key
+          UNIQUE (commandlog_id, log_type, source_host, source_port, source_run_id, connection_id);
         END IF;
       EXCEPTION WHEN duplicate_object THEN
         -- Constraint already exists, ignore
@@ -4037,7 +4062,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         entry.id,
@@ -4050,6 +4075,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.capturedAt,
         entry.sourceHost,
         entry.sourcePort,
+        entry.sourceRunId ?? '',
         connectionId,
       );
     }
@@ -4057,9 +4083,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       INSERT INTO command_log_entries (
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
       ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (commandlog_id, log_type, source_host, source_port, connection_id) DO NOTHING
+      ON CONFLICT (commandlog_id, log_type, source_host, source_port, source_run_id, connection_id) DO NOTHING
     `;
 
     const result = await this.pool.query(query, values);
@@ -4131,29 +4157,26 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    if (connectionId && source) {
-      const result = await this.pool.query(
-        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2 AND source_host = $3 AND source_port = $4',
-        [type, connectionId, source.host, source.port],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const add = (sql: string, value: unknown) => {
+      params.push(value);
+      conditions.push(sql.replace('?', `$${params.length}`));
+    };
+    add('log_type = ?', type);
+    if (connectionId) add('connection_id = ?', connectionId);
+    if (source) {
+      add('source_run_id = ?', source.runId ?? '');
+      if (!source.runId) {
+        add('source_host = ?', source.host);
+        add('source_port = ?', source.port);
+      }
     }
-
-    if (connectionId) {
-      const result = await this.pool.query(
-        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2',
-        [type, connectionId],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
-    }
-
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     const result = await this.pool.query(
-      'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1',
-      [type],
+      `SELECT MAX(commandlog_id) as max_id FROM command_log_entries${where}`,
+      params,
     );
-
     const maxId = result.rows[0]?.max_id;
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
   }

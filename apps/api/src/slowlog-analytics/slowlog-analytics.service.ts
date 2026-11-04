@@ -8,7 +8,13 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
-import { MultiConnectionPoller, ConnectionContext, logSourceOf } from '../common/services/multi-connection-poller';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+  describeLogSource,
+  logSourceKey,
+  readLogSource,
+} from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
@@ -18,10 +24,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   // Per-connection state tracking
   private lastSeenIds = new Map<string, number | null>();
-  // Node each connection's lastSeenId belongs to. Slowlog IDs are per node, so
-  // when a connection lands on another node the tracker restarts from that
-  // node's own last stored ID.
-  private trackedSources = new Map<string, string>();
+  // Server process each connection's lastSeenId belongs to. Slowlog IDs are per
+  // process, so when a connection lands on another one the tracker restarts
+  // from that process's own last stored ID.
+  private trackedSources = new Map<string, { key: string; label: string }>();
 
   // Per-connection cache for Prometheus metrics
   private cachedEntries = new Map<string, SlowLogEntry[]>();
@@ -55,15 +61,17 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     }
 
     try {
-      const source = logSourceOf(ctx);
-      const sourceKey = `${source.host}:${source.port}`;
+      const source = await readLogSource(ctx);
+      const sourceKey = logSourceKey(source);
       const previousSource = this.trackedSources.get(ctx.connectionId);
-      if (previousSource !== sourceKey) {
+      if (previousSource?.key !== sourceKey) {
         if (previousSource !== undefined) {
-          this.logger.log(`Slow log source for ${ctx.connectionName} moved from ${previousSource} to ${sourceKey}`);
+          this.logger.log(
+            `Slow log source for ${ctx.connectionName} moved from ${previousSource.label} to ${describeLogSource(source)}`,
+          );
         }
         this.lastSeenIds.delete(ctx.connectionId);
-        this.trackedSources.set(ctx.connectionId, sourceKey);
+        this.trackedSources.set(ctx.connectionId, { key: sourceKey, label: describeLogSource(source) });
       }
 
       // Initialize lastSeenId from storage if not already set
@@ -75,6 +83,12 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
       // Fetch slow log from Valkey/Redis (up to 128 entries)
       const entries = await ctx.client.getSlowLog(128);
+      // A reconnect during the awaits above moves the socket to another
+      // process; its entries must not be stored under this source.
+      if (logSourceKey(await readLogSource(ctx)) !== sourceKey) {
+        this.logger.debug(`Slow log source for ${ctx.connectionName} changed during the read; skipping this poll`);
+        return;
+      }
       const now = Date.now();
       const lastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
 
@@ -116,6 +130,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         capturedAt: now,
         sourceHost: source.host,
         sourcePort: source.port,
+        sourceRunId: source.runId,
         connectionId: ctx.connectionId,
       }));
 

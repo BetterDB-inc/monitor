@@ -4,6 +4,15 @@ import {
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
 
+/** Same rule as the SQL adapters: match the run id, and the address only when it is unknown. */
+export function matchesLogSource(
+  entry: { sourceHost: string; sourcePort: number; sourceRunId?: string },
+  source: LogSource,
+): boolean {
+  if ((entry.sourceRunId ?? '') !== (source.runId ?? '')) return false;
+  return source.runId ? true : entry.sourceHost === source.host && entry.sourcePort === source.port;
+}
+
 export class SlowLogMemoryRepository {
   private slowLogEntries: StoredSlowLogEntry[] = [];
 
@@ -16,6 +25,7 @@ export class SlowLogMemoryRepository {
           e.id === entry.id &&
           e.sourceHost === entry.sourceHost &&
           e.sourcePort === entry.sourcePort &&
+          (e.sourceRunId ?? '') === (entry.sourceRunId ?? '') &&
           e.connectionId === connectionId,
       );
       if (!exists) {
@@ -67,7 +77,7 @@ export class SlowLogMemoryRepository {
       entries = entries.filter((e) => e.connectionId === connectionId);
     }
     if (source) {
-      entries = entries.filter((e) => e.sourceHost === source.host && e.sourcePort === source.port);
+      entries = entries.filter((e) => matchesLogSource(e, source));
     }
     if (entries.length === 0) return null;
     return Math.max(...entries.map((e) => e.id));

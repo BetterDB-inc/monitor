@@ -23,7 +23,8 @@ export class SlowLogPostgresRepository {
     for (const entry of entries) {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
+        $${paramIndex++}
       )`);
       values.push(
         entry.id,
@@ -35,6 +36,7 @@ export class SlowLogPostgresRepository {
         entry.capturedAt,
         entry.sourceHost,
         entry.sourcePort,
+        entry.sourceRunId ?? '',
         connectionId,
       );
     }
@@ -42,9 +44,9 @@ export class SlowLogPostgresRepository {
     const query = `
       INSERT INTO slow_log_entries (
         slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port, connection_id
+        client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
       ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (slowlog_id, source_host, source_port, connection_id) DO NOTHING
+      ON CONFLICT (slowlog_id, source_host, source_port, source_run_id, connection_id) DO NOTHING
     `;
 
     const result = await this.pool.query(query, values);
@@ -107,25 +109,25 @@ export class SlowLogPostgresRepository {
   }
 
   async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
-    if (connectionId && source) {
-      const result = await this.pool.query(
-        'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1 AND source_host = $2 AND source_port = $3',
-        [connectionId, source.host, source.port],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const add = (sql: string, value: unknown) => {
+      params.push(value);
+      conditions.push(sql.replace('?', `$${params.length}`));
+    };
+    if (connectionId) add('connection_id = ?', connectionId);
+    if (source) {
+      add('source_run_id = ?', source.runId ?? '');
+      if (!source.runId) {
+        add('source_host = ?', source.host);
+        add('source_port = ?', source.port);
+      }
     }
-    if (connectionId) {
-      const result = await this.pool.query(
-        'SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = $1',
-        [connectionId],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
-    }
-
-    const result = await this.pool.query('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries');
-
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+    const result = await this.pool.query(
+      `SELECT MAX(slowlog_id) as max_id FROM slow_log_entries${where}`,
+      params,
+    );
     const maxId = result.rows[0]?.max_id;
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
   }
