@@ -67,6 +67,16 @@ describe('parseReplicaOffsetLines', () => {
     ]);
   });
 
+  it('skips a line without an address', () => {
+    expect(parseReplicaOffsetLines({ slave0: 'state=online,offset=9000,lag=0' })).toEqual([]);
+  });
+
+  it('reports an unknown state when the field is missing', () => {
+    expect(parseReplicaOffsetLines({ slave0: 'ip=10.0.0.2,port=6379,offset=9000' })).toEqual([
+      { key: 'slave0', addr: '10.0.0.2:6379', state: 'unknown', offset: 9000, lagSec: null },
+    ]);
+  });
+
   it('orders replicas by index, not by key string order', () => {
     const info = {
       slave10: 'ip=h10,port=1,state=online,offset=1,lag=0',
