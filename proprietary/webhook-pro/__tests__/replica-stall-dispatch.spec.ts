@@ -511,4 +511,47 @@ describe('one webhook per replica stall', () => {
 
     expect(sent('both')).toEqual([WebhookEventType.REPLICATION_DIVERGENCE]);
   });
+
+  it('does not let a lag alert retried after its stall cover the next stall', async () => {
+    const { dispatcher, lag, divergence, recovered, retrying, attempts, sent } = setup([
+      webhook('both', BOTH),
+    ]);
+
+    retrying.add('both');
+    await lag(30);
+    retrying.delete('both');
+    await divergence();
+    await recovered();
+    const [first] = attempts;
+    await dispatcher.sendWebhook(first.hook, first.deliveryId, first.payload);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
+
+  it('does not let a lag alert retried after its episode ended cover a stall', async () => {
+    const { dispatcher, lag, divergence, retrying, failing, attempts, sent } = setup([
+      webhook('both', BOTH),
+    ]);
+
+    retrying.add('both');
+    await lag(30);
+    retrying.delete('both');
+    await lag(1);
+    failing.add('both');
+    await lag(30);
+    failing.delete('both');
+    const [first] = attempts;
+    await dispatcher.sendWebhook(first.hook, first.deliveryId, first.payload);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
 });

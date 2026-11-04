@@ -41,6 +41,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
   private readonly replicaPairing = new ReplicaPairing();
   private readonly stalls = new Map<string, ReplicaStall>();
   private readonly lagAlerts = new Set<string>();
+  private readonly stallOpenings = new Map<string, number>();
 
   constructor(
     private readonly webhookDispatcher: WebhookDispatcherService,
@@ -160,6 +161,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
   forgetReplication(connectionId: string): void {
     this.replicaPairing.forget(connectionId);
+    this.stallOpenings.delete(connectionId);
     for (const key of this.stalls.keys()) {
       if (key.startsWith(`${connectionId}\0`)) this.stalls.delete(key);
     }
@@ -183,6 +185,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
   }
 
   private lagAlertFilter(replicaConnectionId: string): DispatchFilter {
+    const openings = this.stallOpenings.get(replicaConnectionId) ?? 0;
     return {
       skip: (webhook) => {
         const pair = this.replicaPairing.primaryFor(replicaConnectionId);
@@ -192,7 +195,10 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
           webhook.events.includes(WebhookEventType.REPLICATION_DIVERGENCE)
         );
       },
-      onDelivered: (webhookId) => this.lagAlerts.add(stallKey(replicaConnectionId, webhookId)),
+      onDelivered: (webhookId) => {
+        if ((this.stallOpenings.get(replicaConnectionId) ?? 0) !== openings) return;
+        this.lagAlerts.add(stallKey(replicaConnectionId, webhookId));
+      },
     };
   }
 
@@ -209,6 +215,16 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       covered: new Set<string>(),
     };
     this.stalls.set(key, stall);
+    const replicaConnectionId = this.replicaPairing.replicaConnectionFor(
+      primaryConnectionId,
+      replica,
+    );
+    if (opened && replicaConnectionId) {
+      this.stallOpenings.set(
+        replicaConnectionId,
+        (this.stallOpenings.get(replicaConnectionId) ?? 0) + 1,
+      );
+    }
     const covered =
       opened && reason === 'not_acking' ? this.takeLagAlerts(primaryConnectionId, replica) : [];
     covered.forEach((webhookId) => stall.covered.add(webhookId));

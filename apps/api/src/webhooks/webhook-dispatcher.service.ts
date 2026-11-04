@@ -593,8 +593,17 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               ...(connectionId && { connectionId }),
             };
 
+            const firedState = this.alertStates.peek(alertKey);
+            const onDelivered = filter?.onDelivered;
             await this.dispatchPendingEvent(
-              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], filter),
+              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], {
+                skip: filter?.skip,
+                onDelivered:
+                  onDelivered &&
+                  ((webhookId) => {
+                    if (this.alertStates.peek(alertKey) === firedState) onDelivered(webhookId);
+                  }),
+              }),
               [webhook],
             );
           }
