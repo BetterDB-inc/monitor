@@ -158,6 +158,7 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       stdDev: 0,
       threshold: worst.degradationFactor,
       message: finding.message,
+      kind: finding.kind,
       commands: finding.commands.map((c) => c.command).sort(),
       // Instance metadata, consistent with other anomaly producers.
       sourceHost: ctx.host,
@@ -168,6 +169,13 @@ export class LatencyRegressionService extends MultiConnectionPoller implements O
       resolved: false,
       connectionId: ctx.connectionId,
     };
+    try {
+      this.anomalyEventSink?.stampExternalAnomaly?.(event);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to stamp latency regression event: ${err instanceof Error ? err.message : err}`,
+      );
+    }
 
     try {
       await this.storage.saveAnomalyEvent(event, ctx.connectionId);

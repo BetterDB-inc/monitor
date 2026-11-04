@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import type { StoragePort } from '../../../common/interfaces/storage-port.interface';
 
@@ -25,6 +26,30 @@ describe.each<[string, AdapterFactory]>(adapters)('incident boundaries (%s)', (_
     expect(await storage.getIncidentBoundaries({ startTime: 0 })).toEqual([
       row('s1', 1000, 'a'),
       row('s1', 2000, 'b'),
+    ]);
+  });
+
+  it('reads the metric and connection that began the incident from its stored event', async () => {
+    const anchor = {
+      id: randomUUID(),
+      timestamp: 1000,
+      metricType: 'connections',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 10,
+      baseline: 1,
+      stdDev: 1,
+      zScore: 9,
+      threshold: 3,
+      message: 'm',
+      resolved: false,
+    };
+    await storage.saveAnomalyEvent(anchor, 'conn-a');
+    await storage.saveIncidentBoundaries([row('s1', 1000, anchor.id), row('s1', 2000, 'pruned')]);
+
+    expect(await storage.getIncidentBoundaries({ startTime: 0 })).toEqual([
+      { ...row('s1', 1000, anchor.id), metricType: 'connections', connectionId: 'conn-a' },
+      row('s1', 2000, 'pruned'),
     ]);
   });
 

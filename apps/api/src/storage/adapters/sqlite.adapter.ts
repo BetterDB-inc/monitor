@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { toIncidentBoundary, type IncidentBoundaryRow } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -150,6 +151,7 @@ import type { InvitationRepository } from '../../common/interfaces/invitation-re
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
+import { SQLITE_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
 
 /**
@@ -821,6 +823,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (!anomalyEventInfo.some((col) => col.name === 'event_sequence')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN event_sequence INTEGER');
+    }
+    if (!anomalyEventInfo.some((col) => col.name === 'kind')) {
+      const db = this.db;
+      db.transaction(() => {
+        db.exec('ALTER TABLE anomaly_events ADD COLUMN kind TEXT');
+        db.exec(SQLITE_LEGACY_ANOMALY_BACKFILL.join(';\n'));
+      })();
     }
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
@@ -1873,6 +1882,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         dedupe_key TEXT,
         commands TEXT,
         event_sequence INTEGER,
+        kind TEXT,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -2765,9 +2775,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
-        resolved, resolved_at, duration_ms,
+        kind, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
@@ -2776,6 +2786,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
+        kind = COALESCE(anomaly_events.kind, excluded.kind),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2799,6 +2810,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.dedupeKey ?? null,
       event.commands ? JSON.stringify(event.commands) : null,
       event.eventSequence ?? null,
+      event.kind ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
@@ -2819,9 +2831,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, dedupe_key, commands, event_sequence,
-        resolved, resolved_at, duration_ms,
+        kind, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
@@ -2830,6 +2842,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         dedupe_key = COALESCE(excluded.dedupe_key, anomaly_events.dedupe_key),
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
+        kind = COALESCE(anomaly_events.kind, excluded.kind),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2855,6 +2868,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.dedupeKey ?? null,
           event.commands ? JSON.stringify(event.commands) : null,
           event.eventSequence ?? null,
+          event.kind ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,
@@ -3202,16 +3216,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const inWindow = query.endTime ? 'AND started_at <= ?' : '';
     const rows = this.db
       .prepare(
-        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
-         WHERE ${inScope}started_at >= ? ${inWindow}
-         UNION ALL
-         SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
-         JOIN (
-           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
-           WHERE ${inScope}started_at < ?
-           GROUP BY scope_id
-         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
-         ORDER BY started_at ASC, anomaly_id ASC`,
+        `SELECT boundary.scope_id, boundary.started_at, boundary.anomaly_id,
+                e.metric_type, e.connection_id
+         FROM (
+           SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+           WHERE ${inScope}started_at >= ? ${inWindow}
+           UNION ALL
+           SELECT b.scope_id, b.started_at, b.anomaly_id
+           FROM incident_boundaries b
+           JOIN (
+             SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+             WHERE ${inScope}started_at < ?
+             GROUP BY scope_id
+           ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+         ) boundary
+         LEFT JOIN anomaly_events e ON e.id = boundary.anomaly_id
+         ORDER BY boundary.started_at ASC, boundary.anomaly_id ASC`,
       )
       .all(
         ...(query.scopeIds ?? []),
@@ -3219,12 +3239,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ...(query.endTime ? [query.endTime] : []),
         ...(query.scopeIds ?? []),
         query.startTime,
-      ) as { scope_id: string; started_at: number; anomaly_id: string }[];
-    return rows.map((row) => ({
-      scopeId: row.scope_id,
-      startedAt: row.started_at,
-      anomalyId: row.anomaly_id,
-    }));
+      ) as IncidentBoundaryRow[];
+    return rows.map(toIncidentBoundary);
   }
 
   async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {

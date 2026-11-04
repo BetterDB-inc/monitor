@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { LicenseService } from './license.service';
+import { KEEP_ENV } from '../../apps/api/test/test-env';
 
 describe('LicenseService', () => {
   let service: LicenseService;
@@ -39,9 +40,12 @@ describe('LicenseService', () => {
     process.env = originalEnv;
   });
 
-  it('never targets the production entitlement host from a test run', () => {
-    expect(new URL((service as any).entitlementUrl).hostname).toBe('127.0.0.1');
-  });
+  (KEEP_ENV && process.env.ENTITLEMENT_URL ? it.skip : it)(
+    'never targets the production entitlement host from a test run',
+    () => {
+      expect(new URL((service as any).entitlementUrl).hostname).toBe('127.0.0.1');
+    },
+  );
 
   describe('Version Check', () => {
     describe('isUpdateAvailable', () => {

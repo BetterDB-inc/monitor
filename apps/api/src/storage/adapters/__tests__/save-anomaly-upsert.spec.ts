@@ -74,6 +74,31 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(row.dedupeKey).toBe('a');
     });
 
+    it('stores the detector kind and keeps it when a later save omits it', async () => {
+      await storage.saveAnomalyEvent(event({ kind: 'sustained_degradation' }), CONN);
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.saveAnomalyEvents(
+        [event({ id: randomUUID(), kind: 'upgrade_regression' })],
+        CONN,
+      );
+
+      const rows = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(rows.map((r) => r.kind).sort()).toEqual([
+        'sustained_degradation',
+        'upgrade_regression',
+      ]);
+    });
+
+    it('fills a missing kind from a later batch save', async () => {
+      await storage.saveAnomalyEvent(event(), CONN);
+      await storage.saveAnomalyEvents([event({ kind: 'upgrade_regression' })], CONN);
+
+      const [row] = await storage.getAnomalyEvents({ connectionId: CONN });
+
+      expect(row.kind).toBe('upgrade_regression');
+    });
+
     it('stores the regressed commands and the event sequence', async () => {
       const fields = { commands: ['get', 'set'], eventSequence: 7 };
       await storage.saveAnomalyEvent(event(fields), CONN);

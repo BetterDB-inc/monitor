@@ -1,3 +1,4 @@
+import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
 import { SequenceRule } from './sequence-rules';
@@ -43,10 +44,21 @@ export interface IncidentTimeline {
   };
 }
 
+export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
+
 export interface IncidentBoundary {
   scopeId: string;
   startedAt: number;
   anomalyId: string;
+  metricType?: string;
+  connectionId?: string;
+  members?: RuleStepEvent[];
+}
+
+export interface DroppedSpan {
+  from: number;
+  through: number;
+  scopeId?: string;
 }
 
 export interface IncidentTimelineOptions {
@@ -72,7 +84,7 @@ export interface RecoverySignal {
   stdDev: number;
   threshold: number;
   now: number;
-  message: string;
+  kind?: RegressionKind;
 }
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;
@@ -107,6 +119,19 @@ export function maxSeverity(severities: AnomalySeverity[]): AnomalySeverity {
     (max, s) => (SEVERITY_RANK[s] > SEVERITY_RANK[max] ? s : max),
     AnomalySeverity.INFO,
   );
+}
+
+export function mergeRuleSteps(
+  known: readonly RuleStepEvent[],
+  seen: readonly RuleStepEvent[],
+): RuleStepEvent[] {
+  const latest = new Map<string, RuleStepEvent>();
+  for (const step of [...known, ...seen]) {
+    const key = `${step.metricType}\u0000${step.connectionId ?? ''}`;
+    const held = latest.get(key);
+    if (!held || step.timestamp > held.timestamp) latest.set(key, step);
+  }
+  return [...latest.values()];
 }
 
 export function incidentIdFor(scope: string, firstAnomalyId: string, startedAt: number): string {
@@ -188,7 +213,7 @@ function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
   );
 }
 
-function signalKey(event: AnomalyEvent): string {
+export function signalKey(event: AnomalyEvent): string {
   const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
   return POINT_IN_TIME_METRICS.has(event.metricType)
     ? `${signal}\u0000${(event.commands ?? []).join(',')}`
@@ -235,6 +260,7 @@ export class IncidentTimelineBuilder {
     boundaries: readonly IncidentBoundary[] = [],
     droppedThrough: ReadonlyMap<string, number> = new Map(),
     heldFrom = Number.NEGATIVE_INFINITY,
+    droppedSpans: ReadonlyMap<string, readonly DroppedSpan[]> = new Map(),
   ): IncidentTimeline[] {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
@@ -281,7 +307,8 @@ export class IncidentTimelineBuilder {
         heldFrom,
         this.droppedThroughScope(scope, scoped, droppedThrough),
       );
-      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedAt)) {
+      const spans = this.droppedSpansOf(scope, scoped, droppedSpans);
+      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedAt, spans)) {
         timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
@@ -295,6 +322,7 @@ export class IncidentTimelineBuilder {
     boundaries: readonly IncidentBoundary[],
     positionOf: (anomalyId: string) => number,
     droppedAt: number,
+    spans: DroppedSpan[],
   ): IncidentCluster[] {
     const clusters: IncidentCluster[] = [];
     let current: AnomalyEvent[] = [];
@@ -310,7 +338,7 @@ export class IncidentTimelineBuilder {
       const stored =
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
-      const continues = first !== undefined && this.continuesIncident(current, event);
+      const continues = first !== undefined && this.continuesIncident(current, event, spans);
       if (
         continues &&
         !start &&
@@ -332,10 +360,12 @@ export class IncidentTimelineBuilder {
         start = undefined;
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
+        const anchorDroppedAt = this.anchorDroppedAt(stored, droppedAt, spans);
         const anchorDropped =
           positionOf(stored.anomalyId) < 0 &&
-          stored.startedAt <= droppedAt &&
-          event.timestamp - droppedAt <= this.opts.gapMs;
+          stored.startedAt <= anchorDroppedAt &&
+          (event.timestamp - anchorDroppedAt <= this.opts.gapMs ||
+            this.bridgesFromDropped(event, stored, anchorDroppedAt));
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -349,6 +379,17 @@ export class IncidentTimelineBuilder {
     }
     if (current.length > 0) clusters.push({ events: current, start });
     return clusters;
+  }
+
+  private anchorDroppedAt(
+    stored: IncidentBoundary,
+    droppedAt: number,
+    spans: readonly DroppedSpan[],
+  ): number {
+    const covered = spans.some(
+      (span) => span.from <= stored.startedAt && stored.startedAt <= span.through,
+    );
+    return covered ? Math.max(droppedAt, this.spanReach(spans, stored.startedAt)) : droppedAt;
   }
 
   private droppedThroughScope(
@@ -366,9 +407,64 @@ export class IncidentTimelineBuilder {
     return latest;
   }
 
-  private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {
+  private droppedSpansOf(
+    scope: string,
+    events: AnomalyEvent[],
+    droppedSpans: ReadonlyMap<string, readonly DroppedSpan[]>,
+  ): DroppedSpan[] {
+    const members = new Set(events.map((event) => event.connectionId ?? ''));
+    return [...droppedSpans]
+      .filter(([connectionId]) => members.has(connectionId) || this.resolveScope(connectionId) === scope)
+      .flatMap(([, spans]) => spans)
+      .filter((span) => span.scopeId === undefined || span.scopeId === scope)
+      .sort((a, b) => a.from - b.from);
+  }
+
+  private spanReach(spans: readonly DroppedSpan[], from: number): number {
+    let reach = from;
+    for (const span of spans) {
+      if (span.from - reach > this.opts.gapMs) break;
+      reach = Math.max(reach, span.through);
+    }
+    return reach;
+  }
+
+  private bridges(spans: readonly DroppedSpan[], from: number, to: number): boolean {
+    const reach = this.spanReach(spans, from);
+    return reach > from && to - reach <= this.opts.gapMs;
+  }
+
+  private bridgesFromDropped(
+    event: AnomalyEvent,
+    stored: IncidentBoundary,
+    droppedAt: number,
+  ): boolean {
+    const anchor: RuleStepEvent[] =
+      stored.metricType === undefined
+        ? []
+        : [
+            {
+              metricType: stored.metricType as MetricType,
+              connectionId: stored.connectionId,
+              timestamp: stored.startedAt,
+            },
+          ];
+    const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
+    return this.followsRuleStep([...anchor, ...dropped], event);
+  }
+
+  private continuesIncident(
+    current: AnomalyEvent[],
+    event: AnomalyEvent,
+    spans: DroppedSpan[] = [],
+  ): boolean {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
+    if (this.bridges(spans, last.timestamp, event.timestamp)) return true;
+    return this.followsRuleStep(current, event);
+  }
+
+  private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
     return this.rules().some((rule) =>
       rule.steps.slice(1).some(
         (step, i) =>
@@ -471,7 +567,7 @@ export class IncidentTimelineBuilder {
   }
 
   private recoveredAtIfResolved(event: AnomalyEvent): number | null {
-    return event.resolved ? (event.resolvedAt ?? event.timestamp) : null;
+    return event.resolved ? (event.resolvedAt ?? null) : null;
   }
 
   private recoveredAt(
@@ -481,7 +577,7 @@ export class IncidentTimelineBuilder {
     now: number,
     probe: RecoveryProbe,
   ): number | null | undefined {
-    if (event.resolved) return event.resolvedAt ?? event.timestamp;
+    if (event.resolved) return event.resolvedAt;
     if (now - event.timestamp < this.opts.settleMs) return null;
     return probe({
       connectionId: event.connectionId ?? '',
@@ -492,7 +588,7 @@ export class IncidentTimelineBuilder {
       stdDev: first.stdDev,
       threshold: first.threshold,
       now,
-      message: event.message,
+      kind: event.kind,
     });
   }
 

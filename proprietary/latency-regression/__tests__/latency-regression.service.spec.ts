@@ -63,7 +63,7 @@ describe('LatencyRegressionService', () => {
 
   async function makeService(
     withWebhook = true,
-    sink?: { ingestExternalAnomaly: jest.Mock },
+    sink?: { ingestExternalAnomaly: jest.Mock; stampExternalAnomaly?: jest.Mock },
   ): Promise<LatencyRegressionService> {
     const providers: any[] = [
       LatencyRegressionService,
@@ -102,6 +102,7 @@ describe('LatencyRegressionService', () => {
     expect(event.commands).toEqual(['hmget']);
     expect(event).toMatchObject({
       metricType: 'command_p99',
+      kind: 'upgrade_regression',
       anomalyType: 'spike',
       severity: 'critical', // 3x factor
       value: 6000,
@@ -181,6 +182,42 @@ describe('LatencyRegressionService', () => {
 
     expect(sink.ingestExternalAnomaly).toHaveBeenCalledTimes(1);
     expect(sink.ingestExternalAnomaly.mock.calls[0][0]).toBe(storage.saveAnomalyEvent.mock.calls[0][0]);
+  });
+
+  it('lets the anomaly event sink stamp the event before it is saved', async () => {
+    const sink = {
+      ingestExternalAnomaly: jest.fn(),
+      stampExternalAnomaly: jest.fn((event: any) => {
+        event.eventSequence = 7;
+        event.scopeId = 'conn-1';
+      }),
+    };
+    storage.saveAnomalyEvent.mockImplementation(async (event: any) => {
+      expect(event).toEqual(expect.objectContaining({ eventSequence: 7, scopeId: 'conn-1' }));
+    });
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(sink.stampExternalAnomaly).toHaveBeenCalledTimes(1);
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+    expect(sink.stampExternalAnomaly.mock.invocationCallOrder[0]).toBeLessThan(
+      storage.saveAnomalyEvent.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('still saves and notifies when the sink fails to stamp the event', async () => {
+    const sink = {
+      ingestExternalAnomaly: jest.fn(),
+      stampExternalAnomaly: jest.fn(() => {
+        throw new Error('stamp failed');
+      }),
+    };
+    const service = await makeService(true, sink);
+    await driveUpgradeRegression(service);
+
+    expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+    expect(sink.ingestExternalAnomaly).toHaveBeenCalledTimes(1);
+    expect(webhook.dispatchLatencyRegressionDetected).toHaveBeenCalledTimes(1);
   });
 
   it('tells the anomaly event sink whether latency is still degraded after each poll', async () => {

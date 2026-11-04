@@ -715,6 +715,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       dedupeKey: event.dedupeKey ?? existing.dedupeKey,
       commands: existing.commands ?? event.commands,
       eventSequence: existing.eventSequence ?? event.eventSequence,
+      kind: existing.kind ?? event.kind,
       resolved: existing.resolved || event.resolved,
       resolvedAt: existing.resolvedAt ?? event.resolvedAt,
       durationMs: existing.durationMs ?? event.durationMs,
@@ -930,7 +931,11 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
           b.anomalyId === boundary.anomalyId,
       );
       if (exists) continue;
-      this.incidentBoundaries.push({ ...boundary });
+      this.incidentBoundaries.push({
+        scopeId: boundary.scopeId,
+        startedAt: boundary.startedAt,
+        anomalyId: boundary.anomalyId,
+      });
       saved += 1;
     }
     return saved;
@@ -954,7 +959,12 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         (a, b) =>
           a.startedAt - b.startedAt || (a.anomalyId < b.anomalyId ? -1 : a.anomalyId > b.anomalyId ? 1 : 0),
       )
-      .map((b) => ({ ...b }));
+      .map((b) => {
+        const anchor = this.anomalyEvents.get(b.anomalyId);
+        return anchor
+          ? { ...b, metricType: anchor.metricType, connectionId: anchor.connectionId }
+          : { ...b };
+      });
   }
 
   async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {

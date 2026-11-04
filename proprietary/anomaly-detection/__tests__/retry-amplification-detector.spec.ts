@@ -4,6 +4,7 @@ import {
   observePushCadence,
   latestEpisodeStart,
   openEpisodeStart,
+  precedingEpisodeEnd,
   retryAmplificationMaxPollGap,
   retryAmplificationRearm,
   evaluateRetryAmplification,
@@ -175,6 +176,62 @@ describe('retry amplification detector', () => {
     expect(d.findings).toHaveLength(0);
     expect(d.state.lastEpisode?.classification).toBe('transient');
     expect(d.state.lastEpisode?.windows).toBe(2);
+  });
+
+  describe('the episode before the latest one', () => {
+    const sustained = (d: Driver) => {
+      d.window(hot(2.4));
+      d.window(hot(2.0));
+      d.window(hot(1.6));
+      d.window(hot(1.4));
+      d.windows(BASE, 3);
+    };
+    const flap = (d: Driver) => {
+      d.windows(hot(1.6), 2);
+      d.windows(BASE, 2);
+    };
+
+    it('remembers where it ended', () => {
+      const d = new Driver();
+      d.baseline();
+      sustained(d);
+      const firstEnd = d.state.lastEpisode!.endedAt;
+      expect(d.state.lastEpisode!.classification).toBe('unconfirmed');
+      expect(precedingEpisodeEnd(d.state)).toBeNull();
+
+      d.windows(hot(1.6), 2);
+      expect(precedingEpisodeEnd(d.state)).toBe(firstEnd);
+
+      d.windows(BASE, 2);
+      expect(d.state.lastEpisode!.endedAt).toBeGreaterThan(firstEnd);
+      expect(precedingEpisodeEnd(d.state)).toBe(firstEnd);
+    });
+
+    it('does not take a short flap as the cut-off', () => {
+      const d = new Driver();
+      d.baseline();
+      flap(d);
+      expect(d.state.lastEpisode!.classification).toBe('transient');
+
+      d.windows(hot(1.6), 2);
+      expect(openEpisodeStart(d.state)).not.toBeNull();
+      expect(precedingEpisodeEnd(d.state)).toBeNull();
+    });
+
+    it('looks past a short flap to the sustained episode before it', () => {
+      const d = new Driver();
+      d.baseline();
+      sustained(d);
+      const sustainedEnd = d.state.lastEpisode!.endedAt;
+      flap(d);
+
+      d.windows(hot(1.6), 2);
+      expect(openEpisodeStart(d.state)).not.toBeNull();
+      expect(precedingEpisodeEnd(d.state)).toBe(sustainedEnd);
+
+      d.windows(BASE, 2);
+      expect(precedingEpisodeEnd(d.state)).toBe(sustainedEnd);
+    });
   });
 
   it('does not alert on organic growth through a fixed pool under a P99 regression', () => {

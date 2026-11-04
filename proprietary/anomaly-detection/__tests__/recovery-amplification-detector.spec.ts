@@ -9,7 +9,6 @@ import {
   createResyncEscalationState,
   observeBacklogCoverage,
   observeResyncEscalation,
-  resyncEventReplica,
   resyncSettled,
   stepBacklogCoverage,
 } from '../recovery-amplification-detector';
@@ -548,6 +547,12 @@ describe('observeResyncEscalation', () => {
       ).toBe(true);
     });
 
+    it('settles a row without a replica address once the window passes', () => {
+      const after = T0 - RESYNC_ESCALATION_WINDOW_MS - 1;
+      expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, T0 - 1)).toBe(false);
+      expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, after)).toBe(true);
+    });
+
     it('settles when the node is no longer a primary', () => {
       expect(
         resyncSettled(sample({ role: 'replica', replicas: [] }), '10.0.0.2:6379', T0 - 1),
@@ -659,11 +664,6 @@ describe('recovery amplification rule', () => {
     ];
 
     expect(matchSequence(entries, rule())).toBeNull();
-  });
-
-  it('reads the replica back from a stored message', () => {
-    expect(resyncEventReplica('Replica 10.0.0.2:6379 came back after 5s')).toBe('10.0.0.2:6379');
-    expect(resyncEventReplica('nothing useful')).toBeNull();
   });
 
   it('ignores a cost that came before the resync or outside the span', () => {

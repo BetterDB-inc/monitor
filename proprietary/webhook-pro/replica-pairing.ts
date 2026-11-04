@@ -1,6 +1,7 @@
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
-import { parseReplicaLines, REPLICA_ROLES } from '../anomaly-detection/replication-stream';
+import { isReplicaRole } from '@app/database/parsers/replication-info.parser';
+import { parseReplicaOffsetLines } from '../anomaly-detection/replication-stream';
 
 const DNS_TTL_MS = 5 * 60_000;
 const DNS_RETRY_MS = 30_000;
@@ -47,7 +48,7 @@ export class ReplicaPairing {
   ): void {
     const role = replication?.role;
     const replid = replication?.master_replid;
-    const isReplica = role !== undefined && REPLICA_ROLES.has(role);
+    const isReplica = isReplicaRole(role);
     if (!replication || !replid || (role !== 'master' && !isReplica)) {
       this.views.delete(connectionId);
       return;
@@ -59,7 +60,7 @@ export class ReplicaPairing {
       port: instance.port,
       replicaAddrs: isReplica
         ? []
-        : parseReplicaLines(replication as Record<string, string>).map((line) => line.addr),
+        : parseReplicaOffsetLines(replication as Record<string, string>).map((line) => line.addr),
     });
     if (isReplica) this.refreshHost(instance.host);
   }
