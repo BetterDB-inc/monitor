@@ -25,9 +25,12 @@ export const NODE_COMMAND_TIMEOUT_MS = 5_000;
 
 export interface ClusterSlotStatsResult {
   stats: SlotStats;
-  /** Slot-owning primaries that were unhealthy or did not answer; their slots are missing from `stats`. */
+  /**
+   * Slot-owning primaries that were unhealthy or did not answer for all their
+   * ranges; the slots in `failedSlotRanges` are missing from `stats`.
+   */
   failedNodes: string[];
-  /** The slot ranges those primaries own, as discovery sees them. */
+  /** The slot ranges that could not be read, as discovery sees them. */
   failedSlotRanges: number[][];
 }
 
@@ -458,25 +461,48 @@ export class ClusterMetricsService {
     const results = await Promise.allSettled(
       primaries.map((node) =>
         this.onNode(node, connectionId, timeoutMs, async (client) => {
-          const perRange = await Promise.all(
+          const perRange = await Promise.allSettled(
             node.slots.map(([start, end]) =>
               client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start),
             ),
           );
-          const stats = Object.assign({}, ...perRange.map((raw) => MetricsParser.parseSlotStats(raw as unknown[])));
-          return ownedSlotStats(stats, node.slots);
+          const rejected = perRange.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+          if (rejected.length === perRange.length) throw rejected[0].reason;
+          const stats = Object.assign(
+            {},
+            ...perRange.flatMap((r) =>
+              r.status === 'fulfilled' ? [MetricsParser.parseSlotStats(r.value as unknown[])] : [],
+            ),
+          );
+          return {
+            stats: ownedSlotStats(stats, node.slots),
+            failedRanges: node.slots.filter((_, i) => perRange[i].status === 'rejected'),
+            reason: rejected[0]?.reason,
+          };
         }),
       ),
     );
 
     const perNode: SlotStats[] = [];
-    const failed = owners.filter((node) => !node.healthy);
+    const unhealthy = owners.filter((node) => !node.healthy);
+    const failedNodes = unhealthy.map((node) => node.address);
+    const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
     for (const [i, result] of results.entries()) {
-      if (result.status === 'fulfilled') {
-        perNode.push(result.value);
-      } else {
-        failed.push(primaries[i]);
-        this.logger.warn(`Failed to fetch slot stats from ${primaries[i].address}: ${result.reason}`);
+      const node = primaries[i];
+      if (result.status === 'rejected') {
+        failedNodes.push(node.address);
+        failedSlotRanges.push(...node.slots);
+        this.logger.warn(`Failed to fetch slot stats from ${node.address}: ${result.reason}`);
+        continue;
+      }
+      perNode.push(result.value.stats);
+      if (result.value.failedRanges.length > 0) {
+        failedNodes.push(node.address);
+        failedSlotRanges.push(...result.value.failedRanges);
+        this.logger.warn(
+          `Failed to fetch slot stats for ${result.value.failedRanges.length} of ${node.slots.length} ` +
+            `slot ranges from ${node.address}: ${result.value.reason}`,
+        );
       }
     }
     if (primaries.length > 0 && perNode.length === 0) {
@@ -485,8 +511,8 @@ export class ClusterMetricsService {
     }
     return {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
-      failedNodes: failed.map((node) => node.address),
-      failedSlotRanges: failed.flatMap((node) => node.slots),
+      failedNodes,
+      failedSlotRanges,
     };
   }
 

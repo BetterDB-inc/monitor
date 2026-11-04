@@ -626,6 +626,24 @@ used_cpu_user:20.3\r
       expect(Object.keys(stats).sort()).toEqual(['1', '201']);
     });
 
+    it('keeps the ranges a primary answered and reports only the range that failed', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {
+          if (start === 200) throw new Error('boom');
+          return [[1, ['key-count', 50]]];
+        }),
+      });
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10);
+
+      expect(Object.keys(result.stats)).toEqual(['1']);
+      expect(result.failedNodes).toEqual(['10.0.0.1:6379']);
+      expect(result.failedSlotRanges).toEqual([[200, 299]]);
+    });
+
     it('reports a primary that does not answer in time and returns the others', async () => {
       jest.useFakeTimers();
       try {
