@@ -1,4 +1,5 @@
 import { ClusterNode } from '@app/common/types/metrics.types';
+import { isReplicaRole } from '@app/database/parsers/replication-info.parser';
 
 /**
  * Detects the stuck-cluster state behind valkey-io/valkey#2090: after a primary
@@ -181,8 +182,7 @@ export function evaluateResyncLoop(
   state: ResyncLoopState,
   input: ResyncLoopInput,
 ): ResyncLoopFinding | null {
-  const isReplicaRole = input.role === 'slave' || input.role === 'replica';
-  const linkDown = isReplicaRole === true && input.masterLinkStatus === 'down';
+  const linkDown = isReplicaRole(input.role) && input.masterLinkStatus === 'down';
   if (linkDown === false) {
     // Link up, promoted to primary, or not a replica at all: whatever loop was
     // in flight has ended. Clear so a future loop earns the window afresh.
