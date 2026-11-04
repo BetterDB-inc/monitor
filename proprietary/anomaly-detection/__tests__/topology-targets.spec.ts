@@ -1,6 +1,7 @@
 import type { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import {
   TOPOLOGY_TARGET_LIMIT,
+  TopologyTargetClaims,
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
@@ -78,6 +79,35 @@ describe('topology targets', () => {
 
       expect(targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379', '10.0.0.4:6380']);
       expect(targets[0].nodeId).toBeUndefined();
+    });
+  });
+
+  describe('TopologyTargetClaims', () => {
+    const target = { addr: '10.0.0.9:6379', host: '10.0.0.9', port: 6379 };
+
+    it('leaves a primary to the first connection that reaches it', () => {
+      const claims = new TopologyTargetClaims();
+
+      expect(claims.claim('a', [target], 0, 30_000)).toEqual([target]);
+      expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([]);
+      expect(claims.claim('a', [target], 2_000, 30_000)).toEqual([target]);
+    });
+
+    it('hands a primary over when its owner stops claiming it', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [target], 0, 30_000);
+
+      expect(claims.claim('b', [target], 31_000, 30_000)).toEqual([target]);
+      claims.claim('a', [], 32_000, 30_000);
+      expect(claims.claim('b', [target], 33_000, 30_000)).toEqual([target]);
+    });
+
+    it('frees the primaries of a removed connection', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [target], 0, 30_000);
+      claims.release('a');
+
+      expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([target]);
     });
   });
 

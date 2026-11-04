@@ -13349,6 +13349,17 @@ describe('AnomalyService', () => {
         expect((await divergenceHistory()).map((h) => h.replica)).toContain(NODE_REPLICA);
       });
 
+      it('leaves a primary another connection already covers', async () => {
+        const client = nodeClient([2]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        jest.spyOn(Date, 'now').mockReturnValue(T0);
+        (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
+
+        await poll([target], 1, T0);
+
+        expect(client.info).not.toHaveBeenCalled();
+      });
+
       it('reaches a Sentinel-managed primary by address', async () => {
         const client = nodeClient([2]);
         const getAddressConnection = jest.fn().mockResolvedValue(client);

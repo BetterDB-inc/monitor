@@ -74,3 +74,31 @@ function capTargets(targets: TopologyTarget[]): TopologyTarget[] {
     .sort((a, b) => a.addr.localeCompare(b.addr))
     .slice(0, TOPOLOGY_TARGET_LIMIT);
 }
+
+export class TopologyTargetClaims {
+  private owners = new Map<string, { connectionId: string; at: number }>();
+
+  claim(
+    connectionId: string,
+    targets: TopologyTarget[],
+    now: number,
+    staleMs: number,
+  ): TopologyTarget[] {
+    const wanted = new Set(targets.map((t) => t.addr));
+    for (const [addr, owner] of this.owners) {
+      if (owner.connectionId === connectionId && !wanted.has(addr)) this.owners.delete(addr);
+    }
+    return targets.filter((target) => {
+      const owner = this.owners.get(target.addr);
+      if (owner && owner.connectionId !== connectionId && now - owner.at <= staleMs) return false;
+      this.owners.set(target.addr, { connectionId, at: now });
+      return true;
+    });
+  }
+
+  release(connectionId: string): void {
+    for (const [addr, owner] of this.owners) {
+      if (owner.connectionId === connectionId) this.owners.delete(addr);
+    }
+  }
+}
