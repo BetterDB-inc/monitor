@@ -56,6 +56,13 @@ Slow log and command log entries collected through such a seed are stored
 against the node that served them, not the seed's hostname, so history stays
 complete and attributable when the seed moves between nodes.
 
+The node is identified by its `run_id` from `INFO server`, which stays the
+same whatever address reaches it. When `INFO` fails, entries are stored
+against the address instead. If a connection has never reported a `run_id`
+and `INFO` later starts working, the entries still in the server's log (at
+most 128 per log type) are stored once more under the `run_id`, so history
+can show those entries twice. This happens once per connection.
+
 ### TLS certificates
 
 `CLUSTER NODES` always reports nodes by IP address. When a node also

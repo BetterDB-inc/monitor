@@ -234,7 +234,7 @@ export const metricsApi = {
   // Cluster endpoints
   getClusterInfo: () => fetchApi<Record<string, string>>('/metrics/cluster/info'),
   getClusterNodes: () => fetchApi<ClusterNode[]>('/metrics/cluster/nodes'),
-  /** `failedNodes` lists the primaries that did not answer; their slots are missing from `stats`. */
+  /** `failedNodes` lists the primaries that did not answer for all their slots; those slots are missing from `stats`. */
   getSlotStats: async (orderBy: 'key-count' | 'cpu-usec' = 'key-count', limit = 100) => {
     const { data, headers } = await fetchApiWithHeaders<SlotStats>(
       `/metrics/cluster/slot-stats?orderBy=${orderBy}&limit=${limit}`,

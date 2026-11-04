@@ -233,6 +233,22 @@ describe('MultiConnectionPoller stalled polls', () => {
     await poller.tickNow();
     expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'stuck', 'stuck', 'ok']);
   });
+
+  it('cleans up again when a connection removed mid-poll finishes its poll', async () => {
+    let statuses = [status('stuck', 'direct'), status('ok', 'direct')];
+    const registry = { list: () => statuses, get: () => ({}) } as unknown as ConnectionRegistry;
+    const poller = new StallingPoller(registry);
+    poller.stall.add('stuck');
+
+    await poller.tickNow();
+    statuses = [status('ok', 'direct')];
+    await poller.tickNow();
+    expect(poller.removed).toEqual(['stuck']);
+
+    poller.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(poller.removed).toEqual(['stuck', 'stuck']);
+  });
 });
 
 describe('MultiConnectionPoller sentinel handling', () => {

@@ -363,6 +363,11 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
               this.logger.warn(`Poll failed for ${describe}: ${error instanceof Error ? error.message : error}`);
             } finally {
               this.inFlight.delete(conn.id);
+              // Removed while this poll ran: its writes landed after the cleanup.
+              if (!this.knownConnections.has(conn.id)) {
+                this.onConnectionRemoved(conn.id);
+                this.lastPolledVersion.delete(conn.id);
+              }
             }
           })();
           const timeoutMs = this.getPollTimeoutMs();

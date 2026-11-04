@@ -470,30 +470,25 @@ export class ClusterMetricsService {
           timeoutMs,
           timeoutMessage,
         );
-        // Replies on one connection arrive in order, so once a batch misses the
-        // deadline the ranges after it are failed too; finished batches are kept.
-        const perRange: PromiseSettledResult<unknown>[] = [];
+        // Replies on one connection arrive in order, so once the deadline passes
+        // the ranges still unanswered are failed; the answered ones are kept.
+        const answers: (PromiseSettledResult<unknown> | undefined)[] = new Array(node.slots.length);
         let expired: unknown;
-        for (let i = 0; i < node.slots.length; i += SLOT_RANGE_BATCH_SIZE) {
-          const batch = node.slots.slice(i, i + SLOT_RANGE_BATCH_SIZE);
-          if (expired === undefined) {
-            try {
-              perRange.push(
-                ...(await withTimeout(
-                  Promise.allSettled(
-                    batch.map(([start, end]) => client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start)),
-                  ),
-                  Math.max(0, deadline - Date.now()),
-                  timeoutMessage,
-                )),
-              );
-              continue;
-            } catch (err) {
-              expired = err;
-            }
-          }
-          perRange.push(...batch.map((): PromiseRejectedResult => ({ status: 'rejected', reason: expired })));
+        for (let i = 0; i < node.slots.length && expired === undefined; i += SLOT_RANGE_BATCH_SIZE) {
+          const batch = node.slots.slice(i, i + SLOT_RANGE_BATCH_SIZE).map(([start, end], j) =>
+            client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start).then(
+              (value) => void (answers[i + j] = { status: 'fulfilled', value }),
+              (reason: unknown) => void (answers[i + j] = { status: 'rejected', reason }),
+            ),
+          );
+          await withTimeout(Promise.all(batch), Math.max(0, deadline - Date.now()), timeoutMessage).catch((err) => {
+            expired = err;
+          });
         }
+        const perRange: PromiseSettledResult<unknown>[] = Array.from(
+          answers,
+          (answer) => answer ?? { status: 'rejected', reason: expired },
+        );
         const rejected = perRange.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
         if (rejected.length === perRange.length) throw rejected[0].reason;
         const stats = Object.assign(

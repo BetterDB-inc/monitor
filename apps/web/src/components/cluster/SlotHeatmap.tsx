@@ -7,7 +7,7 @@ import { buildSlotNodeMap, CLUSTER_TOTAL_SLOTS, CLUSTER_GRID_SIZE } from '../../
 
 interface SlotHeatmapProps {
   slotStats: SlotStats | null;
-  /** Primaries that did not answer; their slots are missing from slotStats. */
+  /** Primaries that did not answer for all their slots; those slots are missing from slotStats. */
   failedNodes?: string[];
   nodes: ClusterNode[];
   hasSlotStats: boolean;
@@ -186,8 +186,9 @@ export function SlotHeatmap({ slotStats, failedNodes = [], nodes, hasSlotStats }
             >
               <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-yellow-600" />
               <span>
-                Partial data: {failedNodes.join(', ')} did not answer, so the slots{' '}
-                {failedNodes.length === 1 ? 'it owns are' : 'they own are'} shown as empty.
+                Partial data: {failedNodes.join(', ')} did not answer for all{' '}
+                {failedNodes.length === 1 ? 'its' : 'their'} slots, so some of the slots{' '}
+                {failedNodes.length === 1 ? 'it owns' : 'they own'} may be shown as empty.
               </span>
             </div>
           )}
