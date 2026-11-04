@@ -264,6 +264,26 @@ describe('ClusterDiscoveryService', () => {
       expect(await service.getNodeConnection(target.id, 'test-connection')).toBe(returned);
     });
 
+    it('does not reuse a client another connection opened during discovery', async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      const discover = service.discoverNodes.bind(service);
+      jest.spyOn(service, 'discoverNodes').mockImplementationOnce(async (id?: string) => {
+        internal.discoveredNodes.set(target.id, {
+          node: target,
+          client: othersClient,
+          lastHealthCheck: Date.now(),
+          healthy: true,
+          connectionId: 'other-connection',
+        });
+        return discover(id);
+      });
+
+      expect(await service.getNodeConnection(target.id, 'test-connection')).not.toBe(othersClient);
+    });
+
     it('opens a new client once the node moves to another address', async () => {
       const nodes = await service.discoverNodes();
       const target = nodes[0];
