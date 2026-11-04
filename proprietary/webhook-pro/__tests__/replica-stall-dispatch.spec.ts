@@ -167,6 +167,25 @@ describe('one webhook per replica stall', () => {
     ]);
   });
 
+  it('sends one alert for a lag-first stall after a skipped lag episode ends', async () => {
+    const { lag, divergence, recovered, sent } = setup([
+      webhook('both', [...BOTH, WebhookEventType.REPLICATION_RECOVERED], 120),
+    ]);
+
+    await divergence();
+    await lag(150);
+    await recovered();
+    await lag(1);
+    await lag(150);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_RECOVERED,
+      WebhookEventType.REPLICATION_LAG,
+    ]);
+  });
+
   it('alerts again on a new stall after both recover', async () => {
     const { lag, divergence, recovered, sent } = setup([webhook('both', BOTH)]);
 

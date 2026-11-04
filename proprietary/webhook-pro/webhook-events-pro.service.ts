@@ -129,6 +129,13 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       data.connectionId,
       await this.webhooksAlertedForStall(data.connectionId),
     );
+    this.forgetSkippedLagAlerts(data.connectionId, (webhookId) =>
+      this.webhookDispatcher.isThresholdAlertActive(
+        'replication_lag',
+        data.connectionId,
+        webhookId,
+      ),
+    );
   }
 
   clearReplicationLag(connectionId: string): void {
@@ -152,9 +159,15 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     this.forgetSkippedLagAlerts(connectionId);
   }
 
-  private forgetSkippedLagAlerts(replicaConnectionId: string): void {
+  private forgetSkippedLagAlerts(
+    replicaConnectionId: string,
+    keep: (webhookId: string) => boolean = () => false,
+  ): void {
+    const prefix = `${replicaConnectionId}\0`;
     for (const key of this.skippedLagAlerts) {
-      if (key.startsWith(`${replicaConnectionId}\0`)) this.skippedLagAlerts.delete(key);
+      if (key.startsWith(prefix) && !keep(key.slice(prefix.length))) {
+        this.skippedLagAlerts.delete(key);
+      }
     }
   }
 
