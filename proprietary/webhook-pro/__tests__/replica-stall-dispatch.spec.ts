@@ -554,4 +554,24 @@ describe('one webhook per replica stall', () => {
       WebhookEventType.REPLICATION_DIVERGENCE,
     ]);
   });
+
+  it('lets a lag alert retried during a growth stall cover a later not_acking stall', async () => {
+    const { dispatcher, lag, divergence, recovered, retrying, attempts, sent } = setup([
+      webhook('both', BOTH),
+    ]);
+
+    retrying.add('both');
+    await lag(30);
+    retrying.delete('both');
+    await divergence('growth');
+    await recovered();
+    const [first] = attempts;
+    await dispatcher.sendWebhook(first.hook, first.deliveryId, first.payload);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_LAG,
+    ]);
+  });
 });

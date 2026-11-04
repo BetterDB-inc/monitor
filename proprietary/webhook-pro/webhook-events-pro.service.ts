@@ -219,7 +219,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
       primaryConnectionId,
       replica,
     );
-    if (opened && replicaConnectionId) {
+    if (opened && reason === 'not_acking' && replicaConnectionId) {
       this.stallOpenings.set(
         replicaConnectionId,
         (this.stallOpenings.get(replicaConnectionId) ?? 0) + 1,
