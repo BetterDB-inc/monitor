@@ -170,8 +170,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Bind the node client to the connection that owns it now, so a later
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
-    const shared = this.discoveredNodes.get(nodeId);
-    const key = !shared || shared.connectionId === ownerId ? nodeId : `node:${ownerId}:${nodeId}`;
+    const key = this.nodeClientKey(nodeId, ownerId);
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
 
@@ -419,7 +418,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return Promise.all(healthChecks);
   }
 
+  private nodeClientKey(nodeId: string, ownerId: string | undefined): string {
+    const shared = this.discoveredNodes.get(nodeId);
+    return !shared || shared.connectionId === ownerId ? nodeId : `node:${ownerId}:${nodeId}`;
+  }
+
   private async healthCheckNode(node: DiscoveredNode): Promise<NodeHealth> {
+    const ownerId = this.connectionRegistry.getDefaultId() || undefined;
     try {
       const client = await this.getNodeConnection(node.id);
       const result = await Promise.race([
@@ -431,7 +436,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       const healthy = result === 'PONG';
 
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = healthy;
         connection.lastHealthCheck = Date.now();
@@ -444,7 +449,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         lastCheck: Date.now(),
       };
     } catch (error) {
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = false;
         connection.lastHealthCheck = Date.now();

@@ -556,6 +556,28 @@ describe('ClusterDiscoveryService', () => {
   });
 
   describe('healthCheckAll', () => {
+    it("records the result on the checked client, not another connection's", async () => {
+      const nodes = await service.discoverNodes();
+      const internal = service as unknown as { discoveredNodes: Map<string, { lastHealthCheck: number }> };
+      const stamp = Date.now() - 60_000;
+      for (const node of nodes) {
+        internal.discoveredNodes.set(node.id, {
+          node,
+          client: { status: 'ready', quit: jest.fn() },
+          lastHealthCheck: stamp,
+          healthy: true,
+          connectionId: 'other-connection',
+        } as never);
+      }
+
+      await service.healthCheckAll();
+
+      for (const node of nodes) {
+        expect(internal.discoveredNodes.get(node.id)!.lastHealthCheck).toBe(stamp);
+        expect(internal.discoveredNodes.get(`node:test-connection:${node.id}`)!.lastHealthCheck).toBeGreaterThan(stamp);
+      }
+    });
+
     it('should return health status for all nodes', async () => {
       const health = await service.healthCheckAll();
 
