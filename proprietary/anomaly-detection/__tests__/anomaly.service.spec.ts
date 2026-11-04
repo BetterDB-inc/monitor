@@ -1,3 +1,4 @@
+import type { TopologyTarget } from '../topology-targets';
 import { randomUUID } from 'crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
@@ -13319,11 +13320,16 @@ describe('AnomalyService', () => {
         };
       }
 
-      async function poll(targets: unknown[], times: number, start: number): Promise<number> {
+      async function poll(
+        targets: TopologyTarget[],
+        times: number,
+        start: number,
+        members = new Set(targets.map((t) => t.addr)),
+      ): Promise<number> {
         let t = start;
         for (let i = 0; i < times; i++) {
           jest.spyOn(Date, 'now').mockReturnValue(t);
-          await (service as any).detectTopologyDivergence(mockCtx, targets);
+          await (service as any).detectTopologyDivergence(mockCtx, { targets, members });
           t += 10_000;
         }
         return t;
@@ -13383,7 +13389,7 @@ describe('AnomalyService', () => {
             .fn()
             .mockReturnValue({ username: 'app', password: 'secret' });
 
-          expect((service as any).sentinelDivergenceTargets('conn-1')).toEqual([
+          expect((service as any).sentinelDivergenceTargets('conn-1').targets).toEqual([
             { addr: NODE, host: '10.0.1.5', port: 6379 },
           ]);
         });
@@ -13391,7 +13397,7 @@ describe('AnomalyService', () => {
         it('does not send the Sentinel credentials to the primaries it reports', () => {
           (service as any).connectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue(null);
 
-          expect((service as any).sentinelDivergenceTargets('conn-1')).toEqual([]);
+          expect((service as any).sentinelDivergenceTargets('conn-1').targets).toEqual([]);
         });
       });
 
@@ -13456,6 +13462,85 @@ describe('AnomalyService', () => {
         await feed([0], T0);
 
         expect((service as any).divergenceOrphans.get('conn-1')).toBeUndefined();
+      });
+
+      it('keeps the alert of a primary flagged as failed while it stays in the topology', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const t = await poll([target], 18, T0);
+
+        await poll([], 3, t, new Set([NODE]));
+
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event.resolved).toBe(false);
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+      });
+
+      it('saves the closed windows of a retired primary once storage recovers', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        storage.saveReplicationDivergenceWindows.mockRejectedValue(new Error('storage down'));
+        let t = await poll([target], 18, T0);
+        t = await poll([], 1, t);
+        storage.saveReplicationDivergenceWindows.mockReset();
+        storage.saveReplicationDivergenceWindows.mockResolvedValue(undefined);
+
+        await poll([], 1, t);
+
+        const saved = storage.saveReplicationDivergenceWindows.mock.calls.flatMap(([rows]) => rows);
+        expect(saved.map((w: { replicaAddr: string }) => w.replicaAddr)).toContain(NODE_REPLICA);
+      });
+
+      it('reads stored history once a retired primary had windows in the range', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        let t = await poll([target], 18, T0);
+        t = await feed([0, 0, 0, 0, 0, 0], t);
+        await poll([], 1, t);
+        (service as any).divergenceState.get('conn-1').windowsHeldSince = T0 - 1;
+        storage.getReplicationDivergenceWindows.mockClear();
+
+        await service.getReplicationDivergenceHistory('conn-1', T0, t);
+
+        expect(storage.getReplicationDivergenceWindows).toHaveBeenCalled();
+      });
+
+      it('reads the open divergence events once per poll', async () => {
+        const second = { addr: '10.0.1.7:6379', host: '10.0.1.7', port: 6379, nodeId: 'node-c' };
+        (service as any).clusterDiscovery = {
+          getNodeConnection: jest.fn(async () => nodeClient([2])),
+        };
+        storage.getAnomalyEvents.mockClear();
+
+        await poll([target, second], 3, T0);
+
+        const reads = storage.getAnomalyEvents.mock.calls.filter(
+          ([q]: [{ metricType?: string }]) => q.metricType === MetricType.REPLICATION_DIVERGENCE,
+        );
+        expect(reads.length).toBeLessThanOrEqual(2);
+        expect((service as any).divergenceOrphansSwept.has(`conn-1@${second.addr}`)).toBe(true);
+      });
+
+      it('gives up its claim on a primary it cannot reach', async () => {
+        (service as any).clusterDiscovery = {
+          getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        };
+
+        await poll([target], 1, T0);
+
+        expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, T0, 30_000)).toBe(false);
+      });
+
+      it('skips only connected registrations, whatever the host case', () => {
+        (service as any).connectionRegistry.list.mockReturnValue([
+          { id: 'a', host: 'NODE.example', port: 6379, isConnected: true },
+          { id: 'b', host: '10.0.1.9', port: 6379, isConnected: false },
+        ]);
+
+        const registered = (service as any).registeredAddresses();
+
+        expect(registered('node.EXAMPLE', 6379)).toBe(true);
+        expect(registered('10.0.1.9', 6379)).toBe(false);
       });
 
       it('logs unreachable primaries once and keeps their state', async () => {

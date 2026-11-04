@@ -167,12 +167,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
-    const reused = await this.reuseNodeClient(nodeId);
-    if (reused) return reused;
-
     // Bind the node client to the connection that owns it now, so a later
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const shared = this.discoveredNodes.get(nodeId);
+    const key = !shared || shared.connectionId === ownerId ? nodeId : `node:${ownerId}:${nodeId}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+
     const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
@@ -190,7 +192,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     }
 
     const primaryClient = this.connectionRegistry.get(ownerId).getClient();
-    return this.openNodeClient(nodeId, node, host, port, ownerId, {
+    return this.openNodeClient(key, node, host, port, ownerId, {
       username: primaryClient.options.username || '',
       password: primaryClient.options.password || '',
     });
