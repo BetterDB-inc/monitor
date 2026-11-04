@@ -398,7 +398,7 @@ Replica offsets come from the primary's own `INFO replication`, so detection run
 
 - A cluster connection reads `INFO` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed.
 - A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. SSH-tunnelled connections are skipped. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
-- Primaries that are already monitored as their own connection are skipped, and so are nodes flagged as failed or down. Up to 64 primaries are checked per connection, each with a 2 second timeout. Unreachable primaries are logged once, when the count changes.
+- Primaries that are already monitored as their own connection are skipped, and so are nodes flagged as failed or down. Up to 64 primaries are checked per connection, each with a 2 second timeout. Unreachable primaries are logged once, when the count changes. When several connections reach the same primary, such as two registered nodes of one cluster or two Sentinels, only the first checks it, and another takes over if that connection stops polling for 30 seconds.
 
 Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
 

@@ -259,6 +259,7 @@ import {
 } from './replication-divergence-detector';
 import {
   TopologyTarget,
+  TopologyTargetClaims,
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
@@ -641,6 +642,7 @@ export class AnomalyService
   private divergenceRetired = new Map<string, Set<string>>();
   private divergenceRetiredSwept = new Set<string>();
   private topologyFanoutUnreachable = new Map<string, number>();
+  private readonly topologyTargetClaims = new TopologyTargetClaims();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1125,6 +1127,7 @@ export class AnomalyService
     this.divergenceRetired.delete(connectionId);
     this.divergenceRetiredSwept.delete(connectionId);
     this.topologyFanoutUnreachable.delete(connectionId);
+    this.topologyTargetClaims.release(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -8163,6 +8166,8 @@ export class AnomalyService
     if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
   }
 
+  private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
+
   private sentinelDivergenceTargets(connectionId: string): TopologyTarget[] | null {
     if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) === null) return [];
     const masters = this.sentinelMastersSnapshot.get(connectionId);
@@ -8189,9 +8194,15 @@ export class AnomalyService
 
   private async detectTopologyAnomalies(
     ctx: ConnectionContext,
-    targets: TopologyTarget[],
+    discovered: TopologyTarget[],
   ): Promise<void> {
     if (!this.clusterDiscovery) return;
+    const targets = this.topologyTargetClaims.claim(
+      ctx.connectionId,
+      discovered,
+      Date.now(),
+      Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS),
+    );
     const active = new Set(targets.map((t) => topologyStateKey(ctx.connectionId, t.addr)));
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) this.retireDivergenceScope(key, ctx);
