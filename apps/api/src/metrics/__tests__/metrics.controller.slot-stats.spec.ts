@@ -10,7 +10,7 @@ describe('MetricsController cluster slot stats', () => {
 
   beforeEach(() => getClusterSlotStatsResult.mockReset());
 
-  it.each(['abc', '10oops'])('rejects the non-numeric limit %p with 400 before querying the cluster', async (limit) => {
+  it.each(['abc', '10oops', '0', '-1'])('rejects the invalid limit %p with 400 before querying the cluster', async (limit) => {
     const error = await controller.getClusterSlotStats(undefined, limit).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(HttpException);

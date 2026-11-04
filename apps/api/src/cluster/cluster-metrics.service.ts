@@ -462,33 +462,52 @@ export class ClusterMetricsService {
     // a node still reports the slot it is handing off, which would take one of
     // the N places and push an owned slot out. The merge ranks them instead.
     const results = await Promise.allSettled(
-      primaries.map((node) =>
-        this.onNode(node, connectionId, timeoutMs, async (client) => {
-          const perRange: PromiseSettledResult<unknown>[] = [];
-          for (let i = 0; i < node.slots.length; i += SLOT_RANGE_BATCH_SIZE) {
-            perRange.push(
-              ...(await Promise.allSettled(
-                node.slots
-                  .slice(i, i + SLOT_RANGE_BATCH_SIZE)
-                  .map(([start, end]) => client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start)),
-              )),
-            );
+      primaries.map(async (node) => {
+        const deadline = Date.now() + timeoutMs;
+        const timeoutMessage = `${node.address} did not answer within ${timeoutMs}ms`;
+        const client = await withTimeout(
+          this.discoveryService.getNodeConnection(node.id, connectionId),
+          timeoutMs,
+          timeoutMessage,
+        );
+        // Replies on one connection arrive in order, so once a batch misses the
+        // deadline the ranges after it are failed too; finished batches are kept.
+        const perRange: PromiseSettledResult<unknown>[] = [];
+        let expired: unknown;
+        for (let i = 0; i < node.slots.length; i += SLOT_RANGE_BATCH_SIZE) {
+          const batch = node.slots.slice(i, i + SLOT_RANGE_BATCH_SIZE);
+          if (expired === undefined) {
+            try {
+              perRange.push(
+                ...(await withTimeout(
+                  Promise.allSettled(
+                    batch.map(([start, end]) => client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start)),
+                  ),
+                  Math.max(0, deadline - Date.now()),
+                  timeoutMessage,
+                )),
+              );
+              continue;
+            } catch (err) {
+              expired = err;
+            }
           }
-          const rejected = perRange.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-          if (rejected.length === perRange.length) throw rejected[0].reason;
-          const stats = Object.assign(
-            {},
-            ...perRange.flatMap((r) =>
-              r.status === 'fulfilled' ? [MetricsParser.parseSlotStats(r.value as unknown[])] : [],
-            ),
-          );
-          return {
-            stats: ownedSlotStats(stats, node.slots),
-            failedRanges: node.slots.filter((_, i) => perRange[i].status === 'rejected'),
-            reason: rejected[0]?.reason,
-          };
-        }),
-      ),
+          perRange.push(...batch.map((): PromiseRejectedResult => ({ status: 'rejected', reason: expired })));
+        }
+        const rejected = perRange.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+        if (rejected.length === perRange.length) throw rejected[0].reason;
+        const stats = Object.assign(
+          {},
+          ...perRange.flatMap((r) =>
+            r.status === 'fulfilled' ? [MetricsParser.parseSlotStats(r.value as unknown[])] : [],
+          ),
+        );
+        return {
+          stats: ownedSlotStats(stats, node.slots),
+          failedRanges: node.slots.filter((_, i) => perRange[i].status === 'rejected'),
+          reason: rejected[0]?.reason,
+        };
+      }),
     );
 
     const perNode: SlotStats[] = [];

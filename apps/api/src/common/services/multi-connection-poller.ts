@@ -37,11 +37,12 @@ export class LogSourceTracker {
   // Connections that have reported a run id: once seen, an INFO failure means
   // the source is unknown for that poll, not that it moved to address tracking.
   private readonly withRunId = new Set<string>();
-  // Connections whose stored entries were checked for a run id, so a restart of
-  // this process does not forget that the connection reports one.
-  private readonly historyChecked = new Set<string>();
 
-  /** `hasRunIdHistory` tells whether the connection's stored entries carry a run id. */
+  /**
+   * `hasRunIdHistory` tells whether the connection's stored entries carry a run
+   * id, so a restart of this process, or another replica storing them, is not
+   * mistaken for a source without one. Asked on each failed INFO until it is.
+   */
   constructor(private readonly hasRunIdHistory: (connectionId: string) => Promise<boolean>) {}
 
   /** The current source, or null when this poll's entries cannot be attributed. */
@@ -54,10 +55,9 @@ export class LogSourceTracker {
     } catch {
       // INFO denied or unsupported: fall back to tracking by address.
     }
-    if (!runId && !this.historyChecked.has(ctx.connectionId)) {
+    if (!runId && !this.withRunId.has(ctx.connectionId)) {
       try {
         if (await this.hasRunIdHistory(ctx.connectionId)) this.withRunId.add(ctx.connectionId);
-        this.historyChecked.add(ctx.connectionId);
       } catch {
         return null;
       }
@@ -93,7 +93,6 @@ export class LogSourceTracker {
   forget(connectionId: string): void {
     this.tracked.delete(connectionId);
     this.withRunId.delete(connectionId);
-    this.historyChecked.delete(connectionId);
   }
 }
 

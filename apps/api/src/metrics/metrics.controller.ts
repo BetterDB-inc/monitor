@@ -609,8 +609,8 @@ export class MetricsController {
     @ConnectionId() connectionId?: string,
     @Res({ passthrough: true }) reply?: FastifyReply,
   ): Promise<SlotStats> {
-    if (limit && !/^-?\d+$/.test(limit)) {
-      throw new HttpException('Invalid limit parameter: must be a number', HttpStatus.BAD_REQUEST);
+    if (limit && (!/^\d+$/.test(limit) || parseInt(limit, 10) < 1)) {
+      throw new HttpException('Invalid limit parameter: must be a positive whole number', HttpStatus.BAD_REQUEST);
     }
     const parsedLimit = limit ? parseInt(limit, 10) : undefined;
     try {

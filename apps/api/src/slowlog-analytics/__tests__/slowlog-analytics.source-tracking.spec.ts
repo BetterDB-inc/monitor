@@ -205,6 +205,23 @@ describe('SlowLogAnalyticsService source tracking', () => {
     expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
   });
 
+  it('notices run id entries another replica stored after an earlier check found none', async () => {
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    await poll();
+    expect(await repo.getSlowLogEntries({ connectionId: 'seed' })).toHaveLength(2);
+
+    await repo.saveSlowLogEntries(
+      entries([5], 3000).map((e) => ({ ...e, capturedAt: 1, sourceHost: '10.0.0.1', sourcePort: 6379, sourceRunId: 'run-a', connectionId: 'seed' })),
+      'seed',
+    );
+    served = entries([0, 1, 2], 1000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.filter((e) => !e.sourceRunId).map((e) => e.id).sort()).toEqual([0, 1]);
+  });
+
   it('skips the poll when the connection reconnects while INFO is pending', async () => {
     runId = 'run-a';
     endpoint = { host: '10.0.0.1', port: 6379 };

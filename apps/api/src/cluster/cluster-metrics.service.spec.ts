@@ -657,6 +657,31 @@ used_cpu_user:20.3\r
       expect(result.failedSlotRanges).toEqual([[200, 299]]);
     });
 
+    it('keeps the batches a primary finished before its deadline', async () => {
+      jest.useFakeTimers();
+      try {
+        const slots = Array.from({ length: 17 }, (_, i): [number, number] => [i * 2, i * 2]);
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots },
+        ]);
+        mockDiscoveryService.getNodeConnection.mockResolvedValue({
+          call: jest.fn((_c: string, _s: string, _r: string, start: number) =>
+            start === 32 ? new Promise(() => undefined) : Promise.resolve([[start, ['key-count', 1]]]),
+          ),
+        });
+
+        const pending = service.getClusterSlotStatsResult('key-count', 100);
+        await jest.advanceTimersByTimeAsync(5_000);
+        const result = await pending;
+
+        expect(Object.keys(result.stats)).toHaveLength(16);
+        expect(result.failedNodes).toEqual(['10.0.0.1:6379']);
+        expect(result.failedSlotRanges).toEqual([[32, 32]]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('reports a primary that does not answer in time and returns the others', async () => {
       jest.useFakeTimers();
       try {
