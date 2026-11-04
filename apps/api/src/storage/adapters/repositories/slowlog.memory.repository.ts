@@ -13,21 +13,28 @@ export function matchesLogSource(
   return source.runId ? true : entry.sourceHost === source.host && entry.sourcePort === source.port;
 }
 
+/**
+ * Same keys as the SQL unique constraints: entries with a run id are one entry
+ * per (id, run id), whatever address they were read through; entries without
+ * one are keyed by address.
+ */
+export function isSameLogEntry(
+  a: { id: number; sourceHost: string; sourcePort: number; sourceRunId?: string; connectionId?: string },
+  b: { id: number; sourceHost: string; sourcePort: number; sourceRunId?: string },
+  connectionId: string,
+): boolean {
+  if (a.id !== b.id || a.connectionId !== connectionId) return false;
+  if ((a.sourceRunId ?? '') !== (b.sourceRunId ?? '')) return false;
+  return a.sourceRunId ? true : a.sourceHost === b.sourceHost && a.sourcePort === b.sourcePort;
+}
+
 export class SlowLogMemoryRepository {
   private slowLogEntries: StoredSlowLogEntry[] = [];
 
   async saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number> {
     let savedCount = 0;
     for (const entry of entries) {
-      // Check for duplicates based on unique constraint (including connectionId)
-      const exists = this.slowLogEntries.some(
-        (e) =>
-          e.id === entry.id &&
-          e.sourceHost === entry.sourceHost &&
-          e.sourcePort === entry.sourcePort &&
-          (e.sourceRunId ?? '') === (entry.sourceRunId ?? '') &&
-          e.connectionId === connectionId,
-      );
+      const exists = this.slowLogEntries.some((e) => isSameLogEntry(e, entry, connectionId));
       if (!exists) {
         this.slowLogEntries.push({ ...entry, connectionId });
         savedCount++;

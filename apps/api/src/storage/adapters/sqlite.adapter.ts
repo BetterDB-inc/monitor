@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { LOG_RUN_ID_UNIQUE_INDEXES } from './log-run-id-indexes';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -692,6 +693,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.createSchema();
       // Run migrations for existing databases
       this.runMigrations();
+      this.ensureLogRunIdUniqueIndexes();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
@@ -936,6 +938,29 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
    *   constraint could hold genuine duplicates, and dropping those is exactly
    *   what the canonical constraint enforces going forward.
    */
+  /**
+   * A log entry with a run id is one entry per (id, run id), whatever address
+   * it was read through: two collectors reaching one server process through
+   * different addresses must not store it twice. Rows already duplicated that
+   * way are collapsed to their first copy before the index is built.
+   */
+  private ensureLogRunIdUniqueIndexes(): void {
+    if (!this.db) return;
+    const db = this.db;
+    for (const { table, index, columns } of LOG_RUN_ID_UNIQUE_INDEXES) {
+      const exists = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(index);
+      if (exists) continue;
+      db.transaction(() => {
+        db.exec(
+          `DELETE FROM ${table} WHERE source_run_id <> '' AND pk NOT IN (
+             SELECT MIN(pk) FROM ${table} WHERE source_run_id <> '' GROUP BY ${columns}
+           )`,
+        );
+        db.exec(`CREATE UNIQUE INDEX ${index} ON ${table}(${columns}) WHERE source_run_id <> ''`);
+      })();
+    }
+  }
+
   private migrateConnectionIdUniqueConstraints(): void {
     if (!this.db) return;
     const db = this.db;
@@ -4038,7 +4063,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db
       .prepare(
         `SELECT commandlog_id, timestamp, duration, command,
-              client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+              client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
        FROM command_log_entries
        ${whereClause}
        ${orderBy}

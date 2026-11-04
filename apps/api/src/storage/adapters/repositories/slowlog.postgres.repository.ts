@@ -46,7 +46,7 @@ export class SlowLogPostgresRepository {
         slowlog_id, timestamp, duration, command,
         client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
       ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (slowlog_id, source_host, source_port, source_run_id, connection_id) DO NOTHING
+      ON CONFLICT DO NOTHING
     `;
 
     const result = await this.pool.query(query, values);
@@ -97,7 +97,7 @@ export class SlowLogPostgresRepository {
     const result = await this.pool.query(
       `SELECT
         slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port, connection_id
+        client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
       FROM slow_log_entries
       ${whereClause}
       ${orderBy}

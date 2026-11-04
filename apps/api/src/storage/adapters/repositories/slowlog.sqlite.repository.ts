@@ -89,7 +89,7 @@ export class SlowLogSqliteRepository {
     const rows = this.db
       .prepare(
         `SELECT slowlog_id, timestamp, duration, command,
-              client_address, client_name, captured_at, source_host, source_port, connection_id
+              client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
        FROM slow_log_entries
        ${whereClause}
        ${orderBy}

@@ -244,6 +244,69 @@ describe('SqliteAdapter legacy connection_id migration', () => {
     expect(rows.map((r) => r.timestamp).sort()).toEqual([100, 101, 200]);
   });
 
+  it('adds source_run_id to the command log table and keeps its rows', async () => {
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE command_log_entries (
+        pk INTEGER PRIMARY KEY AUTOINCREMENT,
+        commandlog_id INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL,
+        duration INTEGER NOT NULL,
+        command TEXT NOT NULL DEFAULT '[]',
+        client_address TEXT,
+        client_name TEXT,
+        log_type TEXT NOT NULL,
+        captured_at INTEGER NOT NULL,
+        source_host TEXT NOT NULL,
+        source_port INTEGER NOT NULL,
+        connection_id TEXT NOT NULL DEFAULT 'env-default',
+        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+      );
+      INSERT INTO command_log_entries (commandlog_id, timestamp, duration, log_type, captured_at, source_host, source_port, connection_id)
+      VALUES (1, 100, 10, 'slow', 1, '10.0.0.1', 6379, 'c1'), (2, 101, 10, 'slow', 1, '10.0.0.1', 6379, 'c1');
+    `);
+    legacy.close();
+
+    const adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+    const entry = {
+      id: 1, timestamp: 200, duration: 10, command: ['GET'], clientAddress: '', clientName: '', type: 'slow' as const,
+      capturedAt: 2, sourceHost: '10.0.0.1', sourcePort: 6379, sourceRunId: 'run-new', connectionId: 'c1',
+    };
+    expect(await adapter.saveCommandLogEntries([entry], 'c1')).toBe(1);
+    expect(await adapter.saveCommandLogEntries([entry], 'c1')).toBe(0);
+    const rows = await adapter.getCommandLogEntries({ connectionId: 'c1', limit: 10 });
+    await adapter.close();
+
+    expect(rows.map((r) => r.timestamp).sort()).toEqual([100, 101, 200]);
+  });
+
+  it('collapses rows of one run id stored under two addresses', async () => {
+    const seeded = new SqliteAdapter({ filepath: dbPath });
+    await seeded.initialize();
+    await seeded.close();
+    // A database from before the run-id index: the same process stored twice.
+    const db = new Database(dbPath);
+    db.exec(`
+      DROP INDEX idx_slowlog_run_unique;
+      INSERT INTO slow_log_entries (slowlog_id, timestamp, duration, captured_at, source_host, source_port, source_run_id, connection_id)
+      VALUES (5, 100, 10, 1, '10.0.0.1', 6379, 'run-a', 'c1'), (5, 100, 10, 1, '10.0.1.1', 6379, 'run-a', 'c1'),
+             (5, 100, 10, 1, '10.0.0.1', 6379, '', 'c1'), (5, 100, 10, 1, '10.0.1.1', 6379, '', 'c1');
+    `);
+    db.close();
+
+    const adapter = new SqliteAdapter({ filepath: dbPath });
+    await adapter.initialize();
+    const rows = await adapter.getSlowLogEntries({ connectionId: 'c1', limit: 10 });
+    await adapter.close();
+
+    expect(rows.map((r) => `${r.sourceHost}/${r.sourceRunId}`).sort()).toEqual([
+      '10.0.0.1/',
+      '10.0.0.1/run-a',
+      '10.0.1.1/',
+    ]);
+  });
+
   it('still initializes a brand-new database', async () => {
     const adapter = new SqliteAdapter({ filepath: dbPath });
     await adapter.initialize();

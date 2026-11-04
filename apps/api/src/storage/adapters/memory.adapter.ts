@@ -110,7 +110,11 @@ import {
   type ClientStatsGroup,
 } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
-import { SlowLogMemoryRepository, matchesLogSource } from './repositories/slowlog.memory.repository';
+import {
+  SlowLogMemoryRepository,
+  isSameLogEntry,
+  matchesLogSource,
+} from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
 import { ActivityMemoryRepository } from './repositories/activity.memory.repository';
@@ -1200,13 +1204,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     let savedCount = 0;
     for (const entry of entries) {
       const exists = this.commandLogEntries.some(
-        (e) =>
-          e.id === entry.id &&
-          e.type === entry.type &&
-          e.sourceHost === entry.sourceHost &&
-          e.sourcePort === entry.sourcePort &&
-          (e.sourceRunId ?? '') === (entry.sourceRunId ?? '') &&
-          e.connectionId === connectionId,
+        (e) => e.type === entry.type && isSameLogEntry(e, entry, connectionId),
       );
       if (!exists) {
         this.commandLogEntries.push({ ...entry, connectionId });
