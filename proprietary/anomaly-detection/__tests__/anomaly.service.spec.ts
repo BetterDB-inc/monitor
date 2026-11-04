@@ -13550,7 +13550,8 @@ describe('AnomalyService', () => {
       const target = { addr: NODE, host: '10.0.1.5', port: 6379, nodeId: 'node-b' };
 
       function infoReply(masterOffset: number, gap: number, role = 'master') {
-        const lines = ['# Replication', `role:${role}`, `master_replid:${'b'.repeat(40)}`];
+        const lines = ['# Stats', 'instantaneous_ops_per_sec:250', 'total_error_replies:7'];
+        lines.push('# Replication', `role:${role}`, `master_replid:${'b'.repeat(40)}`);
         lines.push(`master_repl_offset:${masterOffset}`);
         if (role === 'master') {
           lines.push('connected_slaves:1');
@@ -13559,12 +13560,12 @@ describe('AnomalyService', () => {
         return lines.join('\r\n');
       }
 
-      function nodeClient(gapsMiB: number[]) {
+      function nodeClient(gapsMiB: number[], role = 'master') {
         let call = 0;
         return {
           info: jest.fn().mockImplementation(async () => {
             const step = Math.min(Math.floor(call / 3), gapsMiB.length - 1);
-            const reply = infoReply(1_000 * MiB + call * 10 * MiB, gapsMiB[step] * MiB);
+            const reply = infoReply(1_000 * MiB + call * 10 * MiB, gapsMiB[step] * MiB, role);
             call++;
             return reply;
           }),
@@ -13614,11 +13615,27 @@ describe('AnomalyService', () => {
         await poll([target], 1, T0);
 
         expect(retry).toHaveBeenCalledWith(
-          expect.objectContaining({ role: 'master', connected_slaves: '1' }),
+          expect.objectContaining({
+            role: 'master',
+            connected_slaves: '1',
+            instantaneous_ops_per_sec: '250',
+            total_error_replies: '7',
+          }),
           expect.objectContaining({ connectionId: 'conn-1', host: '10.0.1.5', port: 6379 }),
           T0,
           NODE,
         );
+      });
+
+      it('skips retry amplification on a node that reports a replica role', async () => {
+        const client = nodeClient([2], 'slave');
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const retry = jest.spyOn(service as any, 'detectRetryAmplification');
+
+        await poll([target], 1, T0);
+
+        expect(client.info).toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
       });
 
       it('leaves a primary another connection already covers', async () => {

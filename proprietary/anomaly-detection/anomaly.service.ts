@@ -8415,7 +8415,7 @@ export class AnomalyService
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) await this.detectReplicationDivergence(sample, nodeCtx, target.addr);
-      await this.detectRetryAmplification(info, nodeCtx, timestamp, target.addr);
+      if (info.role === 'master') await this.detectRetryAmplification(info, nodeCtx, timestamp, target.addr);
     }
 
     const previous = this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0;
