@@ -150,7 +150,7 @@ import type { InvitationRepository } from '../../common/interfaces/invitation-re
 import { ActivitySqliteRepository } from './repositories/activity.sqlite.repository';
 import type { ActivityRepository } from '../../common/interfaces/activity-repository.interface';
 import { encodeCveSnapshots } from './cve-snapshots.codec';
-import { BACKFILL_COMMAND_P99_KIND_SQL } from './anomaly-kind-backfill';
+import { SQLITE_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { readCveDataset, readCveScanResult } from './cve-storage.schema';
 
 /**
@@ -825,8 +825,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     if (!anomalyEventInfo.some((col) => col.name === 'kind')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN kind TEXT');
+      this.db.exec(SQLITE_LEGACY_ANOMALY_BACKFILL.join(';\n'));
     }
-    this.db.exec(BACKFILL_COMMAND_P99_KIND_SQL);
 
     // Lazy ALTER for the key_pattern_snapshots logical-database dimension.
     // Pre-existing rows were all collected from the connected database, which

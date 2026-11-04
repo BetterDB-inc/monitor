@@ -1,3 +1,4 @@
+import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
 import { SequenceRule } from './sequence-rules';
@@ -72,7 +73,7 @@ export interface RecoverySignal {
   stdDev: number;
   threshold: number;
   now: number;
-  kind?: string;
+  kind?: RegressionKind;
 }
 
 export type RecoveryProbe = (signal: RecoverySignal) => number | null | undefined;

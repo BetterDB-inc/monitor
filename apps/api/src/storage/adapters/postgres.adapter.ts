@@ -2,7 +2,7 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
-import { BACKFILL_COMMAND_P99_KIND_SQL } from './anomaly-kind-backfill';
+import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
 import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
@@ -524,7 +524,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         });
         try {
           await this.migrateConnectionId();
+          const needsLegacyAnomalyBackfill = !(await this.hasAnomalyKindColumn());
           await this.createSchema();
+          if (needsLegacyAnomalyBackfill) await this.backfillLegacyAnomalyEvents();
           await this.ensureOtelIngestedIndex();
           await this.backfillMemoryProposalDiscriminators();
         } finally {
@@ -1502,6 +1504,22 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * one target cannot have all of them keyed, so the first keeps the
    * discriminator and the rest stay NULL, outside the partial index.
    */
+  private async hasAnomalyKindColumn(): Promise<boolean> {
+    if (!this.pool) return false;
+    const { rows } = await this.pool.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'anomaly_events' AND column_name = 'kind'`,
+    );
+    return rows.length > 0;
+  }
+
+  private async backfillLegacyAnomalyEvents(): Promise<void> {
+    if (!this.pool) return;
+    for (const sql of POSTGRES_LEGACY_ANOMALY_BACKFILL) {
+      await this.pool.query(sql);
+    }
+  }
+
   private async backfillMemoryProposalDiscriminators(): Promise<void> {
     if (!this.pool) {
       return;
@@ -1697,7 +1715,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS kind TEXT;
-      ${BACKFILL_COMMAND_P99_KIND_SQL}
 
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);

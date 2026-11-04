@@ -263,10 +263,10 @@ export function resyncSettled(
   since: number,
 ): boolean {
   if (sample.role !== 'primary') return true;
-  const windowPassed = sample.timestamp - since > RESYNC_ESCALATION_WINDOW_MS;
-  if (addr === null) return windowPassed && sample.replicas.every((r) => r.state === 'online');
   const replica = sample.replicas.find((r) => r.addr === addr);
-  return replica ? replica.state === 'online' : windowPassed;
+  return replica
+    ? replica.state === 'online'
+    : sample.timestamp - since > RESYNC_ESCALATION_WINDOW_MS;
 }
 
 registerSequenceRule({

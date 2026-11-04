@@ -547,19 +547,10 @@ describe('observeResyncEscalation', () => {
       ).toBe(true);
     });
 
-    it('settles a row without a replica address once the window passes and every replica is online', () => {
+    it('settles a row without a replica address once the window passes', () => {
       const after = T0 - RESYNC_ESCALATION_WINDOW_MS - 1;
-      expect(resyncSettled(sample({ replicas: [line('online')] }), null, T0 - 1)).toBe(false);
-      expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, after)).toBe(false);
-      expect(resyncSettled(sample({ replicas: [line('online')] }), null, after)).toBe(true);
-      expect(
-        resyncSettled(
-          sample({ replicas: [line('online'), { ...line('send_bulk'), addr: '10.0.0.3:6379' }] }),
-          null,
-          after,
-        ),
-      ).toBe(false);
-      expect(resyncSettled(sample({ replicas: [] }), null, after)).toBe(true);
+      expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, T0 - 1)).toBe(false);
+      expect(resyncSettled(sample({ replicas: [line('send_bulk')] }), null, after)).toBe(true);
     });
 
     it('settles when the node is no longer a primary', () => {
