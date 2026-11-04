@@ -33,7 +33,7 @@ function sentinelMaster(name: string, ip: string, port: number, flags = ['master
 describe('topology targets', () => {
   describe('clusterTargets', () => {
     it('picks the other reachable primaries', () => {
-      const targets = clusterTargets(
+      const { targets, members } = clusterTargets(
         [
           clusterNode('a', '10.0.0.1:6379@16379', ['myself', 'master']),
           clusterNode('b', '10.0.0.2:6379@16379,node-b', ['master']),
@@ -45,15 +45,29 @@ describe('topology targets', () => {
       );
 
       expect(targets).toEqual([{ addr: '10.0.0.2:6379', host: '10.0.0.2', port: 6379, nodeId: 'b' }]);
+      expect([...members].sort()).toEqual(['10.0.0.2:6379', '10.0.0.4:6379']);
+    });
+
+    it('reads a primary once when two node ids share its address', () => {
+      const { targets } = clusterTargets(
+        [
+          clusterNode('b', '10.0.0.2:6379@16379', ['master']),
+          clusterNode('b2', '10.0.0.2:6379@16379', ['master']),
+        ],
+        nothingRegistered,
+      );
+
+      expect(targets.map((t) => t.nodeId)).toEqual(['b']);
     });
 
     it('skips primaries that are monitored as their own connection', () => {
-      const targets = clusterTargets(
+      const { targets, members } = clusterTargets(
         [clusterNode('b', '10.0.0.2:6379@16379', ['master'])],
         (host, port) => host === '10.0.0.2' && port === 6379,
       );
 
       expect(targets).toEqual([]);
+      expect(members.size).toBe(0);
     });
 
     it('caps the fan-out', () => {
@@ -61,13 +75,13 @@ describe('topology targets', () => {
         clusterNode(`n${i}`, `10.0.1.${i}:6379@16379`, ['master']),
       );
 
-      expect(clusterTargets(nodes, nothingRegistered)).toHaveLength(TOPOLOGY_TARGET_LIMIT);
+      expect(clusterTargets(nodes, nothingRegistered).targets).toHaveLength(TOPOLOGY_TARGET_LIMIT);
     });
   });
 
   describe('sentinelTargets', () => {
     it('picks each monitored primary once and skips down ones', () => {
-      const targets = sentinelTargets(
+      const { targets, members } = sentinelTargets(
         [
           sentinelMaster('alpha', '10.0.0.2', 6379),
           sentinelMaster('alpha-dup', '10.0.0.2', 6379),
@@ -79,6 +93,7 @@ describe('topology targets', () => {
 
       expect(targets.map((t) => t.addr)).toEqual(['10.0.0.2:6379', '10.0.0.4:6380']);
       expect(targets[0].nodeId).toBeUndefined();
+      expect(members.has('10.0.0.3:6379')).toBe(true);
     });
   });
 
@@ -91,6 +106,17 @@ describe('topology targets', () => {
       expect(claims.claim('a', [target], 0, 30_000)).toEqual([target]);
       expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([]);
       expect(claims.claim('a', [target], 2_000, 30_000)).toEqual([target]);
+    });
+
+    it('hands a primary over once its owner gives it up', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [target], 0, 30_000);
+
+      expect(claims.heldByOther('b', target.addr, 1_000, 30_000)).toBe(true);
+      claims.releaseTarget('a', target.addr);
+
+      expect(claims.heldByOther('b', target.addr, 1_000, 30_000)).toBe(false);
+      expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([target]);
     });
 
     it('hands a primary over when its owner stops claiming it', () => {

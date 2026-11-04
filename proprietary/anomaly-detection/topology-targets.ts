@@ -14,6 +14,11 @@ export interface TopologyTarget {
 
 export type RegisteredAddress = (host: string, port: number) => boolean;
 
+export interface TopologyScope {
+  targets: TopologyTarget[];
+  members: Set<string>;
+}
+
 export function topologyStateKey(connectionId: string, addr: string): string {
   return `${connectionId}@${addr}`;
 }
@@ -37,36 +42,38 @@ export function splitHostPort(addr: string): { host: string; port: number } | nu
   return { host, port };
 }
 
-export function clusterTargets(
-  nodes: ClusterNode[],
-  isRegistered: RegisteredAddress,
-): TopologyTarget[] {
-  const targets: TopologyTarget[] = [];
+export function clusterTargets(nodes: ClusterNode[], isRegistered: RegisteredAddress): TopologyScope {
+  const targets = new Map<string, TopologyTarget>();
+  const members = new Set<string>();
   for (const node of nodes) {
     if (!node.flags.includes('master') || node.flags.includes('myself')) continue;
-    if (UNREACHABLE_CLUSTER_FLAGS.some((flag) => node.flags.includes(flag))) continue;
     const address = splitHostPort(node.address);
     if (!address || isRegistered(address.host, address.port)) continue;
-    targets.push({ addr: `${address.host}:${address.port}`, ...address, nodeId: node.id });
+    const addr = `${address.host}:${address.port}`;
+    members.add(addr);
+    if (UNREACHABLE_CLUSTER_FLAGS.some((flag) => node.flags.includes(flag))) continue;
+    if (!targets.has(addr)) targets.set(addr, { addr, ...address, nodeId: node.id });
   }
-  return capTargets(targets);
+  return { targets: capTargets([...targets.values()]), members };
 }
 
 export function sentinelTargets(
   masters: SentinelNodeInfo[],
   isRegistered: RegisteredAddress,
-): TopologyTarget[] {
+): TopologyScope {
   const targets = new Map<string, TopologyTarget>();
+  const members = new Set<string>();
   for (const master of masters) {
     if (!master.ip || !Number.isInteger(master.port) || master.port <= 0) continue;
-    if (UNREACHABLE_SENTINEL_FLAGS.some((flag) => master.flags.includes(flag))) continue;
     if (isRegistered(master.ip, master.port)) continue;
     const addr = `${master.ip}:${master.port}`;
+    members.add(addr);
+    if (UNREACHABLE_SENTINEL_FLAGS.some((flag) => master.flags.includes(flag))) continue;
     if (!targets.has(addr)) {
       targets.set(addr, { addr, host: master.ip, port: master.port });
     }
   }
-  return capTargets([...targets.values()]);
+  return { targets: capTargets([...targets.values()]), members };
 }
 
 function capTargets(targets: TopologyTarget[]): TopologyTarget[] {
@@ -94,6 +101,15 @@ export class TopologyTargetClaims {
       this.owners.set(target.addr, { connectionId, at: now });
       return true;
     });
+  }
+
+  heldByOther(connectionId: string, addr: string, now: number, staleMs: number): boolean {
+    const owner = this.owners.get(addr);
+    return !!owner && owner.connectionId !== connectionId && now - owner.at <= staleMs;
+  }
+
+  releaseTarget(connectionId: string, addr: string): void {
+    if (this.owners.get(addr)?.connectionId === connectionId) this.owners.delete(addr);
   }
 
   release(connectionId: string): void {
