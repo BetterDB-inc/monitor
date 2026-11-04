@@ -105,6 +105,17 @@ describe('test env', () => {
       expect(env).toEqual({ DB_HOST: 'localhost', DB_PORT: '6390', DB_PASSWORD: 'devpassword' });
     });
 
+    it('skips the env file when the flag is set to anything but true', () => {
+      const env: NodeJS.ProcessEnv = { BETTERDB_TEST_USE_ENV_FILE: 'false' };
+      applyConnectionSettings(env, writeEnvFile(DEV_ENV_FILE));
+      expect([env.DB_HOST, env.DB_PORT, env.DB_PASSWORD, env.DB_TLS]).toEqual([
+        'localhost',
+        '6390',
+        'devpassword',
+        undefined,
+      ]);
+    });
+
     it('lets the env file win over the test defaults when opted in', () => {
       const env: NodeJS.ProcessEnv = { BETTERDB_TEST_USE_ENV_FILE: 'true' };
       applyConnectionSettings(env, writeEnvFile(DEV_ENV_FILE));
