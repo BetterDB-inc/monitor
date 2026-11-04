@@ -263,7 +263,15 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
         network_bytes_in: 64,
         network_bytes_out: 32,
       });
-      expect(stats['1'].key_count).toBe(0);
+      expect(stats['1']).toEqual({
+        key_count: 0,
+        expires_count: 0,
+        total_reads: 0,
+        total_writes: 0,
+        cpu_usec: 0,
+        network_bytes_in: 0,
+        network_bytes_out: 0,
+      });
     });
 
     it('should handle empty response', () => {

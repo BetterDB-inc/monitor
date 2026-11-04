@@ -129,9 +129,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
+      // Link state is its own CLUSTER NODES field (`linkState`), not a flag.
       const isHealthy =
-        node.flags.includes('connected') ||
-        (!node.flags.includes('disconnected') && !node.flags.includes('fail'));
+        node.linkState !== 'disconnected' &&
+        !node.flags.includes('disconnected') &&
+        !node.flags.includes('fail');
 
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');

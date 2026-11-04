@@ -2631,10 +2631,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     try {
-      const slotStats =
-        client.getCapabilities().clusterEnabled && this.clusterMetricsService
-          ? await this.clusterMetricsService.getClusterSlotStats('key-count', this.slotStatsTopN, connectionId)
-          : await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      const { stats: slotStats, failedNodes } =
+        client.getCapabilities().clusterEnabled && this.clusterMetricsService?.usesClusterWideSlotStats(connectionId)
+          ? await this.clusterMetricsService.getClusterSlotStatsResult('key-count', this.slotStatsTopN, connectionId)
+          : { stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN), failedNodes: [] };
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
@@ -2648,9 +2648,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
       }
 
-      for (const staleSlot of state.currentClusterSlotLabels) {
-        if (!newSlotLabels.has(staleSlot)) {
-          this.removeSlotSeries(connLabel, staleSlot);
+      // A primary that did not answer is missing from this result; keep the
+      // series it exported last time instead of dropping its slots.
+      if (failedNodes.length > 0) {
+        for (const slot of state.currentClusterSlotLabels) newSlotLabels.add(slot);
+      } else {
+        for (const staleSlot of state.currentClusterSlotLabels) {
+          if (!newSlotLabels.has(staleSlot)) {
+            this.removeSlotSeries(connLabel, staleSlot);
+          }
         }
       }
 

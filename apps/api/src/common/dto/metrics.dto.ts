@@ -486,4 +486,13 @@ export class SlotMigrationDto {
 
   @ApiPropertyOptional({ description: 'Number of keys remaining to migrate', example: 2450 })
   keysRemaining?: number;
+
+  @ApiPropertyOptional({
+    description: 'Atomic slot migration (Valkey 9+): the slot ranges the job moves',
+    example: '0-1365 5462-6826',
+  })
+  slotRange?: string;
+
+  @ApiPropertyOptional({ description: 'Atomic slot migration job state as Valkey reports it', example: 'snapshotting' })
+  phase?: string;
 }

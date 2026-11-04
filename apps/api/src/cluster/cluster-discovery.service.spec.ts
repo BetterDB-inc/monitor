@@ -138,6 +138,23 @@ describe('ClusterDiscoveryService', () => {
       expect(nodes[0].healthy).toBe(false);
     });
 
+    it('should mark nodes as unhealthy when only the link state is disconnected', async () => {
+      // The parser keeps link state in its own field; it never appears in flags.
+      mockDbClient.getClusterNodes.mockResolvedValueOnce([
+        {
+          ...mockClusterNodes[0],
+          flags: ['master'],
+          linkState: 'disconnected',
+        },
+      ]);
+
+      await service.cleanupIdleConnections(0);
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const nodes = await service.discoverNodes();
+      expect(nodes[0].healthy).toBe(false);
+    });
+
     it('should mark nodes as unhealthy when failed', async () => {
       mockDbClient.getClusterNodes.mockResolvedValueOnce([
         {
