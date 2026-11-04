@@ -171,15 +171,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
     const key = this.nodeClientKey(nodeId, ownerId);
-    const reused = await this.reuseNodeClient(key);
-    if (reused) return reused;
-
     const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
     if (!node) {
       throw new Error(`Node ${nodeId} not found in cluster`);
     }
+
+    const existing = this.discoveredNodes.get(key);
+    if (existing && existing.node.address.split('@')[0] !== node.address.split('@')[0]) {
+      this.discoveredNodes.delete(key);
+      await this.closeNodeClient(existing.client);
+    }
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
 
     // Cluster node addresses include bus port: "host:port@busport"
     // We only need the client port, so split on '@' first
@@ -419,8 +424,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private nodeClientKey(nodeId: string, ownerId: string | undefined): string {
+    const scoped = `node:${ownerId}:${nodeId}`;
+    if (this.discoveredNodes.has(scoped)) return scoped;
     const shared = this.discoveredNodes.get(nodeId);
-    return !shared || shared.connectionId === ownerId ? nodeId : `node:${ownerId}:${nodeId}`;
+    return !shared || shared.connectionId === ownerId ? nodeId : scoped;
   }
 
   private async healthCheckNode(node: DiscoveredNode): Promise<NodeHealth> {
