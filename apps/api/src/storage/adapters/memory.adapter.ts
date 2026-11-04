@@ -1276,6 +1276,13 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return Math.max(...entriesOfType.map((e) => e.id));
   }
 
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    return (
+      this.slowlogRepo.hasRunIdEntries(connectionId) ||
+      this.commandLogEntries.some((e) => e.connectionId === connectionId && !!e.sourceRunId)
+    );
+  }
+
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.commandLogEntries.length;
     if (connectionId) {

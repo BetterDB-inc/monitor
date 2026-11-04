@@ -518,6 +518,19 @@ used_cpu_user:20.3\r
       );
     });
 
+    it('leaves an endpoint blank when a job does not name its node', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+      nodeClients({
+        fff789node3: {
+          jobs: [['name', 'job-1', 'operation', 'IMPORT', 'slot_ranges', '0-10', 'target_node', 'fff789node3', 'state', 'snapshotting']],
+        },
+      });
+
+      const [migration] = await service.getSlotMigrations();
+
+      expect(migration).toEqual(expect.objectContaining({ sourceNodeId: '', sourceAddress: '', targetNodeId: 'fff789node3' }));
+    });
+
     it('ignores finished atomic jobs and servers without GETSLOTMIGRATIONS', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
       nodeClients({

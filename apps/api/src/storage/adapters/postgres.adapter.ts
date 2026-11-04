@@ -4133,6 +4133,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
   }
 
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT EXISTS (SELECT 1 FROM slow_log_entries WHERE connection_id = $1 AND source_run_id <> '')
+           OR EXISTS (SELECT 1 FROM command_log_entries WHERE connection_id = $1 AND source_run_id <> '') AS found`,
+      [connectionId],
+    );
+    return result.rows[0]?.found === true;
+  }
+
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.pool) throw new Error('Database not initialized');
 

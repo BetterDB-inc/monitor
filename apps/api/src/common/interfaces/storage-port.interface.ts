@@ -795,6 +795,8 @@ export interface StoragePort {
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
   getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Whether any slow or command log entry of the connection was stored under a run id. */
+  hasRunIdLogEntries(connectionId: string): Promise<boolean>;
 
   // Latency Snapshot Methods - connectionId required for writes, optional filter for reads
   saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number>;

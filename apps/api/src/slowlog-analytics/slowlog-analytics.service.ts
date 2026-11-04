@@ -26,7 +26,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   // Server process each connection's lastSeenId belongs to. Slowlog IDs are per
   // process, so when a connection lands on another one the tracker restarts
   // from that process's own last stored ID.
-  private readonly logSources = new LogSourceTracker();
+  private readonly logSources: LogSourceTracker;
 
   // Per-connection cache for Prometheus metrics
   private cachedEntries = new Map<string, SlowLogEntry[]>();
@@ -43,6 +43,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
+    this.logSources = new LogSourceTracker((id) => this.storage.hasRunIdLogEntries(id));
   }
 
   protected getIntervalMs(): number {

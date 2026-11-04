@@ -4116,6 +4116,17 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return row?.max_id ?? null;
   }
 
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM slow_log_entries WHERE connection_id = ? AND source_run_id <> '')
+             OR EXISTS (SELECT 1 FROM command_log_entries WHERE connection_id = ? AND source_run_id <> '') AS found`,
+      )
+      .get(connectionId, connectionId) as { found: number } | undefined;
+    return !!row?.found;
+  }
+
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
 

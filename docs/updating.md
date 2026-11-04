@@ -153,9 +153,43 @@ storage backend:
   (measured: 15 seconds for 8 million `client_snapshots` rows). The build is
   a single transaction, so a restart mid-build leaves nothing behind and the
   next start simply builds it again. On Kubernetes this time counts against
-  the startup probe (the chart allows 150 seconds), not the liveness probe.
+  the startup probe (the chart allows 10 minutes), not the liveness probe.
   Only a SQLite database approaching 100 million history rows would need
   the probe budget raised; at that size PostgreSQL is the better backend.
+
+## Slow log and command log keys (PostgreSQL)
+
+Slow log and command log entries are now keyed by the server process that
+logged them (its `run_id`), not only by the address they were read from. The
+first start after updating rebuilds the unique keys of `slow_log_entries` and
+`command_log_entries` before the API is ready, and drops the old keys. On a
+large database this counts against the startup probe.
+
+- **Rolling updates**: until every replica runs the new version, the old
+  replicas fail to store slow and command log entries, because their inserts
+  name the dropped key. The new replicas resume from what is stored, so
+  entries still in each server's log are stored once the rollout finishes.
+- **Rolling back**: the older version cannot store slow or command log entries
+  until the old keys exist again. Before starting it, run:
+
+```sql
+DELETE FROM slow_log_entries a USING slow_log_entries b
+ WHERE a.pk > b.pk AND a.slowlog_id = b.slowlog_id AND a.source_host = b.source_host
+   AND a.source_port = b.source_port AND a.connection_id = b.connection_id;
+ALTER TABLE slow_log_entries ADD CONSTRAINT slow_log_entries_legacy_key
+  UNIQUE (slowlog_id, source_host, source_port, connection_id);
+
+DELETE FROM command_log_entries a USING command_log_entries b
+ WHERE a.pk > b.pk AND a.commandlog_id = b.commandlog_id AND a.log_type = b.log_type
+   AND a.source_host = b.source_host AND a.source_port = b.source_port
+   AND a.connection_id = b.connection_id;
+ALTER TABLE command_log_entries ADD CONSTRAINT command_log_entries_legacy_key
+  UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
+```
+
+  The `DELETE` keeps one entry where entries from different server processes
+  share an ID and address, which the old key cannot tell apart. Updating again
+  drops these constraints automatically.
 
 ## Release notes
 

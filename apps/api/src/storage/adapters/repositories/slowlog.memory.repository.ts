@@ -90,6 +90,10 @@ export class SlowLogMemoryRepository {
     return Math.max(...entries.map((e) => e.id));
   }
 
+  hasRunIdEntries(connectionId: string): boolean {
+    return this.slowLogEntries.some((e) => e.connectionId === connectionId && !!e.sourceRunId);
+  }
+
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.slowLogEntries.length;
     if (connectionId) {

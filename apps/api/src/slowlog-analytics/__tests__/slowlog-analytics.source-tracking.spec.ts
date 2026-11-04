@@ -56,14 +56,19 @@ describe('SlowLogAnalyticsService source tracking', () => {
     onInfo = () => undefined;
     generation = 1;
     repo = new SlowLogMemoryRepository();
+    service = newService();
+  });
+
+  function newService(): SlowLogAnalyticsService {
     const storage = {
       saveSlowLogEntries: repo.saveSlowLogEntries.bind(repo),
       getLatestSlowLogId: repo.getLatestSlowLogId.bind(repo),
+      hasRunIdLogEntries: async (id: string) => repo.hasRunIdEntries(id),
     };
     const registry = { getDefaultId: () => 'seed', getAll: () => [], on: jest.fn(), removeListener: jest.fn() };
     const capabilities = { isAvailable: () => true, recordFailure: () => false };
-    service = new SlowLogAnalyticsService(registry as never, storage as never, {} as never, capabilities as never);
-  });
+    return new SlowLogAnalyticsService(registry as never, storage as never, {} as never, capabilities as never);
+  }
 
   it('stores every entry of the node the seed moved to, attributed to that node', async () => {
     endpoint = { host: '10.0.0.1', port: 6379 };
@@ -183,6 +188,21 @@ describe('SlowLogAnalyticsService source tracking', () => {
     stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
     expect(stored.map((e) => e.id).sort()).toEqual([0, 1, 2, 3]);
     expect(stored.every((e) => e.sourceRunId === 'run-a')).toBe(true);
+  });
+
+  it('skips the poll after a monitor restart while INFO fails for a connection that stored a run id', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    await poll();
+
+    service = newService();
+    runId = null;
+    served = entries([0, 1, 2], 1000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
   });
 
   it('skips the poll when the connection reconnects while INFO is pending', async () => {

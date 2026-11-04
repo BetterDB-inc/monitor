@@ -23,6 +23,9 @@ export type SlotStatsOrder = 'key-count' | 'cpu-usec';
 /** How long one node may take to answer a fan-out command before it is left out. */
 export const NODE_COMMAND_TIMEOUT_MS = 5_000;
 
+/** How many SLOTSRANGE reads one node may have in flight at once. */
+const SLOT_RANGE_BATCH_SIZE = 16;
+
 export interface ClusterSlotStatsResult {
   stats: SlotStats;
   /**
@@ -461,11 +464,16 @@ export class ClusterMetricsService {
     const results = await Promise.allSettled(
       primaries.map((node) =>
         this.onNode(node, connectionId, timeoutMs, async (client) => {
-          const perRange = await Promise.allSettled(
-            node.slots.map(([start, end]) =>
-              client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start),
-            ),
-          );
+          const perRange: PromiseSettledResult<unknown>[] = [];
+          for (let i = 0; i < node.slots.length; i += SLOT_RANGE_BATCH_SIZE) {
+            perRange.push(
+              ...(await Promise.allSettled(
+                node.slots
+                  .slice(i, i + SLOT_RANGE_BATCH_SIZE)
+                  .map(([start, end]) => client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start)),
+              )),
+            );
+          }
           const rejected = perRange.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
           if (rejected.length === perRange.length) throw rejected[0].reason;
           const stats = Object.assign(
@@ -557,7 +565,8 @@ export class ClusterMetricsService {
       return [];
     }
 
-    const findNode = (idOrPrefix: string) => nodes.find((n) => n.id.startsWith(idOrPrefix));
+    const findNode = (idOrPrefix: string) =>
+      idOrPrefix ? nodes.find((n) => n.id.startsWith(idOrPrefix)) : undefined;
     // The source's MIGRATING marker and the target's IMPORTING marker describe
     // the same move; keep one entry and let MIGRATING win so the label is stable.
     const legacy = new Map<string, SlotMigration>();

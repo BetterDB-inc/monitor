@@ -29,7 +29,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   // Nested Maps: connectionId -> (type -> lastSeenId)
   private lastSeenIds = new Map<string, Map<CommandLogType, number | null>>();
   // Server process each connection's lastSeenIds belong to (command log IDs are per process).
-  private readonly logSources = new LogSourceTracker();
+  private readonly logSources: LogSourceTracker;
 
   // Nested Maps: connectionId -> (type -> entries)
   private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
@@ -42,6 +42,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
+    this.logSources = new LogSourceTracker((id) => this.storage.hasRunIdLogEntries(id));
   }
 
   protected getIntervalMs(): number {

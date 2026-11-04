@@ -12,6 +12,7 @@ const cmd = (id: number, host: string, runId = '') => ({ ...slow(id, host, runId
 export async function assertLogSourceTracking(storage: StoragePort): Promise<void> {
   await storage.saveSlowLogEntries([slow(40, '10.0.0.1'), slow(7, '10.0.0.2')], 'seed');
   await storage.saveCommandLogEntries([cmd(40, '10.0.0.1'), cmd(7, '10.0.0.2')], 'seed');
+  expect(await storage.hasRunIdLogEntries('seed')).toBe(false);
 
   expect(await storage.getLatestSlowLogId('seed')).toBe(40);
   expect(await storage.getLatestSlowLogId('seed', { host: '10.0.0.2', port: 6379 })).toBe(7);
@@ -28,6 +29,8 @@ export async function assertLogSourceTracking(storage: StoragePort): Promise<voi
   // same id from another process on the same address is kept.
   await storage.saveSlowLogEntries([slow(90, '10.0.0.5', 'run-a'), slow(3, '10.0.0.5', 'run-b')], 'seed');
   await storage.saveCommandLogEntries([cmd(90, '10.0.0.5', 'run-a'), cmd(3, '10.0.0.5', 'run-b')], 'seed');
+  expect(await storage.hasRunIdLogEntries('seed')).toBe(true);
+  expect(await storage.hasRunIdLogEntries('other')).toBe(false);
   expect(await storage.saveSlowLogEntries([slow(3, '10.0.0.5', 'run-a')], 'seed')).toBe(1);
   expect(await storage.getLatestSlowLogId('seed', { host: '10.9.9.9', port: 1, runId: 'run-a' })).toBe(90);
   expect(await storage.getLatestSlowLogId('seed', { host: '10.0.0.5', port: 6379, runId: 'run-b' })).toBe(3);
