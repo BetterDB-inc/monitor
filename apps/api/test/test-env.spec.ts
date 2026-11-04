@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import {
+  applyConnectionSettings,
   applyEnvFile,
   applyTestDbOverrides,
   BLOCKED_KEYS,
@@ -11,19 +12,27 @@ import {
   STUB_ENTITLEMENT_URL,
 } from './test-env';
 
+const writeEnvFile = (contents: string): string => {
+  const path = join(mkdtempSync(join(tmpdir(), 'test-env-')), '.env');
+  writeFileSync(path, contents);
+  return path;
+};
+
+const DEV_ENV_FILE = ['DB_HOST=dev-host', 'DB_PORT=6380', 'DB_PASSWORD=dev-pass', 'DB_TLS=true'].join('\n');
+
 describe('test env', () => {
   describe('applyEnvFile', () => {
-    it('fills the DB and storage settings the shell leaves unset', () => {
+    it('fills the connection settings the shell leaves unset', () => {
       const env: NodeJS.ProcessEnv = {};
       applyEnvFile(
-        ['DB_HOST=db.local', 'DB_TLS=true', 'DB_USERNAME=admin', 'STORAGE_URL=postgres://db/x'].join('\n'),
+        ['DB_HOST=db.local', 'DB_TLS=true', 'DB_USERNAME=admin', 'DB_TLS_CA_FILE=/ca.pem'].join('\n'),
         env,
       );
       expect(env).toEqual({
         DB_HOST: 'db.local',
         DB_TLS: 'true',
         DB_USERNAME: 'admin',
-        STORAGE_URL: 'postgres://db/x',
+        DB_TLS_CA_FILE: '/ca.pem',
       });
     });
 
@@ -33,7 +42,7 @@ describe('test env', () => {
       expect(env.DB_HOST).toBe('from-shell');
     });
 
-    it('ignores every key outside the DB and storage settings', () => {
+    it('ignores every key outside the connection settings', () => {
       const env: NodeJS.ProcessEnv = {};
       const keys = [
         ...BLOCKED_KEYS,
@@ -44,6 +53,8 @@ describe('test env', () => {
         'PROMETHEUS_METRICS_TOKEN',
         'OTEL_EXPORTER_OTLP_ENDPOINT',
         'STORAGE_TYPE',
+        'STORAGE_URL',
+        'DB_SOMETHING_NEW',
       ];
       applyEnvFile(keys.map((key) => `${key}=from-env-file`).join('\n'), env);
       expect(env).toEqual({});
@@ -52,10 +63,8 @@ describe('test env', () => {
 
   describe('loadEnvFile', () => {
     it('applies the connection settings from a file on disk', () => {
-      const path = join(mkdtempSync(join(tmpdir(), 'test-env-')), '.env');
-      writeFileSync(path, 'DB_HOST=db.local\nWORKSPACE_DISABLED=true\n');
       const env: NodeJS.ProcessEnv = {};
-      loadEnvFile(path, env);
+      loadEnvFile(writeEnvFile('DB_HOST=db.local\nWORKSPACE_DISABLED=true\n'), env);
       expect(env).toEqual({ DB_HOST: 'db.local' });
     });
 
@@ -86,6 +95,36 @@ describe('test env', () => {
       const env: NodeJS.ProcessEnv = { DB_PORT: '7000', TEST_DB_PORT: '6391' };
       applyTestDbOverrides(env);
       expect(env.DB_PORT).toBe('7000');
+    });
+  });
+
+  describe('applyConnectionSettings', () => {
+    it('points at the test container and skips the env file by default', () => {
+      const env: NodeJS.ProcessEnv = {};
+      applyConnectionSettings(env, writeEnvFile(DEV_ENV_FILE));
+      expect(env).toEqual({ DB_HOST: 'localhost', DB_PORT: '6390', DB_PASSWORD: 'devpassword' });
+    });
+
+    it('lets the env file win over the test defaults when opted in', () => {
+      const env: NodeJS.ProcessEnv = { BETTERDB_TEST_USE_ENV_FILE: 'true' };
+      applyConnectionSettings(env, writeEnvFile(DEV_ENV_FILE));
+      expect(env).toEqual({
+        BETTERDB_TEST_USE_ENV_FILE: 'true',
+        DB_HOST: 'dev-host',
+        DB_PORT: '6380',
+        DB_PASSWORD: 'dev-pass',
+        DB_TLS: 'true',
+      });
+    });
+
+    it('keeps the shell and TEST_DB_* values ahead of an opted-in env file', () => {
+      const env: NodeJS.ProcessEnv = {
+        BETTERDB_TEST_USE_ENV_FILE: 'true',
+        DB_HOST: 'shell-host',
+        TEST_DB_PORT: '6391',
+      };
+      applyConnectionSettings(env, writeEnvFile(DEV_ENV_FILE));
+      expect([env.DB_HOST, env.DB_PORT, env.DB_PASSWORD]).toEqual(['shell-host', '6391', 'dev-pass']);
     });
   });
 
