@@ -181,7 +181,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const existing = this.discoveredNodes.get(key);
     if (existing && existing.node.address.split('@')[0] !== node.address.split('@')[0]) {
       this.discoveredNodes.delete(key);
-      await this.closeNodeClient(existing.client);
+      existing.client.disconnect();
     }
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
