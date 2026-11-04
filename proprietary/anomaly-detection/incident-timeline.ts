@@ -415,16 +415,17 @@ export class IncidentTimelineBuilder {
     return [...droppedSpans]
       .filter(([connectionId]) => members.has(connectionId) || this.resolveScope(connectionId) === scope)
       .flatMap(([, spans]) => spans)
-      .filter((span) => span.scopeId === undefined || span.scopeId === scope);
+      .filter((span) => span.scopeId === undefined || span.scopeId === scope)
+      .sort((a, b) => a.from - b.from);
   }
 
-  private bridges(span: DroppedSpan, from: number, to: number): boolean {
-    return (
-      from <= span.through &&
-      span.from - from <= this.opts.gapMs &&
-      span.through <= to &&
-      to - span.through <= this.opts.gapMs
-    );
+  private bridges(spans: readonly DroppedSpan[], from: number, to: number): boolean {
+    let reach = from;
+    for (const span of spans) {
+      if (span.from - reach > this.opts.gapMs) break;
+      reach = Math.max(reach, span.through);
+    }
+    return reach > from && to - reach <= this.opts.gapMs;
   }
 
   private bridgesFromDropped(
@@ -453,7 +454,7 @@ export class IncidentTimelineBuilder {
   ): boolean {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
-    if (spans.some((span) => this.bridges(span, last.timestamp, event.timestamp))) return true;
+    if (this.bridges(spans, last.timestamp, event.timestamp)) return true;
     return this.followsRuleStep(current, event);
   }
 

@@ -145,6 +145,43 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0 + 10 * MIN);
     });
 
+    it('bridges a gap through a dropped span that runs past the next event', () => {
+      const first = event({ timestamp: T0 });
+      const inside = event({ timestamp: T0 + 20 * MIN, metricType: MetricType.COMMAND_P99 });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, inside],
+        T0 + 31 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-a', [{ from: T0 + MIN, through: T0 + 30 * MIN, scopeId: 'conn-a' }]]]),
+      );
+
+      expect(incidents).toHaveLength(1);
+    });
+
+    it('bridges a gap through adjacent dropped spans from two connections', () => {
+      const first = event({ timestamp: T0 });
+      const late = event({ timestamp: T0 + 30 * MIN, connectionId: 'conn-b' });
+
+      const incidents = new IncidentTimelineBuilder({}, () => 'cluster').build(
+        [first, late],
+        T0 + 31 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([
+          ['conn-a', [{ from: T0 + MIN, through: T0 + 14 * MIN, scopeId: 'cluster' }]],
+          ['conn-b', [{ from: T0 + 15 * MIN, through: T0 + 29 * MIN, scopeId: 'cluster' }]],
+        ]),
+      );
+
+      expect(incidents).toHaveLength(1);
+    });
+
     it('starts afresh when the dropped events ended before the gap', () => {
       const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
 
