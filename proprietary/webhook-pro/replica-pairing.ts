@@ -22,6 +22,7 @@ interface ReplicationView {
 interface ResolvedHost {
   ips: string[];
   expiresAt: number;
+  failures: number;
 }
 
 export type HostResolver = (host: string) => Promise<string[]>;
@@ -122,10 +123,12 @@ export class ReplicaPairing {
     if (cached && this.now() < cached.expiresAt) return;
     this.resolving.add(host);
     withTimeout(this.resolver(host), DNS_TIMEOUT_MS)
-      .then((ips) => this.hosts.set(host, { ips, expiresAt: this.now() + DNS_TTL_MS }))
-      .catch(() =>
-        this.hosts.set(host, { ips: cached?.ips ?? [], expiresAt: this.now() + DNS_RETRY_MS }),
-      )
+      .then((ips) => this.hosts.set(host, { ips, expiresAt: this.now() + DNS_TTL_MS, failures: 0 }))
+      .catch(() => {
+        const failures = (cached?.failures ?? 0) + 1;
+        const retryIn = Math.min(DNS_RETRY_MS * 2 ** (failures - 1), DNS_TTL_MS);
+        this.hosts.set(host, { ips: [], expiresAt: this.now() + retryIn, failures });
+      })
       .finally(() => this.resolving.delete(host));
   }
 }
