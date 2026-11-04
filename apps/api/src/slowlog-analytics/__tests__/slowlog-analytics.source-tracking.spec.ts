@@ -24,6 +24,8 @@ describe('SlowLogAnalyticsService source tracking', () => {
   let runId: string | null;
   let served: SlowLogEntry[];
   let onRead: () => void;
+  let onInfo: () => void;
+  let generation: number;
 
   const ctx = () => ({
     connectionId: 'seed',
@@ -37,9 +39,12 @@ describe('SlowLogAnalyticsService source tracking', () => {
         return batch;
       }),
       getServingEndpoint: () => endpoint,
+      getConnectionGeneration: () => generation,
       getInfo: jest.fn(async () => {
-        if (runId === null) throw new Error('NOPERM');
-        return { server: { run_id: runId } };
+        const reply = runId;
+        onInfo();
+        if (reply === null) throw new Error('NOPERM');
+        return { server: { run_id: reply } };
       }),
     },
   });
@@ -48,6 +53,8 @@ describe('SlowLogAnalyticsService source tracking', () => {
   beforeEach(() => {
     runId = null;
     onRead = () => undefined;
+    onInfo = () => undefined;
+    generation = 1;
     repo = new SlowLogMemoryRepository();
     const storage = {
       saveSlowLogEntries: repo.saveSlowLogEntries.bind(repo),
@@ -141,6 +148,51 @@ describe('SlowLogAnalyticsService source tracking', () => {
     onRead = () => {
       runId = 'run-b';
       endpoint = { host: '10.0.0.2', port: 6379 };
+    };
+    await poll();
+
+    expect(await repo.getSlowLogEntries({ connectionId: 'seed' })).toEqual([]);
+  });
+
+  it('skips a batch read across a reconnect that came back to the same process', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2], 1000);
+    onRead = () => {
+      generation++;
+    };
+    await poll();
+
+    expect(await repo.getSlowLogEntries({ connectionId: 'seed' })).toEqual([]);
+  });
+
+  it('skips the poll while INFO fails for a connection that reported a run id', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    await poll();
+
+    runId = null;
+    served = entries([0, 1, 2, 3], 1000);
+    await poll();
+    let stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
+
+    runId = 'run-a';
+    await poll();
+    stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.map((e) => e.id).sort()).toEqual([0, 1, 2, 3]);
+    expect(stored.every((e) => e.sourceRunId === 'run-a')).toBe(true);
+  });
+
+  it('skips the poll when the connection reconnects while INFO is pending', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    onInfo = () => {
+      generation++;
+      endpoint = { host: '10.0.0.2', port: 6379 };
+      onInfo = () => undefined;
     };
     await poll();
 

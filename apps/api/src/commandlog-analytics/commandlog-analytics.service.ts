@@ -14,8 +14,7 @@ import {
   MultiConnectionPoller,
   ConnectionContext,
   describeLogSource,
-  logSourceKey,
-  readLogSource,
+  LogSourceTracker,
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
@@ -30,7 +29,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   // Nested Maps: connectionId -> (type -> lastSeenId)
   private lastSeenIds = new Map<string, Map<CommandLogType, number | null>>();
   // Server process each connection's lastSeenIds belong to (command log IDs are per process).
-  private trackedSources = new Map<string, { key: string; label: string }>();
+  private readonly logSources = new LogSourceTracker();
 
   // Nested Maps: connectionId -> (type -> entries)
   private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
@@ -90,17 +89,20 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
       return;
     }
 
-    const source = await readLogSource(ctx);
-    const sourceKey = logSourceKey(source);
-    const previousSource = this.trackedSources.get(ctx.connectionId);
-    if (previousSource?.key !== sourceKey) {
-      if (previousSource !== undefined) {
+    const read = await this.logSources.read(ctx);
+    if (!read) {
+      this.logger.debug(`Command log source for ${ctx.connectionName} is unknown; skipping this poll`);
+      return;
+    }
+    const { source } = read;
+    const moved = this.logSources.track(ctx.connectionId, read);
+    if (moved.changed) {
+      if (moved.previous !== undefined) {
         this.logger.log(
-          `Command log source for ${ctx.connectionName} moved from ${previousSource.label} to ${describeLogSource(source)}`,
+          `Command log source for ${ctx.connectionName} moved from ${moved.previous} to ${describeLogSource(source)}`,
         );
       }
       this.lastSeenIds.delete(ctx.connectionId);
-      this.trackedSources.set(ctx.connectionId, { key: sourceKey, label: describeLogSource(source) });
     }
 
     // Initialize per-connection state if needed
@@ -130,7 +132,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
     // A reconnect during the reads above moves the socket to another process;
     // its entries must not be stored under this source.
-    if (logSourceKey(await readLogSource(ctx)) !== sourceKey) {
+    if (!(await this.logSources.unchanged(ctx, read))) {
       this.logger.debug(`Command log source for ${ctx.connectionName} changed during the read; skipping this poll`);
       return;
     }
@@ -204,7 +206,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
-    this.trackedSources.delete(connectionId);
+    this.logSources.forget(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

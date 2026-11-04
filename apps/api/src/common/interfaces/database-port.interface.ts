@@ -132,6 +132,12 @@ export interface DatabasePort {
    */
   getServingEndpoint?(): { host: string; port: number } | null;
   /**
+   * Bumped every time the connection's socket is (re)established. Two equal
+   * readings mean every command between them ran on the same socket, so on the
+   * same server process.
+   */
+  getConnectionGeneration?(): number;
+  /**
    * The SSH host-key fingerprint observed on connect when none was pinned
    * (trust-on-first-use). Present only on adapters that support SSH tunnels.
    */
