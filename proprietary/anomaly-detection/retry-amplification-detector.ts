@@ -148,6 +148,7 @@ export interface RetryAmplificationState {
   ackedLevel: RetryAmplificationLevel;
   pending: RetryAmplificationFinding | null;
   lastEpisode: RetryAmplificationEpisode | null;
+  priorEpisodeEndedAt: number | null;
 }
 
 const LEVEL_RANK: Record<RetryAmplificationLevel, number> = { none: 0, warning: 1, critical: 2 };
@@ -202,6 +203,7 @@ export function createRetryAmplificationState(
     ackedLevel: 'none',
     pending: null,
     lastEpisode: null,
+    priorEpisodeEndedAt: null,
   };
 }
 
@@ -470,6 +472,7 @@ function closeEpisode(state: RetryAmplificationState, endedAt: number, base: Win
         : run.length < RETRY_AMP_MIN_WINDOWS
           ? 'transient'
           : 'unconfirmed';
+    state.priorEpisodeEndedAt = qualifyingEnd(state.lastEpisode) ?? state.priorEpisodeEndedAt;
     state.lastEpisode = {
       classification,
       level: state.episodeLevel,
@@ -591,10 +594,11 @@ export function evaluateRetryAmplification(
     sample.totalCommands < last.totalCommands
   ) {
     endEpisodeAtPollGap(state, last.timestamp);
-    const { coldWindows, lastEpisode, pending } = state;
+    const { coldWindows, lastEpisode, priorEpisodeEndedAt, pending } = state;
     Object.assign(state, createRetryAmplificationState(state.maxPollGapMs), {
       coldWindows,
       lastEpisode,
+      priorEpisodeEndedAt,
       pending,
     });
   }
@@ -712,6 +716,16 @@ export function describeRetryAmplificationState(
 
 export function openEpisodeStart(state: RetryAmplificationState): number | null {
   return state.hotRun[0]?.start ?? null;
+}
+
+function qualifyingEnd(episode: RetryAmplificationEpisode | null): number | null {
+  return episode && episode.classification !== 'transient' ? episode.endedAt : null;
+}
+
+export function precedingEpisodeEnd(state: RetryAmplificationState): number | null {
+  return state.hotRun.length > 0
+    ? (qualifyingEnd(state.lastEpisode) ?? state.priorEpisodeEndedAt)
+    : state.priorEpisodeEndedAt;
 }
 
 export function latestEpisodeStart(state: RetryAmplificationState): number | null {

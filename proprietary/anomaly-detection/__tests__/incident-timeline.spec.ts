@@ -769,6 +769,122 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidents).toHaveLength(2);
     });
 
+    describe('when the earlier step is no longer held', () => {
+      const anchor = {
+        scopeId: 'conn-a',
+        startedAt: T0,
+        anomalyId: 'z-gone',
+        metricType: MetricType.CONNECTIONS,
+        connectionId: 'conn-a',
+      };
+      const dropped = (
+        late: AnomalyEvent,
+        stored: Partial<typeof anchor> = {},
+        rule: SequenceRule = escalation,
+      ) =>
+        new IncidentTimelineBuilder({}, () => 'conn-a', () => [rule]).build(
+          [late],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [{ ...anchor, ...stored }],
+          new Map([['conn-a', T0]]),
+        );
+
+      it('keeps the stored start for a later step the rule can still bridge', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }));
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+
+      it('starts afresh for an event that is not a later step of a rule', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN, metricType: MetricType.CONNECTIONS }),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('measures the span of the rule from the stored start', () => {
+        const [incident] = new IncidentTimelineBuilder({}, (id) => id, () => [escalation]).build(
+          [event({ id: 'late', timestamp: T0 + 15 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [anchor],
+          new Map([['conn-a', T0 + 9 * MIN]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 15 * MIN);
+      });
+
+      it('starts afresh past the span of the rule', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 11 * MIN }));
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 11 * MIN);
+      });
+
+      it('starts afresh when the stored start was not the step before', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }), {
+          metricType: MetricType.MEMORY_USED,
+        });
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('starts afresh when a same-connection rule began on another connection', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN }),
+          { connectionId: 'conn-b' },
+          { ...escalation, sameConnection: true },
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('keeps the stored start when a same-connection rule began on the same connection', () => {
+        const [incident] = dropped(
+          event({ id: 'late', timestamp: T0 + 5 * MIN }),
+          {},
+          { ...escalation, sameConnection: true },
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+
+      describe('when a later member of the incident was the step before', () => {
+        const unrelatedStart = { ...anchor, metricType: MetricType.MEMORY_USED };
+        const step = { metricType: MetricType.CONNECTIONS, connectionId: 'conn-a', timestamp: T0 + MIN };
+        const withMember = (droppedThrough: number) =>
+          new IncidentTimelineBuilder({}, () => 'conn-a', () => [escalation]).build(
+            [event({ id: 'late', timestamp: T0 + 8 * MIN })],
+            T0 + 20 * MIN,
+            neverRecovers,
+            [{ ...unrelatedStart, members: [step] }],
+            new Map([['conn-a', droppedThrough]]),
+          );
+
+        it('keeps the stored start', () => {
+          const [incident] = withMember(T0 + MIN);
+
+          expect(incidentStartOf(incident.incidentId)).toBe(T0);
+        });
+
+        it('does not bridge from a member that was not dropped', () => {
+          const [incident] = withMember(T0 + MIN - 1);
+
+          expect(incidentStartOf(incident.incidentId)).toBe(T0 + 8 * MIN);
+        });
+      });
+
+      it('starts afresh when the stored start does not say what began it', () => {
+        const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }), {
+          metricType: undefined,
+          connectionId: undefined,
+        });
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+    });
+
     it('takes in a step stamped ahead of an incident that already has a boundary', () => {
       const cost = event({ timestamp: T0 + 5 * MIN });
       const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };
