@@ -20,6 +20,7 @@ import {
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 @Injectable()
 export class MetricsService {
@@ -189,7 +190,7 @@ export class MetricsService {
 
     const role = replication?.role ?? 'unknown';
     let replicationLag: number | null = null;
-    if (role === 'slave' || role === 'replica') {
+    if (isReplicaRole(role)) {
       const lastIo = Number(replication?.master_last_io_seconds_ago ?? -1);
       replicationLag = lastIo >= 0 ? lastIo : null;
     }

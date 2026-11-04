@@ -3,7 +3,13 @@ import { ConfigService } from '@nestjs/config';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { withTimeout } from '../common/utils/with-timeout';
-import { InfoParser } from '../database/parsers/info.parser';
+import {
+  ReplicaLine,
+  hasReplicaLines,
+  isReplicaRole,
+  parseReplicaLines,
+  toFiniteNumber,
+} from '../database/parsers/replication-info.parser';
 import {
   HealthGateResult,
   HealthGateSignals,
@@ -12,8 +18,6 @@ import {
   isLagAtLimit,
 } from './health-gate';
 
-const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
-const REPLICA_LINE_KEY = /^(slave|replica)\d+$/;
 const NUMBERED_MASTER_LINK_KEY = /^(master_\d+)_link_status$/;
 const REPLICA_ACK_POLL_INTERVAL_MS = 250;
 const REPLICA_ACK_TIMEOUT_MS = 2500;
@@ -24,8 +28,6 @@ interface ReplicaAckSample {
   primaryOffset: number;
   acks: Map<string, number>;
 }
-
-type ReplicaLine = [string, Record<string, string>];
 
 interface SharedGate {
   result: Promise<HealthGateResult>;
@@ -48,17 +50,13 @@ export class HealthGateService {
     private readonly storage: StoragePort,
     configService: ConfigService,
   ) {
-    this.oomWindowMs = Number(
-      configService.get('MONITOR_RECENT_OOM_WINDOW_MS', 5 * 60 * 1000),
-    );
+    this.oomWindowMs = Number(configService.get('MONITOR_RECENT_OOM_WINDOW_MS', 5 * 60 * 1000));
     this.failoverWindowMs = Number(
       configService.get('MONITOR_RECENT_FAILOVER_WINDOW_MS', 2 * 60 * 1000),
     );
     this.replicaIoStaleSeconds = Number(configService.get('MONITOR_REPLICA_IO_STALE_SEC', 30));
     const memoryPct = Number(configService.get('MONITOR_MEMORY_PCT_THRESHOLD', 85));
-    const lagBytes = Number(
-      configService.get('MONITOR_REPLICATION_LAG_BYTES', 10 * 1024 * 1024),
-    );
+    const lagBytes = Number(configService.get('MONITOR_REPLICATION_LAG_BYTES', 10 * 1024 * 1024));
     this.thresholds = {
       memoryPctThreshold: memoryPct / 100,
       replicationLagThresholdBytes: lagBytes,
@@ -287,7 +285,7 @@ function readReplication(
   const infoFailoverInProgress =
     failoverState !== undefined && failoverState !== '' && failoverState !== 'no-failover';
 
-  const replicaLines = readReplicaLines(replication);
+  const replicaLines = parseReplicaLines(replication);
   const ackSample = parseAckSample(replication, replicaLines);
 
   return {
@@ -303,10 +301,10 @@ function readReplicaLinkDown(
   replicaLines: ReplicaLine[],
   replicaIoStaleSeconds: number,
 ): boolean | null {
-  const masterPrefixes = REPLICA_ROLES.has(replication.role) ? readMasterPrefixes(replication) : [];
+  const masterPrefixes = isReplicaRole(replication.role) ? readMasterPrefixes(replication) : [];
   const links = [
     ...masterPrefixes.map((prefix) => isMasterLinkDown(replication, prefix, replicaIoStaleSeconds)),
-    ...replicaLines.map(([, fields]) => isReplicaLinkDown(fields, replicaIoStaleSeconds)),
+    ...replicaLines.map((line) => isReplicaLinkDown(line, replicaIoStaleSeconds)),
   ];
   if (links.includes(true)) {
     return true;
@@ -342,21 +340,17 @@ function isMasterLinkDown(
     : false;
 }
 
-function isReplicaLinkDown(
-  fields: Record<string, string>,
-  replicaIoStaleSeconds: number,
-): boolean | null {
-  if (fields.state === undefined) {
+function isReplicaLinkDown(line: ReplicaLine, replicaIoStaleSeconds: number): boolean | null {
+  if (line.state === null) {
     return null;
   }
-  if (fields.state !== 'online') {
+  if (line.state !== 'online') {
     return true;
   }
-  const lagSeconds = parseNumber(fields.lag);
-  if (readAckedOffset(fields) === null || lagSeconds === null) {
+  if (readAckedOffset(line) === null || line.lagSec === null) {
     return null;
   }
-  return lagSeconds > replicaIoStaleSeconds;
+  return line.lagSec > replicaIoStaleSeconds;
 }
 
 function furthestReplicaGap(
@@ -367,7 +361,7 @@ function furthestReplicaGap(
     return null;
   }
   if (sample.acks.size === 0) {
-    return REPLICA_ROLES.has(replication.role) || hasConnectedReplicas(replication) ? null : 0;
+    return isReplicaRole(replication.role) || hasConnectedReplicas(replication) ? null : 0;
   }
   return Math.max(...readReplicaGaps(sample).values());
 }
@@ -379,41 +373,31 @@ function readReplicaGaps(sample: ReplicaAckSample): Map<string, number> {
 }
 
 function hasConnectedReplicas(replication: Record<string, string>): boolean {
-  return (
-    toNumber(replication.connected_slaves) > 0 ||
-    Object.keys(replication).some((key) => REPLICA_LINE_KEY.test(key))
-  );
+  return toNumber(replication.connected_slaves) > 0 || hasReplicaLines(replication);
 }
 
 function parseAckSample(
   replication: Record<string, string>,
-  replicaLines = readReplicaLines(replication),
+  replicaLines = parseReplicaLines(replication),
 ): ReplicaAckSample | null {
-  const primaryOffset = parseNumber(replication.master_repl_offset);
+  const primaryOffset = toFiniteNumber(replication.master_repl_offset);
   return primaryOffset === null ? null : { primaryOffset, acks: readAcks(replicaLines) };
 }
 
 function readAcks(replicaLines: ReplicaLine[]): Map<string, number> {
   const acks = new Map<string, number>();
-  for (const [key, fields] of replicaLines) {
-    const offset = readAckedOffset(fields);
+  for (const line of replicaLines) {
+    const offset = readAckedOffset(line);
     if (offset !== null) {
-      const id = fields.ip === undefined ? key : `${fields.ip}:${fields.port}`;
+      const id = line.addr ?? line.key;
       acks.set(id, Math.min(offset, acks.get(id) ?? offset));
     }
   }
   return acks;
 }
 
-function readReplicaLines(replication: Record<string, string>): ReplicaLine[] {
-  return Object.entries(replication)
-    .filter(([key]) => REPLICA_LINE_KEY.test(key))
-    .map(([key, value]) => [key, InfoParser.parseKvLine(value, ',')]);
-}
-
-function readAckedOffset(fields: Record<string, string>): number | null {
-  const offset = parseNumber(fields.offset);
-  return fields.state === 'online' && offset !== null && offset > 0 ? offset : null;
+function readAckedOffset(line: ReplicaLine): number | null {
+  return line.state === 'online' && line.offset !== null && line.offset > 0 ? line.offset : null;
 }
 
 function parseNumber(raw: string | undefined): number | null {

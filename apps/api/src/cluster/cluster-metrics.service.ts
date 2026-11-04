@@ -12,6 +12,7 @@ import {
 } from '../common/types/metrics.types';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
 import { isAmbiguousCommand, isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -493,7 +494,7 @@ export class ClusterMetricsService {
     if (role === 'master') {
       return 'master';
     }
-    if (role === 'slave' || role === 'replica') {
+    if (isReplicaRole(role)) {
       return 'replica';
     }
     return undefined;

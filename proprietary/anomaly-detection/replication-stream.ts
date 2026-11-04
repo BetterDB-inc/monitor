@@ -1,9 +1,10 @@
-import { InfoParser } from '@app/database/parsers/info.parser';
+import {
+  isReplicaRole,
+  parseReplicaLines,
+  toFiniteNumber,
+} from '@app/database/parsers/replication-info.parser';
 
 export const REPLICATION_RATE_EWMA_ALPHA = 0.3;
-
-const REPLICA_LINE_KEY = /^(?:slave|replica)(\d+)$/;
-const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 
 export interface ReplicaOffsetLine {
   key: string;
@@ -35,32 +36,12 @@ interface StreamBaseline {
   ewma: number | null;
 }
 
-function toFiniteNumber(raw: string | undefined): number | null {
-  if (raw === undefined || raw.trim() === '') return null;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : null;
-}
-
-export function parseReplicaLines(info: Record<string, string>): ReplicaOffsetLine[] {
-  const parsed: Array<{ index: number; line: ReplicaOffsetLine }> = [];
-  for (const [key, value] of Object.entries(info)) {
-    const match = REPLICA_LINE_KEY.exec(key);
-    if (!match || typeof value !== 'string') continue;
-    const fields = InfoParser.parseKvLine(value, ',');
-    const offset = toFiniteNumber(fields.offset);
-    if (!fields.ip || !fields.port || offset === null) continue;
-    parsed.push({
-      index: Number(match[1]),
-      line: {
-        key,
-        addr: `${fields.ip}:${fields.port}`,
-        state: fields.state ?? 'unknown',
-        offset,
-        lagSec: toFiniteNumber(fields.lag),
-      },
-    });
-  }
-  return parsed.sort((a, b) => a.index - b.index).map((p) => p.line);
+export function parseReplicaOffsetLines(info: Record<string, string>): ReplicaOffsetLine[] {
+  return parseReplicaLines(info).flatMap(({ key, addr, state, offset, lagSec }) =>
+    addr === null || offset === null
+      ? []
+      : [{ key, addr, state: state ?? 'unknown', offset, lagSec }],
+  );
 }
 
 export class ReplicationStreamTracker {
@@ -103,7 +84,7 @@ export class ReplicationStreamTracker {
 
     this.baselines.set(connectionId, { replid, offset: masterReplOffset, ts: timestamp, ewma });
 
-    const isReplica = REPLICA_ROLES.has(info.role);
+    const isReplica = isReplicaRole(info.role);
     return {
       timestamp,
       role: isReplica ? 'replica' : 'primary',
@@ -114,7 +95,7 @@ export class ReplicationStreamTracker {
       replBacklogSize: toFiniteNumber(info.repl_backlog_size),
       replicas: isReplica
         ? []
-        : parseReplicaLines(info).map((line) => ({
+        : parseReplicaOffsetLines(info).map((line) => ({
             ...line,
             gapBytes: Math.max(0, masterReplOffset - line.offset),
           })),

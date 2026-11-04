@@ -76,6 +76,7 @@ import {
   evaluateWriteRejection,
   type WriteRejectionState,
 } from '../monitor/write-rejection';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 /** How long a CONFIG GET of the BGSAVE stop-writes settings stays fresh. */
 const RDB_STOPS_WRITES_TTL_MS = 5 * 60_000;
@@ -2212,7 +2213,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   ): void {
     const replication = info.replication;
     const role = replication?.role;
-    const isReplica = role === 'slave' || role === 'replica';
+    const isReplica = isReplicaRole(role);
 
     if (replication === undefined || role === undefined) {
       this.masterLinkUp.remove(connLabel);
