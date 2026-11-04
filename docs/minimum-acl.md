@@ -78,7 +78,7 @@ Monitor sessions (manual, scheduled and anomaly-triggered captures) and the capt
 
 ### Vector search
 
-The vector search page, key browsing on it, and index snapshots. Use the key pattern your indexes cover instead of `~*` if you can. Some search modules don't have `FT.TAGVALS`, `FT.CONFIG` or `FT.PROFILE`; drop those rules if they are rejected. BetterDB checks for search with `FT._LIST` when it connects, so reconnect after adding these rules.
+The vector search page, key browsing on it, and index snapshots. Use the key pattern your indexes cover instead of `~*` if you can. `SCAN` still lists key names outside that pattern. Some search modules don't have `FT.TAGVALS`, `FT.CONFIG` or `FT.PROFILE`; drop those rules if they are rejected. BetterDB checks for search with `FT._LIST` when it connects, so reconnect after adding these rules.
 
 ```
 %R~* +scan +ft._list +ft.info +ft.search +ft.tagvals +ft.config|get +ft.profile +hget +hgetall
@@ -86,7 +86,7 @@ The vector search page, key browsing on it, and index snapshots. Use the key pat
 
 ### Session explorer
 
-Browsing keys and reading their values in the session explorer. Use the key pattern your sessions live under.
+Browsing keys and reading their values in the session explorer. Use the key pattern your sessions live under. `SCAN` doesn't apply key patterns, so this user can still list key names outside the pattern; reading values stays limited to it.
 
 ```
 %R~* +scan +exists +type +pttl +memory|usage +object|idletime +strlen +getrange +llen +lrange +hlen +hscan +hstrlen +hmget +hgetall +scard +sscan +smembers +zcard +zrange +xlen +xrange +json.debug|memory +json.get
