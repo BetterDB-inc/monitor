@@ -84,7 +84,11 @@ const ADD_ONS: Record<string, { allowed: Command[]; denied: Command[]; with?: st
       ['HGETALL', '__betterdb:caches'],
       ['GET', '__betterdb:heartbeat:faq'],
       ['HGETALL', 'faq:__stats'],
+      ['HGETALL', 'faq:__config'],
+      ['HGETALL', 'mem:__mem_config'],
       ['ZRANGE', 'faq:__similarity_window', '0', '-1'],
+      ['HGET', 'faq:__tool_policies', 'search'],
+      ['LRANGE', 'faq:__tuning_history', '0', '9'],
     ],
     denied: [
       ['GET', 'faq:entry:1'],
@@ -101,7 +105,7 @@ const ADD_ONS: Record<string, { allowed: Command[]; denied: Command[]; with?: st
   },
   'Session capture': {
     allowed: [['MONITOR'], ['ACL', 'GETUSER', 'default']],
-    denied: [],
+    denied: [['GET', 'k']],
   },
   'Vector search': {
     allowed: [
@@ -112,7 +116,10 @@ const ADD_ONS: Record<string, { allowed: Command[]; denied: Command[]; with?: st
       ['HGET', 'k', 'f'],
       ['HGETALL', 'k'],
     ],
-    denied: [['FT.CREATE', 'idx2', 'SCHEMA', 'f', 'TEXT']],
+    denied: [
+      ['FT.CREATE', 'idx2', 'SCHEMA', 'f', 'TEXT'],
+      ['HSET', 'k', 'f', 'v'],
+    ],
   },
   'Session explorer': {
     allowed: [
@@ -194,22 +201,28 @@ describe('Minimum ACL page (E2E)', () => {
   };
 
   const expectAllowed = async (commands: Command[]) => {
+    let checked = 0;
     for (const cmd of commands) {
       const result = await dryRun(cmd);
       if (result === 'unsupported') continue;
+      checked++;
       expect({ cmd: cmd.join(' '), result }).toEqual({ cmd: cmd.join(' '), result: 'OK' });
     }
+    expect(checked).toBeGreaterThan(0);
   };
 
   const expectDenied = async (commands: Command[]) => {
+    let checked = 0;
     for (const cmd of commands) {
       const result = await dryRun(cmd);
       if (result === 'unsupported') continue;
+      checked++;
       expect({ cmd: cmd.join(' '), denied: result !== 'OK' }).toEqual({
         cmd: cmd.join(' '),
         denied: true,
       });
     }
+    expect(checked).toBeGreaterThan(0);
   };
 
   beforeAll(async () => {

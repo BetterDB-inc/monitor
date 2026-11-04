@@ -54,15 +54,15 @@ Key analytics, KV cache monitoring and the cache simulator. `%R~*` grants read-o
 
 ### AI observability
 
-The AI cache and agent memory panels. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__stats` and `<name>:__similarity_window` keys on every connection.
+The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection.
 
 ```
-%R~__betterdb:* %R~*:__stats %R~*:__similarity_window +get +hgetall +zrange
+%R~__betterdb:* %R~*:__* +get +hget +hgetall +lrange +zrange
 ```
 
 ### ACL auditing
 
-ACL drift detection, config-change webhooks for ACL users, and the "default user" config hazard check. `ACL LIST` returns password hashes for every user. Leave this out if that is a concern.
+ACL drift detection, config-change webhooks, and the "default user" config hazard check. Config-change webhooks read the ACL user list first, so without this add-on they don't report config setting changes either. `ACL LIST` returns password hashes for every user. Leave this out if that is a concern.
 
 ```
 +acl|list +acl|users +acl|getuser
@@ -109,7 +109,7 @@ The migration analysis report on the source. Add the key sampling rules too.
 | `SELECT` | Connections with a database index other than 0, and key analytics, which scans every database listed in `INFO keyspace` | Key analytics only covers the connection's own database |
 | `CLIENT SETNAME` | Labels BetterDB's own connections in `CLIENT LIST` | Connections still open, unnamed |
 | `CLIENT LIST` | Clients page, client analytics, COB pressure, KV cache client detection | Client pages show as unavailable |
-| `CLIENT GETNAME` | Checking whether `CLIENT LIST` is allowed | Client pages stay unavailable even with `CLIENT LIST` |
+| `CLIENT GETNAME` | **Retry** on the client pages, which checks whether `CLIENT LIST` is now allowed | Client pages work, but **Retry** can't re-enable them after you grant `CLIENT LIST`; reconnect instead |
 | `CLIENT NO-TOUCH` | Session explorer reads don't reset key idle times | Reads still work, and reset idle times |
 | `CONFIG GET` | Config drift, config hazard checks, scaling readiness, client eviction and COB pressure detectors, Prometheus persistence metrics | Those checks and detectors skip the connection |
 | `SLOWLOG GET`, `SLOWLOG LEN` | Slow log page and slow log analytics | Slow log shows as unavailable |
@@ -126,12 +126,13 @@ The migration analysis report on the source. Add the key sampling rules too.
 
 ## Commands that change data or server state
 
-Apart from `ACL LOG RESET` (see above), none of these are in the lines above. Grant them only if you use the feature. Commands that write keys also need a write key pattern such as `%RW~<prefix>*` for the keys they touch; `%R~*` alone still blocks them.
+Apart from `ACL LOG RESET` (see above) and `SENTINEL CONFIG SET` (see [Sentinel](#sentinel)), none of these are in the lines above. Grant them only if you use the feature. Commands that write keys also need a write key pattern such as `%RW~<prefix>*` for the keys they touch; `%R~*` alone still blocks them.
 
 | Command | Triggered by |
 | ------- | ------------ |
 | `SLOWLOG RESET`, `COMMANDLOG RESET`, `LATENCY RESET`, `ACL LOG RESET` | The matching `DELETE /metrics/...` API endpoints |
 | `CLIENT KILL` | The `DELETE /metrics/clients` API endpoint |
+| `SENTINEL CONFIG SET` | Nothing in BetterDB, but `+sentinel\|config` allows it (see [Sentinel](#sentinel)) |
 | `UNLINK` | Bulk delete **Execute** |
 | `HSET`, `LPUSH`, `LTRIM`, `DEL` on cache keys | Approving a semantic-cache or agent-cache proposal. `LTRIM` caps the tuning history; without it the history list keeps growing. |
 | `DEL` on memory keys | Approving an agent memory forget proposal |
