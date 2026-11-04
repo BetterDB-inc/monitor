@@ -181,6 +181,23 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidents).toHaveLength(1);
     });
 
+    it('ignores an unscoped dropped span from a connection outside the scope', () => {
+      const first = event({ timestamp: T0 });
+      const late = event({ timestamp: T0 + 20 * MIN });
+
+      const incidents = new IncidentTimelineBuilder().build(
+        [first, late],
+        T0 + 21 * MIN,
+        neverRecovers,
+        [],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([['conn-z', [{ from: T0 + MIN, through: T0 + 19 * MIN }]]]),
+      );
+
+      expect(incidents).toHaveLength(2);
+    });
+
     it('bridges a gap through adjacent dropped spans from two connections', () => {
       const first = event({ timestamp: T0 });
       const late = event({ timestamp: T0 + 30 * MIN, connectionId: 'conn-b' });
