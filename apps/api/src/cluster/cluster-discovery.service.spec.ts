@@ -284,11 +284,11 @@ describe('ClusterDiscoveryService', () => {
       expect(await service.getNodeConnection(target.id, 'test-connection')).not.toBe(othersClient);
     });
 
-    it('opens a new client once the node moves to another address', async () => {
+    it('drops the old client without waiting on it once the node moves to another address', async () => {
       const nodes = await service.discoverNodes();
       const target = nodes[0];
       const internal = service as unknown as { discoveredNodes: Map<string, { client: unknown }> };
-      const oldClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn() };
+      const oldClient = { status: 'ready', quit: jest.fn(() => new Promise(() => {})), disconnect: jest.fn() };
       internal.discoveredNodes.set(target.id, {
         node: { ...target, address: '10.9.9.9:6379' },
         client: oldClient,
@@ -300,7 +300,8 @@ describe('ClusterDiscoveryService', () => {
       const returned = await service.getNodeConnection(target.id, 'test-connection');
 
       expect(returned).not.toBe(oldClient);
-      expect(oldClient.quit).toHaveBeenCalled();
+      expect(oldClient.disconnect).toHaveBeenCalled();
+      expect(oldClient.quit).not.toHaveBeenCalled();
     });
 
     it("keeps using a connection's own client once the shared one is gone", async () => {
