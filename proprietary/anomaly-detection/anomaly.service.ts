@@ -44,6 +44,7 @@ import {
   ConnectionChurnSample,
 } from './connection-churn';
 import {
+  IncidentBoundary,
   IncidentTimeline,
   IncidentTimelineBuilder,
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
@@ -54,6 +55,7 @@ import {
   RESOLVER_BACKED_METRICS,
   RecoveryProbe,
   incidentStartOf,
+  mergeRuleSteps,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
 import {
@@ -283,6 +285,7 @@ import {
   RetryAmplificationStatus,
   describeRetryAmplificationState,
   latestEpisodeStart,
+  precedingEpisodeEnd,
   openEpisodeStart,
   retryAmplificationRearm,
   observePushCadence,
@@ -296,7 +299,9 @@ import {
   rankRetryAmplificationContributors,
   estimateNewConnections,
   selectClientSnapshots,
+  hasRatePair,
   readClientCommandCounts,
+  RETRY_AMP_MAX_BASELINE_SCALE,
 } from './retry-amplification-attribution';
 import {
   LargeReplyEntry,
@@ -410,6 +415,7 @@ interface RetryAmplificationReport {
   clientSnapshots: ClientCommandSnapshot[];
   attributionStart: number;
   closedAt: number | undefined;
+  notBefore: number | null;
   timestamp: number;
   rearm: () => void;
 }
@@ -447,7 +453,7 @@ export class AnomalyService
   private readonly sequenceDedupeBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
   private readonly incidentBoundaryBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
   private scopeSeeds: Map<string, string> | null = null;
-  private liveBoundaries: StoredIncidentBoundary[] = [];
+  private liveBoundaries: IncidentBoundary[] = [];
   private incidentsDirty = true;
   private liveEventsById = new Map<string, AnomalyEvent>();
   private incidentsBuiltAt = 0;
@@ -3825,6 +3831,7 @@ export class AnomalyService
       clientSnapshots,
       attributionStart,
       closedAt,
+      notBefore: precedingEpisodeEnd(state),
       timestamp,
       rearm: retryAmplificationRearm(state, finding),
     });
@@ -3852,6 +3859,7 @@ export class AnomalyService
     clientSnapshots,
     attributionStart,
     closedAt,
+    notBefore,
     timestamp,
     rearm,
   }: RetryAmplificationReport): Promise<void> {
@@ -3860,6 +3868,7 @@ export class AnomalyService
       clientSnapshots,
       attributionStart,
       closedAt ?? timestamp,
+      notBefore,
     );
     if (this.retryAmplificationState.get(ctx.connectionId) !== state) return;
     this.retryAmplificationContributors.set(ctx.connectionId, {
@@ -3987,26 +3996,33 @@ export class AnomalyService
     clientSnapshots: ClientCommandSnapshot[],
     episodeStart: number,
     until: number,
+    notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
-    const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until);
+    const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
     let capture: ClientSnapshotGroupRow[] = [];
     let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
     let baselineConnections: typeof newConnections = [];
+    let baselineRead = false;
     let snapshotsLoaded = true;
-    const baselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    const baselineStart =
+      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
+    const baselineScale =
+      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
     const captureRead = withTimeout(
-      this.storage.getClientConnectionCaptures(ctx.connectionId, baselineStart, until),
+      this.storage.getClientConnectionCaptures(ctx.connectionId, fullBaselineStart, until),
       RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
     ).catch((error): ClientConnectionCaptureRow[] => {
       this.logger.debug(`Client captures unavailable for ${ctx.connectionName}: ${String(error)}`);
       return [];
     });
     try {
-      [capture, newConnections, baselineConnections] = await withTimeout(
+      [capture, newConnections, baselineConnections, baselineRead] = await withTimeout(
         Promise.all([
           this.latestClientCapture(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
           this.storage.getNewClientConnections(ctx.connectionId, baselineStart, episodeStart - 1),
+          this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
@@ -4015,26 +4031,43 @@ export class AnomalyService
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
     const connectionCaptures = await captureRead;
-    const reconnectsKnown = snapshotsLoaded && capture.length > 0;
-    const ratesKnown =
-      snapshots.before !== null && snapshots.first !== null && snapshots.latest !== null;
-    if (!reconnectsKnown && !ratesKnown) return null;
-    return rankRetryAmplificationContributors({
+    const reconnectsKnown =
+      snapshotsLoaded &&
+      capture.length > 0 &&
+      baselineRead &&
+      baselineScale <= RETRY_AMP_MAX_BASELINE_SCALE;
+    const ratesKnown = hasRatePair(snapshots);
+    const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
-      newConnections: estimateNewConnections(
-        newConnections,
-        connectionCaptures,
-        episodeStart,
-        until,
-      ),
-      baselineConnections: estimateNewConnections(
-        baselineConnections,
-        connectionCaptures,
-        baselineStart,
-        episodeStart - 1,
-      ),
+      newConnections: reconnectsKnown
+        ? estimateNewConnections(newConnections, connectionCaptures, episodeStart, until)
+        : [],
+      baselineConnections: reconnectsKnown
+        ? estimateNewConnections(
+            baselineConnections,
+            connectionCaptures.filter((row) => row.capturedAt >= baselineStart),
+            baselineStart,
+            episodeStart - 1,
+          ).map((group) => ({ ...group, count: group.count * baselineScale }))
+        : [],
     });
+    if (ranked.length > 0) return ranked;
+    return reconnectsKnown && ratesKnown ? [] : null;
+  }
+
+  private async hasClientReadings(
+    connectionId: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<boolean> {
+    const readings = await this.storage.getClientSnapshots({
+      connectionId,
+      startTime,
+      endTime,
+      limit: 1,
+    });
+    return readings.length > 0;
   }
 
   private async latestClientCapture(
@@ -6593,8 +6626,9 @@ export class AnomalyService
     return this.incidentEventsById.get(anomalyId);
   }
 
-  private stampScope(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+  private stamp(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
     anomaly.scopeId ??= this.correlationScopeOf(connectionId) || undefined;
+    anomaly.eventSequence ??= this.nextEventSequence++;
   }
 
   private async addAnomaly(
@@ -6602,8 +6636,7 @@ export class AnomalyService
     ctx?: ConnectionContext,
     onDrop?: () => void,
   ): Promise<void> {
-    this.stampScope(anomaly, ctx?.connectionId || anomaly.connectionId);
-    anomaly.eventSequence ??= this.nextEventSequence++;
+    this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
     this.addRecentAnomaly(anomaly);
     this.rememberIncidentEvent(anomaly);
 
@@ -6840,10 +6873,14 @@ export class AnomalyService
     return age <= RETRY_AMP_LATENCY_VERDICT_TTL_MS ? verdict.degraded : undefined;
   }
 
+  stampExternalAnomaly(event: AnomalyEvent): void {
+    this.stamp(event);
+  }
+
   ingestExternalAnomaly(event: AnomalyEvent): void {
     if (this.recentAnomalies.some((a) => a.id === event.id)) return;
     const ingested = { ...event, persisted: true };
-    this.stampScope(ingested);
+    this.stampExternalAnomaly(ingested);
     this.addRecentAnomaly(ingested);
     this.rememberIncidentEvent(ingested);
     this.countAnomaly(event, event.connectionId);
@@ -7034,9 +7071,23 @@ export class AnomalyService
     const known = new Set(this.liveBoundaries.map((b) => key(b.scopeId, b.startedAt)));
     const anchor = (incident: IncidentTimeline) =>
       incidentStartOf(incident.incidentId) ?? incident.startedAt;
-    const kept = this.liveBoundaries.filter(
-      (b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+    const incidents = new Map(
+      this.liveIncidents.map((incident) => [key(incident.scope, anchor(incident)), incident]),
     );
+    const withMembers = (boundary: IncidentBoundary): IncidentBoundary => {
+      const incident = incidents.get(key(boundary.scopeId, boundary.startedAt));
+      if (!incident) return boundary;
+      const seen = incident.entries.flatMap((entry) => {
+        const event = this.liveEventsById.get(entry.anomalyId);
+        if (!event) return [];
+        const { metricType, connectionId, timestamp } = event;
+        return [{ metricType, connectionId, timestamp }];
+      });
+      return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
+    };
+    const kept = this.liveBoundaries
+      .filter((b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs)
+      .map(withMembers);
     const fresh = this.liveIncidents
       .filter((incident) => !known.has(key(incident.scope, anchor(incident))))
       .map((incident) => ({
@@ -7048,7 +7099,7 @@ export class AnomalyService
     if (fresh.length === 0) return;
     try {
       await this.storage.saveIncidentBoundaries(fresh);
-      this.liveBoundaries = [...kept, ...fresh];
+      this.liveBoundaries = [...kept, ...fresh.map(withMembers)];
     } catch (err) {
       this.logger.error('Failed to save incident boundaries:', err);
     }

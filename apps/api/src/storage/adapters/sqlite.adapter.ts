@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { toIncidentBoundary, type IncidentBoundaryRow } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -3215,16 +3216,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const inWindow = query.endTime ? 'AND started_at <= ?' : '';
     const rows = this.db
       .prepare(
-        `SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
-         WHERE ${inScope}started_at >= ? ${inWindow}
-         UNION ALL
-         SELECT b.scope_id, b.started_at, b.anomaly_id FROM incident_boundaries b
-         JOIN (
-           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
-           WHERE ${inScope}started_at < ?
-           GROUP BY scope_id
-         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
-         ORDER BY started_at ASC, anomaly_id ASC`,
+        `SELECT boundary.scope_id, boundary.started_at, boundary.anomaly_id,
+                e.metric_type, e.connection_id
+         FROM (
+           SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+           WHERE ${inScope}started_at >= ? ${inWindow}
+           UNION ALL
+           SELECT b.scope_id, b.started_at, b.anomaly_id
+           FROM incident_boundaries b
+           JOIN (
+             SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+             WHERE ${inScope}started_at < ?
+             GROUP BY scope_id
+           ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+         ) boundary
+         LEFT JOIN anomaly_events e ON e.id = boundary.anomaly_id
+         ORDER BY boundary.started_at ASC, boundary.anomaly_id ASC`,
       )
       .all(
         ...(query.scopeIds ?? []),
@@ -3232,12 +3239,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         ...(query.endTime ? [query.endTime] : []),
         ...(query.scopeIds ?? []),
         query.startTime,
-      ) as { scope_id: string; started_at: number; anomaly_id: string }[];
-    return rows.map((row) => ({
-      scopeId: row.scope_id,
-      startedAt: row.started_at,
-      anomalyId: row.anomaly_id,
-    }));
+      ) as IncidentBoundaryRow[];
+    return rows.map(toIncidentBoundary);
   }
 
   async pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number> {

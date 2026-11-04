@@ -349,6 +349,41 @@ describe('retry amplification attribution', () => {
       );
     });
 
+    it("leaves BetterDB's own connections out of the ranking", () => {
+      const at = (takenAt: number, monitor: number, api: number) =>
+        snapshot(takenAt, [
+          client({ id: '1', name: 'BetterDB-Monitor', 'tot-cmds': String(monitor) }),
+          client({ id: '2', name: 'BetterDB-Monitor-keyscan', 'tot-cmds': String(monitor) }),
+          client({ id: '3', name: 'api', 'tot-cmds': String(api) }),
+        ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before: at(0, 100, 1000),
+        first: at(60_000, 200, 1600),
+        latest: at(120_000, 20_000, 4600),
+        capture: [group({ name: 'BetterDB-Monitor', count: 2 })],
+        newConnections: [
+          { name: 'BetterDB-Monitor-Node-1', user: 'default', ip: '10.0.0.9', count: 9 },
+          { name: 'BetterDB-Agent', user: 'default', ip: '10.0.0.8', count: 9 },
+          { name: 'BetterDB-CLI', user: 'default', ip: '10.0.0.7', count: 9 },
+        ],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+    });
+
+    it('keeps an application whose name only starts with the monitor name', () => {
+      const ranked = rankRetryAmplificationContributors({
+        before: null,
+        first: null,
+        latest: null,
+        capture: [],
+        newConnections: [{ name: 'BetterDB-Monitoring', user: 'default', ip: '10.0.0.1', count: 9 }],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['BetterDB-Monitoring']);
+    });
+
     it('drops clients whose command rate barely moved', () => {
       const steady = (takenAt: number, total: string) =>
         snapshot(takenAt, [client({ id: '1', name: 'steady', 'tot-cmds': total })]);
@@ -463,6 +498,25 @@ describe('retry amplification attribution', () => {
       expect(before?.takenAt).toBe(60_000);
       expect(first?.takenAt).toBe(120_000);
       expect(latest?.takenAt).toBe(240_000);
+    });
+
+    it('skips snapshots taken up to the end of the previous episode', () => {
+      const history = [at(60_000), at(120_000), at(180_000), at(240_000), at(300_000)];
+
+      const { before, first, latest } = selectClientSnapshots(history, 250_000, 300_000, 130_000);
+
+      expect(before?.takenAt).toBe(180_000);
+      expect(first?.takenAt).toBe(240_000);
+      expect(latest?.takenAt).toBe(300_000);
+    });
+
+    it('drops the rate pair when the previous episode leaves one reading before this one', () => {
+      const history = [at(60_000), at(120_000), at(180_000), at(240_000), at(300_000)];
+
+      const { before, first } = selectClientSnapshots(history, 250_000, 300_000, 180_000);
+
+      expect(before).toBeNull();
+      expect(first?.takenAt).toBe(240_000);
     });
 
     it('never pairs a snapshot with itself when the run outpaces the reads', () => {
