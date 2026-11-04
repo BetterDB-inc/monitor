@@ -87,6 +87,7 @@ const ADD_ONS: Record<string, { allowed: Command[]; denied: Command[]; with?: st
       ['HGETALL', 'faq:__config'],
       ['HGETALL', 'mem:__mem_config'],
       ['ZRANGE', 'faq:__similarity_window', '0', '-1'],
+      ['ZRANGEBYSCORE', 'faq:__similarity_window', '0', '+inf'],
       ['HGET', 'faq:__tool_policies', 'search'],
       ['LRANGE', 'faq:__tuning_history', '0', '9'],
     ],

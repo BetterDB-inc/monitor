@@ -54,10 +54,10 @@ Key analytics, KV cache monitoring and the cache simulator. `%R~*` grants read-o
 
 ### AI observability
 
-The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection. `%R~*:__*` also lets this user read any other key with `:__` in its name; if that is a concern, use one pattern per cache instead, such as `%R~faq:__*`.
+The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection. `%R~*:__*` also lets this user read any other key with `:__` in its name; if that is a concern, use one pattern per cache instead, such as `%R~faq:__*`. Trace correlation also checks the cache entry keys named in spans, so it needs the [key sampling](#key-sampling) rules too.
 
 ```
-%R~__betterdb:* %R~*:__* +get +hget +hgetall +lrange +zrange
+%R~__betterdb:* %R~*:__* +get +hget +hgetall +lrange +zrange +zrangebyscore
 ```
 
 ### ACL auditing
