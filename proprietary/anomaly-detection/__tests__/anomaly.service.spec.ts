@@ -2079,6 +2079,20 @@ describe('AnomalyService', () => {
         expect(skewEvents()[0].resolved).toBe(false);
       });
 
+      it('resolves the alert when the reshard ends while a bystander read fails', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        const c = reshardNode('c', 6000);
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(6, 6000, true);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        b.call.mockResolvedValue('b0000000 10.0.0.98:6379@16379 myself,master - 0 0 1 connected');
+        c.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(4, 6000, false);
+
+        expect(skewEvents()[0].resolved).toBe(true);
+      });
+
       it('keeps the snapshot and alert of a primary that fails but stays in the topology', async () => {
         discover({
           b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),

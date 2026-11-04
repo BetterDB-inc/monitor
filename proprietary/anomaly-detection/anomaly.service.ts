@@ -5623,7 +5623,7 @@ export class AnomalyService
         continue;
       }
       if (this.reshardMissedReads.has(key)) {
-        missed = true;
+        missed ||= snapshot.migratingSlots + snapshot.importingSlots > 0;
         unread.add(reshardSkewSignature(snapshot));
       }
       fresh.push([key.slice(prefix.length), snapshot]);
