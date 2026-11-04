@@ -49,7 +49,7 @@ describe('WebhookEventsProService - replication lag', () => {
       true,
       expect.any(Function),
       'conn-1',
-      undefined,
+      expect.objectContaining({ onDelivered: expect.any(Function) }),
     );
     expect(webhookDispatcher.clearThresholdAlertPerWebhook).toHaveBeenCalledWith(
       'replication_lag',

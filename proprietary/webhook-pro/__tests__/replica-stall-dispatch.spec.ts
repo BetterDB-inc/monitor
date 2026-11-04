@@ -1,4 +1,4 @@
-import { WebhookEventType, type Webhook } from '@betterdb/shared';
+import { DeliveryStatus, WebhookEventType, type Webhook } from '@betterdb/shared';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
 import { WebhookEventsProService } from '../webhook-events-pro.service';
 
@@ -22,32 +22,27 @@ function webhook(id: string, events: WebhookEventType[], replicationLagSeconds =
 
 const BOTH = [WebhookEventType.REPLICATION_LAG, WebhookEventType.REPLICATION_DIVERGENCE];
 
-function setup(hooks: Webhook[], { pairReplica = true } = {}) {
+function setup(hooks: Webhook[], { pairReplica = true, tier = 'pro' } = {}) {
+  const getWebhooksByEvent = jest.fn(async (event: WebhookEventType) =>
+    hooks.filter((hook) => hook.events.includes(event)),
+  );
   const dispatcher = new WebhookDispatcherService(
-    {} as never,
-    {
-      getWebhooksByEvent: jest.fn(async (event: WebhookEventType) =>
-        hooks.filter((hook) => hook.events.includes(event)),
-      ),
-    } as never,
+    { createDelivery: jest.fn(async () => ({ id: 'delivery' })) } as never,
+    { getWebhooksByEvent } as never,
     { get: (_key: string, fallback: unknown) => fallback } as never,
   );
-  const delivered: Array<{ event: WebhookEventType; webhookId: string }> = [];
-  jest.spyOn(dispatcher as never, 'dispatchPendingEvent').mockImplementation((async (
-    event: { eventType: WebhookEventType; pendingWebhookIds: Set<string> | null },
-    targets?: Webhook[],
-  ) => {
-    const subscribed = hooks.filter((hook) => hook.events.includes(event.eventType));
-    const ids = targets
-      ? targets.map((hook) => hook.id)
-      : subscribed
-          .map((hook) => hook.id)
-          .filter((id) => !event.pendingWebhookIds || event.pendingWebhookIds.has(id));
-    ids.forEach((webhookId) => delivered.push({ event: event.eventType, webhookId }));
-    return true;
-  }) as never);
+  const failing = new Set<string>();
+  const delivered: Array<{ event: WebhookEventType; webhookId: string; level?: unknown }> = [];
+  jest.spyOn(dispatcher, 'sendWebhook').mockImplementation(async (hook, _id, payload) => {
+    if (failing.has(hook.id)) return DeliveryStatus.DEAD_LETTER;
+    delivered.push({ event: payload.event, webhookId: hook.id, level: payload.data.level });
+    return DeliveryStatus.SUCCESS;
+  });
 
-  const pro = new WebhookEventsProService(dispatcher, { getLicenseTier: () => 'pro' } as never);
+  const license = { tier };
+  const pro = new WebhookEventsProService(dispatcher, {
+    getLicenseTier: () => license.tier,
+  } as never);
   pro.observeReplication(
     PRIMARY,
     {
@@ -74,10 +69,13 @@ function setup(hooks: Webhook[], { pairReplica = true } = {}) {
       instance: { host: '10.0.0.2', port: 6379 },
       connectionId: REPLICA,
     });
-  const divergence = (reason: 'not_acking' | 'growth' = 'not_acking') =>
+  const divergence = (
+    reason: 'not_acking' | 'growth' = 'not_acking',
+    level: 'warning' | 'critical' = 'warning',
+  ) =>
     pro.dispatchReplicationDivergence({
       replica: REPLICA_ADDR,
-      level: 'warning',
+      level,
       reason,
       gapBytes: 0,
       secondsBehind: null,
@@ -90,8 +88,8 @@ function setup(hooks: Webhook[], { pairReplica = true } = {}) {
       instance: { host: '10.0.0.1', port: 6379 },
       connectionId: PRIMARY,
     });
-  const recovered = () =>
-    pro.dispatchReplicationRecovered({
+  const recovered = async () => {
+    const dispatch = pro.dispatchReplicationRecovered({
       replica: REPLICA_ADDR,
       reason: 'caught_up',
       gapBytes: 0,
@@ -100,10 +98,24 @@ function setup(hooks: Webhook[], { pairReplica = true } = {}) {
       instance: { host: '10.0.0.1', port: 6379 },
       connectionId: PRIMARY,
     });
+    pro.endReplicationStall(PRIMARY, REPLICA_ADDR);
+    await dispatch;
+  };
   const sent = (webhookId: string) =>
     delivered.filter((d) => d.webhookId === webhookId).map((d) => d.event);
 
-  return { pro, lag, divergence, recovered, sent };
+  return {
+    pro,
+    dispatcher,
+    getWebhooksByEvent,
+    failing,
+    license,
+    delivered,
+    lag,
+    divergence,
+    recovered,
+    sent,
+  };
 }
 
 describe('one webhook per replica stall', () => {
@@ -242,6 +254,184 @@ describe('one webhook per replica stall', () => {
     expect(sent('both')).toEqual([
       WebhookEventType.REPLICATION_DIVERGENCE,
       WebhookEventType.REPLICATION_LAG,
+    ]);
+  });
+
+  it('sends not_acking to a webhook that dropped replication.lag after its lag alert', async () => {
+    const hook = webhook('both', BOTH);
+    const { lag, divergence, sent } = setup([hook]);
+
+    await lag(30);
+    hook.events = [WebhookEventType.REPLICATION_DIVERGENCE];
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
+
+  it('sends the lag alert when the not_acking delivery failed', async () => {
+    const { lag, divergence, failing, sent } = setup([webhook('both', BOTH, 120)]);
+
+    failing.add('both');
+    await divergence();
+    failing.delete('both');
+    await lag(150);
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_LAG]);
+  });
+
+  it('sends not_acking when the lag alert delivery failed', async () => {
+    const { lag, divergence, failing, sent } = setup([webhook('both', BOTH)]);
+
+    failing.add('both');
+    await lag(30);
+    failing.delete('both');
+    await divergence();
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_DIVERGENCE]);
+  });
+
+  it('keeps the exclusion when the webhook lookup fails and the event is retried', async () => {
+    const { dispatcher, getWebhooksByEvent, lag, divergence, sent } = setup([
+      webhook('both', BOTH),
+      webhook('divergence-only', [WebhookEventType.REPLICATION_DIVERGENCE]),
+    ]);
+
+    await lag(30);
+    getWebhooksByEvent.mockRejectedValueOnce(new Error('storage down'));
+    await divergence();
+    expect(dispatcher.getStorageRetryBufferStats().bufferedEvents).toBe(1);
+
+    await (dispatcher as unknown as { drainStorageRetryBuffer(): Promise<void> })
+      .drainStorageRetryBuffer();
+    dispatcher.onModuleDestroy();
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_LAG]);
+    expect(sent('divergence-only')).toEqual([WebhookEventType.REPLICATION_DIVERGENCE]);
+  });
+
+  it('sends the lag alert to a webhook that dropped divergence after not_acking', async () => {
+    const hook = webhook('both', BOTH, 120);
+    const { lag, divergence, sent } = setup([hook]);
+
+    await divergence();
+    hook.events = [WebhookEventType.REPLICATION_LAG];
+    await lag(150);
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_LAG,
+    ]);
+  });
+
+  it('sends a critical escalation after a skipped not_acking', async () => {
+    const { lag, divergence, delivered } = setup([webhook('both', BOTH)]);
+
+    await lag(30);
+    await divergence('not_acking', 'warning');
+    await divergence('not_acking', 'critical');
+
+    expect(delivered).toEqual([
+      { event: WebhookEventType.REPLICATION_LAG, webhookId: 'both', level: undefined },
+      { event: WebhookEventType.REPLICATION_DIVERGENCE, webhookId: 'both', level: 'critical' },
+    ]);
+  });
+
+  it('sends a not_acking escalation of a stall that opened with another reason', async () => {
+    const { lag, divergence, sent } = setup([webhook('both', BOTH)]);
+
+    await divergence('growth');
+    await lag(30);
+    await divergence('not_acking', 'critical');
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
+
+  it('sends a new stall while the lag alert stays latched', async () => {
+    const { lag, divergence, recovered, sent } = setup([webhook('both', BOTH)]);
+
+    await lag(30);
+    await divergence();
+    await recovered();
+    await lag(30);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+    ]);
+  });
+
+  it('skips replication.recovered for a webhook whose not_acking was skipped', async () => {
+    const { lag, divergence, recovered, sent } = setup([
+      webhook('both', [...BOTH, WebhookEventType.REPLICATION_RECOVERED]),
+      webhook('divergence-only', [
+        WebhookEventType.REPLICATION_DIVERGENCE,
+        WebhookEventType.REPLICATION_RECOVERED,
+      ]),
+      webhook('recovered-only', [WebhookEventType.REPLICATION_RECOVERED]),
+    ]);
+
+    await lag(30);
+    await divergence();
+    await recovered();
+
+    expect(sent('both')).toEqual([WebhookEventType.REPLICATION_LAG]);
+    expect(sent('divergence-only')).toEqual([
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_RECOVERED,
+    ]);
+    expect(sent('recovered-only')).toEqual([WebhookEventType.REPLICATION_RECOVERED]);
+  });
+
+  it('sends replication.recovered after an escalation reached the webhook', async () => {
+    const { lag, divergence, recovered, sent } = setup([
+      webhook('both', [...BOTH, WebhookEventType.REPLICATION_RECOVERED]),
+    ]);
+
+    await lag(30);
+    await divergence('not_acking', 'warning');
+    await divergence('not_acking', 'critical');
+    await recovered();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
+      WebhookEventType.REPLICATION_RECOVERED,
+    ]);
+  });
+
+  it('looks up the targets once and creates no event when every webhook is excluded', async () => {
+    const { dispatcher, getWebhooksByEvent, lag, divergence } = setup([webhook('both', BOTH)]);
+    const createPendingEvent = jest.spyOn(dispatcher as never, 'createPendingEvent');
+
+    await lag(30);
+    createPendingEvent.mockClear();
+    getWebhooksByEvent.mockClear();
+    await divergence();
+
+    expect(getWebhooksByEvent).toHaveBeenCalledTimes(1);
+    expect(createPendingEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not pair replicas while PRO is unlicensed', async () => {
+    const { license, lag, divergence, sent } = setup([webhook('both', BOTH)], {
+      tier: 'community',
+    });
+
+    license.tier = 'pro';
+    await lag(30);
+    await divergence();
+
+    expect(sent('both')).toEqual([
+      WebhookEventType.REPLICATION_LAG,
+      WebhookEventType.REPLICATION_DIVERGENCE,
     ]);
   });
 });

@@ -8271,17 +8271,17 @@ export class AnomalyService
       });
     }
     acknowledgeRecovery(state, recovery.addr);
+
+    if (recovery.kind !== 'cleared' && announced) {
+      this.dispatchReplicationRecovered(ctx, {
+        replica: recovery.addr,
+        reason: 'caught_up',
+        gapBytes: recovery.gapBytes ?? 0,
+        message: `Replica ${recovery.addr} is back under the alert thresholds.`,
+        timestamp,
+      });
+    }
     this.webhookEventsProService?.endReplicationStall(ctx.connectionId, recovery.addr);
-
-    if (recovery.kind === 'cleared' || !announced) return;
-
-    this.dispatchReplicationRecovered(ctx, {
-      replica: recovery.addr,
-      reason: 'caught_up',
-      gapBytes: recovery.gapBytes ?? 0,
-      message: `Replica ${recovery.addr} is back under the alert thresholds.`,
-      timestamp,
-    });
   }
 
   private dispatchReplicationRecovered(

@@ -1,5 +1,8 @@
 import { Injectable, Logger, OnModuleInit, Inject } from '@nestjs/common';
-import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
+import {
+  WebhookDispatcherService,
+  type DispatchFilter,
+} from '@app/webhooks/webhook-dispatcher.service';
 import {
   WebhookEventType,
   type CveCriticalDetectedData,
@@ -36,8 +39,8 @@ import { ReplicaPairing } from './replica-pairing';
 export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
   private readonly replicaPairing = new ReplicaPairing();
-  private readonly notAckingStalls = new Map<string, Set<string>>();
-  private readonly skippedLagAlerts = new Set<string>();
+  private readonly stalls = new Map<string, ReplicaStall>();
+  private readonly lagAlerts = new Set<string>();
 
   constructor(
     private readonly webhookDispatcher: WebhookDispatcherService,
@@ -127,9 +130,9 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         instance: data.instance,
       }),
       data.connectionId,
-      this.webhooksAlertedForStall(data.connectionId),
+      this.lagAlertFilter(data.connectionId),
     );
-    this.forgetSkippedLagAlerts(data.connectionId, (webhookId) =>
+    this.forgetLagAlerts(data.connectionId, (webhookId) =>
       this.webhookDispatcher.isThresholdAlertActive(
         'replication_lag',
         data.connectionId,
@@ -140,7 +143,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
 
   clearReplicationLag(connectionId: string): void {
     this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
-    this.forgetSkippedLagAlerts(connectionId);
+    this.forgetLagAlerts(connectionId);
   }
 
   observeReplication(
@@ -148,69 +151,97 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     replication: Record<string, string | undefined> | undefined,
     instance: WebhookInstanceInfo,
   ): void {
+    if (!this.isEnabled()) {
+      this.replicaPairing.forget(connectionId);
+      return;
+    }
     this.replicaPairing.observe(connectionId, replication, instance);
   }
 
   forgetReplication(connectionId: string): void {
     this.replicaPairing.forget(connectionId);
-    for (const key of this.notAckingStalls.keys()) {
-      if (key.startsWith(`${connectionId}\0`)) this.notAckingStalls.delete(key);
+    for (const key of this.stalls.keys()) {
+      if (key.startsWith(`${connectionId}\0`)) this.stalls.delete(key);
     }
-    this.forgetSkippedLagAlerts(connectionId);
+    this.forgetLagAlerts(connectionId);
   }
 
-  private forgetSkippedLagAlerts(
+  endReplicationStall(connectionId: string, replica: string): void {
+    this.stalls.delete(stallKey(connectionId, replica));
+  }
+
+  private forgetLagAlerts(
     replicaConnectionId: string,
     keep: (webhookId: string) => boolean = () => false,
   ): void {
     const prefix = `${replicaConnectionId}\0`;
-    for (const key of this.skippedLagAlerts) {
+    for (const key of this.lagAlerts) {
       if (key.startsWith(prefix) && !keep(key.slice(prefix.length))) {
-        this.skippedLagAlerts.delete(key);
+        this.lagAlerts.delete(key);
       }
     }
   }
 
-  endReplicationStall(connectionId: string, replica: string): void {
-    this.notAckingStalls.delete(stallKey(connectionId, replica));
-  }
-
-  private webhooksAlertedForStall(
-    replicaConnectionId: string,
-  ): ((webhookId: string) => boolean) | undefined {
+  private lagAlertFilter(replicaConnectionId: string): DispatchFilter {
     const pair = this.replicaPairing.primaryFor(replicaConnectionId);
-    const alerted =
-      pair && this.notAckingStalls.get(stallKey(pair.primaryConnectionId, pair.replicaAddr));
-    if (!alerted) return undefined;
-    return (webhookId) => {
-      if (!alerted.has(webhookId)) return false;
-      this.skippedLagAlerts.add(stallKey(replicaConnectionId, webhookId));
-      return true;
+    const stall = pair && this.stalls.get(stallKey(pair.primaryConnectionId, pair.replicaAddr));
+    return {
+      skip: stall
+        ? (webhook) =>
+            stall.notAcking.has(webhook.id) &&
+            webhook.events.includes(WebhookEventType.REPLICATION_DIVERGENCE)
+        : undefined,
+      onDelivered: (webhookId) => this.lagAlerts.add(stallKey(replicaConnectionId, webhookId)),
     };
   }
 
-  private webhooksWithOpenLagAlert(
+  private divergenceFilter(
     primaryConnectionId: string,
     replica: string,
-  ): ((webhookId: string) => boolean) | undefined {
+    reason: ReplicationDivergenceData['reason'],
+  ): DispatchFilter {
+    const key = stallKey(primaryConnectionId, replica);
+    const opened = !this.stalls.has(key);
+    const stall = this.stalls.get(key) ?? {
+      delivered: new Set<string>(),
+      notAcking: new Set<string>(),
+      covered: new Set<string>(),
+    };
+    this.stalls.set(key, stall);
+    const covered =
+      opened && reason === 'not_acking' ? this.takeLagAlerts(primaryConnectionId, replica) : [];
+    covered.forEach((webhookId) => stall.covered.add(webhookId));
+    return {
+      skip: covered.length
+        ? (webhook) =>
+            covered.includes(webhook.id) &&
+            webhook.events.includes(WebhookEventType.REPLICATION_LAG)
+        : undefined,
+      onDelivered: (webhookId) => {
+        stall.delivered.add(webhookId);
+        if (reason === 'not_acking') stall.notAcking.add(webhookId);
+      },
+    };
+  }
+
+  private takeLagAlerts(primaryConnectionId: string, replica: string): string[] {
     const replicaConnectionId = this.replicaPairing.replicaConnectionFor(
       primaryConnectionId,
       replica,
     );
-    if (!replicaConnectionId) return undefined;
-    return (webhookId) => {
-      const skipped = stallKey(replicaConnectionId, webhookId);
-      const open = this.webhookDispatcher.isThresholdAlertActive(
+    if (!replicaConnectionId) return [];
+    const prefix = `${replicaConnectionId}\0`;
+    const taken = [...this.lagAlerts]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length));
+    this.forgetLagAlerts(replicaConnectionId);
+    return taken.filter((webhookId) =>
+      this.webhookDispatcher.isThresholdAlertActive(
         'replication_lag',
         replicaConnectionId,
         webhookId,
-      );
-      if (!open) {
-        this.skippedLagAlerts.delete(skipped);
-        return false;
-      }
-      return !this.skippedLagAlerts.has(skipped);
-    };
+      ),
+    );
   }
 
   /**
@@ -496,27 +527,11 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     }
 
     const { connectionId, ...payload } = data;
-    let excludeWebhook: ((webhookId: string) => boolean) | undefined;
-    if (connectionId) {
-      const key = stallKey(connectionId, data.replica);
-      if (data.reason === 'not_acking') {
-        const alerted = this.notAckingStalls.get(key) ?? new Set<string>();
-        this.notAckingStalls.set(key, alerted);
-        const hasOpenLagAlert = this.webhooksWithOpenLagAlert(connectionId, data.replica);
-        excludeWebhook = (webhookId) => {
-          if (hasOpenLagAlert?.(webhookId)) return true;
-          alerted.add(webhookId);
-          return false;
-        };
-      } else {
-        this.notAckingStalls.delete(key);
-      }
-    }
     await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.REPLICATION_DIVERGENCE,
       payload,
       connectionId,
-      excludeWebhook,
+      connectionId ? this.divergenceFilter(connectionId, data.replica, data.reason) : undefined,
     );
   }
 
@@ -527,11 +542,20 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     }
 
     const { connectionId, ...payload } = data;
-    if (connectionId) this.endReplicationStall(connectionId, data.replica);
+    const stall = connectionId ? this.stalls.get(stallKey(connectionId, data.replica)) : undefined;
     await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.REPLICATION_RECOVERED,
       payload,
       connectionId,
+      stall?.covered.size
+        ? {
+            skip: (webhook) =>
+              stall.covered.has(webhook.id) &&
+              !stall.delivered.has(webhook.id) &&
+              webhook.events.includes(WebhookEventType.REPLICATION_LAG) &&
+              webhook.events.includes(WebhookEventType.REPLICATION_DIVERGENCE),
+          }
+        : undefined,
     );
   }
 
@@ -872,6 +896,12 @@ export function clusterFailoverMessage(data: {
     return `Cluster failover detected (state ${data.clusterState})`;
   }
   return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
+}
+
+interface ReplicaStall {
+  delivered: Set<string>;
+  notAcking: Set<string>;
+  covered: Set<string>;
 }
 
 function stallKey(primaryConnectionId: string, replica: string): string {

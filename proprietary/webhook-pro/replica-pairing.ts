@@ -1,6 +1,6 @@
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
-import { parseReplicaLines } from '../anomaly-detection/replication-stream';
+import { parseReplicaLines, REPLICA_ROLES } from '../anomaly-detection/replication-stream';
 
 const DNS_TTL_MS = 5 * 60_000;
 const DNS_RETRY_MS = 30_000;
@@ -47,9 +47,9 @@ export class ReplicaPairing {
   ): void {
     const role = replication?.role;
     const replid = replication?.master_replid;
-    const isReplica = role === 'slave' || role === 'replica';
+    const isReplica = role !== undefined && REPLICA_ROLES.has(role);
     if (!replication || !replid || (role !== 'master' && !isReplica)) {
-      this.views.delete(connectionId);
+      this.forget(connectionId);
       return;
     }
     this.views.set(connectionId, {
@@ -65,7 +65,11 @@ export class ReplicaPairing {
   }
 
   forget(connectionId: string): void {
+    const view = this.views.get(connectionId);
     this.views.delete(connectionId);
+    if (view && ![...this.views.values()].some((other) => other.host === view.host)) {
+      this.hosts.delete(view.host);
+    }
   }
 
   primaryFor(replicaConnectionId: string): ReplicaPair | null {
@@ -79,15 +83,11 @@ export class ReplicaPairing {
   }
 
   replicaConnectionFor(primaryConnectionId: string, replicaAddr: string): string | null {
-    const primary = this.views.get(primaryConnectionId);
-    if (!primary || primary.role !== 'primary') return null;
-    const matches = [...this.views].filter(
-      ([id, view]) =>
-        view.role === 'replica' &&
-        view.replid === primary.replid &&
-        this.addrOf(id, view, primary) === replicaAddr,
-    );
-    return matches.length === 1 ? matches[0][0] : null;
+    const matches = [...this.views.keys()].filter((id) => {
+      const pair = this.primaryFor(id);
+      return pair?.primaryConnectionId === primaryConnectionId && pair.replicaAddr === replicaAddr;
+    });
+    return matches.length === 1 ? matches[0] : null;
   }
 
   private primariesOf(replid: string): Array<[string, ReplicationView]> {
@@ -104,7 +104,9 @@ export class ReplicaPairing {
       [replica.host, ...ips].some((host) => addr === `${host}:${replica.port}`),
     );
     if (byHost.length === 1) return byHost[0];
-    if (byHost.length > 1) return null;
+    if (byHost.length > 1 || isIP(replica.host) || !this.hosts.get(replica.host)?.failures) {
+      return null;
+    }
 
     const byPort = primary.replicaAddrs.filter((addr) => addr.endsWith(`:${replica.port}`));
     const samePortReplicas = [...this.views].filter(

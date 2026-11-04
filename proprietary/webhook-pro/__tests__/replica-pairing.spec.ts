@@ -32,13 +32,68 @@ describe('ReplicaPairing', () => {
     expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
   });
 
-  it('pairs a unique replid and port without resolving the host', () => {
+  it('pairs a unique replid and port when the host cannot be resolved', async () => {
     const resolver = jest.fn().mockRejectedValue(new Error('no dns'));
     const pairing = new ReplicaPairing(resolver);
     pairing.observe('p', primaryInfo('r1', '10.0.0.2:6380'), { host: 'primary', port: 6379 });
     pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6380 });
+    await flush();
 
     expect(pairing.primaryFor('a')?.replicaAddr).toBe('10.0.0.2:6380');
+  });
+
+  it('does not pair by port when the replica IP is not on the primary', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('chained', replicaInfo('r1'), { host: '10.0.0.3', port: 6379 });
+
+    expect(pairing.primaryFor('chained')).toBeNull();
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
+  });
+
+  it('does not pair by port when the host resolved to another address', async () => {
+    const pairing = new ReplicaPairing(jest.fn(async () => ['172.17.0.5']));
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+    await flush();
+
+    expect(pairing.primaryFor('a')).toBeNull();
+  });
+
+  it('pairs in neither direction when the primary is monitored twice', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p-ip', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('p-name', primaryInfo('r1', '10.0.0.2:6379'), {
+      host: 'primary.svc',
+      port: 6379,
+    });
+    pairing.observe('a', replicaInfo('r1'), { host: '10.0.0.2', port: 6379 });
+
+    expect(pairing.primaryFor('a')).toBeNull();
+    expect(pairing.replicaConnectionFor('p-ip', '10.0.0.2:6379')).toBeNull();
+    expect(pairing.replicaConnectionFor('p-name', '10.0.0.2:6379')).toBeNull();
+  });
+
+  it('pairs an active-replica', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('a', { role: 'active-replica', master_replid: 'r1' }, {
+      host: '10.0.0.2',
+      port: 6379,
+    });
+
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBe('a');
+  });
+
+  it('drops the cached host lookup when its connection is forgotten', async () => {
+    const resolver = jest.fn(async () => ['10.0.0.2']);
+    const pairing = new ReplicaPairing(resolver);
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+    await flush();
+    pairing.forget('a');
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6379 });
+
+    expect(resolver).toHaveBeenCalledTimes(2);
   });
 
   it('pairs by the resolved host when several replicas share a port', async () => {

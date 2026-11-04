@@ -3,7 +3,7 @@ import { InfoParser } from '@app/database/parsers/info.parser';
 export const REPLICATION_RATE_EWMA_ALPHA = 0.3;
 
 const REPLICA_LINE_KEY = /^(?:slave|replica)(\d+)$/;
-const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
+export const REPLICA_ROLES = new Set(['slave', 'replica', 'active-replica']);
 
 export interface ReplicaOffsetLine {
   key: string;

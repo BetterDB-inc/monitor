@@ -30,7 +30,7 @@ interface AlertState {
   value: number;
 }
 
-interface PendingEvent {
+interface PendingEvent extends DispatchFilter {
   sequence: number;
   eventType: WebhookEventType;
   data: Record<string, unknown>;
@@ -39,6 +39,11 @@ interface PendingEvent {
   payloads: Map<string, WebhookPayload>;
   pendingWebhookIds: Set<string> | null;
   unconfirmedWebhookIds: Set<string>;
+}
+
+export interface DispatchFilter {
+  skip?: (webhook: Webhook) => boolean;
+  onDelivered?: (webhookId: string) => void;
 }
 
 const STORAGE_UNAVAILABLE = 'storage-unavailable' as const;
@@ -183,29 +188,36 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
-    excludeWebhook?: (webhookId: string) => boolean,
+    filter?: DispatchFilter,
   ): Promise<boolean> {
     const enrichedData = connectionId ? { ...data, connectionId } : data;
-    const targetWebhookIds = excludeWebhook
-      ? await this.subscribedWebhookIdsExcept(eventType, connectionId, excludeWebhook)
-      : undefined;
-    return this.dispatchPendingEvent(
-      this.createPendingEvent(eventType, enrichedData, connectionId, targetWebhookIds),
-    );
-  }
-
-  private async subscribedWebhookIdsExcept(
-    eventType: WebhookEventType,
-    connectionId: string | undefined,
-    excludeWebhook: (webhookId: string) => boolean,
-  ): Promise<string[] | undefined> {
+    const skip = filter?.skip;
+    if (!skip) {
+      return this.dispatchPendingEvent(
+        this.createPendingEvent(eventType, enrichedData, connectionId, undefined, filter),
+      );
+    }
+    let webhooks: Webhook[];
     try {
-      const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
-      return webhooks.map((webhook) => webhook.id).filter((id) => !excludeWebhook(id));
+      webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
     } catch (error) {
       this.logger.error(`Failed to look up webhooks for event ${eventType}:`, error);
-      return undefined;
+      return this.bufferEvent(
+        this.createPendingEvent(eventType, enrichedData, connectionId, undefined, filter),
+      );
     }
+    const targets = webhooks.filter((webhook) => !skip(webhook));
+    if (targets.length === 0) return true;
+    return this.dispatchPendingEvent(
+      this.createPendingEvent(
+        eventType,
+        enrichedData,
+        connectionId,
+        targets.map((webhook) => webhook.id),
+        filter,
+      ),
+      targets,
+    );
   }
 
   private createPendingEvent(
@@ -213,6 +225,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     data: Record<string, unknown>,
     connectionId?: string,
     targetWebhookIds?: string[],
+    filter?: DispatchFilter,
   ): PendingEvent {
     return {
       sequence: this.nextEventSequence++,
@@ -223,6 +236,8 @@ export class WebhookDispatcherService implements OnModuleDestroy {
       payloads: new Map(),
       pendingWebhookIds: targetWebhookIds ? new Set(targetWebhookIds) : null,
       unconfirmedWebhookIds: new Set(),
+      skip: filter?.skip,
+      onDelivered: filter?.onDelivered,
     };
   }
 
@@ -269,7 +284,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     }
 
     const pending = event.pendingWebhookIds;
-    const targets = pending ? webhooks.filter((webhook) => pending.has(webhook.id)) : webhooks;
+    const targets = webhooks.filter(
+      (webhook) => (!pending || pending.has(webhook.id)) && !event.skip?.(webhook),
+    );
     event.pendingWebhookIds = new Set(targets.map((webhook) => webhook.id));
 
     if (targets.length === 0) {
@@ -512,7 +529,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     isAbove: boolean,
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
-    skipWebhook?: (webhookId: string) => boolean,
+    filter?: DispatchFilter,
   ): Promise<boolean> {
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
@@ -552,7 +569,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               alertConfig.hysteresisFactor,
             )
           ) {
-            if (skipWebhook?.(webhook.id)) {
+            if (filter?.skip?.(webhook)) {
               this.logger.debug(
                 `Threshold alert ${eventType} for webhook ${webhook.id} skipped: already alerted`,
               );
@@ -573,7 +590,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
             };
 
             await this.dispatchPendingEvent(
-              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id]),
+              this.createPendingEvent(eventType, enrichedData, connectionId, [webhook.id], {
+                onDelivered: filter?.onDelivered,
+              }),
               [webhook],
             );
           }
@@ -659,7 +678,9 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     if (deliveryId === null) {
       return null;
     }
-    return this.sendWebhook(webhook, deliveryId, payload);
+    const status = await this.sendWebhook(webhook, deliveryId, payload);
+    if (status === DeliveryStatus.SUCCESS) event.onDelivered?.(webhook.id);
+    return status;
   }
 
   private getOrCreatePayload(webhookId: string, event: PendingEvent): WebhookPayload {
