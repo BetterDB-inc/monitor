@@ -171,7 +171,10 @@ import {
 import { SUSTAINED_DEGRADATION_MESSAGE } from '../latency-regression/regression-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
-import { isReadOnlyReplicaRole } from '@app/database/parsers/replication-info.parser';
+import {
+  isReadOnlyReplicaRole,
+  isReplicaRole,
+} from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { isWriteCommand } from '@app/cluster/write-commands';
 import {
@@ -2971,7 +2974,7 @@ export class AnomalyService
     try {
       const replid = info['master_replid'];
       const roleStr = info['role'];
-      const isReplicating = roleStr === 'master' || isReadOnlyReplicaRole(roleStr);
+      const isReplicating = roleStr === 'master' || isReplicaRole(roleStr);
       const clusterKey = clusterKeyFromNodes(clusterNodes);
 
       if (!replid || !isReplicating) {
@@ -3422,7 +3425,7 @@ export class AnomalyService
     try {
       const replid = info['master_replid'];
       const roleStr = info['role'];
-      const isReplicating = roleStr === 'master' || isReadOnlyReplicaRole(roleStr);
+      const isReplicating = roleStr === 'master' || isReplicaRole(roleStr);
 
       if (!replid || !isReplicating) {
         // Not (yet) part of a known replication group — drop any stale entry

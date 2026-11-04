@@ -6054,6 +6054,24 @@ describe('AnomalyService', () => {
       expect(['conn-a', 'conn-b']).toContain(events[0].connectionId);
     });
 
+    it('compares config across KeyDB active-replica peers', async () => {
+      const ctxA = makeCtx('conn-a', {
+        role: 'active-replica',
+        replid: 'replid-x',
+        config: { maxmemory: '1000000' },
+      });
+      const ctxB = makeCtx('conn-b', {
+        role: 'active-replica',
+        replid: 'replid-x',
+        config: { maxmemory: '2000000' },
+      });
+
+      await poll(ctxA);
+      await poll(ctxB);
+
+      expect(driftEvents()).toHaveLength(1);
+    });
+
     it('raises the drift again when the outbox drops its unsaved event', async () => {
       const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
       const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
@@ -8519,6 +8537,18 @@ describe('AnomalyService', () => {
         return e.metricType === MetricType.ACL_DRIFT;
       });
     };
+
+    it('keeps the ACL snapshot of an active-replica', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replInfo(),
+        server: { role: 'active-replica' },
+        replication: { role: 'active-replica', master_replid: 'shared-replid' },
+      });
+
+      await poll();
+
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+    });
 
     /** Seed a second connection's slice of the shared snapshot. */
     function seedPeer(connectionId: string, lines: string[], replid = 'shared-replid'): void {
