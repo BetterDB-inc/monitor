@@ -129,6 +129,25 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
     });
 
+    it('keeps the stored start across dropped spans chained from another connection', () => {
+      const late = event({ id: 'late', timestamp: T0 + 20 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder({}, () => 'cluster').build(
+        [late],
+        T0 + 21 * MIN,
+        neverRecovers,
+        [boundary(T0, 'z-gone', 'cluster')],
+        new Map(),
+        Number.NEGATIVE_INFINITY,
+        new Map([
+          ['conn-a', [{ from: T0 - MIN, through: T0 + 9 * MIN, scopeId: 'cluster' }]],
+          ['conn-b', [{ from: T0 + 10 * MIN, through: T0 + 19 * MIN, scopeId: 'cluster' }]],
+        ]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+    });
+
     it('starts afresh when no drop reached the stored start', () => {
       const late = event({ id: 'late', timestamp: T0 + 10 * MIN });
 

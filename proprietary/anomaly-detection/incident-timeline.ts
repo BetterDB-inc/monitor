@@ -385,10 +385,10 @@ export class IncidentTimelineBuilder {
     droppedAt: number,
     spans: readonly DroppedSpan[],
   ): number {
-    const covering = spans.find(
+    const covered = spans.some(
       (span) => span.from <= stored.startedAt && stored.startedAt <= span.through,
     );
-    return covering ? Math.max(droppedAt, covering.through) : droppedAt;
+    return covered ? Math.max(droppedAt, this.spanReach(spans, stored.startedAt)) : droppedAt;
   }
 
   private droppedThroughScope(
@@ -419,12 +419,17 @@ export class IncidentTimelineBuilder {
       .sort((a, b) => a.from - b.from);
   }
 
-  private bridges(spans: readonly DroppedSpan[], from: number, to: number): boolean {
+  private spanReach(spans: readonly DroppedSpan[], from: number): number {
     let reach = from;
     for (const span of spans) {
       if (span.from - reach > this.opts.gapMs) break;
       reach = Math.max(reach, span.through);
     }
+    return reach;
+  }
+
+  private bridges(spans: readonly DroppedSpan[], from: number, to: number): boolean {
+    const reach = this.spanReach(spans, from);
     return reach > from && to - reach <= this.opts.gapMs;
   }
 
