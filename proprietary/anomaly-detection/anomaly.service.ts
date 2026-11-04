@@ -434,7 +434,7 @@ export class AnomalyService
   private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
   private readonly incidentEventsById = new Map<string, AnomalyEvent>();
   private readonly incidentEventsDroppedThrough = new Map<string, number>();
-  private readonly incidentEventsDroppedSpan = new Map<string, DroppedSpan>();
+  private readonly incidentEventsDroppedSpans = new Map<string, DroppedSpan[]>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly unsavedGroups = new Map<
     string,
@@ -1022,7 +1022,7 @@ export class AnomalyService
     this.reshardThinViewLogged.delete(connectionId);
     this.forgetIncidentEvents(connectionId, () => true);
     this.incidentEventsDroppedThrough.delete(connectionId);
-    this.incidentEventsDroppedSpan.delete(connectionId);
+    this.incidentEventsDroppedSpans.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -6583,6 +6583,7 @@ export class AnomalyService
       this.dropIncidentEvent(connectionId, evicted);
       this.extendDroppedSpan(connectionId, evicted.timestamp);
     }
+    this.pruneDroppedSpans(connectionId, events[0]?.timestamp);
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
   }
@@ -6594,17 +6595,30 @@ export class AnomalyService
   }
 
   private extendDroppedSpan(connectionId: string, timestamp: number): void {
-    const span = this.incidentEventsDroppedSpan.get(connectionId);
-    const continues =
-      span !== undefined &&
-      timestamp >= span.from &&
-      timestamp - span.through <= DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs;
-    this.incidentEventsDroppedSpan.set(
+    const gapMs = DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs;
+    const merged: DroppedSpan = { from: timestamp, through: timestamp };
+    const kept: DroppedSpan[] = [];
+    for (const span of this.incidentEventsDroppedSpans.get(connectionId) ?? []) {
+      if (span.from - merged.through <= gapMs && merged.from - span.through <= gapMs) {
+        merged.from = Math.min(merged.from, span.from);
+        merged.through = Math.max(merged.through, span.through);
+      } else {
+        kept.push(span);
+      }
+    }
+    kept.push(merged);
+    this.incidentEventsDroppedSpans.set(
       connectionId,
-      continues
-        ? { from: span.from, through: Math.max(span.through, timestamp) }
-        : { from: timestamp, through: timestamp },
+      kept.sort((a, b) => a.from - b.from),
     );
+  }
+
+  private pruneDroppedSpans(connectionId: string, oldest: number | undefined): void {
+    const spans = this.incidentEventsDroppedSpans.get(connectionId);
+    if (!spans) return;
+    const live = oldest === undefined ? [] : spans.filter((span) => span.through >= oldest);
+    if (live.length > 0) this.incidentEventsDroppedSpans.set(connectionId, live);
+    else this.incidentEventsDroppedSpans.delete(connectionId);
   }
 
   private incidentEventToEvict(events: AnomalyEvent[]): number {
@@ -7135,7 +7149,7 @@ export class AnomalyService
         this.liveBoundaries,
         this.incidentEventsDroppedThrough,
         now - windowMs,
-        this.incidentEventsDroppedSpan,
+        this.incidentEventsDroppedSpans,
       );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;

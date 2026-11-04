@@ -240,7 +240,7 @@ export class IncidentTimelineBuilder {
     boundaries: readonly IncidentBoundary[] = [],
     droppedThrough: ReadonlyMap<string, number> = new Map(),
     heldFrom = Number.NEGATIVE_INFINITY,
-    droppedSpans: ReadonlyMap<string, DroppedSpan> = new Map(),
+    droppedSpans: ReadonlyMap<string, readonly DroppedSpan[]> = new Map(),
   ): IncidentTimeline[] {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
@@ -377,12 +377,12 @@ export class IncidentTimelineBuilder {
   private droppedSpansOf(
     scope: string,
     events: AnomalyEvent[],
-    droppedSpans: ReadonlyMap<string, DroppedSpan>,
+    droppedSpans: ReadonlyMap<string, readonly DroppedSpan[]>,
   ): DroppedSpan[] {
     const members = new Set(events.map((event) => event.connectionId ?? ''));
     return [...droppedSpans]
       .filter(([connectionId]) => members.has(connectionId) || this.resolveScope(connectionId) === scope)
-      .map(([, span]) => span);
+      .flatMap(([, spans]) => spans);
   }
 
   private bridges(span: DroppedSpan, from: number, to: number): boolean {

@@ -11767,6 +11767,34 @@ describe('AnomalyService', () => {
         expect(incidents[0].startedAt).toBe(start);
       });
 
+      it('keeps the earlier dropped span when a later overflow opens another', async () => {
+        const now = Date.now();
+        const start = now - 40 * MIN;
+        for (let i = 0; i < 400; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        const later = start + 10 * MIN;
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: later + i * 1000,
+              metricType: MetricType.COMMAND_P99,
+              commands: ['GET'],
+            }),
+          );
+        }
+        storm(now);
+        expect((service as any).incidentEventsDroppedSpans.get('conn-1')).toHaveLength(2);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents.map((i: any) => i.startedAt)).toEqual([start, later]);
+      });
+
       it('splits incidents across a quiet gap that the dropped span does not cover', async () => {
         const now = Date.now();
         const start = now - 40 * MIN;
@@ -11803,7 +11831,7 @@ describe('AnomalyService', () => {
         const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
         expect(kept).toEqual(['fresh']);
         expect((service as any).incidentEventsDroppedThrough.get('conn-1')).toBe(now - 3 * 60 * MIN + 199);
-        expect((service as any).incidentEventsDroppedSpan.has('conn-1')).toBe(false);
+        expect((service as any).incidentEventsDroppedSpans.has('conn-1')).toBe(false);
       });
 
       it('keeps the buffer in timestamp order when events arrive out of order', () => {
