@@ -22,6 +22,9 @@ import {
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
 
+/** Comma-separated addresses of slot-owning primaries missing from a slot stats response. */
+export const SLOT_STATS_FAILED_NODES_HEADER = 'x-slot-stats-failed-nodes';
+
 @Injectable()
 export class MetricsService {
   constructor(
@@ -148,6 +151,15 @@ export class MetricsService {
   }
 
   async getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number, connectionId?: string): Promise<SlotStats> {
+    return (await this.getClusterSlotStatsResult(orderBy, limit, connectionId)).stats;
+  }
+
+  /** Slot stats plus the slot-owning primaries that did not answer, whose slots are missing. */
+  async getClusterSlotStatsResult(
+    orderBy?: 'key-count' | 'cpu-usec',
+    limit?: number,
+    connectionId?: string,
+  ): Promise<{ stats: SlotStats; failedNodes: string[] }> {
     const client = this.getClient(connectionId);
     const capabilities = client.getCapabilities();
     if (!capabilities.hasClusterSlotStats) {
@@ -155,9 +167,10 @@ export class MetricsService {
     }
     // The connection's own socket only sees the slots of the node it landed on.
     if (capabilities.clusterEnabled && this.clusterMetrics?.usesClusterWideSlotStats(connectionId)) {
-      return this.clusterMetrics.getClusterSlotStats(orderBy, limit, connectionId);
+      const { stats, failedNodes } = await this.clusterMetrics.getClusterSlotStatsResult(orderBy, limit, connectionId);
+      return { stats, failedNodes };
     }
-    return client.getClusterSlotStats(orderBy, limit);
+    return { stats: await client.getClusterSlotStats(orderBy, limit), failedNodes: [] };
   }
 
   async getConfigValue(parameter: string, connectionId?: string): Promise<string | null> {

@@ -50,7 +50,7 @@ export function useCluster() {
   // Fetch slot stats (only if available and in cluster mode)
   const hasSlotStats = capabilities?.hasClusterSlotStats ?? false;
   const {
-    data: slotStats,
+    data: slotStatsResult,
     error: slotStatsError,
     refresh: refreshSlotStats,
   } = usePolling({
@@ -148,7 +148,8 @@ export function useCluster() {
     nodes: nodes || [],
     masters,
     replicas,
-    slotStats: slotStats || null,
+    slotStats: slotStatsResult?.stats || null,
+    slotStatsFailedNodes: slotStatsResult?.failedNodes ?? [],
     hasSlotStats,
     health,
     refetch,

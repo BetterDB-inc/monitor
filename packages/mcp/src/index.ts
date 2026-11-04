@@ -805,7 +805,7 @@ server.tool(
 
 server.tool(
   'get_slot_stats',
-  "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns an error message if not supported.",
+  "Get per-slot key counts and CPU usage (Valkey 8.0+ only). Use orderBy='cpu-usec' to find hot slots, or 'key-count' to find the most populated slots. Returns { slots, failedNodes }; failedNodes lists cluster primaries that did not answer, whose slots are missing. Returns an error message if not supported.",
   {
     orderBy: z
       .enum(['key-count', 'cpu-usec'])

@@ -30,6 +30,7 @@ export function ClusterDashboard() {
     masters,
     replicas,
     slotStats,
+    slotStatsFailedNodes,
     hasSlotStats,
     health,
     refetch,
@@ -218,7 +219,12 @@ export function ClusterDashboard() {
 
           {/* Heatmap + Migrations */}
           <div className="grid md:grid-cols-2 gap-4">
-            <SlotHeatmap slotStats={slotStats} nodes={nodes} hasSlotStats={hasSlotStats} />
+            <SlotHeatmap
+              slotStats={slotStats}
+              failedNodes={slotStatsFailedNodes}
+              nodes={nodes}
+              hasSlotStats={hasSlotStats}
+            />
             <SlotMigrations migrations={migrations || undefined} />
           </div>
 
