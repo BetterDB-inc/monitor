@@ -70,12 +70,15 @@ describe('topology targets', () => {
       expect(members.size).toBe(0);
     });
 
-    it('caps the fan-out', () => {
+    it('caps the fan-out and leaves capped primaries out of scope', () => {
       const nodes = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 5 }, (_, i) =>
         clusterNode(`n${i}`, `10.0.1.${i}:6379@16379`, ['master']),
       );
 
-      expect(clusterTargets(nodes, nothingRegistered).targets).toHaveLength(TOPOLOGY_TARGET_LIMIT);
+      const { targets, members } = clusterTargets(nodes, nothingRegistered);
+
+      expect(targets).toHaveLength(TOPOLOGY_TARGET_LIMIT);
+      expect([...members].sort()).toEqual(targets.map((t) => t.addr).sort());
     });
   });
 
