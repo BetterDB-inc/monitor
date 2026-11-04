@@ -10775,6 +10775,31 @@ describe('AnomalyService', () => {
       expect(startTime).toBe(t - 40 * MIN);
     });
 
+    it('remembers on a live boundary every step its incident has held', async () => {
+      const now = Date.now();
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(
+        anomaly({ id: 'first', timestamp: now - 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        ctx,
+      );
+      await (service as any).addAnomaly(
+        anomaly({ id: 'step', timestamp: now - MIN, metricType: MetricType.CONNECTIONS }),
+        ctx,
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveBoundaries).toEqual([
+        expect.objectContaining({
+          anomalyId: 'first',
+          members: expect.arrayContaining([
+            { metricType: MetricType.MEMORY_USED, connectionId: 'conn-1', timestamp: now - 2 * MIN },
+            { metricType: MetricType.CONNECTIONS, connectionId: 'conn-1', timestamp: now - MIN },
+          ]),
+        }),
+      ]);
+    });
+
     it('stores each live incident start once and keeps it across a restart', async () => {
       const now = Date.now();
       const event = anomaly({ id: 'live', timestamp: now - MIN });

@@ -43,15 +43,16 @@ export interface IncidentTimeline {
   };
 }
 
+export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
+
 export interface IncidentBoundary {
   scopeId: string;
   startedAt: number;
   anomalyId: string;
   metricType?: string;
   connectionId?: string;
+  members?: RuleStepEvent[];
 }
-
-type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
 
 export interface IncidentTimelineOptions {
   gapMs: number;
@@ -111,6 +112,19 @@ export function maxSeverity(severities: AnomalySeverity[]): AnomalySeverity {
     (max, s) => (SEVERITY_RANK[s] > SEVERITY_RANK[max] ? s : max),
     AnomalySeverity.INFO,
   );
+}
+
+export function mergeRuleSteps(
+  known: readonly RuleStepEvent[],
+  seen: readonly RuleStepEvent[],
+): RuleStepEvent[] {
+  const latest = new Map<string, RuleStepEvent>();
+  for (const step of [...known, ...seen]) {
+    const key = `${step.metricType}\u0000${step.connectionId ?? ''}`;
+    const held = latest.get(key);
+    if (!held || step.timestamp > held.timestamp) latest.set(key, step);
+  }
+  return [...latest.values()];
 }
 
 export function incidentIdFor(scope: string, firstAnomalyId: string, startedAt: number): string {
@@ -340,7 +354,7 @@ export class IncidentTimelineBuilder {
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= droppedAt &&
           (event.timestamp - droppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, stored));
+            this.bridgesFromDropped(event, stored, droppedAt));
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -371,14 +385,23 @@ export class IncidentTimelineBuilder {
     return latest;
   }
 
-  private bridgesFromDropped(event: AnomalyEvent, stored: IncidentBoundary): boolean {
-    if (stored.metricType === undefined) return false;
-    const anchor: RuleStepEvent = {
-      metricType: stored.metricType as MetricType,
-      connectionId: stored.connectionId,
-      timestamp: stored.startedAt,
-    };
-    return this.followsRuleStep([anchor], event);
+  private bridgesFromDropped(
+    event: AnomalyEvent,
+    stored: IncidentBoundary,
+    droppedAt: number,
+  ): boolean {
+    const anchor: RuleStepEvent[] =
+      stored.metricType === undefined
+        ? []
+        : [
+            {
+              metricType: stored.metricType as MetricType,
+              connectionId: stored.connectionId,
+              timestamp: stored.startedAt,
+            },
+          ];
+    const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
+    return this.followsRuleStep([...anchor, ...dropped], event);
   }
 
   private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {

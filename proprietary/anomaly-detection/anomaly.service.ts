@@ -44,6 +44,7 @@ import {
   ConnectionChurnSample,
 } from './connection-churn';
 import {
+  IncidentBoundary,
   IncidentTimeline,
   IncidentTimelineBuilder,
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
@@ -54,6 +55,7 @@ import {
   RESOLVER_BACKED_METRICS,
   RecoveryProbe,
   incidentStartOf,
+  mergeRuleSteps,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
 import {
@@ -453,7 +455,7 @@ export class AnomalyService
   private readonly sequenceDedupeBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
   private readonly incidentBoundaryBackoff: SeedBackoff = { failures: 0, retryAt: 0 };
   private scopeSeeds: Map<string, string> | null = null;
-  private liveBoundaries: StoredIncidentBoundary[] = [];
+  private liveBoundaries: IncidentBoundary[] = [];
   private incidentsDirty = true;
   private liveEventsById = new Map<string, AnomalyEvent>();
   private incidentsBuiltAt = 0;
@@ -7074,9 +7076,23 @@ export class AnomalyService
     const known = new Set(this.liveBoundaries.map((b) => key(b.scopeId, b.startedAt)));
     const anchor = (incident: IncidentTimeline) =>
       incidentStartOf(incident.incidentId) ?? incident.startedAt;
-    const kept = this.liveBoundaries.filter(
-      (b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+    const incidents = new Map(
+      this.liveIncidents.map((incident) => [key(incident.scope, anchor(incident)), incident]),
     );
+    const withMembers = (boundary: IncidentBoundary): IncidentBoundary => {
+      const incident = incidents.get(key(boundary.scopeId, boundary.startedAt));
+      if (!incident) return boundary;
+      const seen = incident.entries.flatMap((entry) => {
+        const event = this.liveEventsById.get(entry.anomalyId);
+        if (!event) return [];
+        const { metricType, connectionId, timestamp } = event;
+        return [{ metricType, connectionId, timestamp }];
+      });
+      return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
+    };
+    const kept = this.liveBoundaries
+      .filter((b) => b.startedAt >= windowStart - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs)
+      .map(withMembers);
     const fresh = this.liveIncidents
       .filter((incident) => !known.has(key(incident.scope, anchor(incident))))
       .map((incident) => ({
@@ -7088,7 +7104,7 @@ export class AnomalyService
     if (fresh.length === 0) return;
     try {
       await this.storage.saveIncidentBoundaries(fresh);
-      this.liveBoundaries = [...kept, ...fresh];
+      this.liveBoundaries = [...kept, ...fresh.map(withMembers)];
     } catch (err) {
       this.logger.error('Failed to save incident boundaries:', err);
     }

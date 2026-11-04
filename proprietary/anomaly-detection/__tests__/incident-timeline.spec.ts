@@ -785,6 +785,31 @@ describe('IncidentTimelineBuilder', () => {
         expect(incidentStartOf(incident.incidentId)).toBe(T0);
       });
 
+      describe('when a later member of the incident was the step before', () => {
+        const unrelatedStart = { ...anchor, metricType: MetricType.MEMORY_USED };
+        const step = { metricType: MetricType.CONNECTIONS, connectionId: 'conn-a', timestamp: T0 + MIN };
+        const withMember = (droppedThrough: number) =>
+          new IncidentTimelineBuilder({}, () => 'conn-a', () => [escalation]).build(
+            [event({ id: 'late', timestamp: T0 + 8 * MIN })],
+            T0 + 20 * MIN,
+            neverRecovers,
+            [{ ...unrelatedStart, members: [step] }],
+            new Map([['conn-a', droppedThrough]]),
+          );
+
+        it('keeps the stored start', () => {
+          const [incident] = withMember(T0 + MIN);
+
+          expect(incidentStartOf(incident.incidentId)).toBe(T0);
+        });
+
+        it('does not bridge from a member that was not dropped', () => {
+          const [incident] = withMember(T0 + MIN - 1);
+
+          expect(incidentStartOf(incident.incidentId)).toBe(T0 + 8 * MIN);
+        });
+      });
+
       it('starts afresh when the stored start does not say what began it', () => {
         const [incident] = dropped(event({ id: 'late', timestamp: T0 + 5 * MIN }), {
           metricType: undefined,
