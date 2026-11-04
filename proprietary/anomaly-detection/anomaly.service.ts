@@ -1774,8 +1774,7 @@ export class AnomalyService
         aclClusterNodes = nodes;
         if (nodes) divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
       } else if (live && sentinelMode) {
-        const masters = this.sentinelMastersSnapshot.get(ctx.connectionId);
-        divergenceTargets = masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
+        divergenceTargets = this.sentinelDivergenceTargets(ctx.connectionId);
       } else if (live && sentinelMode === false) {
         divergenceTargets = [];
       }
@@ -8130,6 +8129,12 @@ export class AnomalyService
     await this.settleOrphanedDivergenceEvents(state, ctx, key);
     await this.persistDivergenceWindows(state, ctx);
     if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
+  }
+
+  private sentinelDivergenceTargets(connectionId: string): TopologyTarget[] | null {
+    if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) === null) return [];
+    const masters = this.sentinelMastersSnapshot.get(connectionId);
+    return masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
   }
 
   private registeredAddresses(): (host: string, port: number) => boolean {

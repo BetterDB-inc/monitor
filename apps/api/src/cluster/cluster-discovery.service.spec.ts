@@ -439,7 +439,7 @@ describe('ClusterDiscoveryService', () => {
 
   describe('getAddressConnection', () => {
     beforeEach(() => {
-      mockConnectionRegistry.dataNodeCredentials = jest
+      mockConnectionRegistry.sentinelDataNodeCredentials = jest
         .fn()
         .mockReturnValue({ username: 'node-user', password: 'node-pass' });
     });
@@ -447,7 +447,7 @@ describe('ClusterDiscoveryService', () => {
     it('dials the address with the data-node credentials of the connection', async () => {
       await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
 
-      expect(mockConnectionRegistry.dataNodeCredentials).toHaveBeenCalledWith('test-connection');
+      expect(mockConnectionRegistry.sentinelDataNodeCredentials).toHaveBeenCalledWith('test-connection');
       expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
         expect.objectContaining({
           host: '10.0.1.5',
@@ -456,6 +456,16 @@ describe('ClusterDiscoveryService', () => {
           password: 'node-pass',
         }),
       );
+    });
+
+    it('refuses to dial without data-node credentials', async () => {
+      mockConnectionRegistry.sentinelDataNodeCredentials.mockReturnValue(null);
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      await expect(service.getAddressConnection('10.0.1.5', 6380, 'test-connection')).rejects.toThrow(
+        'no data-node credentials',
+      );
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
     });
 
     it('reuses the client for the same address', async () => {

@@ -173,6 +173,7 @@ describe('AnomalyService', () => {
             get: jest.fn(),
             getConfig: jest.fn().mockReturnValue(null),
             listMembers: jest.fn().mockReturnValue([]),
+            sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -13357,6 +13358,30 @@ describe('AnomalyService', () => {
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
         expect(client.info).toHaveBeenCalledWith('replication');
+      });
+
+      describe('Sentinel targets', () => {
+        const masters = [{ name: 'alpha', ip: '10.0.1.5', port: 6379, runid: 'r', flags: ['master'], fields: {} }];
+
+        beforeEach(() => {
+          (service as any).sentinelMastersSnapshot.set('conn-1', masters);
+        });
+
+        it('fans out when the connection has data-node credentials', () => {
+          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest
+            .fn()
+            .mockReturnValue({ username: 'app', password: 'secret' });
+
+          expect((service as any).sentinelDivergenceTargets('conn-1')).toEqual([
+            { addr: NODE, host: '10.0.1.5', port: 6379 },
+          ]);
+        });
+
+        it('does not send the Sentinel credentials to the primaries it reports', () => {
+          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue(null);
+
+          expect((service as any).sentinelDivergenceTargets('conn-1')).toEqual([]);
+        });
       });
 
       it('keeps per-node state apart from the seed', async () => {

@@ -197,6 +197,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    const credentials = this.connectionRegistry.sentinelDataNodeCredentials(connectionId);
+    if (!credentials) {
+      throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
+    }
     const key = `addr:${connectionId}:${host}:${port}`;
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
@@ -209,7 +213,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       healthy: true,
       flags: [],
     };
-    const credentials = this.connectionRegistry.dataNodeCredentials(connectionId);
     return this.openNodeClient(key, node, host, port, connectionId, {
       username: credentials.username ?? '',
       password: credentials.password ?? '',

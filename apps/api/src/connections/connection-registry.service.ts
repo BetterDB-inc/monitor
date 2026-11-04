@@ -1420,12 +1420,13 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  dataNodeCredentials(seedId: string): { username?: string; password?: string } {
+  sentinelDataNodeCredentials(seedId: string): { username?: string; password?: string } | null {
     const seed = this.configs.get(seedId);
-    if (!seed) {
-      throw new NotFoundException(`Connection '${seedId}' not found.`);
-    }
-    return dataNodeCredentialsOf(seed);
+    if (!seed || seed.membership || seed.sshTunnel?.enabled) return null;
+    if (seed.connectionType === 'external' || seed.host === 'agent') return null;
+    if (seed.credentialStatus === 'decryption_failed' || seed.nodePasswordEncrypted) return null;
+    if (seed.nodeUsername === undefined && seed.nodePassword === undefined) return null;
+    return { username: seed.nodeUsername, password: seed.nodePassword };
   }
 
   async addManagedChild(seedId: string, node: DesiredNode): Promise<string> {
