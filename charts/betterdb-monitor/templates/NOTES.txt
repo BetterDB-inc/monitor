@@ -36,6 +36,27 @@ WARNING: replicaCount > 1. The monitor keeps per-process state (capture
 sessions, in-memory storage); run a single replica unless you know why not.
 {{- end }}
 
+{{- if or .Values.metrics.serviceMonitor.enabled .Values.metrics.prometheusRule.enabled }}
+
+Created for the Prometheus Operator:
+{{- if .Values.metrics.serviceMonitor.enabled }}
+  ServiceMonitor  {{ include "betterdb-monitor.fullname" . }}{{ if not (include "betterdb-monitor.metricsToken.enabled" .) }} (unauthenticated scrape; set metrics.token to require a bearer token){{ end }}
+{{- end }}
+{{- if .Values.metrics.prometheusRule.enabled }}
+  PrometheusRule  {{ include "betterdb-monitor.fullname" . }}
+{{- end }}
+Your Prometheus only picks these up when their labels match its selectors.
+For kube-prometheus-stack that is usually the release label, e.g.
+  --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
+  --set metrics.prometheusRule.labels.release=kube-prometheus-stack
+{{- end }}
+
+{{- if .Values.metrics.grafanaDashboards.enabled }}
+
+Grafana dashboards are published as ConfigMaps in namespace
+{{ .Values.metrics.grafanaDashboards.namespace | default .Release.Namespace }} for the Grafana dashboard sidecar.
+{{- end }}
+
 Health:      /api/health
 Prometheus:  /api/prometheus/metrics
 API docs:    /docs

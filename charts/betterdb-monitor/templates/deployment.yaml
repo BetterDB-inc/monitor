@@ -94,6 +94,13 @@ spec:
                   name: {{ .Values.license.existingSecret | default (include "betterdb-monitor.secretName" .) }}
                   key: {{ ternary .Values.license.existingSecretKey "license-key" (ne .Values.license.existingSecret "") }}
             {{- end }}
+            {{- if include "betterdb-monitor.metricsToken.enabled" . }}
+            - name: PROMETHEUS_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "betterdb-monitor.metricsToken.secretName" . }}
+                  key: {{ include "betterdb-monitor.metricsToken.secretKey" . }}
+            {{- end }}
             {{- if .Values.license.offline.existingSecret }}
             - name: BETTERDB_OFFLINE_LICENSE_FILE
               value: /run/secrets/betterdb/{{ .Values.license.offline.existingSecretKey }}

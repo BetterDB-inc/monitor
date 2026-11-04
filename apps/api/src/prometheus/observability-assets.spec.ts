@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { PrometheusService } from './prometheus.service';
+import { VITALS_METRICS } from './export-profile';
 import type { ConnectionRegistry } from '../connections/connection-registry.service';
 import type { ConfigService } from '@nestjs/config';
 import type { StoragePort } from '../common/interfaces/storage-port.interface';
@@ -425,5 +426,188 @@ describe('demo stack', () => {
     expect(jobs.betterdb.metrics_path).toBe('/api/prometheus/metrics');
     expect(jobs.betterdb.static_configs[0].targets).toEqual(['betterdb:3001']);
     expect(jobs['otel-collector'].static_configs[0].targets).toEqual(['otel-collector:8889']);
+  });
+});
+
+describe('Prometheus alert rules (docs/alertmanager-rules.yml)', () => {
+  const RULES_FILE = path.join(REPO_ROOT, 'docs/alertmanager-rules.yml');
+  const SEVERITIES = ['critical', 'warning', 'info'];
+
+  interface AlertRule {
+    alert: string;
+    expr: string;
+    for?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  }
+
+  function loadRules(): AlertRule[] {
+    const file = parseYaml(readFileSync(RULES_FILE, 'utf8')) as {
+      groups: Array<{ name: string; rules: AlertRule[] }>;
+    };
+    return file.groups.flatMap((group) => group.rules);
+  }
+
+  function registeredLabels(): Map<string, string[]> {
+    const connections = {
+      getConfig: jest.fn().mockReturnValue({ host: '10.0.0.1', port: 6379 }),
+      get: jest.fn(),
+      list: jest.fn().mockReturnValue([]),
+    } as unknown as ConnectionRegistry;
+    const config = {
+      get: jest.fn((_key: string, fallback?: unknown) => fallback),
+    } as unknown as ConfigService;
+    const service = new PrometheusService(
+      {} as StoragePort,
+      connections,
+      config,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const metrics = service['registry'].getMetricsAsArray() as unknown as Array<{
+      name: string;
+      labelNames: string[];
+    }>;
+    return new Map(metrics.map((metric) => [metric.name, [...metric.labelNames]]));
+  }
+
+  /** Label names inside every `by (...)` clause of the expression. */
+  function byClauses(expr: string): string[][] {
+    return [...expr.matchAll(/\bby\s*\(([^)]*)\)/g)].map((match) =>
+      match[1]
+        .split(',')
+        .map((label) => label.trim())
+        .filter(Boolean),
+    );
+  }
+
+  function templatedLabels(rule: AlertRule): string[] {
+    const text = Object.values(rule.annotations ?? {}).join('\n');
+    return [...new Set([...text.matchAll(/\$labels\.([a-zA-Z_][a-zA-Z0-9_]*)/g)].map((m) => m[1]))];
+  }
+
+  const rules = loadRules();
+
+  it('declares each alert once', () => {
+    const names = rules.map((rule) => rule.alert);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it.each(rules.map((rule) => [rule.alert, rule] as const))(
+    '%s has a severity, a summary and a description',
+    (_name, rule) => {
+      expect(SEVERITIES).toContain(rule.labels?.severity);
+      expect(rule.annotations?.summary).toBeTruthy();
+      expect(rule.annotations?.description).toBeTruthy();
+    },
+  );
+
+  it.each(rules.map((rule) => [rule.alert, rule] as const))(
+    '%s only queries metrics the service registers',
+    (_name, rule) => {
+      const labels = registeredLabels();
+      const used = metricNamesIn(rule.expr);
+      expect(used.length).toBeGreaterThan(0);
+      for (const name of used) {
+        expect(labels.has(name)).toBe(true);
+      }
+    },
+  );
+
+  // An annotation that templates a label the result does not carry renders
+  // empty ("Critical anomaly detected on "). The scrape target's `instance`
+  // label is the monitor itself, never the monitored instance, so every alert
+  // names the instance through `connection` instead.
+  it.each(rules.map((rule) => [rule.alert, rule] as const))(
+    '%s only templates labels its result carries',
+    (_name, rule) => {
+      const labels = registeredLabels();
+      const metrics = metricNamesIn(rule.expr);
+      const aggregations = byClauses(rule.expr);
+      const aggregatesWithoutBy =
+        /\b(sum|min|max|avg|count)\s*\(/.test(rule.expr) && aggregations.length === 0;
+
+      for (const label of templatedLabels(rule)) {
+        expect(label).not.toBe('instance');
+        expect(aggregatesWithoutBy).toBe(false);
+        for (const metric of metrics) {
+          expect(labels.get(metric)).toContain(label);
+        }
+        for (const kept of aggregations) {
+          expect(kept).toContain(label);
+        }
+      }
+    },
+  );
+
+  it.each(rules.map((rule) => [rule.alert, rule] as const))(
+    '%s names the monitored instance in its summary',
+    (_name, rule) => {
+      expect(rule.annotations?.summary).toContain('{{ $labels.connection }}');
+    },
+  );
+
+  // Keeping namespace and job stops two releases that watch the same
+  // host:port from merging into one alert, and lets namespaced
+  // AlertmanagerConfigs match (both labels are simply absent elsewhere).
+  it('keeps namespace, job and connection through every aggregation', () => {
+    for (const rule of rules) {
+      for (const kept of byClauses(rule.expr)) {
+        expect(kept).toEqual(expect.arrayContaining(['namespace', 'job', 'connection']));
+      }
+    }
+  });
+
+  // These counters are created on their first inc(), so a new label set is
+  // first scraped already at 1 and increase() alone reports 0 for it.
+  const LAZY_COUNTERS = ['betterdb_anomaly_events_total', 'betterdb_correlated_groups_total'];
+
+  it.each(
+    rules
+      .filter((rule) => LAZY_COUNTERS.some((name) => rule.expr.includes(`increase(${name}`)))
+      .map((rule) => [rule.alert, rule] as const),
+  )('%s also counts a counter series on its first appearance', (_name, rule) => {
+    const windows = [...rule.expr.matchAll(/increase\([^[]+\[(\d+[smh])\]\)/g)].map((m) => m[1]);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const window of windows) {
+      expect(rule.expr).toContain(` offset ${window})`);
+      expect(rule.expr).toContain(' unless ');
+    }
+  });
+
+  it('guards every rule that takes increase() of a lazily created counter', () => {
+    const lazyRules = rules.filter((rule) =>
+      LAZY_COUNTERS.some((name) => rule.expr.includes(`increase(${name}`)),
+    );
+    expect(lazyRules.map((rule) => rule.alert).sort()).toEqual([
+      'BetterDBAuthAnomaly',
+      'BetterDBConnectionLeak',
+      'BetterDBCriticalAnomaly',
+      'BetterDBMemoryPressure',
+      'BetterDBTrafficBurst',
+      'BetterDBWarningSpike',
+    ]);
+  });
+
+  it('ships availability alerts that work under the vitals export profile', () => {
+    const availability = (
+      parseYaml(readFileSync(RULES_FILE, 'utf8')) as {
+        groups: Array<{ name: string; rules: AlertRule[] }>;
+      }
+    ).groups.find((group) => group.name === 'betterdb-availability-alerts');
+
+    expect(availability?.rules.map((rule) => rule.alert)).toEqual([
+      'BetterDBConnectionStale',
+      'BetterDBMemoryNearLimit',
+      'BetterDBReplicaLinkDown',
+      'BetterDBClusterSlotsFailing',
+    ]);
+    for (const rule of availability?.rules ?? []) {
+      for (const name of metricNamesIn(rule.expr)) {
+        expect(VITALS_METRICS.has(name)).toBe(true);
+      }
+    }
   });
 });

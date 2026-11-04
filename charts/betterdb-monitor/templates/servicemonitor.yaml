@@ -1,0 +1,45 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{- /*
+Scrapes /api/prometheus/metrics through the chart's Service. When a metrics
+token is configured the Prometheus Operator reads it from the same Secret the
+pod gets PROMETHEUS_METRICS_TOKEN from; that Secret lives in the release
+namespace, which is why the ServiceMonitor does too.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "betterdb-monitor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "betterdb-monitor.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "betterdb-monitor.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /api/prometheus/metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- if include "betterdb-monitor.metricsToken.enabled" . }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "betterdb-monitor.metricsToken.secretName" . }}
+          key: {{ include "betterdb-monitor.metricsToken.secretKey" . }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

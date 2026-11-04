@@ -96,6 +96,55 @@ ingress:
           pathType: Prefix
   tls: []
 
+# Prometheus / Prometheus Operator integration. Everything here is off by
+# default; the metrics endpoint itself (/api/prometheus/metrics) is always
+# served on the http port.
+metrics:
+  # Bearer token required to scrape the endpoint (PROMETHEUS_METRICS_TOKEN).
+  # Plaintext -> chart-managed Secret; prefer existingSecret. When set, the
+  # ServiceMonitor below authenticates with the same Secret.
+  token: ""
+  existingSecret: ""
+  existingSecretKey: metrics-token
+
+  # A ServiceMonitor for the Prometheus Operator (kube-prometheus-stack).
+  # Requires the monitoring.coreos.com CRDs.
+  serviceMonitor:
+    enabled: false
+    # Labels your Prometheus selects ServiceMonitors by. kube-prometheus-stack
+    # selects on its release name by default, e.g. release: kube-prometheus-stack
+    labels: {}
+    interval: 30s
+    # Must not exceed interval; Prometheus rejects the scrape config otherwise.
+    scrapeTimeout: 10s
+    relabelings: []
+    metricRelabelings: []
+
+  # The alert pack from docs/alertmanager-rules.yml as a PrometheusRule.
+  # Requires the monitoring.coreos.com CRDs.
+  prometheusRule:
+    enabled: false
+    # Labels your Prometheus selects rules by (kube-prometheus-stack: release).
+    labels: {}
+    # Extra rule groups appended after the shipped ones, in PrometheusRule
+    # format: [{name: ..., rules: [...]}]
+    additionalGroups: []
+
+  # The Grafana dashboard pack (deploy/observability/dashboards) as one
+  # ConfigMap per dashboard, for the Grafana dashboard sidecar.
+  grafanaDashboards:
+    enabled: false
+    # Namespace the sidecar watches. Empty = the release namespace.
+    namespace: ""
+    # kube-prometheus-stack's sidecar picks up ConfigMaps labelled
+    # grafana_dashboard: "1" by default.
+    labels:
+      grafana_dashboard: "1"
+    # Folder the sidecar files the dashboards under (needs the sidecar's
+    # folderAnnotation set to grafana_folder).
+    annotations:
+      grafana_folder: BetterDB
+
 resources:
   requests:
     cpu: 100m

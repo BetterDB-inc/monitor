@@ -1,0 +1,31 @@
+# Renders every optional Prometheus Operator / Grafana object. Used by
+# .github/workflows/helm-chart-ci.yml; not a recommended production config.
+db:
+  host: valkey.default.svc.cluster.local
+  password: ci-password
+metrics:
+  token: ci-scrape-token
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    relabelings:
+      - action: replace
+        targetLabel: cluster
+        replacement: ci
+  prometheusRule:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+    additionalGroups:
+      - name: ci-extra
+        rules:
+          - alert: CiAlwaysFiring
+            expr: vector(1)
+            labels:
+              severity: info
+            annotations:
+              summary: CI rule
+  grafanaDashboards:
+    enabled: true
+    namespace: monitoring

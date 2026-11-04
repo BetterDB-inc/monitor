@@ -96,6 +96,49 @@
         "tls": { "type": "array" }
       }
     },
+    "metrics": {
+      "type": "object",
+      "description": "Prometheus / Prometheus Operator integration.",
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "Bearer token required to scrape /api/prometheus/metrics (PROMETHEUS_METRICS_TOKEN)."
+        },
+        "existingSecret": { "type": "string" },
+        "existingSecretKey": { "type": "string" },
+        "serviceMonitor": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object" },
+            "interval": { "type": "string" },
+            "scrapeTimeout": { "type": "string" },
+            "relabelings": { "type": "array" },
+            "metricRelabelings": { "type": "array" }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": { "type": "object" },
+            "additionalGroups": {
+              "type": "array",
+              "items": { "type": "object", "required": ["name", "rules"] }
+            }
+          }
+        },
+        "grafanaDashboards": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "labels": { "type": "object" },
+            "annotations": { "type": ["object", "null"] }
+          }
+        }
+      }
+    },
     "resources": { "type": "object" },
     "startupProbe": { "type": "object" },
     "livenessProbe": { "type": "object" },

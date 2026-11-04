@@ -1,0 +1,25 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- /*
+files/alert-rules.yaml is a byte-identical copy of docs/alertmanager-rules.yml
+(scripts/sync-chart-observability.mjs). .Files.Get returns it as data, so the
+Prometheus $labels / $value placeholders in the annotations reach Prometheus
+untouched instead of being evaluated by Helm.
+*/}}
+{{- $pack := .Files.Get "files/alert-rules.yaml" | fromYaml }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "betterdb-monitor.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "betterdb-monitor.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    {{- toYaml $pack.groups | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.additionalGroups }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
