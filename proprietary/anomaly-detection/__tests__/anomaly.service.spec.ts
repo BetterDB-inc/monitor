@@ -28,6 +28,7 @@ import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_PERSIST_BACKLOG,
   OPEN_EVENT_PAGE_SIZE,
 } from '../replication-divergence-detector';
 import {
@@ -13619,6 +13620,65 @@ describe('AnomalyService', () => {
         await poll([target], 1, T0);
 
         expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, T0, 30_000)).toBe(false);
+      });
+
+      it('marks a primary unreachable when connecting to it stalls', async () => {
+        jest.useFakeTimers();
+        try {
+          (service as any).clusterDiscovery = { getNodeConnection: jest.fn(() => new Promise(() => {})) };
+
+          const done = poll([target], 1, T0);
+          await jest.advanceTimersByTimeAsync(5_000);
+          await done;
+
+          expect((service as any).topologyFanoutUnreachable.get('conn-1')).toBe(1);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('clears the unreachable count once no primary is left to read', async () => {
+        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+        (service as any).topologyFanoutUnreachable.set('conn-1', 1);
+
+        await poll([], 1, T0);
+
+        expect((service as any).topologyFanoutUnreachable.has('conn-1')).toBe(false);
+      });
+
+      it('serves unsaved windows of retired primaries in order', async () => {
+        storage.getReplicationDivergenceWindows.mockResolvedValue([]);
+        const window = (start: number) => ({
+          addr: NODE_REPLICA,
+          start,
+          end: start + 1000,
+          gapBytes: 1,
+          bytesPerSec: 1,
+          secondsBehind: 1,
+        });
+        (service as any).divergencePendingWindows.set('conn-1', [window(T0 + 5000), window(T0)]);
+
+        const [history] = await divergenceHistory();
+
+        expect(history.replica).toBe(NODE_REPLICA);
+        expect(history.windows.map((w: { start: number }) => w.start)).toEqual([T0, T0 + 5000]);
+      });
+
+      it('logs the unsaved windows it drops from a full backlog', () => {
+        const warn = jest.spyOn((service as any).logger, 'warn');
+        const windows = Array.from({ length: DIVERGENCE_PERSIST_BACKLOG + 2 }, (_, i) => ({
+          addr: NODE_REPLICA,
+          start: i,
+          end: i + 1,
+          gapBytes: 1,
+          bytesPerSec: 1,
+          secondsBehind: 1,
+        }));
+
+        (service as any).queuePendingDivergenceWindows(mockCtx, windows);
+
+        expect((service as any).divergencePendingWindows.get('conn-1')).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2'));
       });
 
       it('skips only connected registrations, whatever the host case', () => {
