@@ -626,21 +626,26 @@ describe('observeDivergence', () => {
 
   it('stays quiet on a stale ack whose gap is under the floor at the current write rate', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: MiB - 1, rate: MiB, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: MiB - 1, rate: MiB, lagSec: climbingLag(i) })),
+    );
     expect(out.flat()).toEqual([]);
   });
 
   it('stays quiet on a stale ack only seconds behind a fast primary', () => {
     const h = new Harness();
-    const out = h.windows(Array.from({ length: 6 }, () => ({ gap: 8 * MiB, rate: 4 * MiB, lagSec: 30 })));
+    const out = h.windows(
+      Array.from({ length: 6 }, (_, i) => ({ gap: 8 * MiB, rate: 4 * MiB, lagSec: climbingLag(i) })),
+    );
     expect(out.flat()).toEqual([]);
   });
 
   it('counts stale windows only while the replica is behind', () => {
     const h = new Harness();
-    const behind = { gap: 40 * MiB, rate: MiB, lagSec: 30 };
-    const caughtUp = { gap: 0, rate: MiB, lagSec: 30 };
-    expect(divergences(h.windows([behind, caughtUp, behind]))).toEqual([]);
+    const out = h.windows(
+      [40 * MiB, 0, 40 * MiB].map((gap, i) => ({ gap, rate: MiB, lagSec: climbingLag(i) })),
+    );
+    expect(divergences(out)).toEqual([]);
   });
 
   it('raises no alert for a disconnect the last-IO path owns', () => {

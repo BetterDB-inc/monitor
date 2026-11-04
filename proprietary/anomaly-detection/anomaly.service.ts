@@ -44,6 +44,7 @@ import {
   ConnectionChurnSample,
 } from './connection-churn';
 import {
+  DroppedSpan,
   IncidentTimeline,
   IncidentTimelineBuilder,
   DEFAULT_INCIDENT_TIMELINE_OPTIONS,
@@ -433,6 +434,7 @@ export class AnomalyService
   private readonly incidentEvents = new Map<string, AnomalyEvent[]>();
   private readonly incidentEventsById = new Map<string, AnomalyEvent>();
   private readonly incidentEventsDroppedThrough = new Map<string, number>();
+  private readonly incidentEventsDroppedSpan = new Map<string, DroppedSpan>();
   private recentGroups: CorrelatedAnomalyGroup[] = [];
   private readonly unsavedGroups = new Map<
     string,
@@ -1020,6 +1022,7 @@ export class AnomalyService
     this.reshardThinViewLogged.delete(connectionId);
     this.forgetIncidentEvents(connectionId, () => true);
     this.incidentEventsDroppedThrough.delete(connectionId);
+    this.incidentEventsDroppedSpan.delete(connectionId);
     this.resyncLoopState.delete(connectionId);
     this.hostnameStalenessFirstSeen.delete(connectionId);
     this.activeHostnameStaleness.delete(connectionId);
@@ -6564,16 +6567,44 @@ export class AnomalyService
   private rememberIncidentEvent(anomaly: AnomalyEvent): void {
     const connectionId = anomaly.connectionId ?? '';
     const events = this.incidentEvents.get(connectionId) ?? [];
-    events.push(anomaly);
+    let at = events.length;
+    while (at > 0 && events[at - 1].timestamp > anomaly.timestamp) at -= 1;
+    events.splice(at, 0, anomaly);
     this.incidentEventsById.set(anomaly.id, anomaly);
     if (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
+      const liveFrom = events[events.length - 1].timestamp - 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+      const stale = events.findIndex((event) => event.timestamp >= liveFrom);
+      events
+        .splice(0, stale === -1 ? events.length : stale)
+        .forEach((event) => this.dropIncidentEvent(connectionId, event));
+    }
+    while (events.length > MAX_INCIDENT_EVENTS_PER_CONNECTION) {
       const [evicted] = events.splice(this.incidentEventToEvict(events), 1);
-      this.incidentEventsById.delete(evicted.id);
-      const droppedThrough = this.incidentEventsDroppedThrough.get(connectionId) ?? evicted.timestamp;
-      this.incidentEventsDroppedThrough.set(connectionId, Math.max(droppedThrough, evicted.timestamp));
+      this.dropIncidentEvent(connectionId, evicted);
+      this.extendDroppedSpan(connectionId, evicted.timestamp);
     }
     this.incidentEvents.set(connectionId, events);
     this.incidentsDirty = true;
+  }
+
+  private dropIncidentEvent(connectionId: string, evicted: AnomalyEvent): void {
+    this.incidentEventsById.delete(evicted.id);
+    const droppedThrough = this.incidentEventsDroppedThrough.get(connectionId) ?? evicted.timestamp;
+    this.incidentEventsDroppedThrough.set(connectionId, Math.max(droppedThrough, evicted.timestamp));
+  }
+
+  private extendDroppedSpan(connectionId: string, timestamp: number): void {
+    const span = this.incidentEventsDroppedSpan.get(connectionId);
+    const continues =
+      span !== undefined &&
+      timestamp >= span.from &&
+      timestamp - span.through <= DEFAULT_INCIDENT_TIMELINE_OPTIONS.gapMs;
+    this.incidentEventsDroppedSpan.set(
+      connectionId,
+      continues
+        ? { from: span.from, through: Math.max(span.through, timestamp) }
+        : { from: timestamp, through: timestamp },
+    );
   }
 
   private incidentEventToEvict(events: AnomalyEvent[]): number {
@@ -6581,17 +6612,8 @@ export class AnomalyService
     const first = new Map<string, number>();
     keys.forEach((key, i) => first.has(key) || first.set(key, i));
     const last = new Map(keys.map((key, i) => [key, i]));
-    const newest = keys.length - 1;
-    const candidates: ((key: string, i: number) => boolean)[] = [
-      (key, i) => first.get(key)! < i && last.get(key)! > i,
-      (key, i) => first.get(key)! < i && i < newest,
-      (key) => first.get(key) === last.get(key),
-    ];
-    for (const evictable of candidates) {
-      const index = keys.findIndex(evictable);
-      if (index !== -1) return index;
-    }
-    return 0;
+    const middle = keys.findIndex((key, i) => first.get(key)! < i && i < last.get(key)!);
+    return middle === -1 ? 0 : middle;
   }
 
   private forgetIncidentEvents(
@@ -7113,6 +7135,7 @@ export class AnomalyService
         this.liveBoundaries,
         this.incidentEventsDroppedThrough,
         now - windowMs,
+        this.incidentEventsDroppedSpan,
       );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;

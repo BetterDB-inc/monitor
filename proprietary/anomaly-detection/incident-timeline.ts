@@ -49,6 +49,11 @@ export interface IncidentBoundary {
   anomalyId: string;
 }
 
+export interface DroppedSpan {
+  from: number;
+  through: number;
+}
+
 export interface IncidentTimelineOptions {
   gapMs: number;
   maxSpanMs: number;
@@ -235,6 +240,7 @@ export class IncidentTimelineBuilder {
     boundaries: readonly IncidentBoundary[] = [],
     droppedThrough: ReadonlyMap<string, number> = new Map(),
     heldFrom = Number.NEGATIVE_INFINITY,
+    droppedSpans: ReadonlyMap<string, DroppedSpan> = new Map(),
   ): IncidentTimeline[] {
     const byScope = new Map<string, AnomalyEvent[]>();
     for (const event of events) {
@@ -281,7 +287,8 @@ export class IncidentTimelineBuilder {
         heldFrom,
         this.droppedThroughScope(scope, scoped, droppedThrough),
       );
-      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedAt)) {
+      const spans = this.droppedSpansOf(scope, scoped, droppedSpans);
+      for (const cluster of this.cluster(sorted, scopedBoundaries, positionOf, droppedAt, spans)) {
         timelines.push(this.toTimeline(scope, cluster, now, probe, nextOccurrence));
       }
     }
@@ -295,6 +302,7 @@ export class IncidentTimelineBuilder {
     boundaries: readonly IncidentBoundary[],
     positionOf: (anomalyId: string) => number,
     droppedAt: number,
+    spans: DroppedSpan[],
   ): IncidentCluster[] {
     const clusters: IncidentCluster[] = [];
     let current: AnomalyEvent[] = [];
@@ -310,7 +318,7 @@ export class IncidentTimelineBuilder {
       const stored =
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
-      const continues = first !== undefined && this.continuesIncident(current, event);
+      const continues = first !== undefined && this.continuesIncident(current, event, spans);
       if (
         continues &&
         !start &&
@@ -366,9 +374,34 @@ export class IncidentTimelineBuilder {
     return latest;
   }
 
-  private continuesIncident(current: AnomalyEvent[], event: AnomalyEvent): boolean {
+  private droppedSpansOf(
+    scope: string,
+    events: AnomalyEvent[],
+    droppedSpans: ReadonlyMap<string, DroppedSpan>,
+  ): DroppedSpan[] {
+    const members = new Set(events.map((event) => event.connectionId ?? ''));
+    return [...droppedSpans]
+      .filter(([connectionId]) => members.has(connectionId) || this.resolveScope(connectionId) === scope)
+      .map(([, span]) => span);
+  }
+
+  private bridges(span: DroppedSpan, from: number, to: number): boolean {
+    return (
+      from <= span.through &&
+      span.from - from <= this.opts.gapMs &&
+      span.through <= to &&
+      to - span.through <= this.opts.gapMs
+    );
+  }
+
+  private continuesIncident(
+    current: AnomalyEvent[],
+    event: AnomalyEvent,
+    spans: DroppedSpan[] = [],
+  ): boolean {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
+    if (spans.some((span) => this.bridges(span, last.timestamp, event.timestamp))) return true;
     return this.rules().some((rule) =>
       rule.steps.slice(1).some(
         (step, i) =>

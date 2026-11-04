@@ -11725,7 +11725,7 @@ describe('AnomalyService', () => {
         expect(kept.at(-1)).toBe('repeat');
       });
 
-      it('drops an older repeat before the first event of any signal', () => {
+      it('drops the oldest event before a repeat when no signal repeats in between', () => {
         const now = Date.now();
         const p99 = (id: string, offset: number, command: string) =>
           service.ingestExternalAnomaly(
@@ -11742,9 +11742,78 @@ describe('AnomalyService', () => {
 
         const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
         expect(kept).toHaveLength(200);
-        expect(kept.slice(0, 2)).toEqual(['p99-0', 'p99-1']);
-        expect(kept).not.toContain('repeat-0');
+        expect(kept.slice(0, 2)).toEqual(['p99-1', 'p99-2']);
+        expect(kept).toContain('repeat-0');
         expect(kept.at(-1)).toBe('repeat-1');
+      });
+
+      it('keeps one incident for a signal repeating longer than the gap past the cap', async () => {
+        const now = Date.now();
+        const start = now - 20 * MIN;
+        for (let i = 0; i < 400; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        storm(now);
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept[0]).toBe('mem-0');
+        expect(kept[1]).toBe('mem-201');
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].startedAt).toBe(start);
+      });
+
+      it('splits incidents across a quiet gap that the dropped span does not cover', async () => {
+        const now = Date.now();
+        const start = now - 40 * MIN;
+        for (let i = 0; i < 300; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'late', timestamp: start + 299_000 + 10 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storm(now);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('drops events older than the live window before evicting live ones', () => {
+        const now = Date.now();
+        for (let i = 0; i < 200; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `old-${i}`,
+              timestamp: now - 3 * 60 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+        service.ingestExternalAnomaly(anomaly({ id: 'fresh', timestamp: now }));
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toEqual(['fresh']);
+        expect((service as any).incidentEventsDroppedThrough.get('conn-1')).toBe(now - 3 * 60 * MIN + 199);
+        expect((service as any).incidentEventsDroppedSpan.has('conn-1')).toBe(false);
+      });
+
+      it('keeps the buffer in timestamp order when events arrive out of order', () => {
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'late', timestamp: now - MIN }));
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 3 * MIN }));
+        service.ingestExternalAnomaly(anomaly({ id: 'middle', timestamp: now - 2 * MIN }));
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toEqual(['early', 'middle', 'late']);
       });
 
       it('drops the oldest event and records it when every signal is distinct', () => {
