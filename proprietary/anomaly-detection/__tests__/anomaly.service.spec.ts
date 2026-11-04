@@ -4497,7 +4497,7 @@ describe('AnomalyService', () => {
           history,
           600_000,
           660_000,
-          580_000,
+          569_999,
         );
       };
 
@@ -4707,6 +4707,120 @@ describe('AnomalyService', () => {
         );
       storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([]);
 
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'steady', keyKind: 'name', totalCommands }]]),
+      });
+      const steady = [reading(520_000, 0), reading(580_000, 60_000), reading(700_000, 180_000)];
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        steady,
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 510_000, 599_999);
+      expect(ranked).toEqual([]);
+    });
+
+    describe('when the reconnect baseline cannot be trusted', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const snapshotRow = { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 };
+
+      beforeEach(() => {
+        storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+          { capturedAt: 780_000, ...worker, count: 1, ageSum: 1 },
+        ]);
+        storage.getNewClientConnections = jest
+          .fn()
+          .mockImplementation(async (_id: string, start: number) =>
+            start === 600_000 ? [{ ...worker, count: 50 }] : [],
+          );
+        storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([]);
+      });
+
+      it('does not scale a baseline cut to a sliver after the previous episode', async () => {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([snapshotRow]);
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          [],
+          600_000,
+          780_000,
+          594_999,
+        );
+
+        expect(ranked).toBeNull();
+      });
+
+      it('does not compare with a baseline that has no client readings', async () => {
+        storage.getClientSnapshots = jest
+          .fn()
+          .mockImplementation(async ({ endTime }: { endTime: number }) =>
+            endTime < 600_000 ? [] : [snapshotRow],
+          );
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          [],
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toBeNull();
+      });
+    });
+
+    it('reports attribution as unavailable when command rates are unknown and no reconnects stand out', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+        { capturedAt: 780_000, ...worker, count: 1, ageSum: 1 },
+      ]);
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockImplementation(async (_id: string, start: number) =>
+          start === 600_000 ? [{ ...worker, count: 1 }] : [],
+        );
+      storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([]);
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+      );
+
+      expect(ranked).toBeNull();
+    });
+
+    it('counts the id growth since the last capture before a cut baseline', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientSnapshotGroups = jest.fn().mockResolvedValue([
+        { capturedAt: 780_000, ...worker, count: 1, ageSum: 1 },
+      ]);
+      storage.getNewClientConnections = jest
+        .fn()
+        .mockImplementation(async (_id: string, start: number) =>
+          start === 600_000 ? [{ ...worker, count: 1 }] : [],
+        );
+      const captures = [
+        { ...worker, capturedAt: 505_000, oldestAge: 500, maxClientId: 100 },
+        { ...worker, capturedAt: 650_000, oldestAge: 1, maxClientId: 130 },
+      ];
+      storage.getClientConnectionCaptures = jest
+        .fn()
+        .mockImplementation(async (_id: string, start: number, end: number) =>
+          captures.filter((c) => c.capturedAt >= start && c.capturedAt <= end),
+        );
+
       const ranked = await (service as any).attributeRetryAmplification(
         mockCtx,
         [],
@@ -4715,8 +4829,7 @@ describe('AnomalyService', () => {
         509_999,
       );
 
-      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 510_000, 599_999);
-      expect(ranked).toEqual([]);
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
     });
 
     it('still names a reconnecting client above the scaled baseline', async () => {
@@ -4824,7 +4937,7 @@ describe('AnomalyService', () => {
 
       await runRetry();
 
-      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
+      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(2);
       expect(storage.getClientSnapshots).toHaveBeenCalledWith(
         expect.objectContaining({ limit: 1 }),
       );
@@ -4886,6 +4999,7 @@ describe('AnomalyService', () => {
           sourcePort: 1,
           connectionId: 'conn-1',
         });
+        await history.saveClientSnapshot([row('pool-0', 'pool', 999_000, startTime - 1)], 'conn-1');
         await history.saveClientSnapshot(
           ['early-1', 'early-2', 'early-3'].map((id) => row(id, 'retrier', 0, startTime)),
           'conn-1',
