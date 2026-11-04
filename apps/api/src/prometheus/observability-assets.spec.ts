@@ -549,12 +549,46 @@ describe('Prometheus alert rules (docs/alertmanager-rules.yml)', () => {
     },
   );
 
-  it('keeps the connection label through every aggregation', () => {
+  // Keeping namespace and job stops two releases that watch the same
+  // host:port from merging into one alert, and lets namespaced
+  // AlertmanagerConfigs match (both labels are simply absent elsewhere).
+  it('keeps namespace, job and connection through every aggregation', () => {
     for (const rule of rules) {
       for (const kept of byClauses(rule.expr)) {
-        expect(kept).toContain('connection');
+        expect(kept).toEqual(expect.arrayContaining(['namespace', 'job', 'connection']));
       }
     }
+  });
+
+  // These counters are created on their first inc(), so a new label set is
+  // first scraped already at 1 and increase() alone reports 0 for it.
+  const LAZY_COUNTERS = ['betterdb_anomaly_events_total', 'betterdb_correlated_groups_total'];
+
+  it.each(
+    rules
+      .filter((rule) => LAZY_COUNTERS.some((name) => rule.expr.includes(`increase(${name}`)))
+      .map((rule) => [rule.alert, rule] as const),
+  )('%s also counts a counter series on its first appearance', (_name, rule) => {
+    const windows = [...rule.expr.matchAll(/increase\([^[]+\[(\d+[smh])\]\)/g)].map((m) => m[1]);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const window of windows) {
+      expect(rule.expr).toContain(` offset ${window})`);
+      expect(rule.expr).toContain(' unless ');
+    }
+  });
+
+  it('guards every rule that takes increase() of a lazily created counter', () => {
+    const lazyRules = rules.filter((rule) =>
+      LAZY_COUNTERS.some((name) => rule.expr.includes(`increase(${name}`)),
+    );
+    expect(lazyRules.map((rule) => rule.alert).sort()).toEqual([
+      'BetterDBAuthAnomaly',
+      'BetterDBConnectionLeak',
+      'BetterDBCriticalAnomaly',
+      'BetterDBMemoryPressure',
+      'BetterDBTrafficBurst',
+      'BetterDBWarningSpike',
+    ]);
   });
 
   it('ships availability alerts that work under the vitals export profile', () => {
