@@ -1,5 +1,5 @@
 import type { Advisory, CveFinding, CveProduct, CveSeverity, LoadedModule } from '@betterdb/shared';
-import { isModuleProductOf, moduleProductOf } from '@betterdb/shared';
+import { isModuleProductOf, moduleProductOf, resolveFindingConfidence } from '@betterdb/shared';
 import { matchRanges } from './version-range';
 
 export interface MatchInput {
@@ -84,6 +84,8 @@ export function matchAdvisories(input: MatchInput, advisories: Advisory[]): Matc
       matchedVersion: version,
       ...(loadedModule ? { moduleName: loadedModule.name } : {}),
       ...(match.fixedIn ? { fixedIn: match.fixedIn } : {}),
+      confidence: resolveFindingConfidence(match.fallback, advisory.confidence),
+      ...(match.fallback ? { fallback: true as const } : {}),
     });
     severityCounts[advisory.severity] += 1;
   }

@@ -5,6 +5,8 @@ import { MODULE_VERSION_ENCODINGS } from '../cve.constants';
 export interface VersionMatch {
   vulnerable: boolean;
   fixedIn?: string;
+  /** Set when the vulnerable match came only from an NVD fallback wildcard range. */
+  fallback?: true;
 }
 
 const WILDCARD_BRANCH = '*';
@@ -130,6 +132,30 @@ function lowestPatchedAt(ranges: BranchRange[]): string | undefined {
   });
 }
 
+/** Lowest patchedAt on a branch newer than the version's: the upgrade target for an EOL build. */
+function lowestFixOnNewerBranch(version: string, ranges: BranchRange[]): string | undefined {
+  const own = `${branchOf(version)}.0`;
+  const candidates = ranges
+    .filter((range) => {
+      return range.patchedAt !== undefined && range.branch !== WILDCARD_BRANCH;
+    })
+    .map((range) => {
+      return range.patchedAt as string;
+    })
+    .filter((patched) => {
+      return compareVersions(`${branchOf(patched)}.0`, own) > 0;
+    })
+    .sort(compareVersions);
+
+  return candidates[0];
+}
+
+/**
+ * Precedence: on-branch ranges, then stated wildcards, then NVD fallback
+ * wildcards. A fallback only applies when the version's branch has no
+ * on-branch range from any source, so branch-specific data (a fix, or a
+ * vulnerable floor such as 7.0.8) always wins over it.
+ */
 export function matchRanges(version: string, ranges: BranchRange[]): VersionMatch {
   const branch = branchOf(version);
   const onBranch = ranges.filter((range) => {
@@ -138,10 +164,29 @@ export function matchRanges(version: string, ranges: BranchRange[]): VersionMatc
   const wildcard = ranges.filter((range) => {
     return range.branch === WILDCARD_BRANCH;
   });
+  const stated = wildcard.filter((range) => {
+    return range.fallback !== true;
+  });
 
-  const vulnerable = firstVulnerable(version, onBranch) ?? firstVulnerable(version, wildcard);
-  if (vulnerable !== null) {
-    return vulnerable;
+  const direct = firstVulnerable(version, onBranch) ?? firstVulnerable(version, stated);
+  if (direct !== null) {
+    return direct;
+  }
+
+  if (onBranch.length === 0) {
+    const fallback = wildcard.filter((range) => {
+      return range.fallback === true;
+    });
+    const hit = firstVulnerable(version, fallback);
+    if (hit !== null) {
+      const upgrade = lowestFixOnNewerBranch(version, ranges);
+
+      return {
+        ...hit,
+        fallback: true,
+        ...(hit.fixedIn === undefined && upgrade ? { fixedIn: upgrade } : {}),
+      };
+    }
   }
 
   const fixedIn = lowestPatchedAt(onBranch) ?? lowestPatchedAt(wildcard);
