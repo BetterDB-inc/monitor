@@ -1753,22 +1753,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         PRIMARY KEY (scope_id, started_at, anomaly_id)
       );
       CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = current_schema()
-            AND table_name = 'incident_boundaries'
-            AND column_name = 'metric_type'
-        ) THEN
-          ALTER TABLE incident_boundaries ADD COLUMN metric_type TEXT;
-          ALTER TABLE incident_boundaries ADD COLUMN IF NOT EXISTS connection_id TEXT;
-          UPDATE incident_boundaries b
-          SET metric_type = e.metric_type, connection_id = e.connection_id
-          FROM anomaly_events e
-          WHERE e.id::text = b.anomaly_id;
-        END IF;
-      END $$;
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
@@ -3273,15 +3257,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (boundaries.length === 0) return 0;
 
     const result = await this.pool.query(
-      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id, metric_type, connection_id)
-       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[], $4::text[], $5::text[])
+      `INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+       SELECT * FROM UNNEST($1::text[], $2::bigint[], $3::text[])
        ON CONFLICT DO NOTHING`,
       [
         boundaries.map((b) => b.scopeId),
         boundaries.map((b) => b.startedAt),
         boundaries.map((b) => b.anomalyId),
-        boundaries.map((b) => b.metricType ?? null),
-        boundaries.map((b) => b.connectionId ?? null),
       ],
     );
     return result.rowCount ?? 0;
@@ -3292,19 +3274,27 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (query.scopeIds?.length === 0) return [];
 
     const result = await this.pool.query(
-      `SELECT scope_id, started_at, anomaly_id, metric_type, connection_id FROM incident_boundaries
-       WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
-         AND started_at >= $2
-         AND ($3::bigint IS NULL OR started_at <= $3)
-       UNION ALL
-       SELECT b.scope_id, b.started_at, b.anomaly_id, b.metric_type, b.connection_id
-       FROM incident_boundaries b
-       JOIN (
-         SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
-         WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
-         GROUP BY scope_id
-       ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
-       ORDER BY started_at ASC, anomaly_id ASC`,
+      `SELECT boundary.scope_id, boundary.started_at, boundary.anomaly_id,
+              e.metric_type, e.connection_id
+       FROM (
+         SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+         WHERE ($1::text[] IS NULL OR scope_id = ANY($1))
+           AND started_at >= $2
+           AND ($3::bigint IS NULL OR started_at <= $3)
+         UNION ALL
+         SELECT b.scope_id, b.started_at, b.anomaly_id
+         FROM incident_boundaries b
+         JOIN (
+           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+           WHERE ($1::text[] IS NULL OR scope_id = ANY($1)) AND started_at < $2
+           GROUP BY scope_id
+         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+       ) boundary
+       LEFT JOIN anomaly_events e ON e.id = CASE
+         WHEN boundary.anomaly_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         THEN boundary.anomaly_id::uuid
+       END
+       ORDER BY boundary.started_at ASC, boundary.anomaly_id ASC`,
       [query.scopeIds ?? null, query.startTime, query.endTime ?? null],
     );
     return result.rows.map(toIncidentBoundary);

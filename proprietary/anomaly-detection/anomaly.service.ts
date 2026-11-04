@@ -7083,8 +7083,6 @@ export class AnomalyService
         scopeId: incident.scope,
         startedAt: incident.startedAt,
         anomalyId: incident.entries[0].anomalyId,
-        metricType: incident.entries[0].metricType,
-        connectionId: incident.entries[0].connectionId,
       }));
     this.liveBoundaries = kept;
     if (fresh.length === 0) return;

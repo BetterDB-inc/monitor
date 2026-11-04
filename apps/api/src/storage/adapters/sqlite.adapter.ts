@@ -735,24 +735,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!groupColumns.some((col) => col.name === 'scope_id')) {
       this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN scope_id TEXT').run();
     }
-    const boundaryColumns = this.db.prepare('PRAGMA table_info(incident_boundaries)').all() as {
-      name: string;
-    }[];
-    if (!boundaryColumns.some((col) => col.name === 'metric_type')) {
-      this.db.prepare('ALTER TABLE incident_boundaries ADD COLUMN metric_type TEXT').run();
-    }
-    if (!boundaryColumns.some((col) => col.name === 'connection_id')) {
-      this.db.prepare('ALTER TABLE incident_boundaries ADD COLUMN connection_id TEXT').run();
-    }
-    this.db
-      .prepare(
-        `UPDATE incident_boundaries
-         SET metric_type = e.metric_type, connection_id = e.connection_id
-         FROM anomaly_events e
-         WHERE e.id = incident_boundaries.anomaly_id
-           AND incident_boundaries.metric_type IS NULL`,
-      )
-      .run();
     const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
       name: string;
     }[];
@@ -1954,8 +1936,6 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         scope_id TEXT NOT NULL,
         started_at INTEGER NOT NULL,
         anomaly_id TEXT NOT NULL,
-        metric_type TEXT,
-        connection_id TEXT,
         PRIMARY KEY (scope_id, started_at, anomaly_id)
       );
 
@@ -3201,21 +3181,13 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (boundaries.length === 0) return 0;
 
     const stmt = this.db.prepare(`
-      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id, metric_type, connection_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO incident_boundaries (scope_id, started_at, anomaly_id)
+      VALUES (?, ?, ?)
       ON CONFLICT DO NOTHING
     `);
     const insertMany = this.db.transaction((rows: StoredIncidentBoundary[]) =>
       rows.reduce(
-        (saved, row) =>
-          saved +
-          stmt.run(
-            row.scopeId,
-            row.startedAt,
-            row.anomalyId,
-            row.metricType ?? null,
-            row.connectionId ?? null,
-          ).changes,
+        (saved, row) => saved + stmt.run(row.scopeId, row.startedAt, row.anomalyId).changes,
         0,
       ),
     );
@@ -3231,17 +3203,22 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const inWindow = query.endTime ? 'AND started_at <= ?' : '';
     const rows = this.db
       .prepare(
-        `SELECT scope_id, started_at, anomaly_id, metric_type, connection_id FROM incident_boundaries
-         WHERE ${inScope}started_at >= ? ${inWindow}
-         UNION ALL
-         SELECT b.scope_id, b.started_at, b.anomaly_id, b.metric_type, b.connection_id
-         FROM incident_boundaries b
-         JOIN (
-           SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
-           WHERE ${inScope}started_at < ?
-           GROUP BY scope_id
-         ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
-         ORDER BY started_at ASC, anomaly_id ASC`,
+        `SELECT boundary.scope_id, boundary.started_at, boundary.anomaly_id,
+                e.metric_type, e.connection_id
+         FROM (
+           SELECT scope_id, started_at, anomaly_id FROM incident_boundaries
+           WHERE ${inScope}started_at >= ? ${inWindow}
+           UNION ALL
+           SELECT b.scope_id, b.started_at, b.anomaly_id
+           FROM incident_boundaries b
+           JOIN (
+             SELECT scope_id, MAX(started_at) AS started_at FROM incident_boundaries
+             WHERE ${inScope}started_at < ?
+             GROUP BY scope_id
+           ) latest ON b.scope_id = latest.scope_id AND b.started_at = latest.started_at
+         ) boundary
+         LEFT JOIN anomaly_events e ON e.id = boundary.anomaly_id
+         ORDER BY boundary.started_at ASC, boundary.anomaly_id ASC`,
       )
       .all(
         ...(query.scopeIds ?? []),
