@@ -44,17 +44,19 @@ export function splitHostPort(addr: string): { host: string; port: number } | nu
 
 export function clusterTargets(nodes: ClusterNode[], isRegistered: RegisteredAddress): TopologyScope {
   const targets = new Map<string, TopologyTarget>();
-  const members = new Set<string>();
+  const down = new Set<string>();
   for (const node of nodes) {
     if (!node.flags.includes('master') || node.flags.includes('myself')) continue;
     const address = splitHostPort(node.address);
     if (!address || isRegistered(address.host, address.port)) continue;
     const addr = `${address.host}:${address.port}`;
-    members.add(addr);
-    if (UNREACHABLE_CLUSTER_FLAGS.some((flag) => node.flags.includes(flag))) continue;
+    if (UNREACHABLE_CLUSTER_FLAGS.some((flag) => node.flags.includes(flag))) {
+      down.add(addr);
+      continue;
+    }
     if (!targets.has(addr)) targets.set(addr, { addr, ...address, nodeId: node.id });
   }
-  return { targets: capTargets([...targets.values()]), members };
+  return scopeOf(targets, down);
 }
 
 export function sentinelTargets(
@@ -62,24 +64,28 @@ export function sentinelTargets(
   isRegistered: RegisteredAddress,
 ): TopologyScope {
   const targets = new Map<string, TopologyTarget>();
-  const members = new Set<string>();
+  const down = new Set<string>();
   for (const master of masters) {
     if (!master.ip || !Number.isInteger(master.port) || master.port <= 0) continue;
     if (isRegistered(master.ip, master.port)) continue;
     const addr = `${master.ip}:${master.port}`;
-    members.add(addr);
-    if (UNREACHABLE_SENTINEL_FLAGS.some((flag) => master.flags.includes(flag))) continue;
+    if (UNREACHABLE_SENTINEL_FLAGS.some((flag) => master.flags.includes(flag))) {
+      down.add(addr);
+      continue;
+    }
     if (!targets.has(addr)) {
       targets.set(addr, { addr, host: master.ip, port: master.port });
     }
   }
-  return { targets: capTargets([...targets.values()]), members };
+  return scopeOf(targets, down);
 }
 
-function capTargets(targets: TopologyTarget[]): TopologyTarget[] {
-  return targets
+function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): TopologyScope {
+  const targets = [...reachable.values()]
     .sort((a, b) => a.addr.localeCompare(b.addr))
     .slice(0, TOPOLOGY_TARGET_LIMIT);
+  const unreachable = [...down].filter((addr) => !reachable.has(addr));
+  return { targets, members: new Set([...targets.map((t) => t.addr), ...unreachable]) };
 }
 
 export class TopologyTargetClaims {

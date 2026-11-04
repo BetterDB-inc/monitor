@@ -8340,13 +8340,35 @@ export class AnomalyService
     if (this.divergenceRetiredSwept.has(ctx.connectionId)) return;
     try {
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
-      const stale = open.filter(
-        (e) => e.nodeAddr && !active.has(e.nodeAddr) && !this.persistenceOutbox.has(e.id),
+      const tracked = new Set(
+        this.divergenceKeysOf(ctx.connectionId).flatMap((key) => [
+          ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+          ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
+        ]),
       );
+      const untracked = open.filter(
+        (e) => e.nodeAddr && !tracked.has(e.id) && !this.persistenceOutbox.has(e.id),
+      );
+      const stale = untracked.filter((e) => !active.has(e.nodeAddr!));
       if (stale.length > 0) {
         const retired = this.divergenceRetired.get(ctx.connectionId) ?? new Set<string>();
         for (const event of stale) retired.add(event.id);
         this.divergenceRetired.set(ctx.connectionId, retired);
+      }
+      for (const event of untracked) {
+        if (!active.has(event.nodeAddr!)) continue;
+        const key = topologyStateKey(ctx.connectionId, event.nodeAddr!);
+        if (this.divergenceOrphansSwept.has(key)) continue;
+        const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
+        const replica = event.replicaAddr ?? 'unknown';
+        const orphan = orphans.get(replica) ?? {
+          eventIds: new Set<string>(),
+          sinceWindow: 0,
+          claimed: false,
+        };
+        orphan.eventIds.add(event.id);
+        orphans.set(replica, orphan);
+        this.divergenceOrphans.set(key, orphans);
       }
       this.divergenceRetiredSwept.add(ctx.connectionId);
     } catch (err) {
