@@ -183,9 +183,37 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     eventType: WebhookEventType,
     data: Record<string, unknown>,
     connectionId?: string,
+    excludeWebhook?: (webhookId: string) => boolean,
   ): Promise<boolean> {
     const enrichedData = connectionId ? { ...data, connectionId } : data;
-    return this.dispatchPendingEvent(this.createPendingEvent(eventType, enrichedData, connectionId));
+    const targetWebhookIds = excludeWebhook
+      ? await this.subscribedWebhookIdsExcept(eventType, connectionId, excludeWebhook)
+      : undefined;
+    return this.dispatchPendingEvent(
+      this.createPendingEvent(eventType, enrichedData, connectionId, targetWebhookIds),
+    );
+  }
+
+  async getSubscribedWebhookIds(
+    eventType: WebhookEventType,
+    connectionId?: string,
+  ): Promise<Set<string>> {
+    const webhooks = await this.webhooksService.getWebhooksByEvent(eventType, connectionId);
+    return new Set(webhooks.map((webhook) => webhook.id));
+  }
+
+  private async subscribedWebhookIdsExcept(
+    eventType: WebhookEventType,
+    connectionId: string | undefined,
+    excludeWebhook: (webhookId: string) => boolean,
+  ): Promise<string[] | undefined> {
+    try {
+      const ids = await this.getSubscribedWebhookIds(eventType, connectionId);
+      return [...ids].filter((id) => !excludeWebhook(id));
+    } catch (error) {
+      this.logger.error(`Failed to look up webhooks for event ${eventType}:`, error);
+      return undefined;
+    }
   }
 
   private createPendingEvent(
@@ -415,6 +443,10 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     return false;
   }
 
+  isThresholdAlertActive(alertKeyPrefix: string, connectionId: string, webhookId: string): boolean {
+    return this.alertStates.has(`${alertKeyPrefix}:${connectionId}:${webhookId}`);
+  }
+
   clearThresholdAlertPerWebhook(alertKeyPrefix: string, connectionId: string): void {
     const generationKey = `${alertKeyPrefix}:${connectionId}`;
     const pending = this.pendingLookups.get(generationKey);
@@ -488,6 +520,7 @@ export class WebhookDispatcherService implements OnModuleDestroy {
     isAbove: boolean,
     data: Record<string, unknown> | ((threshold: number) => Record<string, unknown>),
     connectionId?: string,
+    skipWebhook?: (webhookId: string) => boolean,
   ): Promise<boolean> {
     let firedAny = false;
     const settleLookup = this.trackLookup(alertKeyPrefix, connectionId);
@@ -527,6 +560,12 @@ export class WebhookDispatcherService implements OnModuleDestroy {
               alertConfig.hysteresisFactor,
             )
           ) {
+            if (skipWebhook?.(webhook.id)) {
+              this.logger.debug(
+                `Threshold alert ${eventType} for webhook ${webhook.id} skipped: already alerted`,
+              );
+              return;
+            }
             this.logger.log(
               `Threshold alert triggered for webhook ${webhook.id}: ${eventType} (${currentValue} ${isAbove ? '>=' : '<='} ${threshold})`,
             );

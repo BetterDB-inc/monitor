@@ -8271,6 +8271,7 @@ export class AnomalyService
       });
     }
     acknowledgeRecovery(state, recovery.addr);
+    this.webhookEventsProService?.endReplicationStall(ctx.connectionId, recovery.addr);
 
     if (recovery.kind === 'cleared' || !announced) return;
 

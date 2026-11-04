@@ -15,6 +15,7 @@ import {
   type WebhookInstanceInfo,
 } from '@betterdb/shared';
 import { LicenseService } from '@proprietary/licenses';
+import { ReplicaPairing } from './replica-pairing';
 
 /**
  * Webhook Events Pro Service - Generates PRO tier webhook events
@@ -34,6 +35,8 @@ import { LicenseService } from '@proprietary/licenses';
 @Injectable()
 export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProService {
   private readonly logger = new Logger(WebhookEventsProService.name);
+  private readonly replicaPairing = new ReplicaPairing();
+  private readonly notAckingStalls = new Set<string>();
 
   constructor(
     private readonly webhookDispatcher: WebhookDispatcherService,
@@ -123,11 +126,67 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
         instance: data.instance,
       }),
       data.connectionId,
+      await this.webhooksAlertedForStall(data.connectionId),
     );
   }
 
   clearReplicationLag(connectionId: string): void {
     this.webhookDispatcher.clearThresholdAlertPerWebhook('replication_lag', connectionId);
+  }
+
+  observeReplication(
+    connectionId: string,
+    replication: Record<string, string | undefined> | undefined,
+    instance: WebhookInstanceInfo,
+  ): void {
+    this.replicaPairing.observe(connectionId, replication, instance);
+  }
+
+  forgetReplication(connectionId: string): void {
+    this.replicaPairing.forget(connectionId);
+    for (const key of this.notAckingStalls) {
+      if (key.startsWith(`${connectionId}\0`)) this.notAckingStalls.delete(key);
+    }
+  }
+
+  endReplicationStall(connectionId: string, replica: string): void {
+    this.notAckingStalls.delete(stallKey(connectionId, replica));
+  }
+
+  private async webhooksAlertedForStall(
+    replicaConnectionId: string,
+  ): Promise<((webhookId: string) => boolean) | undefined> {
+    const pair = this.replicaPairing.primaryFor(replicaConnectionId);
+    if (!pair || !this.notAckingStalls.has(stallKey(pair.primaryConnectionId, pair.replicaAddr))) {
+      return undefined;
+    }
+    try {
+      const alerted = await this.webhookDispatcher.getSubscribedWebhookIds(
+        WebhookEventType.REPLICATION_DIVERGENCE,
+        pair.primaryConnectionId,
+      );
+      return (webhookId) => alerted.has(webhookId);
+    } catch (error) {
+      this.logger.error('Failed to look up replication.divergence subscribers', error);
+      return undefined;
+    }
+  }
+
+  private webhooksWithOpenLagAlert(
+    primaryConnectionId: string,
+    replica: string,
+  ): ((webhookId: string) => boolean) | undefined {
+    const replicaConnectionId = this.replicaPairing.replicaConnectionFor(
+      primaryConnectionId,
+      replica,
+    );
+    if (!replicaConnectionId) return undefined;
+    return (webhookId) =>
+      this.webhookDispatcher.isThresholdAlertActive(
+        'replication_lag',
+        replicaConnectionId,
+        webhookId,
+      );
   }
 
   /**
@@ -413,10 +472,21 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     }
 
     const { connectionId, ...payload } = data;
+    let excludeWebhook: ((webhookId: string) => boolean) | undefined;
+    if (connectionId) {
+      const key = stallKey(connectionId, data.replica);
+      if (data.reason === 'not_acking') {
+        this.notAckingStalls.add(key);
+        excludeWebhook = this.webhooksWithOpenLagAlert(connectionId, data.replica);
+      } else {
+        this.notAckingStalls.delete(key);
+      }
+    }
     await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.REPLICATION_DIVERGENCE,
       payload,
       connectionId,
+      excludeWebhook,
     );
   }
 
@@ -427,6 +497,7 @@ export class WebhookEventsProService implements OnModuleInit, IWebhookEventsProS
     }
 
     const { connectionId, ...payload } = data;
+    if (connectionId) this.endReplicationStall(connectionId, data.replica);
     await this.webhookDispatcher.dispatchEvent(
       WebhookEventType.REPLICATION_RECOVERED,
       payload,
@@ -771,4 +842,8 @@ export function clusterFailoverMessage(data: {
     return `Cluster failover detected (state ${data.clusterState})`;
   }
   return `Cluster failover detected while state stayed ${data.clusterState}: ${labels}`;
+}
+
+function stallKey(primaryConnectionId: string, replica: string): string {
+  return `${primaryConnectionId}\0${replica}`;
 }

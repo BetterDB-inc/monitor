@@ -123,6 +123,7 @@ describe('AnomalyService', () => {
       dispatchAnomalyDetected: jest.fn().mockResolvedValue(undefined),
       dispatchSlowlogThreshold: jest.fn().mockResolvedValue(undefined),
       dispatchReplicationLag: jest.fn().mockResolvedValue(undefined),
+      endReplicationStall: jest.fn(),
       dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),

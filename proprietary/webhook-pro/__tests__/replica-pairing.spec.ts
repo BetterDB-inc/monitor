@@ -1,0 +1,92 @@
+import { ReplicaPairing } from '../replica-pairing';
+
+const primaryInfo = (replid: string, ...addrs: string[]) => ({
+  role: 'master',
+  master_replid: replid,
+  ...Object.fromEntries(
+    addrs.map((addr, i) => {
+      const [ip, port] = addr.split(':');
+      return [`slave${i}`, `ip=${ip},port=${port},state=online,offset=100,lag=0`];
+    }),
+  ),
+});
+
+const replicaInfo = (replid: string) => ({ role: 'slave', master_replid: replid });
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+describe('ReplicaPairing', () => {
+  it('pairs a replica by its address on the primary', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379', '10.0.0.3:6379'), {
+      host: '10.0.0.1',
+      port: 6379,
+    });
+    pairing.observe('a', replicaInfo('r1'), { host: '10.0.0.3', port: 6379 });
+
+    expect(pairing.primaryFor('a')).toEqual({
+      primaryConnectionId: 'p',
+      replicaAddr: '10.0.0.3:6379',
+    });
+    expect(pairing.replicaConnectionFor('p', '10.0.0.3:6379')).toBe('a');
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
+  });
+
+  it('pairs a unique replid and port without resolving the host', () => {
+    const resolver = jest.fn().mockRejectedValue(new Error('no dns'));
+    const pairing = new ReplicaPairing(resolver);
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6380'), { host: 'primary', port: 6379 });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica.svc', port: 6380 });
+
+    expect(pairing.primaryFor('a')?.replicaAddr).toBe('10.0.0.2:6380');
+  });
+
+  it('pairs by the resolved host when several replicas share a port', async () => {
+    const resolver = jest.fn(async (host: string) =>
+      host === 'replica-b.svc' ? ['10.0.0.3'] : ['10.0.0.2'],
+    );
+    const pairing = new ReplicaPairing(resolver);
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379', '10.0.0.3:6379'), {
+      host: 'primary',
+      port: 6379,
+    });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica-a.svc', port: 6379 });
+    pairing.observe('b', replicaInfo('r1'), { host: 'replica-b.svc', port: 6379 });
+    expect(pairing.primaryFor('b')).toBeNull();
+
+    await flush();
+
+    expect(pairing.primaryFor('b')?.replicaAddr).toBe('10.0.0.3:6379');
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBe('a');
+  });
+
+  it('does not pair when several replicas share a port and the host is unknown', async () => {
+    const pairing = new ReplicaPairing(jest.fn().mockRejectedValue(new Error('no dns')));
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379', '10.0.0.3:6379'), {
+      host: 'primary',
+      port: 6379,
+    });
+    pairing.observe('a', replicaInfo('r1'), { host: 'replica-a.svc', port: 6379 });
+    await flush();
+
+    expect(pairing.primaryFor('a')).toBeNull();
+  });
+
+  it('does not pair a replica of a different primary', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('a', replicaInfo('r2'), { host: '10.0.0.2', port: 6379 });
+
+    expect(pairing.primaryFor('a')).toBeNull();
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
+  });
+
+  it('forgets a connection that stops reporting a role', () => {
+    const pairing = new ReplicaPairing(jest.fn());
+    pairing.observe('p', primaryInfo('r1', '10.0.0.2:6379'), { host: '10.0.0.1', port: 6379 });
+    pairing.observe('a', replicaInfo('r1'), { host: '10.0.0.2', port: 6379 });
+    pairing.observe('a', undefined, { host: '10.0.0.2', port: 6379 });
+
+    expect(pairing.replicaConnectionFor('p', '10.0.0.2:6379')).toBeNull();
+  });
+});

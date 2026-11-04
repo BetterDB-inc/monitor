@@ -828,6 +828,7 @@ describe('PrometheusService staleness bounds', () => {
     const dispatchClusterFailover = jest.fn().mockReturnValue(new Promise(() => {}));
     (service as unknown as Record<string, unknown>)['webhookEventsProService'] = {
       dispatchClusterFailover,
+      observeReplication: jest.fn(),
     };
 
     await update('conn-1');

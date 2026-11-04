@@ -363,6 +363,8 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 
 Sent when a divergence opens or escalates, once the event has been saved. If storage is down the webhook waits for the retry, and is skipped if the event closes first. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
 
+When the primary and the stalled replica are both monitored, a webhook subscribed to both `replication.lag` and `replication.divergence` gets one alert per stall: whichever fires first. The other is skipped for that webhook until the stall ends. This only applies to `not_acking`; other reasons are always sent. The anomaly event is still recorded either way.
+
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
 ```json
