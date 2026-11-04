@@ -2096,6 +2096,82 @@ describe('AnomalyService', () => {
         expect((service as any).reshardSnapshot.size).toBe(0);
       });
 
+      const storedSkew = (id: string, nodeAddr: string) => ({
+        id,
+        timestamp: BASE - 60_000,
+        metricType: MetricType.RESHARD_SHARD_SKEW,
+        connectionId: 'conn-a',
+        nodeAddr,
+        resolved: false,
+      });
+      const resolvedIds = () => (storage.resolveAnomaly as jest.Mock).mock.calls.map(([id]) => id);
+      const storeOpen = (rows: ReturnType<typeof storedSkew>[]) => {
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        storage.getAnomalyEvents = jest.fn(async ({ metricType, resolved }) =>
+          resolved === false && metricType === MetricType.RESHARD_SHARD_SKEW ? rows : [],
+        );
+      };
+
+      it('keeps the open alert of an unregistered shard across a restart', async () => {
+        storeOpen([storedSkew('node-b-1', '10.0.0.98:6379')]);
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(skewEvents()).toHaveLength(0);
+        expect(resolvedIds()).not.toContain('node-b-1');
+        expect((service as any).reshardSkewEventIds.get('conn-a').get('reshard_skew:b0000000')).toBe(
+          'node-b-1',
+        );
+      });
+
+      it('closes the open alert of a shard that is no longer read after a restart', async () => {
+        storeOpen([storedSkew('gone-1', '10.0.0.200:6379')]);
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(2, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(resolvedIds()).toContain('gone-1');
+      });
+
+      it('keeps the alert of a shard whose topology stops answering', async () => {
+        const nodeD = {
+          ...shardNodes('a', true)[2],
+          id: 'd0000000',
+          address: '10.0.0.100:6379@16379',
+        };
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        discover({
+          b0000000: b,
+          c0000000: reshardNode('c', 6000),
+          d0000000: reshardNode('d', 6000),
+        });
+        const pollWithD = async (times: number) => {
+          for (let i = 0; i < times; i += 1) {
+            clock += 1000;
+            const ctx = shardCtx('a', 6000, true);
+            (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+              ...shardNodes('a', true),
+              nodeD,
+            ]);
+            await poll(ctx);
+          }
+        };
+        await pollWithD(6);
+        expect(skewEvents()).toHaveLength(1);
+
+        b.call.mockRejectedValue(new Error('timed out'));
+        await pollWithD(10);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
       it('leaves a primary unjudged when its own topology cannot be read', async () => {
         const b = reshardNode('b', 18_000, '[1-<-a0000000]');
         b.call.mockRejectedValue(new Error('NOPERM'));

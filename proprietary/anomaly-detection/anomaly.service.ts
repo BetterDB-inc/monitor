@@ -632,6 +632,7 @@ export class AnomalyService
   private openEventsAdopted = new Set<string>();
   private readonly openEventsRetry = new Map<string, { at: number; delayMs: number }>();
   private adoptedReshardEventIds = new Map<string, string>();
+  private adoptedNodeReshardEventIds = new Map<string, Map<string, string>>();
   private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
@@ -1020,6 +1021,7 @@ export class AnomalyService
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
+    this.adoptedNodeReshardEventIds.delete(connectionId);
     this.legacyReplicaSlotEvents.delete(connectionId);
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
@@ -2181,11 +2183,20 @@ export class AnomalyService
 
   private adoptReshardEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
     const tracked = new Set(this.reshardSkewEventIds.get(connectionId)?.values());
-    const [newest, ...older] = open
+    const untracked = open
       .filter((e) => !tracked.has(e.id))
       .sort((a, b) => b.timestamp - a.timestamp);
+    const [newest, ...older] = untracked.filter((e) => !e.nodeAddr);
     if (newest) this.adoptedReshardEventIds.set(connectionId, newest.id);
     for (const event of older) this.closeLater(event.id);
+    const byNode = this.adoptedNodeReshardEventIds.get(connectionId) ?? new Map<string, string>();
+    for (const event of untracked) {
+      if (!event.nodeAddr) continue;
+      const adopted = byNode.get(event.nodeAddr);
+      if (adopted === undefined) byNode.set(event.nodeAddr, event.id);
+      else if (adopted !== event.id) this.closeLater(event.id);
+    }
+    if (byNode.size > 0) this.adoptedNodeReshardEventIds.set(connectionId, byNode);
   }
 
   private closeLater(id: string): void {
@@ -2197,6 +2208,19 @@ export class AnomalyService
     const id = this.adoptedReshardEventIds.get(connectionId);
     if (!id) return;
     this.adoptedReshardEventIds.delete(connectionId);
+    this.bindAdoptedReshardEvent(connectionId, shardId, id);
+  }
+
+  private takeAdoptedNodeReshardEvent(connectionId: string, nodeAddr: string): string | undefined {
+    const byNode = this.adoptedNodeReshardEventIds.get(connectionId);
+    const id = byNode?.get(nodeAddr);
+    if (!id) return undefined;
+    byNode!.delete(nodeAddr);
+    if (byNode!.size === 0) this.adoptedNodeReshardEventIds.delete(connectionId);
+    return id;
+  }
+
+  private bindAdoptedReshardEvent(connectionId: string, shardId: string, id: string): void {
     const eventIds = this.reshardSkewEventIds.get(connectionId) ?? new Map<string, string>();
     const signature = reshardSkewSignature({ shardId });
     if (eventIds.has(signature)) this.closeLater(id);
@@ -5458,7 +5482,12 @@ export class AnomalyService
       } else {
         this.reshardSnapshot.delete(ctx.connectionId);
       }
-      const nodeSnapshots = this.freshReshardNodeSnapshots(ctx.connectionId, clusterKey, timestamp, intervalMs);
+      const { fresh: nodeSnapshots, unread } = this.reshardNodeSnapshots(
+        ctx.connectionId,
+        clusterKey,
+        timestamp,
+        intervalMs,
+      );
       const findings: ReshardSkewFinding[] = [];
       const nodeAddrs = new Map<string, string>();
       const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
@@ -5504,7 +5533,7 @@ export class AnomalyService
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * intervalMs,
         eventIdsByConn: this.reshardSkewEventIds,
         metricType: MetricType.RESHARD_SHARD_SKEW,
-        preserveSignature: () => unjudgeable && judged,
+        preserveSignature: (signature) => (unjudgeable && judged) || unread.has(signature),
         buildEvent: (finding) =>
           this.buildReshardSkewEvent(ctx, timestamp, finding, nodeAddrs.get(finding.shardId)),
       });
@@ -5555,20 +5584,24 @@ export class AnomalyService
     return [...this.reshardSnapshot.keys()].filter((key) => isTopologyStateKeyOf(key, connectionId));
   }
 
-  private freshReshardNodeSnapshots(
+  private reshardNodeSnapshots(
     connectionId: string,
     clusterKey: string,
     timestamp: number,
     intervalMs: number,
-  ): [string, ReshardShardSnapshot][] {
+  ): { fresh: [string, ReshardShardSnapshot][]; unread: Set<string> } {
     const prefix = `${connectionId}@`;
     const fresh: [string, ReshardShardSnapshot][] = [];
+    const unread = new Set<string>();
     for (const [key, snapshot] of this.reshardSnapshot) {
       if (!key.startsWith(prefix) || snapshot.clusterKey !== clusterKey) continue;
-      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) continue;
+      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) {
+        unread.add(reshardSkewSignature(snapshot));
+        continue;
+      }
       fresh.push([key.slice(prefix.length), snapshot]);
     }
-    return fresh;
+    return { fresh, unread };
   }
 
   private recordNodeReshardSnapshot(
@@ -5578,11 +5611,16 @@ export class AnomalyService
     info: Record<string, string>,
     timestamp: number,
   ): void {
+    if (!self) return;
+    const nodeAddr = key.slice(ctx.connectionId.length + 1);
+    const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
     const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
-    if (!clusterKey || !self?.flags.includes('master')) {
+    if (!clusterKey || !self.flags.includes('master')) {
       this.reshardSnapshot.delete(key);
+      if (adopted) this.closeLater(adopted);
       return;
     }
+    if (adopted) this.bindAdoptedReshardEvent(ctx.connectionId, self.id, adopted);
     this.reshardSnapshot.set(key, this.reshardShardSnapshot(key, clusterKey, self, info, null, timestamp));
   }
 
@@ -8268,6 +8306,11 @@ export class AnomalyService
     for (const key of this.reshardSnapshotKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) this.reshardSnapshot.delete(key);
     }
+    for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
+      if (active.has(topologyStateKey(ctx.connectionId, nodeAddr))) continue;
+      const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
+      if (adopted) this.closeLater(adopted);
+    }
     await this.sweepRetiredDivergenceNodes(ctx, targets);
     await this.settleRetiredDivergence(ctx.connectionId);
     if (targets.length === 0) return;
@@ -8613,6 +8656,7 @@ export class AnomalyService
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),
+      ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
       ...divergenceKeys.flatMap((key) => [
         ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
