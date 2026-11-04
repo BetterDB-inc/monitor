@@ -433,26 +433,55 @@ describe('PrometheusService slot stats', () => {
     (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
 
     clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
-      stats: { '1': slot(50), '9000': slot(40) },
+      stats: { '1': slot(50), '2': slot(45), '9000': slot(40) },
       failedNodes: [],
+      failedSlotRanges: [],
     });
     await runSlotStats(harness);
-    // The primary owning slot 9000 times out on the next poll.
+    // The primary owning slot 9000 times out on the next poll, and slot 2 of a
+    // healthy primary drops out of the top N.
     clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
       stats: { '1': slot(55) },
       failedNodes: ['10.0.0.3:6379'],
+      failedSlotRanges: [[8192, 16383]],
     });
     await runSlotStats(harness);
     let text = await harness.service.getMetrics();
     expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 55`);
     expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="9000"} 40`);
+    expect(text).not.toContain(`slot="2"`);
 
-    clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({ stats: { '1': slot(56) }, failedNodes: [] });
+    clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+      stats: { '1': slot(56) },
+      failedNodes: [],
+      failedSlotRanges: [],
+    });
     await runSlotStats(harness);
     text = await harness.service.getMetrics();
     expect(text).not.toContain(`slot="9000"`);
-    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith('key-count', 100, 'conn-1');
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith('key-count', 100, 'conn-1', 5_000);
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('bounds the cluster-wide fan-out by what is left of the INFO pass', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: {}, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+
+    service.passDeadlines.set('conn-1', Date.now() + 1_000);
+    await runSlotStats(harness);
+    const [, , , timeoutMs] = clusterMetrics.getClusterSlotStatsResult.mock.calls[0];
+    expect(timeoutMs).toBeGreaterThan(0);
+    expect(timeoutMs).toBeLessThanOrEqual(1_000);
+
+    service.passDeadlines.set('conn-1', Date.now() - 1);
+    await runSlotStats(harness);
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a node child on its own node slot stats', async () => {

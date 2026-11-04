@@ -43,7 +43,12 @@ import {
   TopologyDiff,
   TopologySnapshot,
 } from '../cluster/topology-diff';
-import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  ClusterSlotStatsResult,
+  NODE_COMMAND_TIMEOUT_MS,
+  inSlotRanges,
+} from '../cluster/cluster-metrics.service';
 import {
   demotedWritesMessage,
   evaluateDemotedWrites,
@@ -192,6 +197,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+  // When the current INFO pass of each connection is abandoned by its bound.
+  private passDeadlines = new Map<string, number>();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
@@ -1581,6 +1588,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Captured now: a removal during the INFO phase must stop this pass from
     // starting storage work for the (possibly re-added) connection.
     const storageEpoch = this.currentStorageEpoch(connectionId);
+    this.passDeadlines.set(connectionId, Date.now() + this.pollIntervalMs);
     const run: Promise<number> = (async () => {
       // A hung INFO releases the in-flight entry when the bound expires
       // (otherwise the entry would outlive every later pass and no connection
@@ -2631,10 +2639,28 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
 
     try {
-      const { stats: slotStats, failedNodes } =
-        client.getCapabilities().clusterEnabled && this.clusterMetricsService?.usesClusterWideSlotStats(connectionId)
-          ? await this.clusterMetricsService.getClusterSlotStatsResult('key-count', this.slotStatsTopN, connectionId)
-          : { stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN), failedNodes: [] };
+      let result: ClusterSlotStatsResult;
+      if (client.getCapabilities().clusterEnabled && this.clusterMetricsService?.usesClusterWideSlotStats(connectionId)) {
+        // The fan-out must finish inside this pass, or a later pass retires the
+        // epoch and every primary's answer is thrown away.
+        const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - Date.now();
+        if (remainingMs <= 0) {
+          return;
+        }
+        result = await this.clusterMetricsService.getClusterSlotStatsResult(
+          'key-count',
+          this.slotStatsTopN,
+          connectionId,
+          Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
+        );
+      } else {
+        result = {
+          stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN),
+          failedNodes: [],
+          failedSlotRanges: [],
+        };
+      }
+      const { stats: slotStats, failedSlotRanges } = result;
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
@@ -2649,14 +2675,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       // A primary that did not answer is missing from this result; keep the
-      // series it exported last time instead of dropping its slots.
-      if (failedNodes.length > 0) {
-        for (const slot of state.currentClusterSlotLabels) newSlotLabels.add(slot);
-      } else {
-        for (const staleSlot of state.currentClusterSlotLabels) {
-          if (!newSlotLabels.has(staleSlot)) {
-            this.removeSlotSeries(connLabel, staleSlot);
-          }
+      // series its slots exported last time instead of dropping them.
+      for (const staleSlot of state.currentClusterSlotLabels) {
+        if (newSlotLabels.has(staleSlot)) continue;
+        if (inSlotRanges(Number(staleSlot), failedSlotRanges)) {
+          newSlotLabels.add(staleSlot);
+        } else {
+          this.removeSlotSeries(connLabel, staleSlot);
         }
       }
 
@@ -3869,6 +3894,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
+    this.passDeadlines.delete(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete

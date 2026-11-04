@@ -529,9 +529,9 @@ used_cpu_user:20.3\r
     });
 
     it('keeps the MIGRATING view of a legacy move whichever node answers first', async () => {
-      mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+      // Discovered target-first, so its IMPORTING marker is read first.
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([primaries[1], primaries[0], primaries[2]]);
       nodeClients({
-        // The target answers first with its IMPORTING marker.
         def456node2: { nodes: 'def456node2 192.168.1.11:6379 myself,master - 0 0 2 connected 5461-10922 [100-<-abc123]\n' },
         abc123node1: { nodes: 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [100->-def456]\n' },
       });
@@ -584,15 +584,46 @@ used_cpu_user:20.3\r
         p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
         p2: [[9000, ['key-count', 70]], [9001, ['key-count', 1]], [2, ['key-count', 999]]],
       };
+      const calls: unknown[][] = [];
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
-        call: jest.fn().mockResolvedValue(replies[nodeId]),
+        call: jest.fn(async (...args: unknown[]) => {
+          calls.push([nodeId, ...args]);
+          return replies[nodeId];
+        }),
       }));
 
-      const stats = await service.getClusterSlotStats('key-count', 3, 'conn-1');
+      const result = await service.getClusterSlotStatsResult('key-count', 3, 'conn-1');
 
-      expect(Object.keys(stats).sort()).toEqual(['1', '2', '9000']);
-      expect(stats['2'].key_count).toBe(5);
-      expect(mockDiscoveryService.getNodeConnection.mock.calls.map((c) => c[0]).sort()).toEqual(['p1', 'p2']);
+      expect(Object.keys(result.stats).sort()).toEqual(['1', '2', '9000']);
+      expect(result.stats['2'].key_count).toBe(5);
+      expect(calls).toEqual(
+        expect.arrayContaining([
+          ['p1', 'CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', 0, 8191],
+          ['p2', 'CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', 8192, 16383],
+        ]),
+      );
+      expect(calls).toHaveLength(2);
+      // The unhealthy owner is reported, so its slots count as missing rather than gone.
+      expect(result.failedNodes).toEqual(['10.0.0.4:6379']);
+      expect(result.failedSlotRanges).toEqual([[0, 100]]);
+    });
+
+    it('does not let a slot a primary is handing off push out the slots it owns', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
+      ]);
+      const byRange: Record<string, unknown> = {
+        // Slot 150 was handed off but is still reported, at the top of the ranking.
+        '0': [[1, ['key-count', 50]], [150, ['key-count', 999]]],
+        '200': [[201, ['key-count', 40]]],
+      };
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => byRange[String(start)]),
+      });
+
+      const stats = await service.getClusterSlotStats('key-count', 2);
+
+      expect(Object.keys(stats).sort()).toEqual(['1', '201']);
     });
 
     it('reports a primary that does not answer in time and returns the others', async () => {
@@ -614,6 +645,7 @@ used_cpu_user:20.3\r
 
         expect(Object.keys(result.stats)).toEqual(['1']);
         expect(result.failedNodes).toEqual(['10.0.0.3:6379']);
+        expect(result.failedSlotRanges).toEqual([[8192, 16383]]);
       } finally {
         jest.useRealTimers();
       }

@@ -21,22 +21,23 @@ const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 export type SlotStatsOrder = 'key-count' | 'cpu-usec';
 
 /** How long one node may take to answer a fan-out command before it is left out. */
-const NODE_COMMAND_TIMEOUT_MS = 5_000;
+export const NODE_COMMAND_TIMEOUT_MS = 5_000;
 
 export interface ClusterSlotStatsResult {
   stats: SlotStats;
-  /** Primaries that did not answer; their slots are missing from `stats`. */
+  /** Slot-owning primaries that were unhealthy or did not answer; their slots are missing from `stats`. */
   failedNodes: string[];
+  /** The slot ranges those primaries own, as discovery sees them. */
+  failedSlotRanges: number[][];
+}
+
+export function inSlotRanges(slot: number, ranges: number[][]): boolean {
+  return ranges.some(([start, end]) => slot >= start && slot <= (end ?? start));
 }
 
 /** Keep only the slots inside the node's owned ranges, as discovery sees them. */
 export function ownedSlotStats(stats: SlotStats, ranges: number[][]): SlotStats {
-  return Object.fromEntries(
-    Object.entries(stats).filter(([slot]) => {
-      const n = Number(slot);
-      return ranges.some(([start, end]) => n >= start && n <= (end ?? start));
-    }),
-  );
+  return Object.fromEntries(Object.entries(stats).filter(([slot]) => inSlotRanges(Number(slot), ranges)));
 }
 
 /**
@@ -444,28 +445,37 @@ export class ClusterMetricsService {
     orderBy: SlotStatsOrder = 'key-count',
     limit: number = 100,
     connectionId?: string,
+    timeoutMs: number = NODE_COMMAND_TIMEOUT_MS,
   ): Promise<ClusterSlotStatsResult> {
     const validLimit = Math.max(1, Math.min(limit, CLUSTER_TOTAL_SLOTS));
-    const primaries = (await this.discoveryService.discoverNodes(connectionId)).filter(
-      (node) => node.role === 'master' && node.healthy && node.slots.length > 0,
+    const owners = (await this.discoveryService.discoverNodes(connectionId)).filter(
+      (node) => node.role === 'master' && node.slots.length > 0,
     );
+    const primaries = owners.filter((node) => node.healthy);
+    // Ask for each owned range rather than the node's top N: during a slot move
+    // a node still reports the slot it is handing off, which would take one of
+    // the N places and push an owned slot out. The merge ranks them instead.
     const results = await Promise.allSettled(
       primaries.map((node) =>
-        this.onNode(node, connectionId, async (client) => {
-          const raw = await client.call('CLUSTER', 'SLOT-STATS', 'ORDERBY', orderBy, 'LIMIT', validLimit);
-          // During a slot move a node can still report a slot it no longer owns.
-          return ownedSlotStats(MetricsParser.parseSlotStats(raw as unknown[]), node.slots);
+        this.onNode(node, connectionId, timeoutMs, async (client) => {
+          const perRange = await Promise.all(
+            node.slots.map(([start, end]) =>
+              client.call('CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', start, end ?? start),
+            ),
+          );
+          const stats = Object.assign({}, ...perRange.map((raw) => MetricsParser.parseSlotStats(raw as unknown[])));
+          return ownedSlotStats(stats, node.slots);
         }),
       ),
     );
 
     const perNode: SlotStats[] = [];
-    const failedNodes: string[] = [];
+    const failed = owners.filter((node) => !node.healthy);
     for (const [i, result] of results.entries()) {
       if (result.status === 'fulfilled') {
         perNode.push(result.value);
       } else {
-        failedNodes.push(primaries[i].address);
+        failed.push(primaries[i]);
         this.logger.warn(`Failed to fetch slot stats from ${primaries[i].address}: ${result.reason}`);
       }
     }
@@ -473,19 +483,28 @@ export class ClusterMetricsService {
       const first = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
       throw first?.reason instanceof Error ? first.reason : new Error(String(first?.reason));
     }
-    return { stats: mergeSlotStats(perNode, orderBy, validLimit), failedNodes };
+    return {
+      stats: mergeSlotStats(perNode, orderBy, validLimit),
+      failedNodes: failed.map((node) => node.address),
+      failedSlotRanges: failed.flatMap((node) => node.slots),
+    };
   }
 
   /**
-   * Run commands against one node within NODE_COMMAND_TIMEOUT_MS, so a node that
-   * accepts the connection but never replies cannot hold up a fan-out. The
-   * timeout releases the caller; it does not cancel the command on the socket.
+   * Run commands against one node within `timeoutMs`, so a node that accepts
+   * the connection but never replies cannot hold up a fan-out. The timeout
+   * releases the caller; it does not cancel the command on the socket.
    */
-  private onNode<T>(node: DiscoveredNode, connectionId: string | undefined, run: (client: Valkey) => Promise<T>): Promise<T> {
+  private onNode<T>(
+    node: DiscoveredNode,
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
     return withTimeout(
       this.discoveryService.getNodeConnection(node.id, connectionId).then(run),
-      NODE_COMMAND_TIMEOUT_MS,
-      `${node.address} did not answer within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+      timeoutMs,
+      `${node.address} did not answer within ${timeoutMs}ms`,
     );
   }
 
@@ -601,7 +620,7 @@ export class ClusterMetricsService {
     const primaries = nodes.filter((node) => node.role === 'master' && node.healthy);
     await Promise.all(
       primaries.map((primary) =>
-        this.onNode(primary, connectionId, (client) => readNode(primary, client)).catch((error) => {
+        this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
           this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
         }),
       ),
