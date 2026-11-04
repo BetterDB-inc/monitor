@@ -16,6 +16,7 @@ on:
       - 'packages/**'
       - 'proprietary/**'
       - 'apps/web/**'
+      - 'docs/minimum-acl.md'
       - 'pnpm-lock.yaml'
       - 'package.json'
       - 'pnpm-workspace.yaml'
