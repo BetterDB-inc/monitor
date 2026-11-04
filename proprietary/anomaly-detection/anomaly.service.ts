@@ -530,6 +530,7 @@ export class AnomalyService
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
+  private reshardMissedReads = new Set<string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -1047,7 +1048,10 @@ export class AnomalyService
     this.raftNodeTimeoutRecheck.delete(connectionId);
     this.stuckReplicaFirstSeen.delete(connectionId);
     this.activeStuckReplicas.delete(connectionId);
-    for (const key of this.reshardSnapshotKeysOf(connectionId)) this.reshardSnapshot.delete(key);
+    for (const key of this.reshardSnapshotKeysOf(connectionId)) {
+      this.reshardSnapshot.delete(key);
+      this.reshardMissedReads.delete(key);
+    }
     this.forgetClusterKey(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
@@ -5498,7 +5502,7 @@ export class AnomalyService
       } else {
         this.reshardSnapshot.delete(ctx.connectionId);
       }
-      const { fresh: nodeSnapshots, unread } = this.reshardNodeSnapshots(
+      const { fresh: nodeSnapshots, unread, missed } = this.reshardNodeSnapshots(
         ctx.connectionId,
         clusterKey,
         timestamp,
@@ -5508,7 +5512,8 @@ export class AnomalyService
       const nodeAddrs = new Map<string, string>();
       const shards = this.freshReshardShards(clusterKey, timestamp, intervalMs);
       const judged = seed !== null || nodeSnapshots.length > 0;
-      if (judged && isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs)) {
+      const windowOpen = judged && isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs);
+      if (windowOpen) {
         if (shards.length < RESHARD_MIN_PRIMARIES) {
           if (!this.reshardThinViewLogged.has(ctx.connectionId)) {
             this.reshardThinViewLogged.add(ctx.connectionId);
@@ -5549,7 +5554,8 @@ export class AnomalyService
         minPersistMs: (RESHARD_PERSIST_POLLS - 1) * intervalMs,
         eventIdsByConn: this.reshardSkewEventIds,
         metricType: MetricType.RESHARD_SHARD_SKEW,
-        preserveSignature: (signature) => (unjudgeable && judged) || unread.has(signature),
+        preserveSignature: (signature) =>
+          (unjudgeable && judged) || unread.has(signature) || (missed && !windowOpen),
         buildEvent: (finding) =>
           this.buildReshardSkewEvent(ctx, timestamp, finding, nodeAddrs.get(finding.shardId)),
       });
@@ -5605,19 +5611,24 @@ export class AnomalyService
     clusterKey: string,
     timestamp: number,
     intervalMs: number,
-  ): { fresh: [string, ReshardShardSnapshot][]; unread: Set<string> } {
+  ): { fresh: [string, ReshardShardSnapshot][]; unread: Set<string>; missed: boolean } {
     const prefix = `${connectionId}@`;
     const fresh: [string, ReshardShardSnapshot][] = [];
     const unread = new Set<string>();
+    let missed = false;
     for (const [key, snapshot] of this.reshardSnapshot) {
       if (!key.startsWith(prefix) || snapshot.clusterKey !== clusterKey) continue;
       if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) {
         unread.add(reshardSkewSignature(snapshot));
         continue;
       }
+      if (this.reshardMissedReads.has(key)) {
+        missed = true;
+        unread.add(reshardSkewSignature(snapshot));
+      }
       fresh.push([key.slice(prefix.length), snapshot]);
     }
-    return { fresh, unread };
+    return { fresh, unread, missed };
   }
 
   private recordNodeReshardSnapshot(
@@ -5627,7 +5638,11 @@ export class AnomalyService
     info: Record<string, string>,
     timestamp: number,
   ): void {
-    if (!self) return;
+    if (!self) {
+      this.reshardMissedReads.add(key);
+      return;
+    }
+    this.reshardMissedReads.delete(key);
     const nodeAddr = key.slice(ctx.connectionId.length + 1);
     const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
     const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
@@ -8353,7 +8368,10 @@ export class AnomalyService
       if (key !== ctx.connectionId && !active.has(key)) this.forgetRetryAmplification(key);
     }
     for (const key of this.reshardSnapshotKeysOf(ctx.connectionId)) {
-      if (key !== ctx.connectionId && !active.has(key)) this.reshardSnapshot.delete(key);
+      if (key !== ctx.connectionId && !active.has(key)) {
+        this.reshardSnapshot.delete(key);
+        this.reshardMissedReads.delete(key);
+      }
     }
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
       if (active.has(topologyStateKey(ctx.connectionId, nodeAddr))) continue;
@@ -8401,6 +8419,7 @@ export class AnomalyService
       if (result.status === 'rejected') {
         unreachable++;
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
+        if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
         continue;
       }
       const target = targets[i];
