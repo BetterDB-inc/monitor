@@ -167,7 +167,57 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
-    const existingConnection = this.discoveredNodes.get(nodeId);
+    const reused = await this.reuseNodeClient(nodeId);
+    if (reused) return reused;
+
+    // Bind the node client to the connection that owns it now, so a later
+    // default-connection change can't swap in another connection's TLS identity.
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const nodes = await this.discoverNodes(ownerId);
+    const node = nodes.find((n) => n.id === nodeId);
+
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found in cluster`);
+    }
+
+    // Cluster node addresses include bus port: "host:port@busport"
+    // We only need the client port, so split on '@' first
+    const [host, portStr] = node.address.split('@')[0].split(':');
+    const port = parseInt(portStr, 10);
+
+    if (!host || isNaN(port)) {
+      throw new Error(`Invalid node address: ${node.address}`);
+    }
+
+    const primaryClient = this.connectionRegistry.get(ownerId).getClient();
+    return this.openNodeClient(nodeId, node, host, port, ownerId, {
+      username: primaryClient.options.username || '',
+      password: primaryClient.options.password || '',
+    });
+  }
+
+  async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    const key = `addr:${connectionId}:${host}:${port}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    const node: DiscoveredNode = {
+      id: key,
+      address: `${host}:${port}`,
+      role: 'master',
+      slots: [],
+      configEpoch: 0,
+      healthy: true,
+      flags: [],
+    };
+    const credentials = this.connectionRegistry.dataNodeCredentials(connectionId);
+    return this.openNodeClient(key, node, host, port, connectionId, {
+      username: credentials.username ?? '',
+      password: credentials.password ?? '',
+    });
+  }
+
+  private async reuseNodeClient(key: string): Promise<Valkey | null> {
+    const existingConnection = this.discoveredNodes.get(key);
     if (existingConnection) {
       if (existingConnection.client.status === 'ready') {
         // Reuse the live client and refresh its check stamp. A ready connection
@@ -190,7 +240,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         existingConnection.healthy = true;
         return existingConnection.client;
       } catch (error) {
-        this.logger.warn(`Failed to reconnect to node ${nodeId}: ${error}`);
+        this.logger.warn(`Failed to reconnect to node ${key}: ${error}`);
         existingConnection.healthy = false;
       }
     }
@@ -213,30 +263,17 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         }
       }
     }
+    return null;
+  }
 
-    // Bind the node client to the connection that owns it now, so a later
-    // default-connection change can't swap in another connection's TLS identity.
-    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
-    const nodes = await this.discoverNodes(ownerId);
-    const node = nodes.find((n) => n.id === nodeId);
-
-    if (!node) {
-      throw new Error(`Node ${nodeId} not found in cluster`);
-    }
-
-    // Cluster node addresses include bus port: "host:port@busport"
-    // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
-
-    if (!host || isNaN(port)) {
-      throw new Error(`Invalid node address: ${node.address}`);
-    }
-
-    const dbClient = this.connectionRegistry.get(ownerId);
-    const primaryClient = dbClient.getClient();
-    const username = primaryClient.options.username || '';
-    const password = primaryClient.options.password || '';
+  private async openNodeClient(
+    key: string,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    ownerId: string | undefined,
+    { username, password }: { username: string; password: string },
+  ): Promise<Valkey> {
     const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
 
     const client = new Valkey({
@@ -261,10 +298,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Only log each unique connection error once to avoid log spam
     client.on('error', (err) => {
       const errorCode = (err as any).code || err.name;
-      const errorKey = `${nodeId}-${host}:${port}-${errorCode}`;
+      const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
         this.logger.warn(
-          `Cannot connect to node ${nodeId.substring(0, 12)} at ${host}:${port}: ${err.message}`,
+          `Cannot connect to node ${key.substring(0, 12)} at ${host}:${port}: ${err.message}`,
         );
         // Prevent unbounded growth
         if (this.loggedConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
@@ -294,24 +331,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
-      const replaced = this.discoveredNodes.get(nodeId);
+      const replaced = this.discoveredNodes.get(key);
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
       }
 
-      this.discoveredNodes.set(nodeId, connection);
-      this.logger.log(`Connected to node ${nodeId} at ${host}:${port}`);
+      this.discoveredNodes.set(key, connection);
+      this.logger.log(`Connected to node ${key} at ${host}:${port}`);
 
       // Clear logged errors for this node on successful connection
-      this.clearNodeErrors(nodeId);
+      this.clearNodeErrors(key);
 
       return client;
     } catch (error) {
       // Only log each unique connection error once to avoid spam
-      const errorKey = `connect-${nodeId}`;
+      const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
         this.logger.debug(
-          `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+          `Failed to connect to node ${key} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
         );
         // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {

@@ -108,6 +108,13 @@ function isDefaultCandidate(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin !== 'auto' && config.membership?.retiredAt === undefined;
 }
 
+function dataNodeCredentialsOf(seed: DatabaseConnectionConfig): { username?: string; password?: string } {
+  return {
+    username: seed.nodeUsername ?? seed.username,
+    password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
+  };
+}
+
 function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' | 'source' | 'group' | 'role'> {
   return {
     nodeId: node.nodeId,
@@ -1413,6 +1420,14 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  dataNodeCredentials(seedId: string): { username?: string; password?: string } {
+    const seed = this.configs.get(seedId);
+    if (!seed) {
+      throw new NotFoundException(`Connection '${seedId}' not found.`);
+    }
+    return dataNodeCredentialsOf(seed);
+  }
+
   async addManagedChild(seedId: string, node: DesiredNode): Promise<string> {
     const seed = this.configs.get(seedId);
     if (!seed) {
@@ -1424,8 +1439,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       name: `${seed.name} · ${node.host}:${node.port}`,
       host: node.host,
       port: node.port,
-      username: seed.nodeUsername ?? seed.username,
-      password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
+      ...dataNodeCredentialsOf(seed),
       dbIndex: 0,
       tls: seed.tls,
       // Discovered nodes sit behind the same PKI as the seed: reuse its CA and

@@ -171,6 +171,7 @@ export interface AnomalyEvent {
   correlationId?: string;
   relatedMetrics?: MetricType[];
   replicaAddr?: string;
+  nodeAddr?: string;
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;

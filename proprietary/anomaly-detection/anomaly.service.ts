@@ -172,6 +172,7 @@ import {
   ReplicaSlotAnomaly,
 } from './replica-slot-state-detector';
 import { parseRaftState, isRaftSeeking } from './raft-health-detector';
+import { InfoParser } from '@app/database/parsers/info.parser';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import {
   isReadOnlyReplicaRole,
@@ -256,6 +257,14 @@ import {
   requeueClosedWindows,
   observeDivergence,
 } from './replication-divergence-detector';
+import {
+  TopologyTarget,
+  clusterTargets,
+  connectionOfStateKey,
+  isTopologyStateKeyOf,
+  sentinelTargets,
+  topologyStateKey,
+} from './topology-targets';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -627,6 +636,9 @@ export class AnomalyService
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
   private divergenceOrphans = new Map<string, Map<string, OrphanedDivergence>>();
+  private divergenceRetired = new Map<string, Set<string>>();
+  private divergenceRetiredSwept = new Set<string>();
+  private topologyFanoutUnreachable = new Map<string, number>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1103,10 +1115,16 @@ export class AnomalyService
     this.backlogCoverageEventIds.delete(connectionId);
     this.staleBacklogEventIds.delete(connectionId);
     this.resyncEscalation.delete(connectionId);
-    this.divergenceState.delete(connectionId);
+    for (const key of this.divergenceKeysOf(connectionId)) {
+      this.divergenceState.delete(key);
+      this.divergenceOrphansSwept.delete(key);
+      this.divergenceOrphans.delete(key);
+      this.replicationStream.forget(key);
+    }
     this.lastDivergencePrune.delete(connectionId);
-    this.divergenceOrphansSwept.delete(connectionId);
-    this.divergenceOrphans.delete(connectionId);
+    this.divergenceRetired.delete(connectionId);
+    this.divergenceRetiredSwept.delete(connectionId);
+    this.topologyFanoutUnreachable.delete(connectionId);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -1174,6 +1192,7 @@ export class AnomalyService
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
     let replicationSample: ReplicationStreamSample | null = null;
+    let divergenceTargets: TopologyTarget[] | null = null;
     try {
       const live = ctx.connectionType !== 'external';
       // Timed around the socket call only: this round-trip doubles as the
@@ -1753,6 +1772,12 @@ export class AnomalyService
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
         }
         aclClusterNodes = nodes;
+        if (nodes) divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
+      } else if (live && sentinelMode) {
+        const masters = this.sentinelMastersSnapshot.get(ctx.connectionId);
+        divergenceTargets = masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
+      } else if (live && sentinelMode === false) {
+        divergenceTargets = [];
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -1868,6 +1893,14 @@ export class AnomalyService
       if (replicationSample) {
         await this.detectReplicationDivergence(replicationSample, ctx).catch((err) => {
           this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
+        });
+      }
+      if (divergenceTargets) {
+        await this.detectTopologyDivergence(ctx, divergenceTargets).catch((err) => {
+          this.logger.error(
+            `Failed to detect replication divergence across ${ctx.connectionName}'s topology:`,
+            err,
+          );
         });
       }
     }
@@ -6587,6 +6620,7 @@ export class AnomalyService
       correlationId: anomaly.correlationId,
       relatedMetrics: anomaly.relatedMetrics,
       replicaAddr: anomaly.replicaAddr,
+      nodeAddr: anomaly.nodeAddr,
       dedupeKey: anomaly.dedupeKey,
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
@@ -7152,8 +7186,8 @@ export class AnomalyService
       const seen = incident.entries.flatMap((entry) => {
         const event = this.liveEventsById.get(entry.anomalyId);
         if (!event) return [];
-        const { metricType, connectionId, timestamp } = event;
-        return [{ metricType, connectionId, timestamp }];
+        const { metricType, connectionId, nodeAddr, timestamp } = event;
+        return [{ metricType, connectionId, ...(nodeAddr ? { nodeAddr } : {}), timestamp }];
       });
       return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
     };
@@ -7623,6 +7657,7 @@ export class AnomalyService
       correlationId: s.correlationId,
       relatedMetrics: s.relatedMetrics as MetricType[],
       replicaAddr: s.replicaAddr,
+      nodeAddr: s.nodeAddr,
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
@@ -7833,10 +7868,17 @@ export class AnomalyService
     startTime: number,
     endTime: number,
   ): Promise<ReplicaDivergenceHistory[]> {
-    const state = this.divergenceState.get(connectionId);
+    const keys = this.divergenceKeysOf(connectionId);
+    const states = keys.flatMap((key) => {
+      const state = this.divergenceState.get(key);
+      return state ? [state] : [];
+    });
+    const stateOf = (replica: string) =>
+      states.find((s) => s.replicas.has(replica) || s.observed.has(replica)) ?? states[0];
     const series = new Map<string, DivergenceWindow[]>();
     try {
-      const stored = divergenceWindowsHeld(state, startTime)
+      const held = states.length > 0 && states.every((s) => divergenceWindowsHeld(s, startTime));
+      const stored = held
         ? []
         : await this.storage.getReplicationDivergenceWindows({
             connectionId,
@@ -7862,7 +7904,7 @@ export class AnomalyService
         }`,
       );
     }
-    for (const replica of state?.replicas.values() ?? []) {
+    for (const replica of states.flatMap((s) => [...s.replicas.values()])) {
       const windows = series.get(replica.addr) ?? [];
       const storedEnd = windows.length > 0 ? windows[windows.length - 1].end : -Infinity;
       windows.push(
@@ -7872,11 +7914,12 @@ export class AnomalyService
     }
     const now = Date.now();
     const staleAfterMs = divergenceWindowMs(this.getIntervalMs());
-    const orphans = this.divergenceOrphans.get(connectionId);
+    const orphaned = new Set(keys.flatMap((key) => [...(this.divergenceOrphans.get(key)?.keys() ?? [])]));
     const reachesNow = endTime >= now - staleAfterMs;
     return [...series.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([replica, windows]) => {
+        const state = stateOf(replica);
         const observed = replicaObservedLevel(
           state,
           replica,
@@ -7884,7 +7927,7 @@ export class AnomalyService
           staleAfterMs,
           reachesNow ? windows[windows.length - 1] : undefined,
         );
-        const level = observed === 'none' && orphans?.has(replica) ? 'behind' : observed;
+        const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
         return {
           replica,
           level,
@@ -8067,24 +8110,174 @@ export class AnomalyService
   private async detectReplicationDivergence(
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
+    nodeAddr?: string,
   ): Promise<void> {
     this.reclaimRemovedConnection(ctx.connectionId);
-    const state = this.divergenceState.get(ctx.connectionId) ?? createDivergenceState();
-    this.divergenceState.set(ctx.connectionId, state);
-    if (!this.divergenceOrphansSwept.has(ctx.connectionId)) {
-      await this.collectOrphanedDivergenceEvents(state, ctx);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    const state = this.divergenceState.get(key) ?? createDivergenceState();
+    this.divergenceState.set(key, state);
+    if (!this.divergenceOrphansSwept.has(key)) {
+      await this.collectOrphanedDivergenceEvents(state, ctx, key, nodeAddr);
     }
 
     for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
       if (outcome.kind === 'divergence') {
-        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp);
+        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr);
       } else {
-        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp);
+        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
       }
     }
-    await this.settleOrphanedDivergenceEvents(state, ctx);
+    await this.settleOrphanedDivergenceEvents(state, ctx, key);
     await this.persistDivergenceWindows(state, ctx);
-    await this.pruneDivergenceWindows(ctx, sample.timestamp);
+    if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
+  }
+
+  private registeredAddresses(): (host: string, port: number) => boolean {
+    const registered = new Set(this.connectionRegistry.list().map((c) => `${c.host}:${c.port}`));
+    return (host, port) => registered.has(`${host}:${port}`);
+  }
+
+  private divergenceKeysOf(connectionId: string): string[] {
+    const keys = new Set<string>();
+    for (const map of [this.divergenceState, this.divergenceOrphans]) {
+      for (const key of map.keys()) {
+        if (isTopologyStateKeyOf(key, connectionId)) keys.add(key);
+      }
+    }
+    for (const key of this.divergenceOrphansSwept) {
+      if (isTopologyStateKeyOf(key, connectionId)) keys.add(key);
+    }
+    return [...keys];
+  }
+
+  private async detectTopologyDivergence(
+    ctx: ConnectionContext,
+    targets: TopologyTarget[],
+  ): Promise<void> {
+    if (!this.clusterDiscovery) return;
+    const active = new Set(targets.map((t) => topologyStateKey(ctx.connectionId, t.addr)));
+    for (const key of this.divergenceKeysOf(ctx.connectionId)) {
+      if (key !== ctx.connectionId && !active.has(key)) this.retireDivergenceScope(key, ctx);
+    }
+    await this.sweepRetiredDivergenceNodes(ctx, targets);
+    await this.settleRetiredDivergence(ctx.connectionId);
+    if (targets.length === 0) return;
+
+    const timestamp = Date.now();
+    const results = await Promise.allSettled(
+      targets.map(async (target) => {
+        const client = target.nodeId
+          ? await this.clusterDiscovery!.getNodeConnection(target.nodeId, ctx.connectionId)
+          : await this.clusterDiscovery!.getAddressConnection(target.host, target.port, ctx.connectionId);
+        const raw = await withTimeout(
+          client.info('replication'),
+          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+          `INFO replication to ${target.addr} timed out`,
+        );
+        return this.replicationStream.observe(
+          topologyStateKey(ctx.connectionId, target.addr),
+          this.convertInfoToRecord(InfoParser.parse(raw)),
+          timestamp,
+        );
+      }),
+    );
+
+    let unreachable = 0;
+    for (const [i, result] of results.entries()) {
+      if (result.status === 'rejected') {
+        unreachable++;
+        continue;
+      }
+      if (!result.value) continue;
+      const target = targets[i];
+      const nodeCtx: ConnectionContext = {
+        ...ctx,
+        connectionName: `${ctx.connectionName} (${target.addr})`,
+        host: target.host,
+        port: target.port,
+      };
+      await this.detectReplicationDivergence(result.value, nodeCtx, target.addr);
+    }
+
+    const previous = this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0;
+    if (unreachable !== previous) {
+      if (unreachable > 0) {
+        this.logger.warn(
+          `Replication divergence fan-out for ${ctx.connectionName}: ${unreachable}/${targets.length} primaries unreachable — divergence on their replicas is not being checked.`,
+        );
+      } else {
+        this.logger.log(
+          `Replication divergence fan-out for ${ctx.connectionName}: all primaries reachable again.`,
+        );
+      }
+      this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
+    }
+  }
+
+  private retireDivergenceScope(key: string, ctx: ConnectionContext): void {
+    const state = this.divergenceState.get(key);
+    const ids = [
+      ...[...(state?.replicas.values() ?? [])].flatMap((r) => (r.eventId ? [r.eventId] : [])),
+      ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
+    ];
+    for (const replica of state?.replicas.keys() ?? []) {
+      this.webhookEventsProService?.endReplicationStall(ctx.connectionId, replica);
+    }
+    this.divergenceState.delete(key);
+    this.divergenceOrphans.delete(key);
+    this.divergenceOrphansSwept.delete(key);
+    this.replicationStream.forget(key);
+    if (ids.length === 0) return;
+    const retired = this.divergenceRetired.get(ctx.connectionId) ?? new Set<string>();
+    for (const id of ids) retired.add(id);
+    this.divergenceRetired.set(ctx.connectionId, retired);
+  }
+
+  private async sweepRetiredDivergenceNodes(
+    ctx: ConnectionContext,
+    targets: TopologyTarget[],
+  ): Promise<void> {
+    if (this.divergenceRetiredSwept.has(ctx.connectionId)) return;
+    const active = new Set(targets.map((t) => t.addr));
+    try {
+      const open = await this.readOpenEvents(ctx.connectionId, MetricType.REPLICATION_DIVERGENCE);
+      const stale = open.filter(
+        (e) => e.nodeAddr && !active.has(e.nodeAddr) && !this.persistenceOutbox.has(e.id),
+      );
+      if (stale.length > 0) {
+        const retired = this.divergenceRetired.get(ctx.connectionId) ?? new Set<string>();
+        for (const event of stale) retired.add(event.id);
+        this.divergenceRetired.set(ctx.connectionId, retired);
+      }
+      this.divergenceRetiredSwept.add(ctx.connectionId);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read replication divergence events of retired primaries for ${ctx.connectionName}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  private async settleRetiredDivergence(connectionId: string): Promise<void> {
+    const retired = this.divergenceRetired.get(connectionId);
+    if (!retired) return;
+    this.divergenceRetired.delete(connectionId);
+    for (const id of retired) {
+      await this.resolveAnomalyOutcome(id, () => {
+        this.retireDivergenceEvent(connectionId, id);
+      });
+    }
+  }
+
+  private retireDivergenceEvent(connectionId: string, id: string): void {
+    if (!this.connectionRegistry.getConfig(connectionId)) {
+      this.retryRemovedConnectionSweep(connectionId);
+      return;
+    }
+    const retired = this.divergenceRetired.get(connectionId) ?? new Set<string>();
+    retired.add(id);
+    this.divergenceRetired.set(connectionId, retired);
   }
 
   private async readOpenEvents(
@@ -8108,13 +8301,15 @@ export class AnomalyService
   private async collectOrphanedDivergenceEvents(
     state: DivergenceConnectionState,
     ctx: ConnectionContext,
+    key: string,
+    nodeAddr: string | undefined,
   ): Promise<void> {
     try {
       const seen = new Set([...state.replicas.values()].map((r) => r.eventId));
-      const orphans =
-        this.divergenceOrphans.get(ctx.connectionId) ?? new Map<string, OrphanedDivergence>();
+      const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
       const open = await this.readOpenEvents(ctx.connectionId, MetricType.REPLICATION_DIVERGENCE);
       for (const event of open) {
+        if (event.nodeAddr !== nodeAddr) continue;
         if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
         seen.add(event.id);
         const replica = event.replicaAddr ?? 'unknown';
@@ -8126,8 +8321,8 @@ export class AnomalyService
         orphan.eventIds.add(event.id);
         orphans.set(replica, orphan);
       }
-      if (orphans.size > 0) this.divergenceOrphans.set(ctx.connectionId, orphans);
-      this.divergenceOrphansSwept.add(ctx.connectionId);
+      if (orphans.size > 0) this.divergenceOrphans.set(key, orphans);
+      this.divergenceOrphansSwept.add(key);
     } catch (err) {
       this.logger.warn(
         `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
@@ -8140,8 +8335,9 @@ export class AnomalyService
   private async settleOrphanedDivergenceEvents(
     state: DivergenceConnectionState,
     ctx: ConnectionContext,
+    key: string,
   ): Promise<void> {
-    const orphans = this.divergenceOrphans.get(ctx.connectionId);
+    const orphans = this.divergenceOrphans.get(key);
     if (!orphans) return;
     for (const [replica, orphan] of orphans) {
       const assessment = assessOrphanedReplica(state, replica, orphan.sinceWindow);
@@ -8171,7 +8367,7 @@ export class AnomalyService
         this.dispatchOrphanRecovered(replica, ctx);
       }
     }
-    if (orphans.size === 0) this.divergenceOrphans.delete(ctx.connectionId);
+    if (orphans.size === 0) this.divergenceOrphans.delete(key);
   }
 
   private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
@@ -8275,13 +8471,13 @@ export class AnomalyService
     await this.sweepRemovedConnections();
   }
 
-  private retryDroppedDivergenceClose(connectionId: string, replica: string, id: string): void {
-    const state = this.divergenceState.get(connectionId);
+  private retryDroppedDivergenceClose(key: string, replica: string, id: string): void {
+    const state = this.divergenceState.get(key);
     if (!state) {
-      this.retryRemovedConnectionSweep(connectionId);
+      this.retireDivergenceEvent(connectionOfStateKey(key), id);
       return;
     }
-    const orphans = this.divergenceOrphans.get(connectionId) ?? new Map<string, OrphanedDivergence>();
+    const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
     const orphan = orphans.get(replica) ?? {
       eventIds: new Set<string>(),
       sinceWindow: state.closedWindowCount,
@@ -8290,12 +8486,12 @@ export class AnomalyService
     };
     orphan.eventIds.add(id);
     orphans.set(replica, orphan);
-    this.divergenceOrphans.set(connectionId, orphans);
+    this.divergenceOrphans.set(key, orphans);
   }
 
   private closeConnectionEventsOnRemoval(connectionId: string): void {
     const backlogEventId = this.backlogCoverageEventIds.get(connectionId);
-    const state = this.divergenceState.get(connectionId);
+    const divergenceKeys = this.divergenceKeysOf(connectionId);
     const ids = [
       ...(this.clientSaturationEventIds.get(connectionId) ?? []),
       ...(this.raftFlappingEventIds.get(connectionId) ?? []),
@@ -8306,13 +8502,18 @@ export class AnomalyService
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
-      ...[...(state?.replicas.values() ?? [])].map((r) => r.eventId),
-      ...[...(this.divergenceOrphans.get(connectionId)?.values() ?? [])].flatMap((o) => [
-        ...o.eventIds,
+      ...divergenceKeys.flatMap((key) => [
+        ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+        ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
       ]),
+      ...(this.divergenceRetired.get(connectionId) ?? []),
     ].filter((id): id is string => Boolean(id));
+    const divergenceSwept =
+      this.divergenceOrphansSwept.has(connectionId) &&
+      divergenceKeys.every((key) => this.divergenceOrphansSwept.has(key)) &&
+      (divergenceKeys.length === 1 || this.divergenceRetiredSwept.has(connectionId));
     this.removedConnectionSweeps.set(connectionId, [
-      ...(this.divergenceOrphansSwept.has(connectionId) ? [] : [MetricType.REPLICATION_DIVERGENCE]),
+      ...(divergenceSwept ? [] : [MetricType.REPLICATION_DIVERGENCE]),
       ...(this.openEventsAdopted.has(connectionId) ? [MetricType.RAFT_HEALTH] : ADOPTED_METRICS),
     ]);
     this.closeRemovedEvents(connectionId, ids).catch((err) => {
@@ -8325,6 +8526,8 @@ export class AnomalyService
     finding: DivergenceFinding,
     ctx: ConnectionContext,
     timestamp: number,
+    key: string,
+    nodeAddr: string | undefined,
   ): Promise<void> {
     const relatedMetrics = [
       ...new Set(
@@ -8332,6 +8535,7 @@ export class AnomalyService
           .filter(
             (a) =>
               a.connectionId === ctx.connectionId &&
+              a.nodeAddr === nodeAddr &&
               a.timestamp >= finding.spanStart &&
               a.anomalyType === AnomalyType.SPIKE &&
               DIVERGENCE_COMPOUND_SIGNALS.has(a.metricType),
@@ -8357,6 +8561,7 @@ export class AnomalyService
       connectionId: ctx.connectionId,
       relatedMetrics,
       replicaAddr: finding.addr,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     const previousEventId = state.replicas.get(finding.addr)?.eventId ?? null;
@@ -8390,7 +8595,7 @@ export class AnomalyService
 
     if (previousEventId) {
       await this.resolveAnomalyOutcome(previousEventId, () => {
-        this.retryDroppedDivergenceClose(ctx.connectionId, finding.addr, previousEventId);
+        this.retryDroppedDivergenceClose(key, finding.addr, previousEventId);
       });
     }
   }
@@ -8400,12 +8605,13 @@ export class AnomalyService
     recovery: DivergenceRecovery,
     ctx: ConnectionContext,
     timestamp: number,
+    key: string,
   ): Promise<void> {
     const { eventId } = recovery;
     const announced = state.replicas.get(recovery.addr)?.announced ?? false;
     if (eventId) {
       await this.resolveAnomalyOutcome(eventId, () => {
-        this.retryDroppedDivergenceClose(ctx.connectionId, recovery.addr, eventId);
+        this.retryDroppedDivergenceClose(key, recovery.addr, eventId);
       });
     }
     acknowledgeRecovery(state, recovery.addr);

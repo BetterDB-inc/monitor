@@ -437,6 +437,38 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('getAddressConnection', () => {
+    beforeEach(() => {
+      mockConnectionRegistry.dataNodeCredentials = jest
+        .fn()
+        .mockReturnValue({ username: 'node-user', password: 'node-pass' });
+    });
+
+    it('dials the address with the data-node credentials of the connection', async () => {
+      await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+
+      expect(mockConnectionRegistry.dataNodeCredentials).toHaveBeenCalledWith('test-connection');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.1.5',
+          port: 6380,
+          username: 'node-user',
+          password: 'node-pass',
+        }),
+      );
+    });
+
+    it('reuses the client for the same address', async () => {
+      const first = await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      const second = await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+
+      expect(second).toBe(first);
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
+    });
+  });
+
   describe('discoverNodesIsolated', () => {
     const seedOptions = { host: 'seed.example', port: 7001, username: 'u', password: 'p', tls: { servername: 'seed.example' } };
 
