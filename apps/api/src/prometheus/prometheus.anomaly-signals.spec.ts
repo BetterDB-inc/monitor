@@ -175,7 +175,15 @@ describe('PrometheusService anomaly signal gauges', () => {
         backlogCoverageSeconds: 1,
       });
 
-      expect(await service.getMetrics()).not.toContain('connection="deleted"');
+      for (const name of [
+        'betterdb_replication_gap_bytes',
+        'betterdb_replication_seconds_behind',
+        'betterdb_replication_divergence_level',
+        'betterdb_replication_write_rate_bytes_per_second',
+        'betterdb_replication_backlog_coverage_seconds',
+      ]) {
+        expect(await series(name)).toEqual([]);
+      }
     });
   });
 
@@ -356,6 +364,18 @@ describe('PrometheusService anomaly signal gauges', () => {
       pushEverything('conn-1');
       expect(await service.getMetrics()).toContain(
         `betterdb_incident_active{connection="${LABEL}"`,
+      );
+
+      service.cleanupConnectionMetrics('conn-1');
+      await jest.runAllTimersAsync();
+
+      expect(await service.getMetrics()).not.toContain(`connection="${LABEL}"`);
+    });
+
+    it('drops push-only signal series when a never-polled connection is removed', async () => {
+      pushEverything('conn-1');
+      expect(await service.getMetrics()).toContain(
+        `betterdb_retry_amplification_state{connection="${LABEL}"`,
       );
 
       service.cleanupConnectionMetrics('conn-1');

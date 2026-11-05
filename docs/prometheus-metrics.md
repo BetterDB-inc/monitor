@@ -168,8 +168,8 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
 | `betterdb_replication_gap_bytes`, `_seconds_behind`, `_divergence_level`                     | 3 × N × R    | N is the number of primaries checked for the connection (1 for a standalone connection, every primary for a cluster or Sentinel connection) and R the replicas each one reports. `_seconds_behind` and `_gap_bytes` are absent until a divergence window has closed; while a replica has stopped acknowledging, `_gap_bytes` follows its live gap and `_seconds_behind` is absent. A fan-out primary that cannot be read loses its series until the next good read. | removed      |
-| `betterdb_replication_write_rate_bytes_per_second`, `_backlog_coverage_seconds`              | 2 × N        | One per checked primary. Absent while the write rate (or the backlog size) is unknown.                                                                                        | removed      |
-| `betterdb_connections_received_per_second`, `betterdb_connection_churn_per_op`, `betterdb_retry_amplification_state` | 3 × N | One per checked primary, plus the connection's own node whatever its role. A fan-out node that turns into a replica, or cannot be read, loses these series.       | removed      |
+| `betterdb_replication_write_rate_bytes_per_second`, `_backlog_coverage_seconds`              | 2 × N        | One per checked primary. Absent while the write rate (or the backlog size) is unknown, and on a node that reports a replica role.                                             | removed      |
+| `betterdb_connections_received_per_second`, `betterdb_connection_churn_per_op`, `betterdb_retry_amplification_state` | 3 × N | One per checked primary. A node that turns into a replica, or a fan-out node that cannot be read, loses these series.                                          | removed      |
 | `betterdb_incident_active`                                                                   | ≤ 3 × (P + 1) | P sequence patterns plus `none`, × 3 open statuses.                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
 | `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
@@ -231,7 +231,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | ACL reason/user     | 5                  | 5               |
 | **Per connection**  | **270**            | **674**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs.
+The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -772,7 +772,7 @@ betterdb_retry_amplification_state == 2
 # Connection churn per primary, smoothed
 avg_over_time(betterdb_connections_received_per_second[5m])
 
-# Open incidents by pattern
+# Open incident-connection pairs by pattern (an incident spanning two connections counts twice)
 sum by (pattern) (betterdb_incident_active)
 ```
 

@@ -14336,7 +14336,7 @@ describe('AnomalyService', () => {
           });
 
           await (service as any).detectRetryAmplification(
-            { instantaneous_ops_per_sec: '250', connected_clients: '10' },
+            { instantaneous_ops_per_sec: '250', connected_clients: '10', role: 'master' },
             mockCtx,
             T0,
           );
@@ -14359,13 +14359,58 @@ describe('AnomalyService', () => {
             retainedRatio: 1,
           });
 
-          await (service as any).detectRetryAmplification({ ...info, connected_clients: '10' }, mockCtx, T0);
+          await (service as any).detectRetryAmplification({ ...info, connected_clients: '10', role: 'master' }, mockCtx, T0);
 
           expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
             connectsPerSecond: 50,
             churnPerOp: null,
             retryState: 0,
           });
+        });
+
+        it('clears the seed retry gauges when the seed reports a replica role', async () => {
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10', role: 'slave' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).not.toHaveBeenCalled();
+          expect(prometheusService.clearRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379');
+        });
+
+        it('leaves write rate and backlog coverage out of a replica sample', async () => {
+          await (service as any).detectReplicationDivergence(
+            { ...sample(T0, 2 * MiB), role: 'replica', replBacklogSize: 10 * MiB },
+            mockCtx,
+          );
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals).toMatchObject({ writeRateBytesPerSecond: null, backlogCoverageSeconds: null });
+        });
+
+        it('drops a replica that left the INFO sample', async () => {
+          const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+          await (service as any).detectReplicationDivergence({ ...sample(t, 0), replicas: [] }, mockCtx);
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.replicas).toEqual([]);
+        });
+
+        it('skips an incident gauge refresh while one is still running', async () => {
+          let release!: (value: unknown[]) => void;
+          const timelines = jest
+            .spyOn(service, 'getIncidentTimelines')
+            .mockReturnValue(new Promise((resolve) => (release = resolve)) as never);
+
+          const first = (service as any).updateIncidentGauges(0);
+          await (service as any).updateIncidentGauges(0);
+          release([]);
+          await first;
+
+          expect(timelines).toHaveBeenCalledTimes(1);
+          expect(prometheusService.updateActiveIncidents).toHaveBeenCalledTimes(1);
         });
 
         it('keeps detecting when a gauge update throws', async () => {

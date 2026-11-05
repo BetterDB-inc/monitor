@@ -3967,7 +3967,8 @@ export class AnomalyService
       stressActive,
       activeSaturation: [...activeSaturation],
     });
-    this.publishRetrySignals(ctx, nodeAddr, state, connectsPerSec, opsPerSec);
+    if (info.role === 'master') this.publishRetrySignals(ctx, nodeAddr, state, connectsPerSec, opsPerSec);
+    else this.clearRetrySignals(ctx.connectionId, nodeAddr ?? `${ctx.host}:${ctx.port}`);
 
     const clientSnapshots = nodeAddr ? [] : this.refreshClientSnapshots(ctx, state, info.run_id);
     if (finding === null) return;
@@ -8421,14 +8422,18 @@ export class AnomalyService
     state: DivergenceConnectionState,
     sample: ReplicationStreamSample,
   ): void {
-    const rate = sample.bytesPerSecEwma;
-    const backlog = sample.replBacklogSize;
+    const primary = sample.role === 'primary';
+    const rate = primary ? sample.bytesPerSecEwma : null;
+    const backlog = primary ? sample.replBacklogSize : null;
+    const present = new Set(sample.replicas.map((line) => line.addr));
     try {
       this.prometheusService.updateReplicationSignals(
         ctx.connectionId,
         nodeAddr ?? `${ctx.host}:${ctx.port}`,
         {
-          replicas: [...new Set([...state.replicas.keys(), ...state.staleAcks])].map((addr) => {
+          replicas: [...new Set([...state.replicas.keys(), ...state.staleAcks])]
+            .filter((addr) => present.has(addr))
+            .map((addr) => {
             const replica = state.replicas.get(addr);
             const latest = staleAckWindow(state, addr) ?? replica?.windows.at(-1);
             return {
@@ -9464,6 +9469,8 @@ export class AnomalyService
     return beforeCount - this.recentAnomalies.length;
   }
 
+  private incidentGaugesInFlight = false;
+
   private async updatePrometheusSummary(): Promise<void> {
     const oneHourAgo = Date.now() - 3600000;
     const bySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
@@ -9506,6 +9513,8 @@ export class AnomalyService
   }
 
   private async updateIncidentGauges(since: number): Promise<void> {
+    if (this.incidentGaugesInFlight) return;
+    this.incidentGaugesInFlight = true;
     try {
       const timelines = await this.getIncidentTimelines(undefined, since, undefined, Number.MAX_SAFE_INTEGER);
       const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
@@ -9530,6 +9539,8 @@ export class AnomalyService
     } catch (err) {
       this.logger.debug(`Failed to update incident gauges: ${err instanceof Error ? err.message : err}`);
       this.clearIncidentGauges();
+    } finally {
+      this.incidentGaugesInFlight = false;
     }
   }
 

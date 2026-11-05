@@ -159,6 +159,7 @@ interface ConnectionMetricState {
   currentReplBufferReplicaLabels: Set<string>;
   signalReplicaLabelsByNode: Map<string, Set<string>>;
   signalNodes: Set<string>;
+  signalConnLabel: string | null;
   currentIncidentLabels: Set<string>;
   // Commandstats labels (per-connection)
   currentCommandStatsLabels: Set<string>;
@@ -668,6 +669,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentReplBufferReplicaLabels: new Set(),
         signalReplicaLabelsByNode: new Map(),
         signalNodes: new Set(),
+        signalConnLabel: null,
         currentIncidentLabels: new Set(),
         // Commandstats labels
         currentCommandStatsLabels: new Set(),
@@ -3737,6 +3739,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     const state = this.getConnectionState(connectionId);
     state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
     const currentLabels = new Set<string>();
 
     for (const entry of signals.replicas) {
@@ -3786,7 +3789,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (connLabel === null) {
       return;
     }
-    this.getConnectionState(connectionId).signalNodes.add(node);
+    const state = this.getConnectionState(connectionId);
+    state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
     this.setSignalOrRemove(
       this.connectionsReceivedPerSecond,
       [connLabel, node],
@@ -3841,6 +3846,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         continue;
       }
       const state = this.getConnectionState(connectionId);
+      state.signalConnLabel = connLabel;
       const currentLabels = new Set<string>();
       for (const entry of entries) {
         currentLabels.add(JSON.stringify([entry.pattern, entry.status]));
@@ -4109,7 +4115,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
     this.retireStorageEpoch(connectionId);
-    const label = this.freshness.forget(connectionId);
+    const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? undefined;
     if (label !== undefined) {
       this.releaseLabel(label);
     }
