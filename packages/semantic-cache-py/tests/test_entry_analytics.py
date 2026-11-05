@@ -455,14 +455,18 @@ async def test_live_valkey_reloads_usage_script_and_refreshes_ttl():
 
     Set BETTERDB_TEST_VALKEY_PORT to a disposable Valkey. The test runs SCRIPT FLUSH.
     """
+    valkey_url = os.environ.get("VALKEY_URL")
     port = os.environ.get("BETTERDB_TEST_VALKEY_PORT")
-    if not port:
-        pytest.skip("set BETTERDB_TEST_VALKEY_PORT to a disposable Valkey")
+    if not valkey_url and not port:
+        pytest.skip("set VALKEY_URL or BETTERDB_TEST_VALKEY_PORT to a disposable Valkey")
 
     import valkey.asyncio as valkey
 
-    host = os.environ.get("BETTERDB_TEST_VALKEY_HOST", "127.0.0.1")
-    client = valkey.Valkey(host=host, port=int(port))
+    if valkey_url:
+        client = valkey.from_url(valkey_url)
+    else:
+        host = os.environ.get("BETTERDB_TEST_VALKEY_HOST", "127.0.0.1")
+        client = valkey.Valkey(host=host, port=int(port))
     try:
         await client.ping()
     except Exception as exc:
