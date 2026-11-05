@@ -403,6 +403,12 @@ Replica offsets come from the primary's own `INFO replication`, so detection run
 
 Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
 
+**Replica cross-check**: Before an alert is raised or escalated, the monitor reads `INFO replication` from the replica itself, together with the primary's, and compares the replica's `slave_repl_offset` with the primary's `master_repl_offset`. The replica is read through its own connection when it is monitored as one, by node through cluster discovery on a cluster connection, or by address with the data-node credentials on a Sentinel connection that has them. Other replicas are not read.
+
+- If the replica's link is up and it is less than 1 MiB behind, the alert is skipped. The primary's view was stale because the replica's acknowledgements were late. The check runs again on the next window that would alert.
+- Otherwise the alert is raised, and the message adds the replica's own gap and link status. When the replica reports `slave_read_repl_offset`, the message also says whether it has received data it has not applied yet (slow apply) or has applied everything it received (the stream is not reaching it fast enough).
+- If the replica cannot be read within 2 seconds, is not found, or follows a different replication ID than the primary, the alert is raised as before, without the replica's view.
+
 **Recommended actions**:
 - Compare the replica offset gap with the primary write rate over the next few minutes
 - Check replica host CPU, disk and network for a slow apply path

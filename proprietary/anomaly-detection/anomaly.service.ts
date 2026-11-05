@@ -273,6 +273,7 @@ import {
   splitHostPort,
   topologyStateKey,
 } from './topology-targets';
+import { ReplicaView, describeReplicaView, readReplicaView, replicaCaughtUp } from './replica-cross-check';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -8367,6 +8368,7 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     ctx: ConnectionContext,
     nodeAddr?: string,
+    readPrimary: () => Promise<Record<string, string>> = () => this.readReplicationInfo(ctx.client),
   ): Promise<void> {
     this.reclaimRemovedConnection(ctx.connectionId);
     const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
@@ -8378,7 +8380,14 @@ export class AnomalyService
 
     for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
       if (outcome.kind === 'divergence') {
-        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr);
+        const view = await this.crossCheckReplica(ctx, outcome.addr, readPrimary);
+        if (view && replicaCaughtUp(view)) {
+          this.logger.debug(
+            `Replica ${outcome.addr} of ${ctx.connectionName} reports it is caught up; skipping the divergence alert.`,
+          );
+          continue;
+        }
+        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr, view);
       } else {
         await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
       }
@@ -8386,6 +8395,69 @@ export class AnomalyService
     await this.settleOrphanedDivergenceEvents(state, ctx, key);
     await this.persistDivergenceWindows(state, ctx);
     if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
+  }
+
+  private async readReplicationInfo(client: DatabasePort): Promise<Record<string, string>> {
+    return this.convertInfoToRecord(await client.getInfoParsed(['replication']));
+  }
+
+  private async crossCheckReplica(
+    ctx: ConnectionContext,
+    replicaAddr: string,
+    readPrimary: () => Promise<Record<string, string>>,
+  ): Promise<ReplicaView | null> {
+    const address = splitHostPort(replicaAddr);
+    if (!address) return null;
+    try {
+      const readReplica = this.replicaReader(ctx.connectionId, address.host, address.port);
+      if (!readReplica) return null;
+      const [replica, primary] = await withTimeout(
+        Promise.all([readReplica(), readPrimary()]),
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `Reading replica ${replicaAddr} timed out`,
+      );
+      return readReplicaView(replica, primary);
+    } catch (err) {
+      this.logger.debug(
+        `Could not read replica ${replicaAddr} of ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  private replicaReader(
+    connectionId: string,
+    host: string,
+    port: number,
+  ): (() => Promise<Record<string, string>>) | null {
+    const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
+    if (registeredId && registeredId !== connectionId) {
+      const registered = this.connectionRegistry.list().find((c) => c.id === registeredId);
+      if (!registered?.isConnected) return null;
+      return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
+    }
+    const discovery = this.clusterDiscovery;
+    if (!discovery) return null;
+    const readNode = async (client: Promise<{ info(section: string): Promise<string> }>) =>
+      this.convertInfoToRecord(InfoParser.parse(await (await client).info('replication')));
+    if (this.clusterViews.has(connectionId)) {
+      return async () => {
+        const nodes = await discovery.discoverNodes(connectionId);
+        const node = nodes.find((n) => {
+          const nodeAddress = splitHostPort(n.address);
+          return n.role === 'replica' && nodeAddress?.host === host && nodeAddress.port === port;
+        });
+        if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
+        return readNode(discovery.getNodeConnection(node.id, connectionId));
+      };
+    }
+    if (
+      this.sentinelMastersSnapshot.has(connectionId) &&
+      this.connectionRegistry.sentinelDataNodeCredentials(connectionId) !== null
+    ) {
+      return () => readNode(discovery.getAddressConnection(host, port, connectionId));
+    }
+    return null;
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
@@ -8548,7 +8620,11 @@ export class AnomalyService
       const { info, self } = result.value;
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       const sample = this.replicationStream.observe(key, info, timestamp);
-      if (sample) await this.detectReplicationDivergence(sample, nodeCtx, target.addr);
+      if (sample) {
+        await this.detectReplicationDivergence(sample, nodeCtx, target.addr, () =>
+          this.readTargetReplicationInfo(ctx.connectionId, target),
+        );
+      }
       if (info.role === 'master') await this.detectRetryAmplification(info, nodeCtx, timestamp, target.addr);
     }
 
@@ -8565,6 +8641,16 @@ export class AnomalyService
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
+  }
+
+  private async readTargetReplicationInfo(
+    connectionId: string,
+    target: TopologyTarget,
+  ): Promise<Record<string, string>> {
+    const client = await (target.nodeId
+      ? this.clusterDiscovery!.getNodeConnection(target.nodeId, connectionId)
+      : this.clusterDiscovery!.getAddressConnection(target.host, target.port, connectionId));
+    return this.convertInfoToRecord(InfoParser.parse(await client.info('replication')));
   }
 
   private fanoutCommand<T>(key: string, send: () => Promise<T>): Promise<T> {
@@ -8981,6 +9067,7 @@ export class AnomalyService
     timestamp: number,
     key: string,
     nodeAddr: string | undefined,
+    replicaView: ReplicaView | null,
   ): Promise<void> {
     const relatedMetrics = [
       ...new Set(
@@ -8997,7 +9084,7 @@ export class AnomalyService
       ),
     ];
     const isCritical = finding.level === 'critical';
-    const message = describeDivergence(finding);
+    const message = describeDivergence(finding) + (replicaView ? describeReplicaView(replicaView) : '');
     const event: AnomalyEvent = {
       id: randomUUID(),
       timestamp,
@@ -9032,6 +9119,7 @@ export class AnomalyService
           slopeBytesPerWindow: finding.slopeBytesPerWindow,
           windowCount: finding.windowCount,
           correlatedSignals: relatedMetrics,
+          replicaView,
           message,
           timestamp,
           instance: { host: ctx.host, port: ctx.port },

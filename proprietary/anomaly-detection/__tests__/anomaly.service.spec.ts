@@ -176,6 +176,7 @@ describe('AnomalyService', () => {
             getConfig: jest.fn().mockReturnValue(null),
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
+            findIdByHostPort: jest.fn().mockReturnValue(null),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -13774,6 +13775,155 @@ describe('AnomalyService', () => {
         expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, replicaAddr: NODE_REPLICA });
         expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-b', 'conn-1');
         expect((await divergenceHistory()).map((h) => h.replica)).toContain(NODE_REPLICA);
+      });
+
+      describe('cross-checked against the replica', () => {
+        const replicaNode = { id: 'node-r', address: `${NODE_REPLICA}@16379`, role: 'replica', flags: ['slave'] };
+
+        function replicaClient(offset: number, link = 'up', readOffset = offset) {
+          return {
+            info: jest.fn().mockResolvedValue(
+              [
+                '# Replication',
+                'role:slave',
+                `master_replid:${'b'.repeat(40)}`,
+                `master_link_status:${link}`,
+                `slave_repl_offset:${offset}`,
+                `slave_read_repl_offset:${readOffset}`,
+              ].join('\r\n'),
+            ),
+          };
+        }
+
+        function clusterWith(primary: object, replica: object | Error) {
+          (service as any).clusterViews.set('conn-1', new Set(['node-b', 'node-r']));
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            discoverNodes: jest.fn().mockResolvedValue([replicaNode]),
+            getNodeConnection: jest.fn().mockImplementation(async (id: string) => {
+              if (id === 'node-b') return primary;
+              if (replica instanceof Error) throw replica;
+              return replica;
+            }),
+          };
+        }
+
+        const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+
+        it('skips the alert when the replica reports it is caught up', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).not.toHaveBeenCalled();
+          expect(service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)).toEqual([]);
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-r', 'conn-1');
+        });
+
+        it('alerts with the replica view when the replica agrees it is behind', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(100 * MiB, 'up', 300 * MiB));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          const data = hook().mock.calls[0][0];
+          expect(data.replicaView).toMatchObject({ linkStatus: 'up', applyBacklogBytes: 200 * MiB });
+          expect(data.replicaView.gapBytes).toBeGreaterThan(900 * MiB);
+          expect(data.message).toContain('The replica confirms it is');
+          expect(data.message).toContain('slow to apply');
+          const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+          expect(event.message).toBe(data.message);
+        });
+
+        it('alerts when the replica reports its link is down, even with a small gap', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB, 'down'));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].message).toContain('link to the primary is down');
+        });
+
+        it('alerts as before when the replica cannot be read', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), new Error('refused'));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+          expect(hook().mock.calls[0][0].message).not.toContain('The replica');
+        });
+
+        it('ignores a replica that follows a different replication history', async () => {
+          const other = replicaClient(10_000 * MiB);
+          other.info.mockResolvedValue(
+            ['# Replication', 'role:slave', `master_replid:${'c'.repeat(40)}`, 'master_link_status:up', `slave_repl_offset:${10_000 * MiB}`].join('\r\n'),
+          );
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), other);
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+        });
+
+        it('reads a Sentinel replica by address with the data-node credentials', async () => {
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const replica = replicaClient(10_000 * MiB);
+          const registry = (service as any).connectionRegistry;
+          registry.sentinelDataNodeCredentials.mockReturnValue({ username: 'data', password: 'secret' });
+          (service as any).sentinelMastersSnapshot.set('conn-1', []);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection: jest.fn().mockImplementation(async (host: string) =>
+              host === '10.0.1.6' ? replica : primary,
+            ),
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(hook()).not.toHaveBeenCalled();
+          expect((service as any).clusterDiscovery.getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+        });
+
+        it('does not dial a Sentinel replica without data-node credentials', async () => {
+          (service as any).sentinelMastersSnapshot.set('conn-1', []);
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const getAddressConnection = jest.fn().mockResolvedValue(primary);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection,
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(getAddressConnection).not.toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+          expect(hook()).toHaveBeenCalledTimes(1);
+        });
+
+        it('reads a replica that is registered as its own connection', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), new Error('not used'));
+          const registry = (service as any).connectionRegistry;
+          registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.1.6' ? 'conn-r' : null));
+          registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+          const getInfoParsed = jest.fn().mockResolvedValue({
+            replication: {
+              role: 'slave',
+              master_replid: 'b'.repeat(40),
+              master_link_status: 'up',
+              slave_repl_offset: 10_000 * MiB,
+            },
+          });
+          registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+
+          await poll([target], 18, T0);
+
+          expect(getInfoParsed).toHaveBeenCalledWith(['replication']);
+          expect(hook()).not.toHaveBeenCalled();
+          expect((service as any).clusterDiscovery.getNodeConnection).not.toHaveBeenCalledWith('node-r', 'conn-1');
+        });
       });
 
       it('evaluates retry amplification with the node INFO', async () => {
