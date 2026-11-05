@@ -430,6 +430,8 @@ interface RetryAmplificationClientHistory {
 
 interface RetryAmplificationReport {
   ctx: ConnectionContext;
+  key: string;
+  nodeAddr: string | undefined;
   state: RetryAmplificationState;
   finding: RetryAmplificationFinding;
   clientSnapshots: ClientCommandSnapshot[];
@@ -692,6 +694,7 @@ export class AnomalyService
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
   >();
+  private retryNodeChurnReadings = new Map<string, ConnectionChurnReading>();
   private latencyDegraded = new Map<string, { degraded: boolean; reportedAt: number }>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -1104,11 +1107,9 @@ export class AnomalyService
     this.controlPlaneState.delete(connectionId);
     this.cpSatLastConnectedSlaves.delete(connectionId);
     this.loadSaturationState.delete(connectionId);
-    this.retryAmplificationState.delete(connectionId);
-    this.retryAmplificationReports.delete(connectionId);
-    this.retryAmplificationClients.delete(connectionId);
-    this.retryAmplificationDispatched.delete(connectionId);
-    this.retryAmplificationContributors.delete(connectionId);
+    for (const key of this.retryAmplificationKeysOf(connectionId)) {
+      this.forgetRetryAmplification(key);
+    }
     this.latencyDegraded.delete(connectionId);
     this.prevCpuByConnection.delete(connectionId);
     this.prevReplSnapshot.delete(connectionId);
@@ -1918,17 +1919,15 @@ export class AnomalyService
         ? this.sentinelDivergenceTargets(ctx.connectionId)
         : divergenceTargets;
       if (scope) {
-        await this.detectTopologyDivergence(ctx, scope).catch((err) => {
-          this.logger.error(
-            `Failed to detect replication divergence across ${ctx.connectionName}'s topology:`,
-            err,
-          );
+        await this.detectTopologyAnomalies(ctx, scope).catch((err) => {
+          this.logger.error(`Failed to check ${ctx.connectionName}'s other nodes:`, err);
         });
       }
       this.openDivergenceReads.delete(ctx.connectionId);
     }
   }
 
+  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'stats', 'replication'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
@@ -3817,22 +3816,63 @@ export class AnomalyService
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
+  private nodeConnectsPerSec(key: string, info: Record<string, string>, timestamp: number): number | null {
+    const totalReceived = this.parseNumber(info.total_connections_received);
+    const connectedClients = this.parseNumber(info.connected_clients);
+    if (totalReceived === null || connectedClients === null) {
+      this.retryNodeChurnReadings.delete(key);
+      return null;
+    }
+    const reading = { totalReceived, connectedClients, timestamp };
+    const sample = computeConnectionChurn(this.retryNodeChurnReadings.get(key), reading);
+    this.retryNodeChurnReadings.set(key, reading);
+    return sample.connectsPerSec;
+  }
+
+  private retryAmplificationKeysOf(connectionId: string): string[] {
+    const keys = new Set<string>();
+    for (const map of [
+      this.retryAmplificationState,
+      this.retryAmplificationReports,
+      this.retryAmplificationClients,
+      this.retryAmplificationDispatched,
+      this.retryAmplificationContributors,
+      this.retryNodeChurnReadings,
+    ]) {
+      for (const key of map.keys()) {
+        if (isTopologyStateKeyOf(key, connectionId)) keys.add(key);
+      }
+    }
+    return [...keys];
+  }
+
+  private forgetRetryAmplification(key: string): void {
+    this.retryAmplificationState.delete(key);
+    this.retryAmplificationReports.delete(key);
+    this.retryAmplificationClients.delete(key);
+    this.retryAmplificationDispatched.delete(key);
+    this.retryAmplificationContributors.delete(key);
+    this.retryNodeChurnReadings.delete(key);
+  }
+
   private async detectRetryAmplification(
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    nodeAddr?: string,
   ): Promise<void> {
-    let state = this.retryAmplificationState.get(ctx.connectionId);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    let state = this.retryAmplificationState.get(key);
     if (state === undefined) {
       state = createRetryAmplificationState();
-      this.retryAmplificationState.set(ctx.connectionId, state);
+      this.retryAmplificationState.set(key, state);
     }
     state.maxPollGapMs =
       ctx.connectionType === 'external'
         ? observePushCadence(state, timestamp, this.getIntervalMs())
         : retryAmplificationMaxPollGap(this.getIntervalMs());
 
-    const connectionEvents = this.recentEventsOf(ctx.connectionId).filter((a) => {
+    const connectionEvents = (nodeAddr ? [] : this.recentEventsOf(ctx.connectionId)).filter((a) => {
       const relativeCpuMove =
         a.metricType === MetricType.CPU_UTILIZATION && !isControlPlaneSaturationEvent(a);
       return a.timestamp <= timestamp && !relativeCpuMove;
@@ -3844,7 +3884,7 @@ export class AnomalyService
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
-    const degraded = this.freshLatencyVerdict(ctx.connectionId);
+    const degraded = nodeAddr ? undefined : this.freshLatencyVerdict(ctx.connectionId);
     const stressActive =
       degraded === true ||
       (degraded === undefined &&
@@ -3865,11 +3905,11 @@ export class AnomalyService
         activeSaturation.add(a.metricType);
       }
     }
-    const loadLevel = this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
+    const loadLevel = nodeAddr ? undefined : this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
     if (loadLevel !== undefined && loadLevel !== 'none') {
       activeSaturation.add(MetricType.LOAD_SATURATION);
     }
-    const clientLevel = this.clientSaturationLevel.get(ctx.connectionId);
+    const clientLevel = nodeAddr ? undefined : this.clientSaturationLevel.get(ctx.connectionId);
     if (clientLevel !== undefined && clientLevel !== 'none') {
       activeSaturation.add(MetricType.CLIENT_SATURATION);
     }
@@ -3880,13 +3920,15 @@ export class AnomalyService
       connectedClients: this.parseNumber(info.connected_clients),
       totalCommands: this.parseNumber(info.total_commands_processed),
       totalErrorReplies: this.parseNumber(info.total_error_replies),
-      connectsPerSec: this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null,
+      connectsPerSec: nodeAddr
+        ? this.nodeConnectsPerSec(key, info, timestamp)
+        : (this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null),
       recentEvents,
       stressActive,
       activeSaturation: [...activeSaturation],
     });
 
-    const clientSnapshots = this.refreshClientSnapshots(ctx, state, info.run_id);
+    const clientSnapshots = nodeAddr ? [] : this.refreshClientSnapshots(ctx, state, info.run_id);
     if (finding === null) return;
 
     const attributionStart =
@@ -3894,6 +3936,8 @@ export class AnomalyService
     const closedAt = state.hotRun.length === 0 ? state.lastEpisode?.endedAt : undefined;
     this.queueRetryAmplificationReport({
       ctx,
+      key,
+      nodeAddr,
       state,
       finding,
       clientSnapshots,
@@ -3906,22 +3950,24 @@ export class AnomalyService
   }
 
   private queueRetryAmplificationReport(report: RetryAmplificationReport): void {
-    const { connectionId } = report.ctx;
-    const tail = (this.retryAmplificationReports.get(connectionId) ?? Promise.resolve())
+    const { key } = report;
+    const tail = (this.retryAmplificationReports.get(key) ?? Promise.resolve())
       .then(() => this.reportRetryAmplification(report))
       .catch((error) => {
-        this.logger.error(`Failed to report retry amplification for ${connectionId}`, error);
+        this.logger.error(`Failed to report retry amplification for ${key}`, error);
       })
       .finally(() => {
-        if (this.retryAmplificationReports.get(connectionId) === tail) {
-          this.retryAmplificationReports.delete(connectionId);
+        if (this.retryAmplificationReports.get(key) === tail) {
+          this.retryAmplificationReports.delete(key);
         }
       });
-    this.retryAmplificationReports.set(connectionId, tail);
+    this.retryAmplificationReports.set(key, tail);
   }
 
   private async reportRetryAmplification({
     ctx,
+    key,
+    nodeAddr,
     state,
     finding,
     clientSnapshots,
@@ -3931,15 +3977,17 @@ export class AnomalyService
     timestamp,
     rearm,
   }: RetryAmplificationReport): Promise<void> {
-    const contributors = await this.attributeRetryAmplification(
-      ctx,
-      clientSnapshots,
-      attributionStart,
-      closedAt ?? timestamp,
-      notBefore,
-    );
-    if (this.retryAmplificationState.get(ctx.connectionId) !== state) return;
-    this.retryAmplificationContributors.set(ctx.connectionId, {
+    const contributors = nodeAddr
+      ? null
+      : await this.attributeRetryAmplification(
+          ctx,
+          clientSnapshots,
+          attributionStart,
+          closedAt ?? timestamp,
+          notBefore,
+        );
+    if (this.retryAmplificationState.get(key) !== state) return;
+    this.retryAmplificationContributors.set(key, {
       episodeStart: attributionStart,
       contributors,
     });
@@ -3962,14 +4010,15 @@ export class AnomalyService
       retryTrigger: finding.trigger,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     this.anomalySaveHooks.set(event, () => {
       if (event.resolved) return;
-      const sent = this.retryAmplificationDispatched.get(ctx.connectionId);
+      const sent = this.retryAmplificationDispatched.get(key);
       const sameEpisode = sent?.episodeStart === attributionStart;
       if (sameEpisode && sent?.level === 'critical' && finding.level === 'warning') return;
-      this.retryAmplificationDispatched.set(ctx.connectionId, {
+      this.retryAmplificationDispatched.set(key, {
         episodeStart: attributionStart,
         level: finding.level,
       });
@@ -3991,7 +4040,7 @@ export class AnomalyService
           this.logger.error('Failed to dispatch retry_amplification.detected webhook', err);
         });
     });
-    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, rearm);
+    await this.addLatchedAnomaly(event, ctx, key, rearm);
   }
 
   private recentEventsOf(connectionId: string): AnomalyEvent[] {
@@ -4164,12 +4213,19 @@ export class AnomalyService
     return latestEpisodeStart(state) === cached.episodeStart ? cached.contributors : null;
   }
 
-  getRetryAmplificationStatus(
-    connectionId: string,
-  ): RetryAmplificationStatus & { topContributors: RetryAmplificationContributor[] | null } {
+  getRetryAmplificationStatus(connectionId: string): RetryAmplificationStatus & {
+    topContributors: RetryAmplificationContributor[] | null;
+    nodes: (RetryAmplificationStatus & { node: string })[];
+  } {
+    const prefix = `${connectionId}@`;
+    const nodes = [...this.retryAmplificationState.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, state]) => ({ node: key.slice(prefix.length), ...describeRetryAmplificationState(state) }))
+      .sort((a, b) => a.node.localeCompare(b.node));
     return {
       ...describeRetryAmplificationState(this.retryAmplificationState.get(connectionId)),
       topContributors: this.getRetryAmplificationContributors(connectionId),
+      nodes,
     };
   }
 
@@ -8204,19 +8260,19 @@ export class AnomalyService
     return [...keys];
   }
 
-  private async detectTopologyDivergence(
+  private async detectTopologyAnomalies(
     ctx: ConnectionContext,
     scope: TopologyScope,
   ): Promise<void> {
     if (!this.clusterDiscovery) return;
     try {
-      await this.checkTopologyDivergence(ctx, scope);
+      await this.checkTopologyNodes(ctx, scope);
     } finally {
       this.openDivergenceReads.delete(ctx.connectionId);
     }
   }
 
-  private async checkTopologyDivergence(ctx: ConnectionContext, scope: TopologyScope): Promise<void> {
+  private async checkTopologyNodes(ctx: ConnectionContext, scope: TopologyScope): Promise<void> {
     const now = Date.now();
     const staleMs = Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS);
     const claimed = this.topologyTargetClaims.claim(ctx.connectionId, scope.targets, now, staleMs);
@@ -8246,13 +8302,16 @@ export class AnomalyService
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) this.retireDivergenceScope(key, ctx);
     }
+    for (const key of this.retryAmplificationKeysOf(ctx.connectionId)) {
+      if (key !== ctx.connectionId && !active.has(key)) this.forgetRetryAmplification(key);
+    }
     await this.persistPendingDivergenceWindows(ctx);
     await this.sweepRetiredDivergenceNodes(ctx, kept);
     await this.settleRetiredDivergence(ctx.connectionId);
     if (targets.length === 0) {
       if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
-          `Replication divergence fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
+          `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
         );
         this.topologyFanoutUnreachable.delete(ctx.connectionId);
       }
@@ -8271,16 +8330,12 @@ export class AnomalyService
         );
         const raw = await withTimeout(
           this.fanoutCommand(topologyStateKey(ctx.connectionId, target.addr), () =>
-            client.info('replication'),
+            Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
           ),
           AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-          `INFO replication to ${target.addr} timed out`,
+          `INFO to ${target.addr} timed out`,
         );
-        return this.replicationStream.observe(
-          topologyStateKey(ctx.connectionId, target.addr),
-          this.convertInfoToRecord(InfoParser.parse(raw)),
-          timestamp,
-        );
+        return this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
       }),
     );
 
@@ -8296,7 +8351,6 @@ export class AnomalyService
         continue;
       }
       this.topologyBackoff.delete(key);
-      if (!result.value) continue;
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,
@@ -8304,18 +8358,21 @@ export class AnomalyService
         host: target.host,
         port: target.port,
       };
-      await this.detectReplicationDivergence(result.value, nodeCtx, target.addr);
+      const info = result.value;
+      const sample = this.replicationStream.observe(key, info, timestamp);
+      if (sample) await this.detectReplicationDivergence(sample, nodeCtx, target.addr);
+      if (info.role === 'master') await this.detectRetryAmplification(info, nodeCtx, timestamp, target.addr);
     }
 
     const previous = this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0;
     if (unreachable !== previous) {
       if (unreachable > 0) {
         this.logger.warn(
-          `Replication divergence fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — divergence on their replicas is not being checked.`,
+          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — replication divergence and retry amplification are not checked on them.`,
         );
       } else {
         this.logger.log(
-          `Replication divergence fan-out for ${ctx.connectionName}: all primaries reachable again.`,
+          `Node fan-out for ${ctx.connectionName}: all primaries reachable again.`,
         );
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
