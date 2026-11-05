@@ -10440,7 +10440,7 @@ describe('AnomalyService', () => {
       await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
 
       expect(prometheusService.updateAnomalySummary).toHaveBeenCalled();
-      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+      expect(prometheusService.updateActiveIncidents).toHaveBeenCalledWith(new Map());
     });
   });
 
@@ -14249,6 +14249,39 @@ describe('AnomalyService', () => {
           expect(signals.replicas).toEqual([
             expect.objectContaining({ replica: '10.0.0.2:6379', gapBytes: 10 * MiB, level: 1 }),
           ]);
+        });
+
+        it('publishes the live gap of a replica that stopped acknowledging', async () => {
+          let t = await feed([0, 0], T0);
+          for (let i = 0; i < 16; i++) {
+            const base = sample(t, 9 * MiB);
+            await (service as any).detectReplicationDivergence(
+              { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) },
+              mockCtx,
+            );
+            t += 10_000;
+          }
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.replicas).toEqual([
+            { replica: '10.0.0.2:6379', gapBytes: 9 * MiB, secondsBehind: null, level: 2 },
+          ]);
+        });
+
+        it('clears the gauges of a fan-out node it cannot read', async () => {
+          const client = nodeClient([2]);
+          const getNodeConnection = jest.fn().mockResolvedValue(client);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
+          let t = await poll([target], 1, T0);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalled();
+
+          getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+          t = await poll([target], 1, t);
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+
+          prometheusService.clearNodeSignals.mockClear();
+          await poll([target], 1, t);
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
         });
 
         it('publishes replication and retry signals of a fan-out node under its address', async () => {

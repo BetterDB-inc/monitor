@@ -8428,13 +8428,14 @@ export class AnomalyService
         ctx.connectionId,
         nodeAddr ?? `${ctx.host}:${ctx.port}`,
         {
-          replicas: [...state.replicas.values()].map((replica) => {
-            const latest = replica.windows.at(-1);
+          replicas: [...new Set([...state.replicas.keys(), ...state.staleAcks])].map((addr) => {
+            const replica = state.replicas.get(addr);
+            const latest = staleAckWindow(state, addr) ?? replica?.windows.at(-1);
             return {
-              replica: replica.addr,
+              replica: addr,
               gapBytes: latest?.gapBytes ?? null,
               secondsBehind: latest?.secondsBehind ?? null,
-              level: DIVERGENCE_LEVEL_GAUGE[replica.level],
+              level: DIVERGENCE_LEVEL_GAUGE[replica?.level ?? 'none'],
             };
           }),
           writeRateBytesPerSecond: rate,
@@ -8570,6 +8571,9 @@ export class AnomalyService
       const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
       if (adopted) this.closeLater(adopted);
     }
+    for (const addr of kept) {
+      if (!read.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
+    }
     await this.persistPendingDivergenceWindows(ctx);
     await this.sweepRetiredDivergenceNodes(ctx, kept);
     await this.settleRetiredDivergence(ctx.connectionId);
@@ -8616,6 +8620,7 @@ export class AnomalyService
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
         unreachable++;
+        this.clearNodeSignals(ctx.connectionId, key);
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
         if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
         const failures = (this.topologyBackoff.get(key)?.failures ?? 0) + 1;
@@ -9524,6 +9529,15 @@ export class AnomalyService
       );
     } catch (err) {
       this.logger.debug(`Failed to update incident gauges: ${err instanceof Error ? err.message : err}`);
+      this.clearIncidentGauges();
+    }
+  }
+
+  private clearIncidentGauges(): void {
+    try {
+      this.prometheusService.updateActiveIncidents(new Map());
+    } catch (err) {
+      this.logger.debug(`Failed to clear incident gauges: ${err instanceof Error ? err.message : err}`);
     }
   }
 }
