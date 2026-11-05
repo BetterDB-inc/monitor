@@ -10,11 +10,22 @@ import {
   patternLabel,
 } from '../anomaly-display';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
-import { incidentDurationMs, isIncidentOpen, orderedEntries } from './incident-summary';
+import {
+  incidentDurationMs,
+  incidentTitle,
+  isDurationOngoing,
+  orderedEntries,
+} from './incident-summary';
 
 interface IncidentTimelineViewProps {
   incident: IncidentTimeline;
   now: number;
+}
+
+function recoveryTime(firedAt: number, recoveredAt: number): string {
+  return new Date(firedAt).toDateString() === new Date(recoveredAt).toDateString()
+    ? formatTime(recoveredAt)
+    : formatDateTime(recoveredAt);
 }
 
 function recoveryText(entry: IncidentTimelineEntry): string {
@@ -22,7 +33,7 @@ function recoveryText(entry: IncidentTimelineEntry): string {
     case 'recovered':
       return entry.recoveredAt === null
         ? 'Back to baseline'
-        : `Back to baseline at ${formatTime(entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
+        : `Back to baseline at ${recoveryTime(entry.timestamp, entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
     case 'recurred':
       return 'Fired again later';
     case 'unknown':
@@ -47,17 +58,14 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
 
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
   const entries = orderedEntries(incident);
-  const stepOf = new Map<string, number>();
+  const stepOf = new Map<string, number | null>();
   for (const match of incident.sequenceMatches) {
     match.anomalyIds.forEach((id, i) => {
-      if (!stepOf.has(id)) stepOf.set(id, i + 1);
+      if (!stepOf.has(id)) stepOf.set(id, match.steps[i] ?? null);
     });
   }
   const duration = formatDuration(incidentDurationMs(incident, now));
-  const title =
-    incident.matchedPatterns.length > 0
-      ? incident.matchedPatterns.map(patternLabel).join(', ')
-      : 'Incident';
+  const title = incidentTitle(incident);
 
   return (
     <div className="space-y-6">
@@ -67,7 +75,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       </div>
       <p className="text-sm text-muted-foreground">
         Started {formatDateTime(incident.startedAt)} ·{' '}
-        {isIncidentOpen(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
+        {isDurationOngoing(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
         event{incident.entries.length === 1 ? '' : 's'} across {incident.connectionIds.length}{' '}
         connection{incident.connectionIds.length === 1 ? '' : 's'}
       </p>
@@ -107,10 +115,18 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
             <ol className="space-y-1 text-sm">
               {match.anomalyIds.map((id, i) => {
                 const entry = incident.entries.find((e) => e.anomalyId === id);
+                const step = match.steps[i];
                 return (
                   <li key={id} className="flex gap-2">
-                    <span className="font-mono text-primary">{i + 1}.</span>
-                    <span>{entry ? metricLabel(entry.metricType) : id}</span>
+                    <span className="font-mono text-primary">
+                      {step === null ? '+' : `${step}.`}
+                    </span>
+                    <span>
+                      {entry ? metricLabel(entry.metricType) : id}
+                      {step === null && (
+                        <span className="text-muted-foreground"> (supporting signal)</span>
+                      )}
+                    </span>
                   </li>
                 );
               })}
@@ -155,7 +171,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                     </span>
                     {step !== undefined && (
                       <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                        Step {step}
+                        {step === null ? 'Supporting signal' : `Step ${step}`}
                       </span>
                     )}
                     {entry.nodeAddr && (

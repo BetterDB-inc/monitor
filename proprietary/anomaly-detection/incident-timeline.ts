@@ -25,6 +25,7 @@ export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'de
 export interface IncidentSequenceMatch {
   pattern: AnomalyPattern;
   anomalyIds: string[];
+  steps: (number | null)[];
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;
@@ -643,6 +644,10 @@ export class IncidentTimelineBuilder {
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),
+          steps: held.map((e) => {
+            const position = matched.indexOf(e);
+            return position < rule.steps.length ? position + 1 : null;
+          }),
           diagnosis: rule.diagnosis,
           recommendations: rule.recommendations.filter(
             (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,

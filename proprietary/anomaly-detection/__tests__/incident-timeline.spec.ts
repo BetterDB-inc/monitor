@@ -1169,6 +1169,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
       expect(incident.matchedPatterns).toEqual([escalation.pattern]);
       expect(incident.sequenceMatches[0].anomalyIds).toEqual(['held']);
+      expect(incident.sequenceMatches[0].steps).toEqual([2]);
     });
 
     describe('with a step that may come before the step it follows', () => {
@@ -1272,10 +1273,24 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.sequenceMatches[0]).toEqual(
         expect.objectContaining({
           anomalyIds: [conn.id, mem.id],
+          steps: [1, 2],
           severity: AnomalySeverity.CRITICAL,
           diagnosis: escalation.diagnosis,
         }),
       );
+    });
+
+    it('numbers an optional event as no step', () => {
+      const conn = event({ metricType: MetricType.CONNECTIONS });
+      const evicted = event({ metricType: MetricType.EVICTED_KEYS, timestamp: T0 + MIN });
+      const mem = event({ metricType: MetricType.MEMORY_USED, timestamp: T0 + 2 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [
+        { ...escalation, optionalMetrics: [MetricType.EVICTED_KEYS] },
+      ]).build([conn, evicted, mem], T0 + 3 * MIN, neverRecovers);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id, evicted.id]);
+      expect(incident.sequenceMatches[0].steps).toEqual([1, 2, null]);
     });
 
     it('does not match the steps in reverse order', () => {

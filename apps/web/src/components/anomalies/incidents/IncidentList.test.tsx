@@ -6,11 +6,11 @@ import { entry, incident, T0 } from './incident-fixtures';
 
 function renderList(
   incidents: Parameters<typeof IncidentList>[0]['incidents'],
-  now = T0 + 600_000,
+  props: Partial<Parameters<typeof IncidentList>[0]> = {},
 ) {
   return render(
     <MemoryRouter>
-      <IncidentList incidents={incidents} now={now} />
+      <IncidentList incidents={incidents} now={T0 + 600_000} {...props} />
     </MemoryRouter>,
   );
 }
@@ -19,6 +19,26 @@ describe('IncidentList', () => {
   it('shows an empty state without incidents', () => {
     renderList([]);
     expect(screen.getByText('No incidents in this time range')).toBeInTheDocument();
+  });
+
+  it('shows loading instead of the empty state before the first response', () => {
+    renderList(undefined, { loading: true });
+    expect(screen.getByText('Loading incidents…')).toBeInTheDocument();
+    expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
+  });
+
+  it('says when the list is capped and keeps the date range on links', () => {
+    renderList([incident({ incidentId: 'a' }), incident({ incidentId: 'b' })], {
+      limit: 2,
+      linkQuery: 'start=1&end=2',
+    });
+    expect(
+      screen.getByText('Showing the newest 2 incidents. Narrow the time range to see older ones.'),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('link')[0]).toHaveAttribute(
+      'href',
+      '/anomalies/incidents/a?start=1&end=2',
+    );
   });
 
   it('lists pattern, scope, duration and status, linking to the detail view', () => {

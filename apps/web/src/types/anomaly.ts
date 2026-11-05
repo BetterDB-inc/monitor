@@ -93,6 +93,7 @@ export interface IncidentTimelineEntry {
 export interface IncidentSequenceMatch {
   pattern: string;
   anomalyIds: string[];
+  steps: (number | null)[];
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;

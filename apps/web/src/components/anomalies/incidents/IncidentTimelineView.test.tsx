@@ -109,6 +109,7 @@ describe('IncidentTimelineView', () => {
             {
               pattern: 'retry_storm',
               anomalyIds: ['a', 'b'],
+              steps: [1, 2],
               diagnosis: 'Clients are retrying slow commands',
               recommendations: ['Add client backoff'],
               severity: 'critical',
@@ -124,6 +125,63 @@ describe('IncidentTimelineView', () => {
     const [first, second] = screen.getAllByTestId('incident-entry');
     expect(within(first).getByText('Step 1')).toBeInTheDocument();
     expect(within(second).getByText('Step 2')).toBeInTheDocument();
+  });
+
+  it('numbers events by their rule step and marks supporting signals', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          matchedPatterns: ['retry_storm'],
+          entries: [
+            entry({ anomalyId: 'a', metricType: 'command_p99' }),
+            entry({ anomalyId: 'b', metricType: 'connection_churn', timestamp: T0 + 1 }),
+            entry({ anomalyId: 'c', metricType: 'connections', timestamp: T0 + 2 }),
+          ],
+          sequenceMatches: [
+            {
+              pattern: 'retry_storm',
+              anomalyIds: ['a', 'c', 'b'],
+              steps: [2, 3, null],
+              diagnosis: 'Clients are retrying slow commands',
+              recommendations: [],
+              severity: 'critical',
+            },
+          ],
+        })}
+      />,
+    );
+
+    const [first, second, third] = screen.getAllByTestId('incident-entry');
+    expect(within(first).getByText('Step 2')).toBeInTheDocument();
+    expect(within(second).getByText('Supporting signal')).toBeInTheDocument();
+    expect(within(third).getByText('Step 3')).toBeInTheDocument();
+  });
+
+  it('titles an incident without a pattern by its first signal', () => {
+    render(<IncidentTimelineView now={T0} incident={incident()} />);
+    expect(screen.getByRole('heading', { name: 'Connections' })).toBeInTheDocument();
+  });
+
+  it('dates a recovery that falls on another day', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries: [
+            entry({
+              recoveredAt: T0 + 24 * 3_600_000,
+              recoveryState: 'recovered',
+            }),
+          ],
+        })}
+      />,
+    );
+    const nextDay = new Date(T0 + 24 * 3_600_000).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+    });
+    expect(screen.getByText(new RegExp(`Back to baseline at ${nextDay}`))).toBeInTheDocument();
   });
 
   it('calls out recovery debt on a degraded incident', () => {

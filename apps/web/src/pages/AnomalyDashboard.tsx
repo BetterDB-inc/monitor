@@ -27,8 +27,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
 import {
+  dateRangeQuery,
   findIncidentForAnomalies,
   incidentPath,
+  incidentsByAnomaly,
 } from '../components/anomalies/incidents/incident-summary';
 import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
@@ -99,6 +101,9 @@ export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: bo
   return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
 }
 
+const INCIDENT_LIST_LIMIT = 200;
+const INCIDENT_POLL_MS = 30_000;
+
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
   const { hasFeature } = useLicense();
@@ -152,6 +157,25 @@ export function AnomalyDashboard() {
 
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
+  const rangeQuery = dateRangeQuery(startTime, endTime);
+
+  const changeDateRange = (range: DateRange | undefined) => {
+    setDateRange(range);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (range?.from && range?.to) {
+          next.set('start', String(range.from.getTime()));
+          next.set('end', String(range.to.getTime()));
+        } else {
+          next.delete('start');
+          next.delete('end');
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   const { data: summary, error: summaryError } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
@@ -208,12 +232,15 @@ export function AnomalyDashboard() {
   const {
     data: incidents,
     error: incidentsError,
+    loading: incidentsLoading,
     lastUpdated: incidentsUpdated,
   } = usePolling<IncidentTimeline[]>({
-    fetcher: () => metricsApi.getIncidents({ startTime, endTime }),
-    interval: 5000,
+    fetcher: () => metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }),
+    interval: INCIDENT_POLL_MS,
+    enabled: tab === 'incidents' || expandedGroups.size > 0,
     refetchKey: currentConnection?.id,
   });
+  const incidentByAnomaly = useMemo(() => incidentsByAnomaly(incidents), [incidents]);
 
   const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
     ReplicaDivergenceHistory[]
@@ -292,7 +319,7 @@ export function AnomalyDashboard() {
           <h1 className="text-3xl font-bold">Anomaly Detection</h1>
           <p className="text-muted-foreground">Real-time monitoring across all metrics</p>
         </div>
-        <DateRangePicker value={dateRange} onChange={setDateRange} />
+        <DateRangePicker value={dateRange} onChange={changeDateRange} />
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -322,6 +349,9 @@ export function AnomalyDashboard() {
                 <IncidentList
                   incidents={incidents ?? undefined}
                   now={incidentsUpdated?.getTime() ?? 0}
+                  loading={incidentsLoading}
+                  limit={INCIDENT_LIST_LIMIT}
+                  linkQuery={rangeQuery}
                 />
               )}
             </CardContent>
@@ -479,7 +509,7 @@ export function AnomalyDashboard() {
                   const patternConfig = PATTERN_CONFIG[group.pattern] || PATTERN_CONFIG.unknown;
                   const PatternIcon = patternConfig.icon;
                   const incident = findIncidentForAnomalies(
-                    incidents ?? undefined,
+                    incidentByAnomaly,
                     group.anomalies.map((a) => a.id),
                   );
 
@@ -534,7 +564,7 @@ export function AnomalyDashboard() {
 
                           {incident && (
                             <Link
-                              to={incidentPath(incident.incidentId)}
+                              to={incidentPath(incident.incidentId, rangeQuery)}
                               className="inline-flex text-sm font-medium text-primary hover:underline"
                             >
                               View incident timeline

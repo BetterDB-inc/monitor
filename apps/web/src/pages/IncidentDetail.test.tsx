@@ -14,7 +14,7 @@ const polling: {
     lastUpdated: Date | null;
   };
   fetcher?: () => Promise<unknown>;
-  interval?: number;
+  interval?: number | ((data: IncidentTimeline | undefined) => number | false);
 } = { state: { data: null, error: null, loading: true, lastUpdated: null } };
 
 vi.mock('../api/metrics', () => ({
@@ -26,7 +26,10 @@ vi.mock('../hooks/useConnection', () => ({
 }));
 
 vi.mock('../hooks/usePolling', () => ({
-  usePolling: (options: { fetcher: () => Promise<unknown>; interval?: number }) => {
+  usePolling: (options: {
+    fetcher: () => Promise<unknown>;
+    interval?: number | ((data: IncidentTimeline | undefined) => number | false);
+  }) => {
     polling.fetcher = options.fetcher;
     polling.interval = options.interval;
     return polling.state;
@@ -51,13 +54,27 @@ describe('IncidentDetail', () => {
     polling.state = { data: null, error: null, loading: true, lastUpdated: null };
   });
 
-  it('polls the incident named in the URL like the dashboard', async () => {
+  it('polls the incident named in the URL', async () => {
     renderAt('/anomalies/incidents/123-abc');
 
     await polling.fetcher?.();
     expect(getIncident).toHaveBeenCalledWith('123-abc');
-    expect(polling.interval).toBe(5000);
     expect(screen.getByText('Loading incident…')).toBeInTheDocument();
+  });
+
+  it('polls a recovered incident less often', () => {
+    renderAt('/anomalies/incidents/123-abc');
+
+    const interval = polling.interval as (data: IncidentTimeline | undefined) => number;
+    expect(interval(undefined)).toBe(15_000);
+    expect(
+      interval(
+        incident({
+          recovery: { status: 'active', openSignals: [], unknownSignals: [], recoveredAt: null },
+        }),
+      ),
+    ).toBe(15_000);
+    expect(interval(incident())).toBe(60_000);
   });
 
   it('renders the incident and links back to the list', () => {
@@ -75,6 +92,32 @@ describe('IncidentDetail', () => {
       'href',
       '/anomalies?tab=incidents',
     );
+  });
+
+  it('keeps the date range on the back link', () => {
+    polling.state = { data: incident(), error: null, loading: false, lastUpdated: new Date() };
+
+    renderAt('/anomalies/incidents/123-abc?start=100&end=200');
+
+    expect(screen.getByRole('link', { name: /Back to incidents/ })).toHaveAttribute(
+      'href',
+      '/anomalies?tab=incidents&start=100&end=200',
+    );
+  });
+
+  it('keeps a loaded incident when a later poll cannot find it', () => {
+    polling.state = {
+      data: incident({ matchedPatterns: ['backlog_exhaustion'] }),
+      error: new ApiError('Incident 123-abc not found', 404),
+      loading: false,
+      lastUpdated: new Date(),
+    };
+
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(screen.getByRole('heading', { name: 'Backlog Exhaustion' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('can no longer be found');
+    expect(screen.queryByText('Incident not found')).not.toBeInTheDocument();
   });
 
   it('says when the incident does not exist', () => {

@@ -1,5 +1,5 @@
-import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, SearchX } from 'lucide-react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { AlertTriangle, ArrowLeft, SearchX } from 'lucide-react';
 import { metricsApi } from '../api/metrics';
 import { ApiError } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
@@ -7,10 +7,15 @@ import { useConnection } from '../hooks/useConnection';
 import { EmptyState } from '../components/ui/empty-state';
 import { QueryErrorState } from '../components/QueryErrorState';
 import { IncidentTimelineView } from '../components/anomalies/incidents/IncidentTimelineView';
+import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
 import type { IncidentTimeline } from '../types/anomaly';
+
+const OPEN_INCIDENT_POLL_MS = 15_000;
+const RECOVERED_INCIDENT_POLL_MS = 60_000;
 
 export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
+  const [searchParams] = useSearchParams();
   const { currentConnection } = useConnection();
   const {
     data: incident,
@@ -19,30 +24,47 @@ export function IncidentDetail() {
     lastUpdated,
   } = usePolling<IncidentTimeline>({
     fetcher: () => metricsApi.getIncident(incidentId),
-    interval: 5000,
+    interval: (latest) =>
+      latest?.recovery.status === 'recovered' ? RECOVERED_INCIDENT_POLL_MS : OPEN_INCIDENT_POLL_MS,
     refetchKey: `${currentConnection?.id ?? ''}:${incidentId}`,
   });
   const notFound = error instanceof ApiError && error.status === 404;
+  const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));
+  const backTo = `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
 
   return (
     <div className="space-y-6">
       <Link
-        to="/anomalies?tab=incidents"
+        to={backTo}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="w-4 h-4" />
         Back to incidents
       </Link>
-      {notFound ? (
+      {incident ? (
+        <>
+          {notFound && (
+            <div
+              role="status"
+              className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4 text-sm"
+            >
+              <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
+              <p>
+                This incident can no longer be found. Its events may have been regrouped into
+                another incident. Showing the last timeline loaded.
+              </p>
+            </div>
+          )}
+          <IncidentTimelineView
+            incident={incident}
+            now={lastUpdated?.getTime() ?? incident.lastEventAt}
+          />
+        </>
+      ) : notFound ? (
         <EmptyState
           icon={SearchX}
           title="Incident not found"
           description="It may be outside the stored history, or belong to another connection."
-        />
-      ) : incident ? (
-        <IncidentTimelineView
-          incident={incident}
-          now={lastUpdated?.getTime() ?? incident.lastEventAt}
         />
       ) : loading ? (
         <p className="text-sm text-muted-foreground">Loading incident…</p>

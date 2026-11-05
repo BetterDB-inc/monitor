@@ -5,7 +5,7 @@ import { useUpgradePrompt } from './useUpgradePrompt';
 
 interface UsePollingOptions<T> {
   fetcher: (signal: AbortSignal) => Promise<T>;
-  interval?: number;
+  interval?: number | ((data: T | undefined) => number | false);
   enabled?: boolean;
   /** Optional key that triggers a refetch when changed (e.g., filter parameters) */
   refetchKey?: string | number;
@@ -51,7 +51,8 @@ export function usePolling<T>({
       }
     },
     enabled,
-    refetchInterval: interval,
+    refetchInterval:
+      typeof interval === 'function' ? (query) => interval(query.state.data) : interval,
     refetchIntervalInBackground: false,
     retry: (failureCount, error) => {
       if (error instanceof PaymentRequiredError) return false;

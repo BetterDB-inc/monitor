@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { entry, incident, T0 } from './incident-fixtures';
 import {
+  dateRangeQuery,
   findIncidentForAnomalies,
   incidentDurationMs,
   incidentPath,
+  incidentsByAnomaly,
+  incidentTitle,
+  isDurationOngoing,
   orderedEntries,
 } from './incident-summary';
 
@@ -51,12 +55,43 @@ describe('incident summary helpers', () => {
 
   it('finds the incident holding any of a group anomalies', () => {
     const target = incident({ incidentId: 'b', entries: [entry({ anomalyId: 'x' })] });
-    expect(findIncidentForAnomalies([incident(), target], ['y', 'x'])).toBe(target);
-    expect(findIncidentForAnomalies([incident()], ['z'])).toBeUndefined();
-    expect(findIncidentForAnomalies(undefined, ['x'])).toBeUndefined();
+    expect(findIncidentForAnomalies(incidentsByAnomaly([incident(), target]), ['y', 'x'])).toBe(
+      target,
+    );
+    expect(findIncidentForAnomalies(incidentsByAnomaly([incident()]), ['z'])).toBeUndefined();
+    expect(findIncidentForAnomalies(incidentsByAnomaly(null), ['x'])).toBeUndefined();
   });
 
-  it('encodes the incident id in its path', () => {
+  it('encodes the incident id in its path and keeps the date range', () => {
     expect(incidentPath('1-a/b')).toBe('/anomalies/incidents/1-a%2Fb');
+    expect(incidentPath('1-a', dateRangeQuery(100, 200))).toBe(
+      '/anomalies/incidents/1-a?start=100&end=200',
+    );
+    expect(dateRangeQuery(100, undefined)).toBe('');
+  });
+
+  it('only counts an incident as ongoing while its duration runs to now', () => {
+    const active = (recoveredAt: number | null) =>
+      incident({
+        recovery: { status: 'active', openSignals: [], unknownSignals: [], recoveredAt },
+      });
+    expect(isDurationOngoing(active(null))).toBe(true);
+    expect(isDurationOngoing(active(T0 + 120_000))).toBe(false);
+    expect(isDurationOngoing(incident())).toBe(false);
+  });
+
+  it('titles an incident by its patterns, or else its first signal', () => {
+    expect(incidentTitle(incident({ matchedPatterns: ['retry_storm'] }))).toBe('Retry Storm');
+    expect(
+      incidentTitle(
+        incident({
+          entries: [
+            entry({ anomalyId: 'b', metricType: 'memory_used', timestamp: T0 + 5 }),
+            entry({ anomalyId: 'a', metricType: 'connections', timestamp: T0 }),
+          ],
+        }),
+      ),
+    ).toBe('Connections');
+    expect(incidentTitle(incident({ entries: [] }))).toBe('Incident');
   });
 });
