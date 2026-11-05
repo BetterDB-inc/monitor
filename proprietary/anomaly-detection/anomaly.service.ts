@@ -414,6 +414,8 @@ const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const OPEN_INCIDENT_STATUSES: ReadonlySet<string> = new Set(['active', 'recovering', 'degraded']);
+const INCIDENT_GAUGE_SEED_LOOKBACK_MS = 24 * 60 * 60_000;
+const INCIDENT_GAUGE_MAX_FAILURES = 3;
 const DIVERGENCE_LEVEL_GAUGE = { none: 0, warning: 1, critical: 2 } as const;
 const RETRY_STATE_GAUGE = { none: 0, candidate: 1, amplifying: 2 } as const;
 const ANOMALY_ANNOUNCE_MAX_AGE_MS = 5 * 60 * 1000;
@@ -1938,6 +1940,8 @@ export class AnomalyService
         await this.detectTopologyAnomalies(ctx, scope).catch((err) => {
           this.logger.error(`Failed to check ${ctx.connectionName}'s other nodes:`, err);
         });
+      } else {
+        this.clearFanoutNodeSignals(ctx.connectionId);
       }
       this.openDivergenceReads.delete(ctx.connectionId);
     }
@@ -3967,7 +3971,7 @@ export class AnomalyService
       stressActive,
       activeSaturation: [...activeSaturation],
     });
-    if (info.role === 'master') this.publishRetrySignals(ctx, nodeAddr, state, connectsPerSec, opsPerSec);
+    if (!isReplicaRole(info.role)) this.publishRetrySignals(ctx, nodeAddr, state, connectsPerSec, opsPerSec);
     else this.clearRetrySignals(ctx.connectionId, nodeAddr ?? `${ctx.host}:${ctx.port}`);
 
     const clientSnapshots = nodeAddr ? [] : this.refreshClientSnapshots(ctx, state, info.run_id);
@@ -4001,7 +4005,7 @@ export class AnomalyService
     try {
       this.prometheusService.updateRetrySignals(ctx.connectionId, nodeAddr ?? `${ctx.host}:${ctx.port}`, {
         connectsPerSecond: connectsPerSec,
-        churnPerOp: connectsPerSec === null || opsPerSec === null || opsPerSec <= 0 ? null : connectsPerSec / opsPerSec,
+        churnPerOp: connectsPerSec === null ? null : connectsPerOp(connectsPerSec, opsPerSec),
         retryState: RETRY_STATE_GAUGE[describeRetryAmplificationState(state).classification],
       });
     } catch (err) {
@@ -8399,21 +8403,24 @@ export class AnomalyService
     const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
     const state = this.divergenceState.get(key) ?? createDivergenceState();
     this.divergenceState.set(key, state);
-    if (!this.divergenceOrphansSwept.has(key)) {
-      await this.collectOrphanedDivergenceEvents(state, ctx, key, nodeAddr);
-    }
-
-    for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
-      if (outcome.kind === 'divergence') {
-        await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr);
-      } else {
-        await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
+    try {
+      if (!this.divergenceOrphansSwept.has(key)) {
+        await this.collectOrphanedDivergenceEvents(state, ctx, key, nodeAddr);
       }
+
+      for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+        if (outcome.kind === 'divergence') {
+          await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr);
+        } else {
+          await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
+        }
+      }
+      await this.settleOrphanedDivergenceEvents(state, ctx, key);
+      await this.persistDivergenceWindows(state, ctx);
+      if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
+    } finally {
+      this.publishReplicationSignals(ctx, nodeAddr, state, sample);
     }
-    await this.settleOrphanedDivergenceEvents(state, ctx, key);
-    await this.persistDivergenceWindows(state, ctx);
-    if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
-    this.publishReplicationSignals(ctx, nodeAddr, state, sample);
   }
 
   private publishReplicationSignals(
@@ -8461,6 +8468,13 @@ export class AnomalyService
       this.logger.debug(
         `Failed to clear retry amplification gauges for ${node}: ${err instanceof Error ? err.message : err}`,
       );
+    }
+  }
+
+  private clearFanoutNodeSignals(connectionId: string): void {
+    const keys = new Set([...this.divergenceKeysOf(connectionId), ...this.retryAmplificationKeysOf(connectionId)]);
+    for (const key of keys) {
+      if (key !== connectionId) this.clearNodeSignals(connectionId, key);
     }
   }
 
@@ -9470,6 +9484,8 @@ export class AnomalyService
   }
 
   private incidentGaugesInFlight = false;
+  private incidentGaugeFailures = 0;
+  private openIncidentSince: number | null = null;
 
   private async updatePrometheusSummary(): Promise<void> {
     const oneHourAgo = Date.now() - 3600000;
@@ -9516,11 +9532,14 @@ export class AnomalyService
     if (this.incidentGaugesInFlight) return;
     this.incidentGaugesInFlight = true;
     try {
-      const timelines = await this.getIncidentTimelines(undefined, since, undefined, Number.MAX_SAFE_INTEGER);
+      const from = Math.min(since, this.openIncidentSince ?? Date.now() - INCIDENT_GAUGE_SEED_LOOKBACK_MS);
+      const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
       const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
+      let oldestOpen: number | null = null;
       for (const timeline of timelines) {
         const status = timeline.recovery.status;
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
+        oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
         const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
         for (const connectionId of new Set(timeline.connectionIds)) {
           const counts = byConnection.get(connectionId) ?? new Map();
@@ -9536,9 +9555,14 @@ export class AnomalyService
       this.prometheusService.updateActiveIncidents(
         new Map([...byConnection].map(([connectionId, counts]) => [connectionId, [...counts.values()]])),
       );
+      this.openIncidentSince = oldestOpen === null ? since : Math.min(since, oldestOpen);
+      this.incidentGaugeFailures = 0;
     } catch (err) {
-      this.logger.debug(`Failed to update incident gauges: ${err instanceof Error ? err.message : err}`);
-      this.clearIncidentGauges();
+      this.incidentGaugeFailures++;
+      this.logger.warn(
+        `Failed to update incident gauges (${this.incidentGaugeFailures} in a row): ${err instanceof Error ? err.message : err}`,
+      );
+      if (this.incidentGaugeFailures >= INCIDENT_GAUGE_MAX_FAILURES) this.clearIncidentGauges();
     } finally {
       this.incidentGaugesInFlight = false;
     }

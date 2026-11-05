@@ -384,7 +384,7 @@ describe('PrometheusService anomaly signal gauges', () => {
       expect(await service.getMetrics()).not.toContain(`connection="${LABEL}"`);
     });
 
-    it('drops signal series once the connection goes stale', async () => {
+    it('drops node signal series but keeps open incidents once the connection goes stale', async () => {
       await service['runUpdateMetricsForConnection']('conn-1');
       pushEverything('conn-1');
 
@@ -396,10 +396,10 @@ describe('PrometheusService anomaly signal gauges', () => {
         'betterdb_replication_divergence_level',
         'betterdb_replication_write_rate_bytes_per_second',
         'betterdb_retry_amplification_state',
-        'betterdb_incident_active',
       ]) {
         expect(text).not.toContain(`${name}{connection="${LABEL}"`);
       }
+      expect(text).toContain(`betterdb_incident_active{connection="${LABEL}"`);
     });
 
     it('is not exported under the vitals profile', async () => {

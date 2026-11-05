@@ -10440,7 +10440,47 @@ describe('AnomalyService', () => {
       await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
 
       expect(prometheusService.updateAnomalySummary).toHaveBeenCalled();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+    });
+
+    it('clears incident gauges only after three failed refreshes in a row', async () => {
+      const read = jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+
+      await (service as any).updatePrometheusSummary();
+      await (service as any).updatePrometheusSummary();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+
+      await (service as any).updatePrometheusSummary();
       expect(prometheusService.updateActiveIncidents).toHaveBeenCalledWith(new Map());
+
+      read.mockResolvedValue([]);
+      await (service as any).updatePrometheusSummary();
+      (prometheusService.updateActiveIncidents as jest.Mock).mockClear();
+      read.mockRejectedValue(new Error('storage down'));
+      await (service as any).updatePrometheusSummary();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+    });
+
+    it('keeps reading back to the oldest open incident', async () => {
+      const now = Date.now();
+      const oldEvent = now - 3 * 3600_000;
+      const read = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+        {
+          lastEventAt: oldEvent,
+          recovery: { status: 'degraded' },
+          matchedPatterns: [],
+          connectionIds: ['conn-1'],
+        } as any,
+      ]);
+
+      await (service as any).updatePrometheusSummary();
+      await (service as any).updatePrometheusSummary();
+
+      expect(read.mock.calls[0][1]).toBeLessThanOrEqual(now - 24 * 3600_000 + 1000);
+      expect(read.mock.calls[1][1]).toBe(oldEvent);
+      expect(prometheusService.updateActiveIncidents).toHaveBeenLastCalledWith(
+        new Map([['conn-1', [{ pattern: 'none', status: 'degraded', count: 1 }]]]),
+      );
     });
   });
 
@@ -14351,7 +14391,7 @@ describe('AnomalyService', () => {
         it.each([
           ['unknown', {}],
           ['idle', { instantaneous_ops_per_sec: '0' }],
-        ])('leaves churn per op out when ops per second is %s', async (_label, info) => {
+        ])('divides churn by at least one op when ops per second is %s', async (_label, info) => {
           (service as any).connectionChurnSamples.set('conn-1', {
             timestamp: T0,
             connectsPerSec: 50,
@@ -14363,7 +14403,7 @@ describe('AnomalyService', () => {
 
           expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
             connectsPerSecond: 50,
-            churnPerOp: null,
+            churnPerOp: 50,
             retryState: 0,
           });
         });
@@ -14387,6 +14427,40 @@ describe('AnomalyService', () => {
 
           const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
           expect(signals).toMatchObject({ writeRateBytesPerSecond: null, backlogCoverageSeconds: null });
+        });
+
+        it('publishes the seed retry gauges when the role is not reported', async () => {
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalled();
+          expect(prometheusService.clearRetrySignals).not.toHaveBeenCalled();
+        });
+
+        it('still publishes replication gauges when storing a window fails', async () => {
+          jest.spyOn(service as any, 'persistDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          await expect(
+            (service as any).detectReplicationDivergence(sample(T0, 2 * MiB), mockCtx),
+          ).rejects.toThrow('storage down');
+
+          expect(prometheusService.updateReplicationSignals).toHaveBeenCalled();
+        });
+
+        it('clears other nodes gauges when the fan-out cannot run', () => {
+          (service as any).divergenceState.set('conn-1@10.0.0.5:6379', {});
+          (service as any).retryAmplificationState.set('conn-1@10.0.0.6:6379', {});
+          (service as any).divergenceState.set('conn-1', {});
+
+          (service as any).clearFanoutNodeSignals('conn-1');
+
+          expect(prometheusService.clearNodeSignals.mock.calls.map((c: string[]) => c[1]).sort()).toEqual([
+            '10.0.0.5:6379',
+            '10.0.0.6:6379',
+          ]);
         });
 
         it('drops a replica that left the INFO sample', async () => {

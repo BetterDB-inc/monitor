@@ -98,6 +98,7 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
   'betterdb_anomaly_by_metric',
   'betterdb_correlated_groups_by_severity',
   'betterdb_correlated_groups_by_pattern',
+  'betterdb_incident_active',
 ]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
@@ -1212,7 +1213,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     this.incidentActive = this.createGauge(
       'incident_active',
-      'Open incidents with an event in the last hour, by matched pattern and recovery status',
+      'Open incidents per connection, by matched pattern and recovery status',
       ['pattern', 'status'],
     );
 
