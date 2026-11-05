@@ -2079,6 +2079,78 @@ describe('AnomalyService', () => {
         expect(skewEvents()[0].resolved).toBe(false);
       });
 
+      it('does not judge a primary on its last reading once its node reads fail', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        const c = reshardNode('c', 6000);
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(1, 6000, true);
+
+        b.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(5, 6000, true);
+
+        expect(skewEvents()).toHaveLength(0);
+      });
+
+      it('sends the alert of an unregistered primary with that primary as its source', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            metricType: MetricType.RESHARD_SHARD_SKEW,
+            nodeAddr: '10.0.0.98:6379',
+            sourceHost: '10.0.0.98',
+            sourcePort: 6379,
+          }),
+        );
+      });
+
+      it('reads a bystander primary less often while no reshard runs', async () => {
+        const b = reshardNode('b', 6000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 6000, false);
+
+        expect(b.info).toHaveBeenCalledTimes(6 * 4);
+        expect(b.call.mock.calls.length).toBeLessThan(6);
+      });
+
+      it('resolves the alert of an unreadable primary once its last reading is past the stall limit', async () => {
+        const b = reshardNode('b', 18_000, '[1->-c0000000]');
+        const c = reshardNode('c', 6000, '[1-<-b0000000]');
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(6, 6000, false);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        b.call.mockRejectedValue(new Error('read failed'));
+        c.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(2, 6000, false);
+        clock += 31 * 60_000;
+        await pollSeed(2, 6000, false);
+
+        expect(skewEvents()[0].resolved).toBe(true);
+      });
+
+      it('does not carry migration history over to a new node at the same address', () => {
+        const key = 'conn-a@10.0.0.98:6379';
+        (service as any).reshardSnapshot.set(key, {
+          shardId: 'old00000',
+          markerSignature: 'm',
+          markerChangedAt: 1,
+          lastMarkerAt: 2,
+        });
+        const node = { id: 'new00000', flags: ['master'], migratingSlots: [], importingSlots: [] };
+
+        const snapshot = (service as any).reshardShardSnapshot(key, 'cluster', node, {}, null, 10_000);
+
+        expect(snapshot.lastMarkerAt).toBeNull();
+      });
+
       it('resolves the alert when the reshard ends while a bystander read fails', async () => {
         const b = reshardNode('b', 18_000, '[1-<-a0000000]');
         const c = reshardNode('c', 6000);
@@ -13738,7 +13810,7 @@ describe('AnomalyService', () => {
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
-        expect(client.info.mock.calls).toEqual([['clients'], ['stats'], ['replication']]);
+        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication']]);
       });
 
       describe('Sentinel targets', () => {
@@ -13953,7 +14025,7 @@ describe('AnomalyService', () => {
             await done;
           }
 
-          expect(client.info).toHaveBeenCalledTimes(3);
+          expect(client.info).toHaveBeenCalledTimes(4);
         } finally {
           jest.useRealTimers();
         }

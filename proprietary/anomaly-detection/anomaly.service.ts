@@ -64,6 +64,7 @@ import {
   RESHARD_MIN_PRIMARIES,
   RESHARD_PERSIST_POLLS,
   RESHARD_QUIET_POLLS,
+  RESHARD_MARKER_STALL_MS,
   RESHARD_STALE_POLLS,
   ReshardShardSnapshot,
   ReshardSkewFinding,
@@ -268,6 +269,7 @@ import {
   connectionOfStateKey,
   isTopologyStateKeyOf,
   sentinelTargets,
+  splitHostPort,
   topologyStateKey,
 } from './topology-targets';
 import {
@@ -531,6 +533,7 @@ export class AnomalyService
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
   private reshardMissedReads = new Set<string>();
+  private reshardNodeSelves = new Map<string, { self: ClusterNode; readAt: number }>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -1052,6 +1055,7 @@ export class AnomalyService
     for (const key of this.reshardSnapshotKeysOf(connectionId)) {
       this.reshardSnapshot.delete(key);
       this.reshardMissedReads.delete(key);
+      this.reshardNodeSelves.delete(key);
     }
     this.forgetClusterKey(connectionId);
     this.reshardSkewFirstSeen.delete(connectionId);
@@ -1928,7 +1932,7 @@ export class AnomalyService
     }
   }
 
-  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'stats', 'replication'] as const;
+  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
@@ -5567,7 +5571,10 @@ export class AnomalyService
         }
       }
       const primaries = nodes.filter((n) => n.flags.includes('master')).length;
-      const unjudgeable = shards.length < RESHARD_MIN_PRIMARIES && primaries >= RESHARD_MIN_PRIMARIES;
+      const unjudgeable =
+        shards.length < RESHARD_MIN_PRIMARIES &&
+        primaries >= RESHARD_MIN_PRIMARIES &&
+        this.reshardPeerSeenSince(ctx.connectionId, clusterKey, timestamp - RESHARD_MARKER_STALL_MS);
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
@@ -5580,6 +5587,7 @@ export class AnomalyService
         metricType: MetricType.RESHARD_SHARD_SKEW,
         preserveSignature: (signature) =>
           (unjudgeable && judged) || unread.has(signature) || (missed && !windowOpen),
+        contextOf: (finding) => this.nodeContext(ctx, nodeAddrs.get(finding.shardId)),
         buildEvent: (finding) =>
           this.buildReshardSkewEvent(ctx, timestamp, finding, nodeAddrs.get(finding.shardId)),
       });
@@ -5600,7 +5608,8 @@ export class AnomalyService
   ): ReshardShardSnapshot {
     const migratingSlots = node.migratingSlots?.length ?? 0;
     const importingSlots = node.importingSlots?.length ?? 0;
-    const previous = this.reshardSnapshot.get(key);
+    const stored = this.reshardSnapshot.get(key);
+    const previous = stored?.shardId === node.id ? stored : undefined;
     const markerSignature = reshardMarkerSignature(
       node.migratingSlots ?? [],
       node.importingSlots ?? [],
@@ -5626,6 +5635,13 @@ export class AnomalyService
     };
   }
 
+  private reshardPeerSeenSince(connectionId: string, clusterKey: string, since: number): boolean {
+    for (const [key, snapshot] of this.reshardSnapshot) {
+      if (key !== connectionId && snapshot.clusterKey === clusterKey && snapshot.timestamp >= since) return true;
+    }
+    return false;
+  }
+
   private reshardSnapshotKeysOf(connectionId: string): string[] {
     return [...this.reshardSnapshot.keys()].filter((key) => isTopologyStateKeyOf(key, connectionId));
   }
@@ -5642,13 +5658,16 @@ export class AnomalyService
     let missed = false;
     for (const [key, snapshot] of this.reshardSnapshot) {
       if (!key.startsWith(prefix) || snapshot.clusterKey !== clusterKey) continue;
-      if (timestamp - snapshot.timestamp > RESHARD_STALE_POLLS * intervalMs) {
+      const age = timestamp - snapshot.timestamp;
+      if (age > RESHARD_MARKER_STALL_MS) continue;
+      if (age > RESHARD_STALE_POLLS * intervalMs) {
         unread.add(reshardSkewSignature(snapshot));
         continue;
       }
       if (this.reshardMissedReads.has(key)) {
         missed ||= snapshot.migratingSlots + snapshot.importingSlots > 0;
         unread.add(reshardSkewSignature(snapshot));
+        continue;
       }
       fresh.push([key.slice(prefix.length), snapshot]);
     }
@@ -5679,6 +5698,29 @@ export class AnomalyService
     this.reshardSnapshot.set(key, this.reshardShardSnapshot(key, clusterKey, self, info, null, timestamp));
   }
 
+  private nodeContext(ctx: ConnectionContext, nodeAddr: string | undefined): ConnectionContext {
+    const target = nodeAddr ? splitHostPort(nodeAddr) : null;
+    return target
+      ? { ...ctx, connectionName: `${ctx.connectionName} (${nodeAddr})`, host: target.host, port: target.port }
+      : ctx;
+  }
+
+  private cachedNodeSelf(
+    connectionId: string,
+    key: string,
+    nodeId: string,
+    timestamp: number,
+  ): ClusterNode | null {
+    const cached = this.reshardNodeSelves.get(key);
+    if (!cached || cached.self.id !== nodeId) return null;
+    if ((cached.self.migratingSlots?.length ?? 0) + (cached.self.importingSlots?.length ?? 0) > 0) return null;
+    const intervalMs = this.getIntervalMs();
+    if (timestamp - cached.readAt >= RESHARD_QUIET_POLLS * intervalMs) return null;
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    const shards = clusterKey ? this.freshReshardShards(clusterKey, timestamp, intervalMs) : [];
+    return isReshardActive(shards, timestamp, RESHARD_QUIET_POLLS * intervalMs) ? null : cached.self;
+  }
+
   private async readNodeSelf(
     client: { call(...args: string[]): Promise<unknown> },
     addr: string,
@@ -5690,7 +5732,9 @@ export class AnomalyService
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `CLUSTER NODES to ${addr} timed out`,
       );
-      return MetricsParser.parseClusterNodes(raw as string).find((n) => n.flags.includes('myself')) ?? null;
+      const self = MetricsParser.parseClusterNodes(raw as string).find((n) => n.flags.includes('myself')) ?? null;
+      if (self) this.reshardNodeSelves.set(stateKey, { self, readAt: Date.now() });
+      return self;
     } catch {
       return null;
     }
@@ -6531,6 +6575,7 @@ export class AnomalyService
     // (grace preserved) nor auto-resolved — their prior state is carried forward
     // rather than read as recovery.
     preserveSignature?: (signature: string) => boolean;
+    contextOf?: (finding: T) => ConnectionContext;
   }): Promise<void> {
     const {
       ctx,
@@ -6544,6 +6589,7 @@ export class AnomalyService
       eventIdsByConn,
       metricType,
       preserveSignature,
+      contextOf,
     } = params;
     const connId = ctx.connectionId;
     const isPreserved = (sig: string): boolean => preserveSignature?.(sig) ?? false;
@@ -6605,10 +6651,11 @@ export class AnomalyService
       }
 
       const event = buildEvent(finding, signature);
-      this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      const eventCtx = contextOf?.(finding) ?? ctx;
+      this.logger.warn(`Anomaly detected for ${eventCtx.connectionName}: ${event.message}`);
       active.add(signature);
       if (eventIdsByConn) eventIds.set(signature, event.id);
-      await this.addLatchedAnomaly(event, ctx, `${connId}:${signature}`, () => {
+      await this.addLatchedAnomaly(event, eventCtx, `${connId}:${signature}`, () => {
         activeByConn.get(connId)?.delete(signature);
         const tracked = eventIdsByConn?.get(connId);
         if (tracked?.get(signature) === event.id) tracked.delete(signature);
@@ -8395,6 +8442,7 @@ export class AnomalyService
       if (key !== ctx.connectionId && !active.has(key)) {
         this.reshardSnapshot.delete(key);
         this.reshardMissedReads.delete(key);
+        this.reshardNodeSelves.delete(key);
       }
     }
     const read = new Set(targets.map((t) => t.addr));
@@ -8439,7 +8487,10 @@ export class AnomalyService
             AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
             `INFO to ${target.addr} timed out`,
           ),
-          target.nodeId ? this.readNodeSelf(client, target.addr, stateKey) : Promise.resolve(null),
+          target.nodeId
+            ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+              this.readNodeSelf(client, target.addr, stateKey))
+            : Promise.resolve(null),
         ]);
         return { info: this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n'))), self };
       }),
