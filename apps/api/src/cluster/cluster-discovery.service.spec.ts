@@ -290,6 +290,29 @@ describe('ClusterDiscoveryService', () => {
       expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(1);
     });
 
+    it('retries discovery after the connection lookup throws', async () => {
+      mockConnectionRegistry.get.mockImplementationOnce(() => {
+        throw new Error('Connection not found');
+      });
+
+      await expect(service.discoverNodes('test-connection')).rejects.toThrow('Connection not found');
+      await expect(service.discoverNodes('test-connection')).resolves.toHaveLength(2);
+    });
+
+    it('does not cache a discovery that finishes after its connection is released', async () => {
+      let finish!: (nodes: typeof mockClusterNodes) => void;
+      mockDbClient.getClusterNodes.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+      const pending = service.discoverNodes('test-connection');
+      await Promise.resolve();
+
+      await service.releaseConnection('test-connection');
+      finish(mockClusterNodes);
+      await pending;
+      await service.discoverNodes('test-connection');
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
     it('closes the node clients of a removed connection', async () => {
       const nodes = await service.discoverNodes();
       const client = await service.getNodeConnection(nodes[0].id, 'test-connection');

@@ -73,19 +73,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const pending = this.discoveryInFlight.get(cacheKey);
     if (pending) return pending;
 
-    const discovery = (async () => {
+    const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
       try {
-        const client = this.connectionRegistry.get(connectionId);
-        return this.remember(cacheKey, await client.getClusterNodes());
+        const nodes = await this.connectionRegistry.get(connectionId).getClusterNodes();
+        if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
+        return this.remember(cacheKey, nodes);
       } catch (error) {
         this.logger.error(
           `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
         );
         throw error;
       } finally {
-        this.discoveryInFlight.delete(cacheKey);
+        if (this.discoveryInFlight.get(cacheKey) === discovery) this.discoveryInFlight.delete(cacheKey);
       }
-    })();
+    });
     this.discoveryInFlight.set(cacheKey, discovery);
     return discovery;
   }
@@ -135,6 +136,22 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private remember(cacheKey: string, clusterNodes: ClusterNode[]): DiscoveredNode[] {
+    const discovered = this.toDiscoveredNodes(clusterNodes);
+
+    // Store in per-connection cache
+    this.discoveryCacheByConnection.set(cacheKey, {
+      nodes: discovered,
+      lastDiscoveryTime: Date.now(),
+    });
+
+    this.logger.log(
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+    );
+
+    return discovered;
+  }
+
+  private toDiscoveredNodes(clusterNodes: ClusterNode[]): DiscoveredNode[] {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
@@ -161,17 +178,6 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         ...(node.hostname ? { hostname: node.hostname } : {}),
       });
     }
-
-    // Store in per-connection cache
-    this.discoveryCacheByConnection.set(cacheKey, {
-      nodes: discovered,
-      lastDiscoveryTime: Date.now(),
-    });
-
-    this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
-    );
-
     return discovered;
   }
 
@@ -494,6 +500,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
     for (const [key] of owned) this.discoveredNodes.delete(key);
     this.discoveryCacheByConnection.delete(connectionId);
+    this.discoveryInFlight.delete(connectionId);
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
