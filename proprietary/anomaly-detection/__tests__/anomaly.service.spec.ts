@@ -2255,6 +2255,20 @@ describe('AnomalyService', () => {
         );
       });
 
+      it('keeps the open alert of the seed shard across a restart before its peers are read', async () => {
+        storeOpen([storedSkew('seed-1', undefined as unknown as string)]);
+        discover({
+          b0000000: reshardNode('b', 6000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(1, 18_000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(resolvedIds()).not.toContain('seed-1');
+        expect((service as any).reshardSkewEventIds.get('conn-a').get('reshard_skew:a0000000')).toBe('seed-1');
+      });
+
       it('closes the open alert of a shard that is no longer read after a restart', async () => {
         storeOpen([storedSkew('gone-1', '10.0.0.200:6379')]);
         discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });

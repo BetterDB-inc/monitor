@@ -532,6 +532,7 @@ export class AnomalyService
   private reshardSkewEventIds = new Map<string, Map<string, string>>();
   private reshardWriteP99 = new Map<string, { readAt: number; value: number | null }>();
   private reshardThinViewLogged = new Set<string>();
+  private reshardWatchedSince = new Map<string, number>();
   private reshardMissedReads = new Set<string>();
   private reshardNodeSelves = new Map<string, { self: ClusterNode; readAt: number }>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
@@ -1064,6 +1065,7 @@ export class AnomalyService
     this.reshardSkewEventIds.delete(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
+    this.reshardWatchedSince.delete(connectionId);
     this.forgetIncidentEvents(connectionId, () => true);
     this.incidentEventsDroppedThrough.delete(connectionId);
     this.incidentEventsDroppedSpans.delete(connectionId);
@@ -5576,10 +5578,13 @@ export class AnomalyService
         }
       }
       const primaries = nodes.filter((n) => n.flags.includes('master')).length;
+      const stallStart = timestamp - RESHARD_MARKER_STALL_MS;
+      if (!this.reshardWatchedSince.has(ctx.connectionId)) this.reshardWatchedSince.set(ctx.connectionId, timestamp);
       const unjudgeable =
         shards.length < RESHARD_MIN_PRIMARIES &&
         primaries >= RESHARD_MIN_PRIMARIES &&
-        this.reshardPeerSeenSince(ctx.connectionId, clusterKey, timestamp - RESHARD_MARKER_STALL_MS);
+        (this.reshardWatchedSince.get(ctx.connectionId)! > stallStart ||
+          this.reshardPeerSeenSince(ctx.connectionId, clusterKey, stallStart));
       await this.applyTopologyPersistenceGate({
         ctx,
         timestamp,
