@@ -1,7 +1,7 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
-import { SequenceRule } from './sequence-rules';
+import { SequenceRule, leadOf } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
@@ -150,20 +150,25 @@ export function matchSequence(
   const extend = (matched: IncidentTimelineEntry[]): IncidentTimelineEntry[] | 'unreachable' | 'rejected' => {
     if (matched.length === rule.steps.length) return accept(matched) ? matched : 'rejected';
     const first = matched[0];
-    const previous = matched[matched.length - 1];
+    const reached = Math.max(...matched.map((e) => e.timestamp));
+    const earliest = Math.min(...matched.map((e) => e.timestamp));
     const step = rule.steps[matched.length];
+    const lead = leadOf(rule, matched.length);
     const options = entries.filter(
       (e) =>
         !matched.includes(e) &&
         step.includes(e.metricType) &&
         (!rule.sameConnection || e.connectionId === first.connectionId) &&
-        e.timestamp >= previous.timestamp &&
-        e.timestamp - first.timestamp <= rule.maxSpanMs,
+        e.timestamp >= reached - lead &&
+        Math.max(reached, e.timestamp) - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
     );
     let outcome: 'unreachable' | 'rejected' = 'unreachable';
     for (const next of options) {
       const found = extend([...matched, next]);
-      if (found === 'unreachable') break;
+      if (found === 'unreachable') {
+        if (lead === 0) break;
+        continue;
+      }
       if (found !== 'rejected') return found;
       outcome = 'rejected';
     }
@@ -202,15 +207,44 @@ export function reachesStep(
   return candidates.some((first) => {
     if (!rule.steps[0].includes(first.metricType)) return false;
     if (event.timestamp - first.timestamp > rule.maxSpanMs) return false;
+    const used: RuleStepEvent[] = [first];
     let reached = first.timestamp;
-    for (const step of rule.steps.slice(1, stepIndex)) {
+    let earliest = first.timestamp;
+    for (let i = 1; i < stepIndex; i++) {
+      const lead = leadOf(rule, i);
       const next = candidates.find(
-        (e) => e !== first && step.includes(e.metricType) && e.timestamp >= reached,
+        (e) =>
+          !used.includes(e) &&
+          rule.steps[i].includes(e.metricType) &&
+          e.timestamp >= reached - lead &&
+          event.timestamp - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
       );
       if (!next) return false;
-      reached = next.timestamp;
+      used.push(next);
+      reached = Math.max(reached, next.timestamp);
+      earliest = Math.min(earliest, next.timestamp);
     }
     return true;
+  });
+}
+
+export function precedesLeadStep(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+): boolean {
+  return rule.steps.some((step, i) => {
+    const lead = Math.min(leadOf(rule, i), rule.maxSpanMs);
+    return (
+      lead > 0 &&
+      earlier.some(
+        (e) =>
+          step.includes(e.metricType) &&
+          (!rule.sameConnection || e.connectionId === event.connectionId) &&
+          e.timestamp <= event.timestamp &&
+          event.timestamp - e.timestamp <= lead,
+      )
+    );
   });
 }
 
@@ -510,7 +544,9 @@ export class IncidentTimelineBuilder {
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
     return this.rules().some((rule) =>
       rule.steps.some(
-        (step, i) => i > 0 && step.includes(event.metricType) && reachesStep(current, event, rule, i),
+        (step, i) =>
+          step.includes(event.metricType) &&
+          (i > 0 ? reachesStep(current, event, rule, i) : precedesLeadStep(current, event, rule)),
       ),
     );
   }
