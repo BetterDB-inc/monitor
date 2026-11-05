@@ -51,6 +51,7 @@ function patternsOf(events: AnomalyEvent[], pattern: AnomalyPattern, scope = (id
 interface RuleCase {
   pattern: AnomalyPattern;
   steps: MetricType[];
+  alternatives: MetricType[][];
   optional?: MetricType;
   spanMs: number;
   lead?: { step: number; ms: number };
@@ -61,6 +62,11 @@ const cases: RuleCase[] = [
   {
     pattern: AnomalyPattern.DIVERGENCE_UNDER_PRESSURE,
     steps: [MetricType.INPUT_KBPS, MetricType.REPLICATION_DIVERGENCE, MetricType.REPL_BUFFER_PRESSURE],
+    alternatives: [
+      [MetricType.OPS_PER_SEC, MetricType.INPUT_KBPS],
+      [MetricType.REPLICATION_DIVERGENCE],
+      [MetricType.MEMORY_USED, MetricType.MEMORY_OVERHEAD, MetricType.REPL_BUFFER_PRESSURE],
+    ],
     optional: MetricType.EVICTED_KEYS,
     spanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
@@ -69,6 +75,7 @@ const cases: RuleCase[] = [
   {
     pattern: AnomalyPattern.RESHARD_UNDER_WRITES,
     steps: [MetricType.RESHARD_SHARD_SKEW, MetricType.REPLICATION_DIVERGENCE],
+    alternatives: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
     optional: MetricType.COMMAND_P99,
     spanMs: RESHARD_UNDER_WRITES_MAX_SPAN_MS,
     sameConnection: false,
@@ -76,6 +83,16 @@ const cases: RuleCase[] = [
   {
     pattern: AnomalyPattern.RETRY_STORM,
     steps: [MetricType.ERROR_REPLIES, MetricType.RETRY_AMPLIFICATION, MetricType.CLIENT_LOCKOUT_RISK],
+    alternatives: [
+      [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
+      [MetricType.RETRY_AMPLIFICATION],
+      [
+        MetricType.CLIENT_SATURATION,
+        MetricType.LOAD_SATURATION,
+        MetricType.REJECTED_CONNECTIONS,
+        MetricType.CLIENT_LOCKOUT_RISK,
+      ],
+    ],
     optional: MetricType.CONNECTION_CHURN,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
     lead: { step: 2, ms: RETRY_STORM_MAX_SPAN_MS },
@@ -84,6 +101,7 @@ const cases: RuleCase[] = [
   {
     pattern: AnomalyPattern.BACKLOG_EXHAUSTION,
     steps: [MetricType.BACKLOG_COVERAGE_RISK, MetricType.RESYNC_ESCALATION],
+    alternatives: [[MetricType.BACKLOG_COVERAGE_RISK], [MetricType.RESYNC_ESCALATION]],
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
     lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
     sameConnection: true,
@@ -102,11 +120,23 @@ describe('incident sequence rules', () => {
     expect(rule.recommendations.length).toBeGreaterThan(0);
   });
 
-  describe.each(cases)('$pattern', ({ pattern, steps, optional, spanMs, lead, sameConnection }) => {
+  describe.each(cases)('$pattern', ({ pattern, steps, alternatives, optional, spanMs, lead, sameConnection }) => {
     const inOrder = (gapMs = MIN) => steps.map((metric, i) => event(metric, i * gapMs));
 
     it('matches its steps in order', () => {
       expect(patternsOf(inOrder(), pattern)).toEqual([pattern]);
+    });
+
+    it('has the expected alternatives in every step', () => {
+      expect(ruleFor(pattern).steps).toEqual(alternatives);
+    });
+
+    it.each(
+      alternatives.flatMap((metrics, stepIndex) => metrics.map((metric) => ({ stepIndex, metric }))),
+    )('matches with $metric as step $stepIndex', ({ stepIndex, metric }) => {
+      const events = steps.map((step, i) => event(i === stepIndex ? metric : step, i * MIN));
+
+      expect(patternsOf(events, pattern)).toEqual([pattern]);
     });
 
     it('matches across quiet gaps that stay within its span', () => {
