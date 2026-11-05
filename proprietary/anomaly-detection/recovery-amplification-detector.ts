@@ -9,6 +9,8 @@ export const BACKLOG_COVERAGE_REARM_FACTOR = 1.2;
 export const BACKLOG_COVERAGE_MIN_BYTES_PER_SEC = 1024;
 export const RESYNC_ESCALATION_WINDOW_MS = 5 * 60_000;
 export const RECOVERY_AMPLIFICATION_MAX_SPAN_MS = 10 * 60_000;
+export const RAISE_REPL_BACKLOG_RECOMMENDATION =
+  'Raise repl-backlog-size so a disconnect of this length resumes with a partial sync';
 
 const FULL_SYNC_REPLICA_STATES: ReadonlySet<string> = new Set(['wait_bgsave', 'send_bulk']);
 
@@ -287,7 +289,7 @@ registerSequenceRule({
   diagnosis:
     'A replica disconnect outran the replication backlog and forced a full resync, and the primary then took the fork, memory or output-buffer cost of serving it.',
   recommendations: [
-    'Raise repl-backlog-size so a disconnect of this length resumes with a partial sync',
+    RAISE_REPL_BACKLOG_RECOMMENDATION,
     'Check why the replica disconnected before the next write burst repeats it',
     'Watch fork memory and replica output buffers until the resync completes',
   ],

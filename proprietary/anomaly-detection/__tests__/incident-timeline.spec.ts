@@ -3,6 +3,10 @@ import {
   RecoveryProbe,
   incidentIdFor,
   incidentStartOf,
+  matchSequence,
+  mergeRuleSteps,
+  reachesStep,
+  toTimelineEntry,
 } from '../incident-timeline';
 import { SequenceRule } from '../sequence-rules';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
@@ -1024,6 +1028,211 @@ describe('IncidentTimelineBuilder', () => {
       });
     });
 
+    describe('with a rule of three steps', () => {
+      const chain: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+      };
+
+      it('does not take in the last step when only the step before it was seen', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + 5 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('takes in the last step once every earlier step was seen in order', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + 6 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([chain.pattern]);
+      });
+
+      it('does not take in the last step when the earlier steps came out of order', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + MIN, metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + 6 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('does not bridge a dropped start on the last step when only the step before it was dropped', () => {
+        const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [event({ id: 'late', timestamp: T0 + 5 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.OPS_PER_SEC,
+              connectionId: 'conn-a',
+            },
+          ],
+          new Map([['conn-a', T0]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('takes in the last step after a retained step once the first step was dropped', () => {
+        const incidents = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [
+            event({ id: 'middle', timestamp: T0 + 4 * MIN, metricType: MetricType.OPS_PER_SEC }),
+            event({ id: 'late', timestamp: T0 + 8 * MIN }),
+          ],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.CONNECTIONS,
+              connectionId: 'conn-a',
+            },
+          ],
+          new Map([['conn-a', T0]]),
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidentStartOf(incidents[0].incidentId)).toBe(T0);
+        expect(incidents[0].matchedPatterns).toEqual([chain.pattern]);
+        expect(incidents[0].sequenceMatches[0].anomalyIds).toEqual(['middle', 'late']);
+      });
+
+      it('bridges a dropped start on the last step when every earlier step was dropped', () => {
+        const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [event({ id: 'late', timestamp: T0 + 5 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.CONNECTIONS,
+              connectionId: 'conn-a',
+              members: [{ metricType: MetricType.OPS_PER_SEC, connectionId: 'conn-a', timestamp: T0 + MIN }],
+            },
+          ],
+          new Map([['conn-a', T0 + MIN]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+    });
+
+    it('matches a retained later step when an earlier copy of it was dropped too', () => {
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [escalation]).build(
+        [event({ id: 'held', timestamp: T0 + 4 * MIN })],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.CONNECTIONS,
+            connectionId: 'conn-a',
+            members: [{ metricType: MetricType.MEMORY_USED, connectionId: 'conn-a', timestamp: T0 + MIN }],
+          },
+        ],
+        new Map([['conn-a', T0 + MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      expect(incident.matchedPatterns).toEqual([escalation.pattern]);
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual(['held']);
+    });
+
+    describe('with a step that may come before the step it follows', () => {
+      const leading: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+        leadMs: { 2: 6 * MIN },
+      };
+
+      it('keeps the first step in the incident of a lead step it follows within the lead', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.MEMORY_USED }),
+            event({ timestamp: T0 + 5 * MIN, metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + 6 * MIN, metricType: MetricType.OPS_PER_SEC }),
+          ],
+          leading,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([leading.pattern]);
+      });
+
+      it('keeps a lead step that arrives after a quiet gap, before the step it follows', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + 3 * MIN, metricType: MetricType.MEMORY_USED }),
+            event({ timestamp: T0 + 6 * MIN, metricType: MetricType.OPS_PER_SEC }),
+          ],
+          leading,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([leading.pattern]);
+      });
+
+      it('splits the first step from a lead step further back than the lead', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.MEMORY_USED }),
+            event({ timestamp: T0 + 7 * MIN, metricType: MetricType.CONNECTIONS }),
+          ],
+          leading,
+        );
+
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('takes in a later step once every earlier step was seen, the lead step out of order', () => {
+        const chain: SequenceRule = {
+          ...escalation,
+          steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED], [MetricType.OPS_PER_SEC], [MetricType.FRAGMENTATION_RATIO]],
+          leadMs: { 2: 6 * MIN },
+        };
+
+        const incidents = build(
+          [
+            event({ metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + 2 * MIN, metricType: MetricType.MEMORY_USED }),
+            event({ timestamp: T0 + 7 * MIN, metricType: MetricType.FRAGMENTATION_RATIO }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([chain.pattern]);
+      });
+    });
+
     it('takes in a step stamped ahead of an incident that already has a boundary', () => {
       const cost = event({ timestamp: T0 + 5 * MIN });
       const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };
@@ -1108,6 +1317,135 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.sequenceMatches[0].anomalyIds[0]).toBe(late.id);
     });
 
+    describe('with a step that may come before the step it follows', () => {
+      const leading: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+        leadMs: { 2: 3 * MIN },
+      };
+      const entry = (metricType: MetricType, at: number) =>
+        toTimelineEntry(event({ metricType, timestamp: T0 + at * MIN }));
+
+      it('matches the lead step after the step it follows', () => {
+        const entries = [
+          entry(MetricType.CONNECTIONS, 0),
+          entry(MetricType.OPS_PER_SEC, 1),
+          entry(MetricType.MEMORY_USED, 2),
+        ];
+
+        expect(matchSequence(entries, leading)).toEqual(entries);
+      });
+
+      it('matches the lead step before the step it follows, within the lead', () => {
+        const entries = [
+          entry(MetricType.CONNECTIONS, 0),
+          entry(MetricType.MEMORY_USED, 1),
+          entry(MetricType.OPS_PER_SEC, 4),
+        ];
+
+        expect(matchSequence(entries, leading)).toEqual([entries[0], entries[2], entries[1]]);
+      });
+
+      it('matches the lead step before the first step, within the lead and the span', () => {
+        const entries = [
+          entry(MetricType.MEMORY_USED, 0),
+          entry(MetricType.CONNECTIONS, 1),
+          entry(MetricType.OPS_PER_SEC, 2),
+        ];
+
+        expect(matchSequence(entries, leading)).toEqual([entries[1], entries[2], entries[0]]);
+      });
+
+      it('does not match the lead step further back than the lead', () => {
+        const entries = [
+          entry(MetricType.CONNECTIONS, 0),
+          entry(MetricType.MEMORY_USED, 1),
+          entry(MetricType.OPS_PER_SEC, 5),
+        ];
+
+        expect(matchSequence(entries, leading)).toBeNull();
+      });
+
+      it('measures the span from the earliest to the latest matched step', () => {
+        const entries = [
+          entry(MetricType.MEMORY_USED, 0),
+          entry(MetricType.CONNECTIONS, 2),
+          entry(MetricType.OPS_PER_SEC, 3),
+        ];
+
+        expect(matchSequence(entries, { ...leading, maxSpanMs: 2 * MIN })).toBeNull();
+      });
+
+      it('tries a later lead step when an earlier one leaves no room for the next step', () => {
+        const middle: SequenceRule = { ...leading, maxSpanMs: 2 * MIN, leadMs: { 1: 3 * MIN } };
+        const entries = [
+          entry(MetricType.OPS_PER_SEC, 0),
+          entry(MetricType.CONNECTIONS, 1),
+          entry(MetricType.OPS_PER_SEC, 2),
+          entry(MetricType.MEMORY_USED, 3),
+        ];
+
+        expect(matchSequence(entries, middle)).toEqual([entries[1], entries[2], entries[3]]);
+      });
+
+      it('reaches the step after a lead step seen before its own previous step', () => {
+        const chain: SequenceRule = {
+          ...leading,
+          steps: [...leading.steps, [MetricType.FRAGMENTATION_RATIO]],
+        };
+        const earlier = [
+          { metricType: MetricType.CONNECTIONS, connectionId: 'conn-a', timestamp: T0 },
+          { metricType: MetricType.MEMORY_USED, connectionId: 'conn-a', timestamp: T0 + MIN },
+          { metricType: MetricType.OPS_PER_SEC, connectionId: 'conn-a', timestamp: T0 + 2 * MIN },
+        ];
+        const next = {
+          metricType: MetricType.FRAGMENTATION_RATIO,
+          connectionId: 'conn-a',
+          timestamp: T0 + 5 * MIN,
+        };
+
+        expect(reachesStep(earlier, next, chain, 3)).toBe(true);
+        expect(reachesStep(earlier.slice(0, 2), next, chain, 3)).toBe(false);
+      });
+    });
+
+    it('lists a recommendation once when two matches of one incident share it', () => {
+      const other: SequenceRule = {
+        ...escalation,
+        pattern: AnomalyPattern.CONNECTION_LEAK,
+        recommendations: ['Check clients', 'Close idle connections'],
+      };
+
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [escalation, other]).build(
+        [event({ metricType: MetricType.CONNECTIONS }), event({ timestamp: T0 + MIN })],
+        T0 + 2 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.sequenceMatches.map((m) => m.recommendations)).toEqual([
+        ['Check clients'],
+        ['Close idle connections'],
+      ]);
+    });
+
+    it('keeps the recommendations on every match of the same rule', () => {
+      const [incident] = builder().build(
+        [
+          event({ metricType: MetricType.CONNECTIONS }),
+          event({ timestamp: T0 + MIN }),
+          event({ metricType: MetricType.CONNECTIONS, timestamp: T0 + 2 * MIN }),
+          event({ timestamp: T0 + 3 * MIN }),
+        ],
+        T0 + 4 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.sequenceMatches.map((m) => m.recommendations)).toEqual([
+        escalation.recommendations,
+        escalation.recommendations,
+      ]);
+    });
+
     it('matches steps that land in the same poll in either order', () => {
       const mem = event({ metricType: MetricType.MEMORY_USED, id: 'evt-a' });
       const conn = event({ metricType: MetricType.CONNECTIONS, id: 'evt-b' });
@@ -1115,6 +1453,27 @@ describe('IncidentTimelineBuilder', () => {
       const [incident] = builder().build([mem, conn], T0 + MIN, neverRecovers);
 
       expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id]);
+    });
+  });
+
+  describe('mergeRuleSteps', () => {
+    const step = (metricType: MetricType, at: number) => ({
+      metricType,
+      connectionId: 'conn-a',
+      timestamp: T0 + at * MIN,
+    });
+
+    it('keeps an earlier step when the same metric repeats later', () => {
+      const merged = mergeRuleSteps(
+        [step(MetricType.CONNECTIONS, 1), step(MetricType.OPS_PER_SEC, 2)],
+        [step(MetricType.CONNECTIONS, 3), step(MetricType.OPS_PER_SEC, 2)],
+      );
+
+      expect(merged).toEqual([
+        step(MetricType.CONNECTIONS, 1),
+        step(MetricType.OPS_PER_SEC, 2),
+        step(MetricType.CONNECTIONS, 3),
+      ]);
     });
   });
 });

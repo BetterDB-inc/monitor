@@ -43,4 +43,19 @@ describe('sequence rule registry', () => {
       registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC], []] }),
     ).toThrow(/at least one metric/);
   });
+
+  it.each([
+    [{ 0: 60_000 }],
+    [{ 2: 60_000 }],
+    [{ 1: 0 }],
+    [{ 1: Number.NaN }],
+  ])('rejects a lead of %j', (leadMs) => {
+    expect(() => registry.registerSequenceRule({ ...rule, leadMs })).toThrow(/lead/);
+  });
+
+  it('accepts a lead on a later step', () => {
+    registry.registerSequenceRule({ ...rule, leadMs: { 1: 60_000 } });
+
+    expect(registry.getSequenceRules()).toHaveLength(1);
+  });
 });
