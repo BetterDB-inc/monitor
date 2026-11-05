@@ -8373,6 +8373,11 @@ export class AnomalyService
         this.reshardMissedReads.delete(key);
       }
     }
+    const read = new Set(targets.map((t) => t.addr));
+    for (const addr of kept) {
+      const key = topologyStateKey(ctx.connectionId, addr);
+      if (!read.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
+    }
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
       if (active.has(topologyStateKey(ctx.connectionId, nodeAddr))) continue;
       const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);

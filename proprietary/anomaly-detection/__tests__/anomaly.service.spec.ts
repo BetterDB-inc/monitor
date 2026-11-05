@@ -2093,6 +2093,28 @@ describe('AnomalyService', () => {
         expect(skewEvents()[0].resolved).toBe(true);
       });
 
+      it('keeps the alert of a reshard on unregistered primaries once they are flagged failed', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1->-c0000000]'),
+          c0000000: reshardNode('c', 6000, '[1-<-b0000000]'),
+        });
+        await pollSeed(6, 6000, false);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        for (let i = 0; i < 4; i += 1) {
+          clock += 1000;
+          const ctx = shardCtx('a', 6000, false);
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(
+            shardNodes('a', false).map((node) =>
+              node.id === 'a0000000' ? node : { ...node, flags: ['master', 'fail'] },
+            ),
+          );
+          await poll(ctx);
+        }
+
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
       it('keeps the snapshot and alert of a primary that fails but stays in the topology', async () => {
         discover({
           b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
