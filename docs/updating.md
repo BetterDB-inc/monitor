@@ -109,8 +109,13 @@ just pulling the newer chart:
 ```bash
 helm repo update
 helm upgrade betterdb-monitor betterdb/betterdb-monitor \
-  --namespace betterdb --reuse-values
+  --namespace betterdb --reset-then-reuse-values
 ```
+
+`--reset-then-reuse-values` (Helm 3.14+) keeps your overrides but picks up
+the new chart's defaults, such as a longer startup probe. `--reuse-values`
+keeps the old release's defaults too, so a changed default never reaches an
+existing install. On older Helm, pass your values file with `-f` instead.
 
 Don't override `image.tag` to update — leave it empty and let the chart's
 `appVersion` drive the image, so chart and app versions move together and
@@ -163,7 +168,10 @@ Slow log and command log entries are now keyed by the server process that
 logged them (its `run_id`), not only by the address they were read from. The
 first start after updating rebuilds the unique keys of `slow_log_entries` and
 `command_log_entries` before the API is ready, and drops the old keys. On a
-large database this counts against the startup probe.
+large database this counts against the startup probe. The chart allows 10
+minutes for it; an install upgraded with `--reuse-values` keeps the old 150
+seconds, so upgrade with `--reset-then-reuse-values` or set
+`startupProbe.failureThreshold` (e.g. `--set startupProbe.failureThreshold=120`).
 
 - **Rolling updates**: until every replica runs the new version, the old
   replicas fail to store slow and command log entries, because their inserts
