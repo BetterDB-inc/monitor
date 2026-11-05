@@ -33,11 +33,11 @@ registerSequenceRule({
   optionalMetrics: [MetricType.COMMAND_P99],
   maxSpanMs: RESHARD_UNDER_WRITES_MAX_SPAN_MS,
   diagnosis:
-    'A reshard ran under sustained writes: the shards taking part carried more load and slower writes than the rest, and their replicas then fell behind.',
+    'During a reshard one shard carried far more traffic, CPU, memory or write latency than the rest, and replicas then fell behind the stream.',
   recommendations: [
-    'Slow the slot migration or pause it until write traffic drops',
-    'Move slots in smaller batches so the source and target shards keep up',
-    'Watch replica lag on the shards in the reshard until it settles',
+    'Check which measure the shard skew alert names before acting on it',
+    'Slow the slot migration or move slots in smaller batches while the skewed shard is loaded',
+    'Watch replica lag on the skewed shards until it settles',
   ],
 });
 

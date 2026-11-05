@@ -443,11 +443,11 @@ Why each span is that long:
 
 - **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
 - **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that.
-- **reshard_under_writes**: skew already means an active reshard with slower writes, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
+- **reshard_under_writes**: skew only fires during an active reshard, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
 - **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation follows within minutes or it has another cause.
 - **backlog_exhaustion**: a coverage warning can stand for a long time before the disconnect that exhausts it, so this rule uses the full incident span.
 
-Write P99 regressions are part of `reshard_shard_skew`, and a replica disconnect is stamped on `resync_escalation`, so neither needs a step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
+`reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
 
 ## Severity Levels
 

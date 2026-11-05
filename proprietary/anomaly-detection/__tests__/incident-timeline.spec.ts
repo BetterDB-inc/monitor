@@ -3,6 +3,7 @@ import {
   RecoveryProbe,
   incidentIdFor,
   incidentStartOf,
+  mergeRuleSteps,
 } from '../incident-timeline';
 import { SequenceRule } from '../sequence-rules';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
@@ -1055,6 +1056,30 @@ describe('IncidentTimelineBuilder', () => {
         expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
       });
 
+      it('takes in the last step after a retained step once the first step was dropped', () => {
+        const incidents = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [
+            event({ id: 'middle', timestamp: T0 + 4 * MIN, metricType: MetricType.OPS_PER_SEC }),
+            event({ id: 'late', timestamp: T0 + 8 * MIN }),
+          ],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.CONNECTIONS,
+              connectionId: 'conn-a',
+            },
+          ],
+          new Map([['conn-a', T0]]),
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidentStartOf(incidents[0].incidentId)).toBe(T0);
+      });
+
       it('bridges a dropped start on the last step when every earlier step was dropped', () => {
         const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
           [event({ id: 'late', timestamp: T0 + 5 * MIN })],
@@ -1168,6 +1193,27 @@ describe('IncidentTimelineBuilder', () => {
       const [incident] = builder().build([mem, conn], T0 + MIN, neverRecovers);
 
       expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id]);
+    });
+  });
+
+  describe('mergeRuleSteps', () => {
+    const step = (metricType: MetricType, at: number) => ({
+      metricType,
+      connectionId: 'conn-a',
+      timestamp: T0 + at * MIN,
+    });
+
+    it('keeps an earlier step when the same metric repeats later', () => {
+      const merged = mergeRuleSteps(
+        [step(MetricType.CONNECTIONS, 1), step(MetricType.OPS_PER_SEC, 2)],
+        [step(MetricType.CONNECTIONS, 3), step(MetricType.OPS_PER_SEC, 2)],
+      );
+
+      expect(merged).toEqual([
+        step(MetricType.CONNECTIONS, 1),
+        step(MetricType.OPS_PER_SEC, 2),
+        step(MetricType.CONNECTIONS, 3),
+      ]);
     });
   });
 });

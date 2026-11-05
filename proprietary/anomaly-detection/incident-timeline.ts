@@ -125,13 +125,11 @@ export function mergeRuleSteps(
   known: readonly RuleStepEvent[],
   seen: readonly RuleStepEvent[],
 ): RuleStepEvent[] {
-  const latest = new Map<string, RuleStepEvent>();
+  const steps = new Map<string, RuleStepEvent>();
   for (const step of [...known, ...seen]) {
-    const key = `${step.metricType}\u0000${step.connectionId ?? ''}`;
-    const held = latest.get(key);
-    if (!held || step.timestamp > held.timestamp) latest.set(key, step);
+    steps.set(`${step.metricType}\u0000${step.connectionId ?? ''}\u0000${step.timestamp}`, step);
   }
-  return [...latest.values()];
+  return [...steps.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export function incidentIdFor(scope: string, firstAnomalyId: string, startedAt: number): string {
@@ -357,6 +355,7 @@ export class IncidentTimelineBuilder {
     let start: IncidentBoundary | undefined;
     let latest: IncidentBoundary | undefined;
     let used: IncidentBoundary | undefined;
+    let prefix: RuleStepEvent[] = [];
     let next = 0;
     for (const event of sorted) {
       while (next < boundaries.length && startsByEvent(boundaries[next], event, positionOf)) {
@@ -366,7 +365,8 @@ export class IncidentTimelineBuilder {
       const stored =
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
-      const continues = first !== undefined && this.continuesIncident(current, event, spans);
+      const continues =
+        first !== undefined && this.continuesIncident([...prefix, ...current], event, spans);
       if (
         continues &&
         !start &&
@@ -386,14 +386,17 @@ export class IncidentTimelineBuilder {
         clusters.push({ events: current, start });
         current = [];
         start = undefined;
+        prefix = [];
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
         const anchorDroppedAt = this.anchorDroppedAt(stored, droppedAt, spans);
+        const dropped = this.droppedPrefix(stored, anchorDroppedAt);
         const anchorDropped =
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= anchorDroppedAt &&
           (event.timestamp - anchorDroppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, stored, anchorDroppedAt));
+            this.followsRuleStep(dropped, event));
+        if (anchorDropped) prefix = dropped;
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -462,11 +465,7 @@ export class IncidentTimelineBuilder {
     return reach > from && to - reach <= this.opts.gapMs;
   }
 
-  private bridgesFromDropped(
-    event: AnomalyEvent,
-    stored: IncidentBoundary,
-    droppedAt: number,
-  ): boolean {
+  private droppedPrefix(stored: IncidentBoundary, droppedAt: number): RuleStepEvent[] {
     const anchor: RuleStepEvent[] =
       stored.metricType === undefined
         ? []
@@ -478,11 +477,11 @@ export class IncidentTimelineBuilder {
             },
           ];
     const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
-    return this.followsRuleStep([...anchor, ...dropped], event);
+    return [...anchor, ...dropped];
   }
 
   private continuesIncident(
-    current: AnomalyEvent[],
+    current: readonly RuleStepEvent[],
     event: AnomalyEvent,
     spans: DroppedSpan[] = [],
   ): boolean {
