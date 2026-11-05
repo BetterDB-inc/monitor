@@ -24,15 +24,26 @@ describe('IncidentTimelineView', () => {
     expect(messages).toEqual(['First', 'Second', 'Last']);
   });
 
-  it('shows when each signal returned to baseline', () => {
+  it('shows each event recovery state', () => {
     render(
       <IncidentTimelineView
         now={T0}
         incident={incident({
           entries: [
-            entry({ anomalyId: 'a', recoveredAt: T0 + 90_000, message: 'Recovered one' }),
+            entry({
+              anomalyId: 'a',
+              recoveredAt: T0 + 90_000,
+              recoveryState: 'recovered',
+              message: 'Recovered one',
+            }),
             entry({ anomalyId: 'b', metricType: 'memory_used', message: 'Open one' }),
-            entry({ anomalyId: 'c', metricType: 'evicted_keys', message: 'Unknown one' }),
+            entry({
+              anomalyId: 'c',
+              metricType: 'evicted_keys',
+              recoveryState: 'unknown',
+              message: 'Unknown one',
+            }),
+            entry({ anomalyId: 'd', recoveryState: 'recurred', message: 'Repeated one' }),
           ],
           recovery: {
             status: 'active',
@@ -47,6 +58,36 @@ describe('IncidentTimelineView', () => {
     expect(screen.getByText(/Back to baseline at .* \(after 1m 30s\)/)).toBeInTheDocument();
     expect(screen.getByText('Not back to baseline')).toBeInTheDocument();
     expect(screen.getByText('Recovery unknown')).toBeInTheDocument();
+    expect(screen.getByText('Fired again later')).toBeInTheDocument();
+  });
+
+  it('does not mark an open event unknown when the same metric is unknown elsewhere', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries: [
+            entry({ anomalyId: 'a', nodeAddr: '10.0.0.1:6379', metricType: 'memory_used' }),
+            entry({
+              anomalyId: 'b',
+              nodeAddr: '10.0.0.2:6379',
+              metricType: 'memory_used',
+              recoveryState: 'unknown',
+            }),
+          ],
+          recovery: {
+            status: 'recovering',
+            openSignals: ['memory_used'],
+            unknownSignals: ['memory_used'],
+            recoveredAt: null,
+          },
+        })}
+      />,
+    );
+
+    const [open, unknown] = screen.getAllByTestId('incident-entry');
+    expect(within(open).getByText('Not back to baseline')).toBeInTheDocument();
+    expect(within(unknown).getByText('Recovery unknown')).toBeInTheDocument();
   });
 
   it('highlights the matched sequence rule and its steps', () => {

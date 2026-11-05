@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, CircleDashed, CircleDot } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleDashed, CircleDot, Repeat } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import type { IncidentTimeline, IncidentTimelineEntry } from '../../../types/anomaly';
 import {
@@ -17,27 +17,32 @@ interface IncidentTimelineViewProps {
   now: number;
 }
 
-function recoveryText(entry: IncidentTimelineEntry, incident: IncidentTimeline): string {
-  if (entry.recoveredAt !== null) {
-    return `Back to baseline at ${formatTime(entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
+function recoveryText(entry: IncidentTimelineEntry): string {
+  switch (entry.recoveryState) {
+    case 'recovered':
+      return entry.recoveredAt === null
+        ? 'Back to baseline'
+        : `Back to baseline at ${formatTime(entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
+    case 'recurred':
+      return 'Fired again later';
+    case 'unknown':
+      return 'Recovery unknown';
+    default:
+      return 'Not back to baseline';
   }
-  if (incident.recovery.unknownSignals.includes(entry.metricType)) return 'Recovery unknown';
-  return 'Not back to baseline';
 }
 
-function RecoveryIcon({
-  entry,
-  incident,
-}: {
-  entry: IncidentTimelineEntry;
-  incident: IncidentTimeline;
-}) {
-  if (entry.recoveredAt !== null)
-    return <CheckCircle2 className="w-4 h-4 text-green-500" aria-hidden />;
-  if (incident.recovery.unknownSignals.includes(entry.metricType)) {
-    return <CircleDashed className="w-4 h-4 text-muted-foreground" aria-hidden />;
+function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
+  switch (entry.recoveryState) {
+    case 'recovered':
+      return <CheckCircle2 className="w-4 h-4 text-green-500" aria-hidden />;
+    case 'recurred':
+      return <Repeat className="w-4 h-4 text-muted-foreground" aria-hidden />;
+    case 'unknown':
+      return <CircleDashed className="w-4 h-4 text-muted-foreground" aria-hidden />;
+    default:
+      return <CircleDot className="w-4 h-4 text-destructive" aria-hidden />;
   }
-  return <CircleDot className="w-4 h-4 text-destructive" aria-hidden />;
 }
 
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
@@ -159,8 +164,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                   </div>
                   <p className="text-sm">{entry.message}</p>
                   <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <RecoveryIcon entry={entry} incident={incident} />
-                    {recoveryText(entry, incident)}
+                    <RecoveryIcon entry={entry} />
+                    {recoveryText(entry)}
                   </p>
                 </li>
               );

@@ -76,6 +76,8 @@ export interface ReplicaDivergenceHistory {
 
 export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
 
+export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
+
 export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
@@ -85,6 +87,7 @@ export interface IncidentTimelineEntry {
   severity: AnomalySeverity;
   message: string;
   recoveredAt: number | null;
+  recoveryState: IncidentEntryRecovery;
 }
 
 export interface IncidentSequenceMatch {

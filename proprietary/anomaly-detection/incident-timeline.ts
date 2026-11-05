@@ -15,7 +15,10 @@ export interface IncidentTimelineEntry {
   severity: AnomalySeverity;
   message: string;
   recoveredAt: number | null;
+  recoveryState: IncidentEntryRecovery;
 }
+
+export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
 
 export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
 
@@ -290,7 +293,15 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     severity: event.severity,
     message: event.message,
     recoveredAt: null,
+    recoveryState: 'open',
   };
+}
+
+function entryRecovery(at: number | null | undefined | 'recurred'): IncidentEntryRecovery {
+  if (at === 'recurred') return 'recurred';
+  if (at === null) return 'open';
+  if (at === undefined) return 'unknown';
+  return 'recovered';
 }
 
 function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
@@ -593,12 +604,14 @@ export class IncidentTimelineBuilder {
 
     const entries: IncidentTimelineEntry[] = events.map((event) => {
       const key = signalKey(event);
-      const isLast = lastBySignal.get(key) === event;
+      const recoveredAt =
+        lastBySignal.get(key) === event
+          ? recoveredAtBySignal.get(key)
+          : (this.recoveredAtIfResolved(event) ?? 'recurred');
       return {
         ...toTimelineEntry(event),
-        recoveredAt: isLast
-          ? (recoveredAtBySignal.get(key) ?? null)
-          : this.recoveredAtIfResolved(event),
+        recoveredAt: typeof recoveredAt === 'number' ? recoveredAt : null,
+        recoveryState: entryRecovery(recoveredAt),
       };
     });
 
@@ -616,6 +629,7 @@ export class IncidentTimelineBuilder {
         severity: AnomalySeverity.INFO,
         message: '',
         recoveredAt: null,
+        recoveryState: 'open',
       }),
     );
     const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);

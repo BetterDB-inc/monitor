@@ -11,6 +11,7 @@ export function entry(overrides: Partial<IncidentTimelineEntry> = {}): IncidentT
     severity: 'warning',
     message: 'Connections spiked',
     recoveredAt: null,
+    recoveryState: 'open',
     ...overrides,
   };
 }

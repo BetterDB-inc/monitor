@@ -699,6 +699,11 @@ describe('IncidentTimelineBuilder', () => {
         recoveredAt: null,
       });
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual([
+        'recurred',
+        'unknown',
+        'recovered',
+      ]);
     });
 
     it('does not ask the probe before the settle time', () => {
@@ -742,6 +747,7 @@ describe('IncidentTimelineBuilder', () => {
         recoveredAt: null,
       });
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([T0 + MIN, null]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual(['recovered', 'unknown']);
     });
 
     it('keeps an incident with an open signal recovering even if another is unknown', () => {
@@ -757,6 +763,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.status).toBe('recovering');
       expect(incident.recovery.openSignals).toEqual([MetricType.CONNECTIONS]);
       expect(incident.recovery.unknownSignals).toEqual([MetricType.MEMORY_USED]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual(['open', 'unknown']);
     });
 
     it('settles into degraded when signals stay open past the degraded threshold', () => {
