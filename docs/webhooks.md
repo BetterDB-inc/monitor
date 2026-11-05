@@ -442,6 +442,8 @@ If the replica alerts again, the old event closes with no `replication.recovered
 }
 ```
 
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+
 #### cve.critical_detected (Pro)
 
 Fired only when a CVE scan finds new critical findings vs the previous stored
