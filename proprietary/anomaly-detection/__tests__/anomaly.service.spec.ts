@@ -4483,7 +4483,7 @@ describe('AnomalyService', () => {
           .getRecentEvents()
           .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
 
-        expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'latency' });
+        expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'errors' });
         expect(event.message).toContain('Client attribution unavailable.');
         expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -4493,6 +4493,37 @@ describe('AnomalyService', () => {
           }),
         );
         expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      });
+
+      it('judges the node without the seed latency or saturation', async () => {
+        const { recorded } = await runRetry({ nodeAddr: NODE, saturated: () => true });
+
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]).toMatchObject({
+          nodeAddr: NODE,
+          severity: AnomalySeverity.WARNING,
+          retryTrigger: 'errors',
+        });
+      });
+
+      it('takes the node reconnect rate from its own INFO', () => {
+        const nodeConnectsPerSec = (at: number, total: string) =>
+          (service as any).nodeConnectsPerSec(
+            `conn-1@${NODE}`,
+            { total_connections_received: total, connected_clients: '100' },
+            at,
+          );
+
+        expect(nodeConnectsPerSec(1_000_000, '1000')).toBeNull();
+        expect(nodeConnectsPerSec(1_010_000, '1500')).toBe(50);
+      });
+
+      it('lists node state in the status', async () => {
+        await runRetry({ nodeAddr: NODE });
+
+        expect(service.getRetryAmplificationStatus('conn-1').nodes).toEqual([
+          expect.objectContaining({ node: NODE, classification: 'amplifying', level: 'warning' }),
+        ]);
       });
 
       it('keeps node state apart from the seed', async () => {
@@ -13613,10 +13644,10 @@ describe('AnomalyService', () => {
       function nodeClient(gapsMiB: number[], role = 'master') {
         let call = 0;
         return {
-          info: jest.fn().mockImplementation(async () => {
+          info: jest.fn().mockImplementation(async (section?: string) => {
             const step = Math.min(Math.floor(call / 3), gapsMiB.length - 1);
             const reply = infoReply(1_000 * MiB + call * 10 * MiB, gapsMiB[step] * MiB, role);
-            call++;
+            if (section === 'replication') call++;
             return reply;
           }),
         };
@@ -13707,7 +13738,7 @@ describe('AnomalyService', () => {
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
-        expect(client.info).toHaveBeenCalledWith();
+        expect(client.info.mock.calls).toEqual([['clients'], ['stats'], ['replication']]);
       });
 
       describe('Sentinel targets', () => {
@@ -13922,7 +13953,7 @@ describe('AnomalyService', () => {
             await done;
           }
 
-          expect(client.info).toHaveBeenCalledTimes(1);
+          expect(client.info).toHaveBeenCalledTimes(3);
         } finally {
           jest.useRealTimers();
         }
