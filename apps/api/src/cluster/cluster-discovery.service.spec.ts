@@ -284,6 +284,33 @@ describe('ClusterDiscoveryService', () => {
       expect(await service.getNodeConnection(target.id, 'test-connection')).not.toBe(othersClient);
     });
 
+    it('shares one CLUSTER NODES call between concurrent callers', async () => {
+      await Promise.all([service.discoverNodes('test-connection'), service.discoverNodes('test-connection')]);
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the node clients of a removed connection', async () => {
+      const nodes = await service.discoverNodes();
+      const client = await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+      await service.releaseConnection('test-connection');
+
+      expect(client.quit).toHaveBeenCalled();
+      expect((service as unknown as { discoveredNodes: Map<string, unknown> }).discoveredNodes.size).toBe(0);
+    });
+
+    it('closes address clients the connection no longer reads', async () => {
+      mockConnectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue({ password: 'p' });
+      const kept = await service.getAddressConnection('10.0.0.2', 6379, 'test-connection');
+      const moved = await service.getAddressConnection('10.0.0.3', 6379, 'test-connection');
+
+      await service.retainAddressConnections('test-connection', new Set(['10.0.0.2:6379']));
+
+      expect(moved.quit).toHaveBeenCalled();
+      expect(kept.quit).not.toHaveBeenCalled();
+    });
+
     it("keeps another connection's client that was stored while this one was connecting", async () => {
       const nodes = await service.discoverNodes();
       const target = nodes[0];

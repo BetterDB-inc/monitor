@@ -656,6 +656,7 @@ export class AnomalyService
   private openDivergenceReads = new Map<string, Promise<StoredAnomalyEvent[]>>();
   private topologyFanoutUnreachable = new Map<string, number>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
+  private topologyBackoff = new Map<string, { failures: number; until: number }>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -1150,6 +1151,10 @@ export class AnomalyService
     this.openDivergenceReads.delete(connectionId);
     this.topologyFanoutUnreachable.delete(connectionId);
     this.topologyTargetClaims.release(connectionId);
+    for (const key of [...this.topologyBackoff.keys()]) {
+      if (isTopologyStateKeyOf(key, connectionId)) this.topologyBackoff.delete(key);
+    }
+    void this.clusterDiscovery?.releaseConnection(connectionId).catch(() => undefined);
     this.logger.debug(`Cleaned up anomaly detection state for connection ${connectionId}`);
   }
 
@@ -8378,6 +8383,7 @@ export class AnomalyService
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
+  private static readonly TOPOLOGY_BACKOFF_MAX_POLLS = 8;
 
   private sentinelDivergenceTargets(connectionId: string): TopologyScope | null {
     if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) === null) {
@@ -8425,13 +8431,30 @@ export class AnomalyService
   private async checkTopologyNodes(ctx: ConnectionContext, scope: TopologyScope): Promise<void> {
     const now = Date.now();
     const staleMs = Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS);
-    const targets = this.topologyTargetClaims.claim(ctx.connectionId, scope.targets, now, staleMs);
+    const claimed = this.topologyTargetClaims.claim(ctx.connectionId, scope.targets, now, staleMs);
+    const claimedAddrs = new Set(claimed.map((t) => t.addr));
+    const reachable = new Set(scope.targets.map((t) => t.addr));
     const kept = new Set(
       [...scope.members].filter(
-        (addr) => !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
+        (addr) =>
+          !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs) &&
+          (claimedAddrs.has(addr) || !reachable.has(addr)),
       ),
     );
     const active = new Set([...kept].map((addr) => topologyStateKey(ctx.connectionId, addr)));
+    for (const key of this.topologyBackoff.keys()) {
+      if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
+    }
+    void this.clusterDiscovery
+      ?.retainAddressConnections(ctx.connectionId, new Set(claimed.filter((t) => !t.nodeId).map((t) => t.addr)))
+      .catch(() => undefined);
+    const targets = claimed.filter(
+      (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
+    );
+    const backedOff = claimed.length - targets.length;
+    for (const target of claimed) {
+      if (!targets.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
+    }
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) this.retireDivergenceScope(key, ctx);
     }
@@ -8459,7 +8482,7 @@ export class AnomalyService
     await this.sweepRetiredDivergenceNodes(ctx, kept);
     await this.settleRetiredDivergence(ctx.connectionId);
     if (targets.length === 0) {
-      if ((this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
+      if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
           `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
         );
@@ -8496,14 +8519,19 @@ export class AnomalyService
       }),
     );
 
-    let unreachable = 0;
+    let unreachable = backedOff;
     for (const [i, result] of results.entries()) {
+      const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
         unreachable++;
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
         if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
+        const failures = (this.topologyBackoff.get(key)?.failures ?? 0) + 1;
+        const polls = Math.min(2 ** (failures - 1), AnomalyService.TOPOLOGY_BACKOFF_MAX_POLLS);
+        this.topologyBackoff.set(key, { failures, until: now + polls * this.getIntervalMs() });
         continue;
       }
+      this.topologyBackoff.delete(key);
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,
@@ -8512,7 +8540,6 @@ export class AnomalyService
         port: target.port,
       };
       const { info, self } = result.value;
-      const key = topologyStateKey(ctx.connectionId, target.addr);
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) await this.detectReplicationDivergence(sample, nodeCtx, target.addr);
@@ -8523,7 +8550,7 @@ export class AnomalyService
     if (unreachable !== previous) {
       if (unreachable > 0) {
         this.logger.warn(
-          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${targets.length} primaries unreachable — replication divergence, retry amplification and reshard skew are not checked on them.`,
+          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — replication divergence, retry amplification and reshard skew are not checked on them.`,
         );
       } else {
         this.logger.log(
