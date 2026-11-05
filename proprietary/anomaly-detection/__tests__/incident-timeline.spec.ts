@@ -1151,6 +1151,20 @@ describe('IncidentTimelineBuilder', () => {
         expect(incidents[0].matchedPatterns).toEqual([leading.pattern]);
       });
 
+      it('keeps a lead step that arrives after a quiet gap, before the step it follows', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + 3 * MIN, metricType: MetricType.MEMORY_USED }),
+            event({ timestamp: T0 + 6 * MIN, metricType: MetricType.OPS_PER_SEC }),
+          ],
+          leading,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([leading.pattern]);
+      });
+
       it('splits the first step from a lead step further back than the lead', () => {
         const incidents = build(
           [

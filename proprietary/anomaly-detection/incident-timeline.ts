@@ -547,7 +547,10 @@ export class IncidentTimelineBuilder {
       rule.steps.some(
         (step, i) =>
           step.includes(event.metricType) &&
-          (i > 0 ? reachesStep(current, event, rule, i) : precedesLeadStep(current, event, rule)),
+          (i === 0
+            ? precedesLeadStep(current, event, rule)
+            : reachesStep(current, event, rule, i) ||
+              (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
       ),
     );
   }
