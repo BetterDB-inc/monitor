@@ -112,6 +112,11 @@ describe('AnomalyService', () => {
       updateAnomalySummary: jest.fn(),
       updateAnomalyBufferStats: jest.fn(),
       updateReplBufferPressure: jest.fn(),
+      updateReplicationSignals: jest.fn(),
+      updateRetrySignals: jest.fn(),
+      clearRetrySignals: jest.fn(),
+      clearNodeSignals: jest.fn(),
+      updateActiveIncidents: jest.fn(),
     };
 
     anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
@@ -10395,6 +10400,48 @@ describe('AnomalyService', () => {
         }),
       );
     });
+
+    it('counts open incidents per connection, pattern and status', async () => {
+      const timeline = (
+        connectionIds: string[],
+        matchedPatterns: AnomalyPattern[],
+        status: string,
+      ) => ({ connectionIds, matchedPatterns, recovery: { status } });
+      const timelines = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+        timeline(['conn-1', 'conn-2'], [AnomalyPattern.RETRY_STORM, AnomalyPattern.MEMORY_PRESSURE], 'active'),
+        timeline(['conn-1'], [AnomalyPattern.RETRY_STORM], 'active'),
+        timeline(['conn-1'], [], 'recovering'),
+        timeline(['conn-2'], [], 'degraded'),
+        timeline(['conn-1'], [AnomalyPattern.RETRY_STORM], 'recovered'),
+        timeline(['conn-2'], [], 'unknown'),
+      ] as any);
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(timelines).toHaveBeenCalledWith(undefined, expect.any(Number), undefined, Number.MAX_SAFE_INTEGER);
+      const [byConnection] = prometheusService.updateActiveIncidents.mock.calls[0];
+      expect(Object.fromEntries(byConnection)).toEqual({
+        'conn-1': [
+          { pattern: AnomalyPattern.RETRY_STORM, status: 'active', count: 2 },
+          { pattern: AnomalyPattern.MEMORY_PRESSURE, status: 'active', count: 1 },
+          { pattern: 'none', status: 'recovering', count: 1 },
+        ],
+        'conn-2': [
+          { pattern: AnomalyPattern.RETRY_STORM, status: 'active', count: 1 },
+          { pattern: AnomalyPattern.MEMORY_PRESSURE, status: 'active', count: 1 },
+          { pattern: 'none', status: 'degraded', count: 1 },
+        ],
+      });
+    });
+
+    it('still publishes the summary when incidents cannot be read', async () => {
+      jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+
+      await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
+
+      expect(prometheusService.updateAnomalySummary).toHaveBeenCalled();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+    });
   });
 
   describe('external connections', () => {
@@ -14178,6 +14225,111 @@ describe('AnomalyService', () => {
         expect(fanoutWarnings).toHaveLength(1);
         expect(String(fanoutWarnings[0][0])).toContain('1/1 primaries unreachable');
         expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+      });
+
+      describe('prometheus signal gauges', () => {
+        it('publishes the seed replication signals under its own address', async () => {
+          await (service as any).detectReplicationDivergence(
+            { ...sample(T0, 2 * MiB), replBacklogSize: 10 * MiB },
+            mockCtx,
+          );
+
+          expect(prometheusService.updateReplicationSignals).toHaveBeenLastCalledWith(
+            'conn-1',
+            'localhost:6379',
+            { replicas: [], writeRateBytesPerSecond: MiB, backlogCoverageSeconds: 10 },
+          );
+        });
+
+        it('publishes the latest window gap and level of each seed replica', async () => {
+          await feed([2, 4, 6, 8, 10, 12], T0);
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.backlogCoverageSeconds).toBeNull();
+          expect(signals.replicas).toEqual([
+            expect.objectContaining({ replica: '10.0.0.2:6379', gapBytes: 10 * MiB, level: 1 }),
+          ]);
+        });
+
+        it('publishes replication and retry signals of a fan-out node under its address', async () => {
+          const client = nodeClient([2, 4, 6, 8, 10, 12]);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          await poll([target], 18, T0);
+
+          const nodeCalls = prometheusService.updateReplicationSignals.mock.calls.filter(
+            ([, node]: [string, string]) => node === NODE,
+          );
+          expect(nodeCalls.length).toBeGreaterThan(0);
+          expect(nodeCalls.at(-1)[2].replicas).toEqual([
+            expect.objectContaining({ replica: NODE_REPLICA, level: expect.any(Number) }),
+          ]);
+          expect(nodeCalls.at(-1)[2].replicas[0].level).toBeGreaterThan(0);
+          expect(prometheusService.updateRetrySignals).toHaveBeenLastCalledWith(
+            'conn-1',
+            NODE,
+            expect.objectContaining({ retryState: 0 }),
+          );
+        });
+
+        it('clears the gauges of a node that left the topology', async () => {
+          const client = nodeClient([2]);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+          const t = await poll([target], 1, T0);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalled();
+
+          await poll([], 1, t);
+
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalledWith('conn-1', 'localhost:6379');
+        });
+
+        it('clears the retry gauges of a node that reports a replica role', async () => {
+          const client = nodeClient([2], 'slave');
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          await poll([target], 1, T0);
+
+          expect(prometheusService.clearRetrySignals).toHaveBeenCalledWith('conn-1', NODE);
+          expect(prometheusService.updateRetrySignals).not.toHaveBeenCalled();
+        });
+
+        it('publishes the seed connects per second and churn per op', async () => {
+          (service as any).connectionChurnSamples.set('conn-1', {
+            timestamp: T0,
+            connectsPerSec: 50,
+            connectedClients: 10,
+            retainedRatio: 1,
+          });
+
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
+            connectsPerSecond: 50,
+            churnPerOp: 0.2,
+            retryState: 0,
+          });
+        });
+
+        it('keeps detecting when a gauge update throws', async () => {
+          prometheusService.updateRetrySignals.mockImplementation(() => {
+            throw new Error('registry gone');
+          });
+          prometheusService.updateReplicationSignals.mockImplementation(() => {
+            throw new Error('registry gone');
+          });
+
+          await expect(
+            (service as any).detectRetryAmplification({ instantaneous_ops_per_sec: '1' }, mockCtx, T0),
+          ).resolves.toBeUndefined();
+          await feed([2, 4, 6], T0);
+
+          expect(storage.saveReplicationDivergenceWindows).toHaveBeenCalled();
+        });
       });
     });
 

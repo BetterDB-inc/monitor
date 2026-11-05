@@ -335,6 +335,15 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_anomaly_buffer_ready` | `betterdb.anomaly.buffer.ready` | `1` |
 | `betterdb_anomaly_buffer_mean` | `betterdb.anomaly.buffer.mean` | — |
 | `betterdb_anomaly_buffer_stddev` | `betterdb.anomaly.buffer.stddev` | — |
+| `betterdb_replication_gap_bytes` | `betterdb.replication.gap` | `By` |
+| `betterdb_replication_seconds_behind` | `betterdb.replication.seconds_behind` | `s` |
+| `betterdb_replication_divergence_level` | `betterdb.replication.divergence_level` | `1` |
+| `betterdb_replication_write_rate_bytes_per_second` | `betterdb.replication.write_rate` | `By/s` |
+| `betterdb_replication_backlog_coverage_seconds` | `betterdb.replication.backlog_coverage` | `s` |
+| `betterdb_connections_received_per_second` | `betterdb.connections.received_rate` | `{connection}/s` |
+| `betterdb_connection_churn_per_op` | `betterdb.connections.churn_per_op` | `{connection}/{operation}` |
+| `betterdb_retry_amplification_state` | `betterdb.anomaly.retry_amplification_state` | `1` |
+| `betterdb_incident_active` | `betterdb.anomaly.incidents_active` | `{incident}` |
 | `betterdb_metric_forecast_time_to_limit_seconds` | `betterdb.forecast.time_to_limit` | `s` |
 | `betterdb_cve_findings` | `betterdb.cve.findings` | `{finding}` |
 | `betterdb_cve_kev` | `betterdb.cve.kev` | `{finding}` |

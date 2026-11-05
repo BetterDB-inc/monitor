@@ -413,6 +413,9 @@ const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
+const OPEN_INCIDENT_STATUSES: ReadonlySet<string> = new Set(['active', 'recovering', 'degraded']);
+const DIVERGENCE_LEVEL_GAUGE = { none: 0, warning: 1, critical: 2 } as const;
+const RETRY_STATE_GAUGE = { none: 0, candidate: 1, amplifying: 2 } as const;
 const ANOMALY_ANNOUNCE_MAX_AGE_MS = 5 * 60 * 1000;
 const MAX_CORRELATED_GROUP_RESULTS = 1_000;
 const MAX_CORRELATED_MEMBER_ROWS = 10_000;
@@ -3949,19 +3952,22 @@ export class AnomalyService
       activeSaturation.add(MetricType.CLIENT_SATURATION);
     }
 
+    const opsPerSec = this.parseNumber(info.instantaneous_ops_per_sec);
+    const connectsPerSec = nodeAddr
+      ? this.nodeConnectsPerSec(key, info, timestamp)
+      : (this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null);
     const finding = evaluateRetryAmplification(state, {
       timestamp,
-      opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec),
+      opsPerSec,
       connectedClients: this.parseNumber(info.connected_clients),
       totalCommands: this.parseNumber(info.total_commands_processed),
       totalErrorReplies: this.parseNumber(info.total_error_replies),
-      connectsPerSec: nodeAddr
-        ? this.nodeConnectsPerSec(key, info, timestamp)
-        : (this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null),
+      connectsPerSec,
       recentEvents,
       stressActive,
       activeSaturation: [...activeSaturation],
     });
+    this.publishRetrySignals(ctx, nodeAddr, state, connectsPerSec, opsPerSec);
 
     const clientSnapshots = nodeAddr ? [] : this.refreshClientSnapshots(ctx, state, info.run_id);
     if (finding === null) return;
@@ -3982,6 +3988,26 @@ export class AnomalyService
       timestamp,
       rearm: retryAmplificationRearm(state, finding),
     });
+  }
+
+  private publishRetrySignals(
+    ctx: ConnectionContext,
+    nodeAddr: string | undefined,
+    state: RetryAmplificationState,
+    connectsPerSec: number | null,
+    opsPerSec: number | null,
+  ): void {
+    try {
+      this.prometheusService.updateRetrySignals(ctx.connectionId, nodeAddr ?? `${ctx.host}:${ctx.port}`, {
+        connectsPerSecond: connectsPerSec,
+        churnPerOp: connectsPerSec === null ? null : connectsPerOp(connectsPerSec, opsPerSec),
+        retryState: RETRY_STATE_GAUGE[describeRetryAmplificationState(state).classification],
+      });
+    } catch (err) {
+      this.logger.debug(
+        `Failed to update retry amplification gauges for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   private queueRetryAmplificationReport(report: RetryAmplificationReport): void {
@@ -8386,6 +8412,60 @@ export class AnomalyService
     await this.settleOrphanedDivergenceEvents(state, ctx, key);
     await this.persistDivergenceWindows(state, ctx);
     if (!nodeAddr) await this.pruneDivergenceWindows(ctx, sample.timestamp);
+    this.publishReplicationSignals(ctx, nodeAddr, state, sample);
+  }
+
+  private publishReplicationSignals(
+    ctx: ConnectionContext,
+    nodeAddr: string | undefined,
+    state: DivergenceConnectionState,
+    sample: ReplicationStreamSample,
+  ): void {
+    const rate = sample.bytesPerSecEwma;
+    const backlog = sample.replBacklogSize;
+    try {
+      this.prometheusService.updateReplicationSignals(
+        ctx.connectionId,
+        nodeAddr ?? `${ctx.host}:${ctx.port}`,
+        {
+          replicas: [...state.replicas.values()].map((replica) => {
+            const latest = replica.windows.at(-1);
+            return {
+              replica: replica.addr,
+              gapBytes: latest?.gapBytes ?? null,
+              secondsBehind: latest?.secondsBehind ?? null,
+              level: DIVERGENCE_LEVEL_GAUGE[replica.level],
+            };
+          }),
+          writeRateBytesPerSecond: rate,
+          backlogCoverageSeconds: rate !== null && rate > 0 && backlog !== null ? backlog / rate : null,
+        },
+      );
+    } catch (err) {
+      this.logger.debug(
+        `Failed to update replication gauges for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private clearRetrySignals(connectionId: string, node: string): void {
+    try {
+      this.prometheusService.clearRetrySignals(connectionId, node);
+    } catch (err) {
+      this.logger.debug(
+        `Failed to clear retry amplification gauges for ${node}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private clearNodeSignals(connectionId: string, key: string): void {
+    try {
+      this.prometheusService.clearNodeSignals(connectionId, key.slice(connectionId.length + 1));
+    } catch (err) {
+      this.logger.debug(
+        `Failed to clear node gauges for ${key}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
@@ -8462,10 +8542,16 @@ export class AnomalyService
       if (!targets.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
     }
     for (const key of this.divergenceKeysOf(ctx.connectionId)) {
-      if (key !== ctx.connectionId && !active.has(key)) this.retireDivergenceScope(key, ctx);
+      if (key !== ctx.connectionId && !active.has(key)) {
+        this.retireDivergenceScope(key, ctx);
+        this.clearNodeSignals(ctx.connectionId, key);
+      }
     }
     for (const key of this.retryAmplificationKeysOf(ctx.connectionId)) {
-      if (key !== ctx.connectionId && !active.has(key)) this.forgetRetryAmplification(key);
+      if (key !== ctx.connectionId && !active.has(key)) {
+        this.forgetRetryAmplification(key);
+        this.clearNodeSignals(ctx.connectionId, key);
+      }
     }
     for (const key of this.reshardSnapshotKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
@@ -8550,6 +8636,7 @@ export class AnomalyService
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) await this.detectReplicationDivergence(sample, nodeCtx, target.addr);
       if (info.role === 'master') await this.detectRetryAmplification(info, nodeCtx, timestamp, target.addr);
+      else this.clearRetrySignals(ctx.connectionId, target.addr);
     }
 
     const previous = this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0;
@@ -9409,5 +9496,34 @@ export class AnomalyService
       ready: s.isReady,
     }));
     this.prometheusService.updateAnomalyBufferStats(bufferStats);
+
+    await this.updateIncidentGauges(oneHourAgo);
+  }
+
+  private async updateIncidentGauges(since: number): Promise<void> {
+    try {
+      const timelines = await this.getIncidentTimelines(undefined, since, undefined, Number.MAX_SAFE_INTEGER);
+      const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
+      for (const timeline of timelines) {
+        const status = timeline.recovery.status;
+        if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
+        const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
+        for (const connectionId of new Set(timeline.connectionIds)) {
+          const counts = byConnection.get(connectionId) ?? new Map();
+          for (const pattern of patterns) {
+            const label = `${pattern}\u0000${status}`;
+            const entry = counts.get(label) ?? { pattern, status, count: 0 };
+            entry.count++;
+            counts.set(label, entry);
+          }
+          byConnection.set(connectionId, counts);
+        }
+      }
+      this.prometheusService.updateActiveIncidents(
+        new Map([...byConnection].map(([connectionId, counts]) => [connectionId, [...counts.values()]])),
+      );
+    } catch (err) {
+      this.logger.debug(`Failed to update incident gauges: ${err instanceof Error ? err.message : err}`);
+    }
   }
 }

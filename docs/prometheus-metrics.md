@@ -167,6 +167,10 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_vector_index_docs`, `_memory_bytes`, `_indexing_failures`, `_percent_indexed`      | 4 × I        | I is the number of search indexes.                                                                                                                                            | removed      |
 | `betterdb_inference_bucket_p50_us`, `_p95_us`, `_p99_us`, `betterdb_inference_unhealthy`     | 4 × (2 + I′) | One `read` bucket, one `write` bucket, and one `FT.SEARCH:<index>` bucket for each of the I′ indexes that appear in the slowlog or COMMANDLOG window.                         | removed      |
 | `betterdb_inference_sla_breach`                                                              | ≤ I          | One per index with an SLA configured.                                                                                                                                         | removed      |
+| `betterdb_replication_gap_bytes`, `_seconds_behind`, `_divergence_level`                     | 3 × N × R    | N is the number of primaries checked for the connection (1 for a standalone connection, every primary for a cluster or Sentinel connection) and R the replicas each one reports. `_seconds_behind` and `_gap_bytes` are absent until a divergence window has closed. | removed      |
+| `betterdb_replication_write_rate_bytes_per_second`, `_backlog_coverage_seconds`              | 2 × N        | One per checked primary. Absent while the write rate (or the backlog size) is unknown.                                                                                        | removed      |
+| `betterdb_connections_received_per_second`, `betterdb_connection_churn_per_op`, `betterdb_retry_amplification_state` | 3 × N | One per checked primary. A node that turns into a replica loses these series.                                                                                    | removed      |
+| `betterdb_incident_active`                                                                   | ≤ 3 × (P + 1) | P sequence patterns plus `none`, × 3 open statuses.                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
 | `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
 | `betterdb_key_memory_bytes`, `betterdb_key_cardinality`                                      | 2 × K        | K is `METRICS_KEY_DETAILS_TOP_N` (default 10, maximum 50, `0` disables): the top tracked keys by memory, each a `(key, type, db)` series. Key names become label values. Pro connections only.                  | removed      |
@@ -538,6 +542,45 @@ Real-time anomaly detection system metrics.
 | `betterdb_anomaly_buffer_mean`   | gauge | `metric_type` | Rolling mean for anomaly detection      | `2450`  |
 | `betterdb_anomaly_buffer_stddev` | gauge | `metric_type` | Rolling stddev for anomaly detection    | `125.5` |
 
+#### Replication Signal Metrics
+
+Values behind the replication divergence and backlog detectors. The `node` label is the address (`host:port`) of the primary that was read: the connection's own node, or each primary that BetterDB checks for a cluster or Sentinel connection. The `replica` label is the replica's address as that primary reports it.
+
+| Metric                                             | Type  | Labels            | Description                                                                          | Example    |
+| -------------------------------------------------- | ----- | ----------------- | ------------------------------------------------------------------------------------ | ---------- |
+| `betterdb_replication_gap_bytes`                   | gauge | `node`, `replica` | Replica offset gap behind its primary in the latest closed divergence window          | `1048576`  |
+| `betterdb_replication_seconds_behind`              | gauge | `node`, `replica` | Estimated seconds the replica trails its primary in the latest closed window          | `2.5`      |
+| `betterdb_replication_divergence_level`            | gauge | `node`, `replica` | Divergence level: `0` none, `1` warning, `2` critical                                 | `1`        |
+| `betterdb_replication_write_rate_bytes_per_second` | gauge | `node`            | Smoothed replication stream write rate of the primary                                 | `524288`   |
+| `betterdb_replication_backlog_coverage_seconds`    | gauge | `node`            | `repl-backlog-size` divided by the write rate: how many seconds of writes the backlog holds | `120`  |
+
+`betterdb_replication_gap_bytes` and `betterdb_replication_seconds_behind` appear once the first divergence window closes for that replica, and `betterdb_replication_seconds_behind` is absent while the write rate is unknown or 0. `betterdb_replication_write_rate_bytes_per_second` is absent until a rate is known, and `betterdb_replication_backlog_coverage_seconds` is also absent while the backlog size is unknown or the write rate is 0. A replica that stops being reported, and a primary that leaves the topology, lose their series.
+
+#### Connection Churn and Retry Metrics
+
+Inputs and live state of the retry amplification detector, one series per primary (`node`, as above).
+
+| Metric                                     | Type  | Labels | Description                                                       | Example |
+| ------------------------------------------ | ----- | ------ | ----------------------------------------------------------------- | ------- |
+| `betterdb_connections_received_per_second` | gauge | `node` | New client connections accepted per second since the previous poll | `35`    |
+| `betterdb_connection_churn_per_op`         | gauge | `node` | New connections per command processed (connects/s ÷ ops/s)        | `0.04`  |
+| `betterdb_retry_amplification_state`       | gauge | `node` | Retry amplification classification: `0` none, `1` candidate (hot windows seen, not yet confirmed), `2` amplifying | `0` |
+
+The two rate gauges are absent until two polls have produced a connection rate. `betterdb_retry_amplification_state` is reported on every poll of a primary; a node that becomes a replica loses all three series.
+
+#### Incident Metrics
+
+| Metric                     | Type  | Labels              | Description                                                                 | Example |
+| -------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- | ------- |
+| `betterdb_incident_active` | gauge | `pattern`, `status` | Open incidents with an event in the last hour, by matched pattern and recovery status | `1` |
+
+**Label Values**:
+
+- `pattern`: each sequence pattern the incident matched (for example `retry_storm`, `backlog_exhaustion`), or `none` when it matched none. An incident that matched two patterns is counted under both.
+- `status`: `active`, `recovering`, `degraded`. Recovered incidents and incidents whose recovery is unknown are not counted.
+
+An incident that spans several connections is counted under each of them. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series.
+
 ### Metric Forecasting Metrics
 
 Forward-looking projections of when a tracked metric will reach its configured ceiling.
@@ -709,6 +752,28 @@ topk(5, betterdb_anomaly_by_metric)
 
 # Unresolved critical anomalies
 betterdb_anomaly_events_current{severity="critical"}
+```
+
+### Replication, Retry and Incident Signals
+
+```promql
+# Largest replica gap per primary
+max by (connection, node) (betterdb_replication_gap_bytes)
+
+# Replicas currently at critical divergence
+betterdb_replication_divergence_level == 2
+
+# Primaries whose backlog holds less than 60 seconds of writes
+betterdb_replication_backlog_coverage_seconds < 60
+
+# Primaries in a confirmed retry storm
+betterdb_retry_amplification_state == 2
+
+# Connection churn per primary, smoothed
+avg_over_time(betterdb_connections_received_per_second[5m])
+
+# Open incidents by pattern
+sum by (pattern) (betterdb_incident_active)
 ```
 
 ### CPU Utilization
