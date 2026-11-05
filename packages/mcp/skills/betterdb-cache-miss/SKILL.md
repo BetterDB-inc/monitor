@@ -19,7 +19,7 @@ Explain a miss from the cache's own stats. Propose a threshold change only when 
 4. Call `cache_similarity_distribution` for a semantic cache, or `cache_tool_effectiveness` for an agent cache, before any proposal.
 5. Call `cache_recent_changes` before proposing, so you do not repeat an open proposal.
 6. Propose with `cache_propose_threshold_adjust` or `cache_propose_tool_ttl_adjust` only when the window supports the change. Proposals do not write to Valkey until `cache_approve_proposal`. Do not approve unless the user asked to apply it.
-7. For a trace, call `list_ai_traces` even when `ai_list_instances` is empty. `ai_list_instances` discovers AI components and has no time window. An empty list there does not mean there are no traces. `list_ai_traces` looks back at most 168 hours. An empty trace list means that window had none. Correlate with `get_ai_trace` and `correlate_ai_trace` using the id the user gave, or an id `list_ai_traces` returned. An id the user already has does not require either list.
+7. For a trace, call `list_ai_traces` even when `ai_list_instances` is empty. Set `hours` to the requested lookback, from 1 through 168. When the user gave no lookback, pass `hours` 1. `ai_list_instances` discovers AI components and has no time window. An empty list there does not mean there are no traces. An empty trace list means the `hours` window had none. Correlate with `get_ai_trace` and `correlate_ai_trace` using the id the user gave, or an id `list_ai_traces` returned. An id the user already has does not require either list.
 8. For vector search, call `get_vector_indexes`. "Search module not loaded" is a clear stop. Call `get_inference_latency` only when indexes exist.
 
 ## Common mistakes

@@ -121,6 +121,24 @@ describe('ConfigHazardService', () => {
     expect(appendonlyProbeCount()).toBe(2);
   });
 
+  it('keeps cluster findings and does not cache when appendonly reads null', async () => {
+    // A filtered CONFIG GET resolves appendonly to null without throwing. Cluster
+    // findings stay, but the skipped AOF check must not cache as a finished probe.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve(null);
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.resolve('no');
+      return Promise.resolve(null);
+    });
+    const first = await service.probeHazards('conn-1');
+    expect(first.complete).toBe(false);
+    expect(first.findings).toHaveLength(1);
+    expect(first.findings[0].id).toBe('cluster-crc-disabled');
+
+    await service.probeHazards('conn-1');
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
   it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
     client.getConfigValue.mockImplementation((param: string) => {
       if (param === 'appendonly') return Promise.resolve('yes');

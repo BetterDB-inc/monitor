@@ -29,7 +29,7 @@ Answer "is it healthy?" from one structured summary. Every later BetterDB skill 
 
 ## How to read get_health
 
-Report hit rate, key count, connected clients, role, replication lag, fragmentation, and `configHazards`. An empty `configHazards` list with no `configHazardsUnavailable` flag means the probe finished and found nothing. `configHazardsUnavailable: true` means the probe did not finish. Findings alongside that flag are partial. A missing `configHazards` with the flag means the probe produced nothing. Do not call either case "no hazards." `replicationLag` is set only for a replica. `null` on a primary means lag was not measured, even when replicas exist.
+Report hit rate, key count, connected clients, role, replication lag, fragmentation, and `configHazards`. An empty `configHazards` list with no `configHazardsUnavailable` flag means the probe finished and found nothing. `configHazardsUnavailable: true` means the probe did not finish. Findings alongside that flag are partial. A missing `configHazards` with the flag means the probe produced nothing. A response with neither `configHazards` nor `configHazardsUnavailable` means hazard probing is unavailable or unsupported. Do not call any of those cases "no hazards." `replicationLag` is set only for a replica. `null` on a primary means lag was not measured, even when replicas exist.
 
 ## Common mistakes
 

@@ -23,7 +23,7 @@ Say what a process death would lose, from persistence and replication INFO. Age 
 - `aof_enabled` 0, `rdb_changes_since_last_save` 0, last bgsave `ok`: a crash loses no new writes. Still say how old the snapshot is.
 - `rdb_changes_since_last_save` greater than 0 and AOF off: those changes exist only in memory.
 - `aof_enabled` 1: a host crash can lose writes not yet fsynced to the AOF. Report `aof_last_write_status`. Say the loss window depends on `appendfsync`, which INFO does not report. Do not state that no writes are lost.
-- `role` is `master`, `connected_slaves` is 0, and `repl_backlog_active` is 0: there is no replica that can take over. Use only these replication fields. `replicationLag: null` from `get_health` is also what a primary returns when replicas exist, so it is not evidence. Do not use this verdict when `role` is `slave` or `replica`. That instance is itself the promotion candidate.
+- `role` is `master` and `connected_slaves` is 0: no connected replica is visible from this primary. Do not infer failover eligibility from `repl_backlog_active`. `replicationLag: null` from `get_health` is also what a primary returns when replicas exist, so it is not evidence. Do not use this verdict when `role` is `slave` or `replica`. That instance is itself the promotion candidate.
 
 ## Common mistakes
 
