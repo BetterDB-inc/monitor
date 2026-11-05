@@ -249,6 +249,7 @@ export function signalKey(event: AnomalyEvent): string {
 interface IncidentCluster {
   events: AnomalyEvent[];
   start?: IncidentBoundary;
+  prefix: RuleStepEvent[];
 }
 
 function positionsOf(sorted: AnomalyEvent[]): (anomalyId: string) => number {
@@ -383,7 +384,7 @@ export class IncidentTimelineBuilder {
           !continues ||
           event.timestamp - (start?.startedAt ?? first.timestamp) > this.opts.maxSpanMs)
       ) {
-        clusters.push({ events: current, start });
+        clusters.push({ events: current, start, prefix });
         current = [];
         start = undefined;
         prefix = [];
@@ -408,7 +409,7 @@ export class IncidentTimelineBuilder {
       }
       current.push(event);
     }
-    if (current.length > 0) clusters.push({ events: current, start });
+    if (current.length > 0) clusters.push({ events: current, start, prefix });
     return clusters;
   }
 
@@ -501,7 +502,7 @@ export class IncidentTimelineBuilder {
 
   private toTimeline(
     scope: string,
-    { events, start }: IncidentCluster,
+    { events, start, prefix }: IncidentCluster,
     now: number,
     probe: RecoveryProbe,
     nextOccurrence: (event: AnomalyEvent) => number | null,
@@ -537,15 +538,29 @@ export class IncidentTimelineBuilder {
       if (!sequence.includes(entry.metricType)) sequence.push(entry.metricType);
     }
 
+    const dropped = prefix.map(
+      (step): IncidentTimelineEntry => ({
+        anomalyId: '',
+        connectionId: step.connectionId ?? '',
+        timestamp: step.timestamp,
+        metricType: step.metricType,
+        severity: AnomalySeverity.INFO,
+        message: '',
+        recoveredAt: null,
+      }),
+    );
+    const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);
     const sequenceMatches: IncidentSequenceMatch[] = [];
     for (const rule of this.rules()) {
-      for (const matched of matchSequences(entries, rule)) {
+      for (const matched of matchSequences(candidates, rule)) {
+        const held = matched.filter((e) => !dropped.includes(e));
+        if (!held.some((e) => rule.steps.some((step) => step.includes(e.metricType)))) continue;
         sequenceMatches.push({
           pattern: rule.pattern,
-          anomalyIds: matched.map((e) => e.anomalyId),
+          anomalyIds: held.map((e) => e.anomalyId),
           diagnosis: rule.diagnosis,
           recommendations: rule.recommendations,
-          severity: maxSeverity(matched.map((e) => e.severity)),
+          severity: maxSeverity(held.map((e) => e.severity)),
         });
       }
     }

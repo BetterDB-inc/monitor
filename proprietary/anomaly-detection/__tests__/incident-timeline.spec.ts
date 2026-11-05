@@ -1078,6 +1078,8 @@ describe('IncidentTimelineBuilder', () => {
 
         expect(incidents).toHaveLength(1);
         expect(incidentStartOf(incidents[0].incidentId)).toBe(T0);
+        expect(incidents[0].matchedPatterns).toEqual([chain.pattern]);
+        expect(incidents[0].sequenceMatches[0].anomalyIds).toEqual(['middle', 'late']);
       });
 
       it('bridges a dropped start on the last step when every earlier step was dropped', () => {
