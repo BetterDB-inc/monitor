@@ -693,6 +693,7 @@ export class AnomalyService
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
   >();
+  private retryNodeChurnReadings = new Map<string, ConnectionChurnReading>();
   private latencyDegraded = new Map<string, { degraded: boolean; reportedAt: number }>();
   // Last-emitted client-saturation level per connection (connected_clients /
   // maxclients). Used for hysteresis: alert only when saturation escalates, not
@@ -1921,6 +1922,7 @@ export class AnomalyService
     }
   }
 
+  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'stats', 'replication'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
@@ -3809,6 +3811,19 @@ export class AnomalyService
     acknowledgeLoadSaturationFinding(state, finding);
   }
 
+  private nodeConnectsPerSec(key: string, info: Record<string, string>, timestamp: number): number | null {
+    const totalReceived = this.parseNumber(info.total_connections_received);
+    const connectedClients = this.parseNumber(info.connected_clients);
+    if (totalReceived === null || connectedClients === null) {
+      this.retryNodeChurnReadings.delete(key);
+      return null;
+    }
+    const reading = { totalReceived, connectedClients, timestamp };
+    const sample = computeConnectionChurn(this.retryNodeChurnReadings.get(key), reading);
+    this.retryNodeChurnReadings.set(key, reading);
+    return sample.connectsPerSec;
+  }
+
   private retryAmplificationKeysOf(connectionId: string): string[] {
     const keys = new Set<string>();
     for (const map of [
@@ -3817,6 +3832,7 @@ export class AnomalyService
       this.retryAmplificationClients,
       this.retryAmplificationDispatched,
       this.retryAmplificationContributors,
+      this.retryNodeChurnReadings,
     ]) {
       for (const key of map.keys()) {
         if (isTopologyStateKeyOf(key, connectionId)) keys.add(key);
@@ -3831,6 +3847,7 @@ export class AnomalyService
     this.retryAmplificationClients.delete(key);
     this.retryAmplificationDispatched.delete(key);
     this.retryAmplificationContributors.delete(key);
+    this.retryNodeChurnReadings.delete(key);
   }
 
   private async detectRetryAmplification(
@@ -3850,7 +3867,7 @@ export class AnomalyService
         ? observePushCadence(state, timestamp, this.getIntervalMs())
         : retryAmplificationMaxPollGap(this.getIntervalMs());
 
-    const connectionEvents = this.recentEventsOf(ctx.connectionId).filter((a) => {
+    const connectionEvents = (nodeAddr ? [] : this.recentEventsOf(ctx.connectionId)).filter((a) => {
       const relativeCpuMove =
         a.metricType === MetricType.CPU_UTILIZATION && !isControlPlaneSaturationEvent(a);
       return a.timestamp <= timestamp && !relativeCpuMove;
@@ -3862,7 +3879,7 @@ export class AnomalyService
       .map((a) => {
         return { metricType: a.metricType, timestamp: a.timestamp };
       });
-    const degraded = this.freshLatencyVerdict(ctx.connectionId);
+    const degraded = nodeAddr ? undefined : this.freshLatencyVerdict(ctx.connectionId);
     const stressActive =
       degraded === true ||
       (degraded === undefined &&
@@ -3883,11 +3900,11 @@ export class AnomalyService
         activeSaturation.add(a.metricType);
       }
     }
-    const loadLevel = this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
+    const loadLevel = nodeAddr ? undefined : this.loadSaturationState.get(ctx.connectionId)?.ackedLevel;
     if (loadLevel !== undefined && loadLevel !== 'none') {
       activeSaturation.add(MetricType.LOAD_SATURATION);
     }
-    const clientLevel = this.clientSaturationLevel.get(ctx.connectionId);
+    const clientLevel = nodeAddr ? undefined : this.clientSaturationLevel.get(ctx.connectionId);
     if (clientLevel !== undefined && clientLevel !== 'none') {
       activeSaturation.add(MetricType.CLIENT_SATURATION);
     }
@@ -3899,7 +3916,7 @@ export class AnomalyService
       totalCommands: this.parseNumber(info.total_commands_processed),
       totalErrorReplies: this.parseNumber(info.total_error_replies),
       connectsPerSec: nodeAddr
-        ? null
+        ? this.nodeConnectsPerSec(key, info, timestamp)
         : (this.getConnectionChurnSample(ctx.connectionId)?.connectsPerSec ?? null),
       recentEvents,
       stressActive,
@@ -4191,12 +4208,19 @@ export class AnomalyService
     return latestEpisodeStart(state) === cached.episodeStart ? cached.contributors : null;
   }
 
-  getRetryAmplificationStatus(
-    connectionId: string,
-  ): RetryAmplificationStatus & { topContributors: RetryAmplificationContributor[] | null } {
+  getRetryAmplificationStatus(connectionId: string): RetryAmplificationStatus & {
+    topContributors: RetryAmplificationContributor[] | null;
+    nodes: (RetryAmplificationStatus & { node: string })[];
+  } {
+    const prefix = `${connectionId}@`;
+    const nodes = [...this.retryAmplificationState.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, state]) => ({ node: key.slice(prefix.length), ...describeRetryAmplificationState(state) }))
+      .sort((a, b) => a.node.localeCompare(b.node));
     return {
       ...describeRetryAmplificationState(this.retryAmplificationState.get(connectionId)),
       topContributors: this.getRetryAmplificationContributors(connectionId),
+      nodes,
     };
   }
 
@@ -8264,7 +8288,7 @@ export class AnomalyService
     if (targets.length === 0) {
       if ((this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
-          `Replication divergence fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
+          `Node fan-out for ${ctx.connectionName}: no reachable primaries left to check.`,
         );
         this.topologyFanoutUnreachable.delete(ctx.connectionId);
       }
@@ -8282,11 +8306,13 @@ export class AnomalyService
           `Connecting to ${target.addr} timed out`,
         );
         const raw = await withTimeout(
-          this.fanoutCommand(topologyStateKey(ctx.connectionId, target.addr), () => client.info()),
+          this.fanoutCommand(topologyStateKey(ctx.connectionId, target.addr), () =>
+            Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
+          ),
           AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
           `INFO to ${target.addr} timed out`,
         );
-        return this.convertInfoToRecord(InfoParser.parse(raw));
+        return this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
       }),
     );
 

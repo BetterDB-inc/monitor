@@ -682,7 +682,7 @@ server.tool(
 
 server.tool(
   'get_retry_amplification',
-  'Get the live retry-amplification detector state: whether its baseline is armed, whether a candidate or amplifying episode is open (load per client rising with latency, errors or churn while the client count stays flat), the last episode and its trigger, and the clients whose command rate or reconnects grew most. Use when an incident looks like a self-sustaining retry storm rather than real traffic growth.',
+  'Get the live retry-amplification detector state: whether its baseline is armed, whether a candidate or amplifying episode is open (load per client rising with latency, errors or churn while the client count stays flat), the last episode and its trigger, and the clients whose command rate or reconnects grew most. On a cluster or Sentinel group, `nodes` holds the same state for each other primary it reads. Use when an incident looks like a self-sustaining retry storm rather than real traffic growth.',
   {
     instanceId: z.string().optional().describe('Optional instance ID override'),
   },
