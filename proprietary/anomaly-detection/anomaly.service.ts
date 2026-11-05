@@ -600,6 +600,7 @@ export class AnomalyService
   private activeSentinelLoopStalls = new Map<string, Set<string>>();
   private sentinelModeLast = new Map<string, boolean>();
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
+  private sentinelReplicaAddrs = new Map<string, Set<string>>();
   // Monitor-clock ms the masters snapshot above was last refreshed, and the value
   // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
   // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
@@ -1092,6 +1093,7 @@ export class AnomalyService
     this.activeSentinelLoopStalls.delete(connectionId);
     this.sentinelModeLast.delete(connectionId);
     this.sentinelMastersSnapshot.delete(connectionId);
+    this.sentinelReplicaAddrs.delete(connectionId);
     this.sentinelMastersSnapshotAt.delete(connectionId);
     this.sentinelMastersConsumedAt.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
@@ -2470,6 +2472,7 @@ export class AnomalyService
       // No longer (or never) a Sentinel: drop any snapshot so the loop-stall
       // classifier cannot keep counting a stale `s_down` toward a misdirected alert.
       this.sentinelMastersSnapshot.delete(ctx.connectionId);
+      this.sentinelReplicaAddrs.delete(ctx.connectionId);
       this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
       return;
     }
@@ -2494,11 +2497,13 @@ export class AnomalyService
       this.sentinelMastersSnapshotAt.set(ctx.connectionId, timestamp);
       const findings: SentinelDrift[] = [];
       const unreadMasters = new Set<string>();
+      const replicaAddrs = new Set<string>();
       for (const master of masters) {
         // A per-master failure (the master was just removed, or Sentinel is
         // mid-failover) skips that master rather than losing the whole view.
         try {
           const replicas = await ctx.client.getSentinelReplicas(master.name);
+          for (const replica of replicas) replicaAddrs.add(`${replica.ip.toLowerCase()}:${replica.port}`);
           findings.push(...detectSentinelDrift(master, replicas));
         } catch (replicaErr) {
           unreadMasters.add(master.name);
@@ -2507,6 +2512,7 @@ export class AnomalyService
           );
         }
       }
+      this.sentinelReplicaAddrs.set(ctx.connectionId, replicaAddrs);
 
       await this.applyTopologyPersistenceGate({
         ctx,
@@ -2534,6 +2540,7 @@ export class AnomalyService
       // than let the loop-stall classifier keep counting an old `s_down` toward a
       // misdirected alert from evidence we can no longer confirm.
       this.sentinelMastersSnapshot.delete(ctx.connectionId);
+      this.sentinelReplicaAddrs.delete(ctx.connectionId);
       this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
       this.logger.debug(
         `Failed to check Sentinel topology for ${ctx.connectionName}: ${sentinelErr instanceof Error ? sentinelErr.message : sentinelErr}`,
@@ -8452,7 +8459,7 @@ export class AnomalyService
       };
     }
     if (
-      this.sentinelMastersSnapshot.has(connectionId) &&
+      this.sentinelReplicaAddrs.get(connectionId)?.has(`${host.toLowerCase()}:${port}`) &&
       this.connectionRegistry.sentinelDataNodeCredentials(connectionId) !== null
     ) {
       return () => readNode(discovery.getAddressConnection(host, port, connectionId));

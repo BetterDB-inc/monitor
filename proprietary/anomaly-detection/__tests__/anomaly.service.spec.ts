@@ -9607,6 +9607,16 @@ describe('AnomalyService', () => {
       await poll();
     }
 
+    it('records the replica addresses Sentinel reports, and drops them when the probe fails', async () => {
+      await poll();
+      expect([...(service as any).sentinelReplicaAddrs.get('conn-1')]).toEqual(['valkey-1.valkey-headless:6379']);
+
+      (dbClient.getSentinelMasters as jest.Mock).mockRejectedValue(new Error('down'));
+      now += 61_000;
+      await poll();
+      expect((service as any).sentinelReplicaAddrs.has('conn-1')).toBe(false);
+    });
+
     it('emits a WARNING once an IP-for-hostname entry persists past the gate', async () => {
       (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
         healthyReplica,
@@ -13872,7 +13882,7 @@ describe('AnomalyService', () => {
           const replica = replicaClient(10_000 * MiB);
           const registry = (service as any).connectionRegistry;
           registry.sentinelDataNodeCredentials.mockReturnValue({ username: 'data', password: 'secret' });
-          (service as any).sentinelMastersSnapshot.set('conn-1', []);
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
           (service as any).clusterDiscovery = {
             retainAddressConnections: jest.fn().mockResolvedValue(undefined),
             getAddressConnection: jest.fn().mockImplementation(async (host: string) =>
@@ -13887,8 +13897,26 @@ describe('AnomalyService', () => {
           expect((service as any).clusterDiscovery.getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
         });
 
+        it('does not dial a replica that Sentinel does not report', async () => {
+          (service as any).connectionRegistry.sentinelDataNodeCredentials.mockReturnValue({ username: 'data', password: 'secret' });
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set(['10.0.9.9:6379']));
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const getAddressConnection = jest.fn().mockResolvedValue(primary);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection,
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(getAddressConnection).not.toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+        });
+
         it('does not dial a Sentinel replica without data-node credentials', async () => {
-          (service as any).sentinelMastersSnapshot.set('conn-1', []);
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
           const primary = nodeClient([2, 4, 6, 8, 10, 12]);
           const getAddressConnection = jest.fn().mockResolvedValue(primary);
           (service as any).clusterDiscovery = {
