@@ -601,6 +601,7 @@ export class AnomalyService
   private sentinelModeLast = new Map<string, boolean>();
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
   private sentinelReplicaAddrs = new Map<string, Set<string>>();
+  private crossCheckDeadline = new Map<string, number | null>();
   // Monitor-clock ms the masters snapshot above was last refreshed, and the value
   // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
   // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
@@ -1926,6 +1927,7 @@ export class AnomalyService
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
       throw error;
     } finally {
+      this.crossCheckDeadline.set(ctx.connectionId, null);
       if (replicationSample) {
         await this.detectReplicationDivergence(replicationSample, ctx).catch((err) => {
           this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
@@ -1940,6 +1942,7 @@ export class AnomalyService
         });
       }
       this.openDivergenceReads.delete(ctx.connectionId);
+      this.crossCheckDeadline.delete(ctx.connectionId);
     }
   }
 
@@ -2503,7 +2506,7 @@ export class AnomalyService
         // mid-failover) skips that master rather than losing the whole view.
         try {
           const replicas = await ctx.client.getSentinelReplicas(master.name);
-          for (const replica of replicas) replicaAddrs.add(`${replica.ip.toLowerCase()}:${replica.port}`);
+          for (const replica of replicas) replicaAddrs.add(`${replica.ip}:${replica.port}`);
           findings.push(...detectSentinelDrift(master, replicas));
         } catch (replicaErr) {
           unreadMasters.add(master.name);
@@ -8418,12 +8421,24 @@ export class AnomalyService
     try {
       const readReplica = this.replicaReader(ctx.connectionId, address.host, address.port);
       if (!readReplica) return null;
-      const [replica, primary] = await withTimeout(
-        Promise.all([readReplica(), readPrimary()]),
+      let deadline = this.crossCheckDeadline.get(ctx.connectionId);
+      if (deadline === null) {
+        deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+        this.crossCheckDeadline.set(ctx.connectionId, deadline);
+      }
+      const budget = Math.min(
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        deadline === undefined ? Infinity : deadline - Date.now(),
+      );
+      if (budget <= 0) throw new Error('no time left in this poll');
+      return await withTimeout(
+        (async () => {
+          const replica = await readReplica();
+          return readReplicaView(replica, await readPrimary());
+        })(),
+        budget,
         `Reading replica ${replicaAddr} timed out`,
       );
-      return readReplicaView(replica, primary);
     } catch (err) {
       this.logger.debug(
         `Could not read replica ${replicaAddr} of ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -8458,11 +8473,13 @@ export class AnomalyService
         return readNode(discovery.getNodeConnection(node.id, connectionId));
       };
     }
-    if (
-      this.sentinelReplicaAddrs.get(connectionId)?.has(`${host.toLowerCase()}:${port}`) &&
-      this.connectionRegistry.sentinelDataNodeCredentials(connectionId) !== null
-    ) {
-      return () => readNode(discovery.getAddressConnection(host, port, connectionId));
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    const seedId = membership?.source === 'sentinel' ? membership.seedId : connectionId;
+    const wanted = `${host.toLowerCase()}:${port}`;
+    const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
+    const sentinelAddress = reported ? splitHostPort(reported) : null;
+    if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
+      return () => readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId));
     }
     return null;
   }
@@ -8531,7 +8548,13 @@ export class AnomalyService
       if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
     }
     void this.clusterDiscovery
-      ?.retainAddressConnections(ctx.connectionId, new Set(claimed.filter((t) => !t.nodeId).map((t) => t.addr)))
+      ?.retainAddressConnections(
+        ctx.connectionId,
+        new Set([
+          ...claimed.filter((t) => !t.nodeId).map((t) => t.addr),
+          ...(this.sentinelReplicaAddrs.get(ctx.connectionId) ?? []),
+        ]),
+      )
       .catch(() => undefined);
     const targets = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,

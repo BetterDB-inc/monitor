@@ -35,8 +35,9 @@ export function describeReplicaView(view: ReplicaView): string {
   }
   const reported = ` The replica confirms it is ${formatBytes(view.gapBytes)} behind`;
   if (view.applyBacklogBytes === null) return `${reported}.`;
-  if (view.applyBacklogBytes >= DIVERGENCE_FLOOR_BYTES) {
-    return `${reported}; it has received ${formatBytes(view.applyBacklogBytes)} it has not applied yet, so it is slow to apply.`;
+  if (view.applyBacklogBytes === 0) {
+    return `${reported}; it has applied everything it received, so the stream is not reaching it fast enough.`;
   }
-  return `${reported}; it has applied everything it received, so the stream is not reaching it fast enough.`;
+  const unapplied = `${reported}; it has received ${formatBytes(view.applyBacklogBytes)} it has not applied yet`;
+  return view.applyBacklogBytes >= DIVERGENCE_FLOOR_BYTES ? `${unapplied}, so it is slow to apply.` : `${unapplied}.`;
 }

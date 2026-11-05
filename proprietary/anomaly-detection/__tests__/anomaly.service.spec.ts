@@ -13931,6 +13931,71 @@ describe('AnomalyService', () => {
           expect(hook()).toHaveBeenCalledTimes(1);
         });
 
+        it('reads the replica of a Sentinel member through its seed', async () => {
+          const replica = replicaClient(10_000 * MiB);
+          const registry = (service as any).connectionRegistry;
+          registry.getConfig.mockImplementation((id: string) =>
+            id === 'conn-1' ? { id, membership: { source: 'sentinel', seedId: 'seed-s', nodeId: 'n' } } : null,
+          );
+          registry.sentinelDataNodeCredentials.mockImplementation((id: string) =>
+            id === 'seed-s' ? { username: 'data', password: 'secret' } : null,
+          );
+          (service as any).sentinelReplicaAddrs.set('seed-s', new Set(['10.0.1.6:6379']));
+          const getAddressConnection = jest.fn().mockResolvedValue(replica);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getAddressConnection };
+
+          const view = await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, async () => ({
+            master_repl_offset: String(1_000 * MiB),
+            master_replid: 'b'.repeat(40),
+          }));
+
+          expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'seed-s');
+          expect(view).toMatchObject({ gapBytes: 0, linkStatus: 'up' });
+        });
+
+        it('skips the cross-check once the poll has used up its time', async () => {
+          clusterWith(nodeClient([2]), replicaClient(10_000 * MiB));
+          (service as any).crossCheckDeadline.set('conn-1', T0 - 1);
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          const readPrimary = jest.fn();
+
+          const view = await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, readPrimary);
+
+          expect(view).toBeNull();
+          expect(readPrimary).not.toHaveBeenCalled();
+        });
+
+        it('reads the replica before the primary', async () => {
+          const order: string[] = [];
+          const replica = replicaClient(10_000 * MiB);
+          replica.info.mockImplementation(async () => {
+            order.push('replica');
+            return ['# Replication', 'role:slave', `master_replid:${'b'.repeat(40)}`, 'slave_repl_offset:1'].join('\r\n');
+          });
+          clusterWith(nodeClient([2]), replica);
+
+          await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, async () => {
+            order.push('primary');
+            return { master_repl_offset: '1', master_replid: 'b'.repeat(40) };
+          });
+
+          expect(order).toEqual(['replica', 'primary']);
+        });
+
+        it('keeps Sentinel replica connections open across the topology prune', async () => {
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
+          const retainAddressConnections = jest.fn().mockResolvedValue(undefined);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections,
+            getAddressConnection: jest.fn().mockResolvedValue(nodeClient([2])),
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 1, T0);
+
+          expect(retainAddressConnections).toHaveBeenCalledWith('conn-1', new Set([NODE, NODE_REPLICA]));
+        });
+
         it('reads a replica that is registered as its own connection', async () => {
           clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), new Error('not used'));
           const registry = (service as any).connectionRegistry;
