@@ -98,6 +98,7 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
   'betterdb_anomaly_by_metric',
   'betterdb_correlated_groups_by_severity',
   'betterdb_correlated_groups_by_pattern',
+  'betterdb_incident_active',
 ]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
@@ -157,6 +158,10 @@ interface ConnectionMetricState {
   currentVectorIndexLabels: Set<string>;
   // Replication output-buffer pressure labels (per-connection)
   currentReplBufferReplicaLabels: Set<string>;
+  signalReplicaLabelsByNode: Map<string, Set<string>>;
+  signalNodes: Set<string>;
+  signalConnLabel: string | null;
+  currentIncidentLabels: Set<string>;
   // Commandstats labels (per-connection)
   currentCommandStatsLabels: Set<string>;
   // Inference latency labels (per-connection)
@@ -376,6 +381,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyDetectionBufferReady: Gauge;
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
+  private replicationGapBytes: Gauge;
+  private replicationSecondsBehind: Gauge;
+  private replicationDivergenceLevel: Gauge;
+  private replicationWriteRate: Gauge;
+  private replicationBacklogCoverage: Gauge;
+  private connectionsReceivedPerSecond: Gauge;
+  private connectionChurnPerOp: Gauge;
+  private retryAmplificationState: Gauge;
+  private incidentActive: Gauge;
 
   // Metric Forecasting
   private metricForecastTimeToLimitSeconds: Gauge;
@@ -654,6 +668,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentVectorIndexLabels: new Set(),
         // Replication output-buffer pressure labels
         currentReplBufferReplicaLabels: new Set(),
+        signalReplicaLabelsByNode: new Map(),
+        signalNodes: new Set(),
+        signalConnLabel: null,
+        currentIncidentLabels: new Set(),
         // Commandstats labels
         currentCommandStatsLabels: new Set(),
         // Inference latency labels
@@ -1151,6 +1169,52 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'anomaly_buffer_stddev',
       'Rolling stddev for anomaly detection',
       ['metric_type'],
+    );
+
+    this.replicationGapBytes = this.createGauge(
+      'replication_gap_bytes',
+      'Replica offset gap behind its primary in the latest closed divergence window',
+      ['node', 'replica'],
+    );
+    this.replicationSecondsBehind = this.createGauge(
+      'replication_seconds_behind',
+      'Estimated seconds the replica trails its primary in the latest closed divergence window',
+      ['node', 'replica'],
+    );
+    this.replicationDivergenceLevel = this.createGauge(
+      'replication_divergence_level',
+      'Replication divergence level per replica: 0 none, 1 warning, 2 critical',
+      ['node', 'replica'],
+    );
+    this.replicationWriteRate = this.createGauge(
+      'replication_write_rate_bytes_per_second',
+      'Smoothed replication stream write rate of the primary in bytes per second',
+      ['node'],
+    );
+    this.replicationBacklogCoverage = this.createGauge(
+      'replication_backlog_coverage_seconds',
+      'Seconds of writes the replication backlog holds at the current write rate',
+      ['node'],
+    );
+    this.connectionsReceivedPerSecond = this.createGauge(
+      'connections_received_per_second',
+      'New client connections accepted per second',
+      ['node'],
+    );
+    this.connectionChurnPerOp = this.createGauge(
+      'connection_churn_per_op',
+      'New client connections per command processed',
+      ['node'],
+    );
+    this.retryAmplificationState = this.createGauge(
+      'retry_amplification_state',
+      'Retry amplification classification: 0 none, 1 candidate, 2 amplifying',
+      ['node'],
+    );
+    this.incidentActive = this.createGauge(
+      'incident_active',
+      'Open incidents per connection, by matched pattern and recovery status',
+      ['pattern', 'status'],
     );
 
     // Metric Forecasting
@@ -3656,6 +3720,180 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     state.currentReplBufferReplicaLabels = currentLabels;
   }
 
+  updateReplicationSignals(
+    connectionId: string,
+    node: string,
+    signals: {
+      replicas: ReadonlyArray<{
+        replica: string;
+        gapBytes: number | null;
+        secondsBehind: number | null;
+        level: number;
+      }>;
+      writeRateBytesPerSecond: number | null;
+      backlogCoverageSeconds: number | null;
+    },
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
+    const currentLabels = new Set<string>();
+
+    for (const entry of signals.replicas) {
+      currentLabels.add(entry.replica);
+      this.replicationDivergenceLevel.labels(connLabel, node, entry.replica).set(entry.level);
+      this.setSignalOrRemove(
+        this.replicationGapBytes,
+        [connLabel, node, entry.replica],
+        entry.gapBytes,
+      );
+      this.setSignalOrRemove(
+        this.replicationSecondsBehind,
+        [connLabel, node, entry.replica],
+        entry.secondsBehind,
+      );
+    }
+
+    for (const staleLabel of state.signalReplicaLabelsByNode.get(node) ?? []) {
+      if (!currentLabels.has(staleLabel)) {
+        this.removeReplicaSignals(connLabel, node, staleLabel);
+      }
+    }
+    state.signalReplicaLabelsByNode.set(node, currentLabels);
+
+    this.setSignalOrRemove(
+      this.replicationWriteRate,
+      [connLabel, node],
+      signals.writeRateBytesPerSecond,
+    );
+    this.setSignalOrRemove(
+      this.replicationBacklogCoverage,
+      [connLabel, node],
+      signals.backlogCoverageSeconds,
+    );
+  }
+
+  updateRetrySignals(
+    connectionId: string,
+    node: string,
+    signals: {
+      connectsPerSecond: number | null;
+      churnPerOp: number | null;
+      retryState: number;
+    },
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
+    this.setSignalOrRemove(
+      this.connectionsReceivedPerSecond,
+      [connLabel, node],
+      signals.connectsPerSecond,
+    );
+    this.setSignalOrRemove(this.connectionChurnPerOp, [connLabel, node], signals.churnPerOp);
+    this.retryAmplificationState.labels(connLabel, node).set(signals.retryState);
+  }
+
+  clearNodeSignals(connectionId: string, node: string): void {
+    const state = this.perConnectionState.get(connectionId);
+    if (state === undefined || !state.signalNodes.has(node)) {
+      return;
+    }
+    const connLabel = this.getConnectionLabel(connectionId);
+    state.signalNodes.delete(node);
+    const replicas = state.signalReplicaLabelsByNode.get(node) ?? new Set<string>();
+    state.signalReplicaLabelsByNode.delete(node);
+    if (connLabel === null) {
+      return;
+    }
+    for (const replica of replicas) {
+      this.removeReplicaSignals(connLabel, node, replica);
+    }
+    this.replicationWriteRate.remove(connLabel, node);
+    this.replicationBacklogCoverage.remove(connLabel, node);
+    this.removeRetrySignals(connLabel, node);
+  }
+
+  clearRetrySignals(connectionId: string, node: string): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel !== null) {
+      this.removeRetrySignals(connLabel, node);
+    }
+  }
+
+  private removeRetrySignals(connLabel: string, node: string): void {
+    this.connectionsReceivedPerSecond.remove(connLabel, node);
+    this.connectionChurnPerOp.remove(connLabel, node);
+    this.retryAmplificationState.remove(connLabel, node);
+  }
+
+  updateActiveIncidents(
+    byConnection: ReadonlyMap<
+      string,
+      ReadonlyArray<{ pattern: string; status: string; count: number }>
+    >,
+  ): void {
+    for (const [connectionId, entries] of byConnection) {
+      const connLabel = this.getConnectionLabel(connectionId);
+      if (connLabel === null) {
+        continue;
+      }
+      const state = this.getConnectionState(connectionId);
+      state.signalConnLabel = connLabel;
+      const currentLabels = new Set<string>();
+      for (const entry of entries) {
+        currentLabels.add(JSON.stringify([entry.pattern, entry.status]));
+        this.incidentActive.labels(connLabel, entry.pattern, entry.status).set(entry.count);
+      }
+      this.removeStaleIncidentLabels(connLabel, state, currentLabels);
+    }
+    for (const [connectionId, state] of this.perConnectionState) {
+      if (byConnection.has(connectionId) || state.currentIncidentLabels.size === 0) {
+        continue;
+      }
+      const connLabel = this.getConnectionLabel(connectionId);
+      if (connLabel !== null) {
+        this.removeStaleIncidentLabels(connLabel, state, new Set());
+      }
+    }
+  }
+
+  private removeStaleIncidentLabels(
+    connLabel: string,
+    state: ConnectionMetricState,
+    currentLabels: Set<string>,
+  ): void {
+    for (const staleLabel of state.currentIncidentLabels) {
+      if (!currentLabels.has(staleLabel)) {
+        const [pattern, status] = JSON.parse(staleLabel) as [string, string];
+        this.incidentActive.remove(connLabel, pattern, status);
+      }
+    }
+    state.currentIncidentLabels = currentLabels;
+  }
+
+  private removeReplicaSignals(connLabel: string, node: string, replica: string): void {
+    this.replicationGapBytes.remove(connLabel, node, replica);
+    this.replicationSecondsBehind.remove(connLabel, node, replica);
+    this.replicationDivergenceLevel.remove(connLabel, node, replica);
+  }
+
+  private setSignalOrRemove(gauge: Gauge, labels: string[], value: number | null): void {
+    if (value === null || !Number.isFinite(value)) {
+      gauge.remove(...labels);
+    } else {
+      gauge.labels(...labels).set(value);
+    }
+  }
+
   updateCommandstatsMetrics(
     connectionId: string,
     samples: ReadonlyArray<{
@@ -3878,7 +4116,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
     this.retireStorageEpoch(connectionId);
-    const label = this.freshness.forget(connectionId);
+    const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? undefined;
     if (label !== undefined) {
       this.releaseLabel(label);
     }
