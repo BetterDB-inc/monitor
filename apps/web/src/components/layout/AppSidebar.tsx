@@ -113,7 +113,7 @@ export function AppSidebar({ cloudUser, onFeedbackClick, onShortcutsClick }: Sid
           </NavItem>
           <NavItem
             to="/anomalies"
-            active={location.pathname === '/anomalies'}
+            active={location.pathname === '/anomalies' || location.pathname.startsWith('/anomalies/')}
             requiredFeature={Feature.ANOMALY_DETECTION}
           >
             Anomaly Detection

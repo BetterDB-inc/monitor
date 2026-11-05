@@ -48,6 +48,7 @@ import type {
   AnomalySummary,
   AnomalyBufferStats,
   ReplicaDivergenceHistory,
+  IncidentTimeline,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -449,6 +450,18 @@ export const metricsApi = {
       `/anomaly/replication-divergence${queryString ? `?${queryString}` : ''}`,
     );
   },
+
+  getIncidents: (params?: { limit?: number; startTime?: number; endTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.limit) query.append('limit', params.limit.toString());
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<IncidentTimeline[]>(`/anomaly/incidents${queryString ? `?${queryString}` : ''}`);
+  },
+
+  getIncident: (incidentId: string) =>
+    fetchApi<IncidentTimeline>(`/anomaly/incidents/${encodeURIComponent(incidentId)}`),
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {
