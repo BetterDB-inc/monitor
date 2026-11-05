@@ -427,25 +427,27 @@ Detection runs on each monitored connection that currently reports a primary rol
 
 ## Incident Sequence Rules
 
-Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap as long as it stays within the rule's span.
+Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap, as long as the rule's span and the incident's 30-minute limit allow it.
 
-A step only counts once every step before it has occurred, in order, within the rule's span. A later step alone never joins or extends an incident. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster.
+A rule's span is measured from its earliest matched event to its latest, using the time each event is stamped with. It is not how long a signal stays open: a warning raised earlier than the span allows does not count, however long it stays active. Optional signals are taken in when they are stamped within one span of the first step, before or after it.
 
-| Rule | Steps | Optional | Span | Same connection |
-| --- | --- | --- | --- | --- |
-| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`, `memory_overhead` or `output_kbps` | `connection_churn` | 10 min | yes |
-| `divergence_under_pressure` | `ops_per_sec` or `input_kbps` → `replication_divergence` → `memory_used`, `memory_overhead` or `repl_buffer_pressure` | `evicted_keys`, `evicted_clients`, `fork_memory_risk` | 15 min | yes |
-| `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | `command_p99` | 15 min | no |
-| `retry_storm` | `command_p99` or `error_replies` → `retry_amplification` → `client_saturation`, `load_saturation`, `rejected_connections` or `client_lockout_risk` | `connection_churn` | 10 min | yes |
-| `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | — | 30 min | yes |
+Steps count in order: each step must come after the steps before it, within the span. A step with a lead may also come before the steps before it, by up to its lead. A later step alone never joins or extends an incident. A first step joins an incident across a quiet gap only when the incident already holds a lead step of the rule, stamped within that lead. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster. When two rules match the same incident and give the same recommendation, it is listed once, on the first match.
+
+| Rule | Steps | Lead | Optional | Span | Same connection |
+| --- | --- | --- | --- | --- | --- |
+| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`, `memory_overhead` or `output_kbps` | — | `connection_churn` | 10 min | yes |
+| `divergence_under_pressure` | `ops_per_sec` or `input_kbps` → `replication_divergence` → `memory_used`, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`, `evicted_clients`, `fork_memory_risk` | 15 min | yes |
+| `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | — | `command_p99` | 15 min | no |
+| `retry_storm` | `command_p99` or `error_replies` → `retry_amplification` → `client_saturation`, `load_saturation`, `rejected_connections` or `client_lockout_risk` | saturation step: 10 min | `connection_churn` | 10 min | yes |
+| `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | `resync_escalation`: 5 min | — | 30 min | yes |
 
 Why each span is that long:
 
 - **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
-- **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that.
+- **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that. The divergence detector counts memory and buffer pressure seen since its divergence span began, so pressure may come before the divergence anywhere in the span.
 - **reshard_under_writes**: skew only fires during an active reshard, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
-- **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation follows within minutes or it has another cause.
-- **backlog_exhaustion**: a coverage warning can stand for a long time before the disconnect that exhausts it, so this rule uses the full incident span.
+- **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation shows up within minutes of it or it has another cause. The retry detector rates a storm critical on saturation it already holds, so saturation may come before the retry amplification anywhere in the span.
+- **backlog_exhaustion**: a coverage warning can be raised well before the disconnect that exhausts it, so this rule allows the full incident span from the warning to the resync. A resync escalation is stamped with the time the replica disconnected, up to five minutes before it is raised, so it may be stamped up to five minutes before the coverage warning.
 
 `reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
 
