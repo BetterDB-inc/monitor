@@ -44,7 +44,14 @@ In BetterDB, go to **Settings → MCP Tokens** and generate a new token.
 
 ### 2. Configure your MCP client
 
-Add to your MCP client config (e.g. Claude Code or OpenAI Codex):
+In Claude Code, install the BetterDB plugin and enter your URL and token when prompted:
+
+```bash
+claude plugin marketplace add BetterDB-inc/monitor
+claude plugin install betterdb@betterdb
+```
+
+For other clients, or to configure Claude Code by hand, add to your MCP client config (e.g. Claude Code or OpenAI Codex):
 
 ```json
 {

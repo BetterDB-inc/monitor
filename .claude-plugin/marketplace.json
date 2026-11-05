@@ -1,0 +1,17 @@
+{
+  "name": "betterdb",
+  "description": "BetterDB plugins for Claude Code",
+  "owner": {
+    "name": "BetterDB Inc.",
+    "url": "https://betterdb.com"
+  },
+  "plugins": [
+    {
+      "name": "betterdb",
+      "source": "./packages/mcp/claude-plugin",
+      "description": "Valkey and Redis observability from BetterDB Monitor",
+      "category": "monitoring",
+      "tags": ["valkey", "redis", "observability"]
+    }
+  ]
+}

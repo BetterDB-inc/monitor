@@ -1,0 +1,28 @@
+{
+  "name": "betterdb",
+  "displayName": "BetterDB",
+  "version": "1.5.0",
+  "description": "Valkey and Redis observability from BetterDB Monitor: health, slowlog, latency, memory, hot keys, anomalies and cluster state",
+  "author": {
+    "name": "BetterDB Inc.",
+    "url": "https://betterdb.com"
+  },
+  "homepage": "https://betterdb.com",
+  "repository": "https://github.com/BetterDB-inc/monitor",
+  "license": "MIT",
+  "keywords": ["valkey", "redis", "observability", "monitoring", "database", "slowlog", "cluster"],
+  "userConfig": {
+    "betterdb_url": {
+      "type": "string",
+      "title": "BetterDB URL",
+      "description": "URL of your BetterDB Monitor, for example https://<workspace>.app.betterdb.com or http://localhost:3001",
+      "default": "http://localhost:3001"
+    },
+    "betterdb_token": {
+      "type": "string",
+      "title": "MCP token",
+      "description": "Token from Settings → MCP Tokens in BetterDB. Leave empty for a local monitor without auth",
+      "sensitive": true
+    }
+  }
+}
