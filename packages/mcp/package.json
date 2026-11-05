@@ -23,7 +23,8 @@
     "betterdb-mcp": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills"
   ],
   "publishConfig": {
     "access": "public"
