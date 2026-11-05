@@ -392,10 +392,13 @@ Attribution sends no `CLIENT LIST` of its own. It reuses the client analytics po
 
 Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
 
-Detection runs on each monitored connection that currently reports a primary role, because the replica offsets come from the primary's own `INFO replication`. Nothing covers a primary that isn't registered as its own connection:
+Replica offsets come from the primary's own `INFO replication`, so detection runs on every connection that reports a primary role, and also on primaries reached through a cluster or Sentinel connection:
 
-- A Sentinel connection reports no offsets, so it gets no divergence detection. Set `SENTINEL_AUTO_REGISTER_NODES` to register the primaries it monitors. See [Sentinel Auto-Registration](./sentinel-auto-registration.md).
-- A cluster connection only reads the node it's connected to, so shards whose primary lives elsewhere, including any shard after a failover, are not covered. Set `CLUSTER_AUTO_REGISTER_NODES` to register every node. See [Cluster Auto-Registration](./cluster-auto-registration.md).
+- A cluster connection reads `INFO replication` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. These connections log in with the cluster connection's own username and password. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed.
+- A Sentinel connection reads `INFO replication` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. SSH-tunnelled connections are skipped. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
+- Primaries that are already monitored as their own connected connection are skipped. Nodes flagged as failed or down are not read, but their open alerts stay open until they leave the topology. Up to 64 primaries are checked per connection, each with a 2 second timeout. Primaries past that limit are left to another connection that reaches them, and alerts of primaries no connection checks are closed. A primary that can't be reached is retried after 1 poll, then after 2, 4 and up to 8 polls, until a read succeeds. Unreachable primaries are logged once, when the count changes. When several connections reach the same primary, such as two registered nodes of one cluster or two Sentinels, only the first checks it. Another connection takes over when the first can no longer read it, or stops polling for 30 seconds.
+
+Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
 
 **Recommended actions**:
 - Compare the replica offset gap with the primary write rate over the next few minutes

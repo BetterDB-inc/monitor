@@ -453,6 +453,26 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
   });
 
+  describe('sentinelDataNodeCredentials', () => {
+    it('returns only the data node credentials the seed configures', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'secret' });
+      expect(registry.sentinelDataNodeCredentials('seed')).toEqual({ username: 'app', password: 'secret' });
+    });
+
+    it.each<[string, Partial<DatabaseConnectionConfig>]>([
+      ['no data node credentials', {}],
+      ['a still-encrypted data node password', { nodeUsername: 'app', nodePassword: 'c', nodePasswordEncrypted: true }],
+      ['failed decryption', { nodeUsername: 'app', nodePassword: 's', credentialStatus: 'decryption_failed' }],
+      ['an SSH tunnel', { nodeUsername: 'app', nodePassword: 's', sshTunnel: { enabled: true } as never }],
+      ['an external connection', { nodeUsername: 'app', nodePassword: 's', connectionType: 'external' }],
+    ])('returns null for a seed with %s', (_label, overrides) => {
+      const { registry } = build();
+      put(registry, { ...seed, ...overrides });
+      expect(registry.sentinelDataNodeCredentials('seed')).toBeNull();
+    });
+  });
+
   it('never exposes the data node password in list()', () => {
     const { registry } = build();
     put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'secret', nodePasswordEncrypted: true });

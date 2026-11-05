@@ -46,13 +46,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
+  private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
   private readonly DISCOVERY_CACHE_TTL = 30000; // 30 seconds
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
-  private readonly MAX_CONNECTIONS = 100; // Maximum number of concurrent connections
+  private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -69,16 +70,25 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     if (cached) {
       return cached;
     }
+    const pending = this.discoveryInFlight.get(cacheKey);
+    if (pending) return pending;
 
-    try {
-      const client = this.connectionRegistry.get(connectionId);
-      return this.remember(cacheKey, await client.getClusterNodes());
-    } catch (error) {
-      this.logger.error(
-        `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
-      );
-      throw error;
-    }
+    const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
+      try {
+        const nodes = await this.connectionRegistry.get(connectionId).getClusterNodes();
+        if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
+        return this.remember(cacheKey, nodes);
+      } catch (error) {
+        this.logger.error(
+          `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
+        );
+        throw error;
+      } finally {
+        if (this.discoveryInFlight.get(cacheKey) === discovery) this.discoveryInFlight.delete(cacheKey);
+      }
+    });
+    this.discoveryInFlight.set(cacheKey, discovery);
+    return discovery;
   }
 
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
@@ -126,6 +136,22 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   private remember(cacheKey: string, clusterNodes: ClusterNode[]): DiscoveredNode[] {
+    const discovered = this.toDiscoveredNodes(clusterNodes);
+
+    // Store in per-connection cache
+    this.discoveryCacheByConnection.set(cacheKey, {
+      nodes: discovered,
+      lastDiscoveryTime: Date.now(),
+    });
+
+    this.logger.log(
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+    );
+
+    return discovered;
+  }
+
+  private toDiscoveredNodes(clusterNodes: ClusterNode[]): DiscoveredNode[] {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
@@ -152,22 +178,70 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         ...(node.hostname ? { hostname: node.hostname } : {}),
       });
     }
-
-    // Store in per-connection cache
-    this.discoveryCacheByConnection.set(cacheKey, {
-      nodes: discovered,
-      lastDiscoveryTime: Date.now(),
-    });
-
-    this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
-    );
-
     return discovered;
   }
 
   async getNodeConnection(nodeId: string, connectionId?: string): Promise<Valkey> {
-    const existingConnection = this.discoveredNodes.get(nodeId);
+    // Bind the node client to the connection that owns it now, so a later
+    // default-connection change can't swap in another connection's TLS identity.
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const nodes = await this.discoverNodes(ownerId);
+    const node = nodes.find((n) => n.id === nodeId);
+
+    if (!node) {
+      throw new Error(`Node ${nodeId} not found in cluster`);
+    }
+
+    const key = this.nodeClientKey(nodeId, ownerId);
+    const existing = this.discoveredNodes.get(key);
+    if (existing && existing.node.address.split('@')[0] !== node.address.split('@')[0]) {
+      this.discoveredNodes.delete(key);
+      existing.client.disconnect();
+    }
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+
+    // Cluster node addresses include bus port: "host:port@busport"
+    // We only need the client port, so split on '@' first
+    const [host, portStr] = node.address.split('@')[0].split(':');
+    const port = parseInt(portStr, 10);
+
+    if (!host || isNaN(port)) {
+      throw new Error(`Invalid node address: ${node.address}`);
+    }
+
+    const primaryClient = this.connectionRegistry.get(ownerId).getClient();
+    return this.openNodeClient(key, node, host, port, ownerId, {
+      username: primaryClient.options.username || '',
+      password: primaryClient.options.password || '',
+    });
+  }
+
+  async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    const credentials = this.connectionRegistry.sentinelDataNodeCredentials(connectionId);
+    if (!credentials) {
+      throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
+    }
+    const key = `addr:${connectionId}:${host}:${port}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    const node: DiscoveredNode = {
+      id: key,
+      address: `${host}:${port}`,
+      role: 'master',
+      slots: [],
+      configEpoch: 0,
+      healthy: true,
+      flags: [],
+    };
+    return this.openNodeClient(key, node, host, port, connectionId, {
+      username: credentials.username ?? '',
+      password: credentials.password ?? '',
+    });
+  }
+
+  private async reuseNodeClient(key: string): Promise<Valkey | null> {
+    const existingConnection = this.discoveredNodes.get(key);
     if (existingConnection) {
       if (existingConnection.client.status === 'ready') {
         // Reuse the live client and refresh its check stamp. A ready connection
@@ -190,7 +264,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         existingConnection.healthy = true;
         return existingConnection.client;
       } catch (error) {
-        this.logger.warn(`Failed to reconnect to node ${nodeId}: ${error}`);
+        this.logger.warn(`Failed to reconnect to node ${key}: ${error}`);
         existingConnection.healthy = false;
       }
     }
@@ -213,30 +287,17 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         }
       }
     }
+    return null;
+  }
 
-    // Bind the node client to the connection that owns it now, so a later
-    // default-connection change can't swap in another connection's TLS identity.
-    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
-    const nodes = await this.discoverNodes(ownerId);
-    const node = nodes.find((n) => n.id === nodeId);
-
-    if (!node) {
-      throw new Error(`Node ${nodeId} not found in cluster`);
-    }
-
-    // Cluster node addresses include bus port: "host:port@busport"
-    // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
-
-    if (!host || isNaN(port)) {
-      throw new Error(`Invalid node address: ${node.address}`);
-    }
-
-    const dbClient = this.connectionRegistry.get(ownerId);
-    const primaryClient = dbClient.getClient();
-    const username = primaryClient.options.username || '';
-    const password = primaryClient.options.password || '';
+  private async openNodeClient(
+    key: string,
+    node: DiscoveredNode,
+    host: string,
+    port: number,
+    ownerId: string | undefined,
+    { username, password }: { username: string; password: string },
+  ): Promise<Valkey> {
     const tls = this.nodeTlsOptions(ownerId, host, node.hostname);
 
     const client = new Valkey({
@@ -261,10 +322,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Only log each unique connection error once to avoid log spam
     client.on('error', (err) => {
       const errorCode = (err as any).code || err.name;
-      const errorKey = `${nodeId}-${host}:${port}-${errorCode}`;
+      const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
         this.logger.warn(
-          `Cannot connect to node ${nodeId.substring(0, 12)} at ${host}:${port}: ${err.message}`,
+          `Cannot connect to node ${key.substring(0, 12)} at ${host}:${port}: ${err.message}`,
         );
         // Prevent unbounded growth
         if (this.loggedConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
@@ -294,24 +355,29 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       // Close any stale client we're about to replace so the overwrite never
       // orphans a still-open socket (belt-and-suspenders for the not-ready path
       // that falls through above).
-      const replaced = this.discoveredNodes.get(nodeId);
+      let storeKey = key;
+      let replaced = this.discoveredNodes.get(storeKey);
+      if (replaced && replaced.client !== client && replaced.connectionId !== ownerId) {
+        storeKey = `node:${ownerId}:${node.id}`;
+        replaced = this.discoveredNodes.get(storeKey);
+      }
       if (replaced && replaced.client !== client) {
         await this.closeNodeClient(replaced.client);
       }
 
-      this.discoveredNodes.set(nodeId, connection);
-      this.logger.log(`Connected to node ${nodeId} at ${host}:${port}`);
+      this.discoveredNodes.set(storeKey, connection);
+      this.logger.log(`Connected to node ${key} at ${host}:${port}`);
 
       // Clear logged errors for this node on successful connection
-      this.clearNodeErrors(nodeId);
+      this.clearNodeErrors(key);
 
       return client;
     } catch (error) {
       // Only log each unique connection error once to avoid spam
-      const errorKey = `connect-${nodeId}`;
+      const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
         this.logger.debug(
-          `Failed to connect to node ${nodeId} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+          `Failed to connect to node ${key} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
         );
         // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
@@ -377,7 +443,15 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return Promise.all(healthChecks);
   }
 
+  private nodeClientKey(nodeId: string, ownerId: string | undefined): string {
+    const scoped = `node:${ownerId}:${nodeId}`;
+    if (this.discoveredNodes.has(scoped)) return scoped;
+    const shared = this.discoveredNodes.get(nodeId);
+    return !shared || shared.connectionId === ownerId ? nodeId : scoped;
+  }
+
   private async healthCheckNode(node: DiscoveredNode): Promise<NodeHealth> {
+    const ownerId = this.connectionRegistry.getDefaultId() || undefined;
     try {
       const client = await this.getNodeConnection(node.id);
       const result = await Promise.race([
@@ -389,7 +463,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
       const healthy = result === 'PONG';
 
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = healthy;
         connection.lastHealthCheck = Date.now();
@@ -402,7 +476,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         lastCheck: Date.now(),
       };
     } catch (error) {
-      const connection = this.discoveredNodes.get(node.id);
+      const connection = this.discoveredNodes.get(this.nodeClientKey(node.id, ownerId));
       if (connection) {
         connection.healthy = false;
         connection.lastHealthCheck = Date.now();
@@ -420,6 +494,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   getActiveConnections(): NodeConnection[] {
     return Array.from(this.discoveredNodes.values());
+  }
+
+  async releaseConnection(connectionId: string): Promise<void> {
+    const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
+    for (const [key] of owned) this.discoveredNodes.delete(key);
+    this.discoveryCacheByConnection.delete(connectionId);
+    this.discoveryInFlight.delete(connectionId);
+    await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
+  }
+
+  async retainAddressConnections(connectionId: string, addrs: ReadonlySet<string>): Promise<void> {
+    const prefix = `addr:${connectionId}:`;
+    const dropped = [...this.discoveredNodes].filter(
+      ([key]) => key.startsWith(prefix) && !addrs.has(key.slice(prefix.length)),
+    );
+    for (const [key] of dropped) this.discoveredNodes.delete(key);
+    await Promise.allSettled(dropped.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
   async disconnectAll(): Promise<void> {
