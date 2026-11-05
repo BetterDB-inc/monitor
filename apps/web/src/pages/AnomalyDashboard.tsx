@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { QueryErrorState, findExternalUnsupportedError } from '../components/QueryErrorState';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { Feature } from '@betterdb/shared';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
@@ -25,6 +25,7 @@ import {
   formatTime,
 } from '../components/anomalies/anomaly-display';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { ConnectionLink } from '../components/ConnectionLink';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
 import {
   dateRangeQuery,
@@ -235,10 +236,11 @@ export function AnomalyDashboard() {
     loading: incidentsLoading,
     lastUpdated: incidentsUpdated,
   } = usePolling<IncidentTimeline[]>({
-    fetcher: () => metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }),
+    fetcher: (signal) =>
+      metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }, signal),
     interval: INCIDENT_POLL_MS,
     enabled: tab === 'incidents' || expandedGroups.size > 0,
-    refetchKey: currentConnection?.id,
+    refetchKey: `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`,
   });
   const incidentByAnomaly = useMemo(() => incidentsByAnomaly(incidents), [incidents]);
 
@@ -346,13 +348,21 @@ export function AnomalyDashboard() {
                   }
                 />
               ) : (
-                <IncidentList
-                  incidents={incidents ?? undefined}
-                  now={incidentsUpdated?.getTime() ?? 0}
-                  loading={incidentsLoading}
-                  limit={INCIDENT_LIST_LIMIT}
-                  linkQuery={rangeQuery}
-                />
+                <>
+                  {incidentsError && (
+                    <p role="status" className="mb-3 text-sm text-yellow-600">
+                      Could not refresh incidents: {incidentsError.message}. Showing the last list
+                      loaded.
+                    </p>
+                  )}
+                  <IncidentList
+                    incidents={incidents ?? undefined}
+                    now={incidentsUpdated?.getTime() ?? 0}
+                    loading={incidentsLoading}
+                    limit={INCIDENT_LIST_LIMIT}
+                    linkQuery={rangeQuery}
+                  />
+                </>
               )}
             </CardContent>
           </Card>
@@ -563,12 +573,12 @@ export function AnomalyDashboard() {
                           </div>
 
                           {incident && (
-                            <Link
+                            <ConnectionLink
                               to={incidentPath(incident.incidentId, rangeQuery)}
                               className="inline-flex text-sm font-medium text-primary hover:underline"
                             >
                               View incident timeline
-                            </Link>
+                            </ConnectionLink>
                           )}
 
                           {/* Related Anomalies */}

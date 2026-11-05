@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { ConnectionLink } from '../../ConnectionLink';
 import { Siren } from 'lucide-react';
 import { EmptyState } from '../../ui/empty-state';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
@@ -66,12 +66,12 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
             return (
               <TableRow key={incident.incidentId}>
                 <TableCell>
-                  <Link
+                  <ConnectionLink
                     to={incidentPath(incident.incidentId, linkQuery)}
                     className="font-medium hover:underline"
                   >
                     {incidentTitle(incident)}
-                  </Link>
+                  </ConnectionLink>
                   <p className="text-xs text-muted-foreground">
                     {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
                   </p>

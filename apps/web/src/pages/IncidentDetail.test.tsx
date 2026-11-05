@@ -120,6 +120,32 @@ describe('IncidentDetail', () => {
     expect(screen.queryByText('Incident not found')).not.toBeInTheDocument();
   });
 
+  it('warns when a refresh fails after the incident loaded', () => {
+    polling.state = {
+      data: incident(),
+      error: new ApiError('Storage unavailable', 500),
+      loading: false,
+      lastUpdated: new Date(),
+    };
+
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Could not refresh the incident: Storage unavailable',
+    );
+  });
+
+  it('keeps the connection on the back link', () => {
+    polling.state = { data: incident(), error: null, loading: false, lastUpdated: new Date() };
+
+    renderAt('/anomalies/incidents/123-abc?connection=conn-2');
+
+    expect(screen.getByRole('link', { name: /Back to incidents/ })).toHaveAttribute(
+      'href',
+      '/anomalies?tab=incidents&connection=conn-2',
+    );
+  });
+
   it('says when the incident does not exist', () => {
     polling.state = {
       data: null,

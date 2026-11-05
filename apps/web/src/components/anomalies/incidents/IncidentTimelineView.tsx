@@ -58,10 +58,15 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
 
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
   const entries = orderedEntries(incident);
-  const stepOf = new Map<string, number | null>();
+  const namePattern = incident.sequenceMatches.length > 1;
+  const stepsOf = new Map<string, string[]>();
   for (const match of incident.sequenceMatches) {
     match.anomalyIds.forEach((id, i) => {
-      if (!stepOf.has(id)) stepOf.set(id, match.steps[i] ?? null);
+      const step = match.steps[i] ?? null;
+      const label = step === null ? 'Supporting signal' : `Step ${step}`;
+      const tags = stepsOf.get(id) ?? [];
+      tags.push(namePattern ? `${patternLabel(match.pattern)}: ${label}` : label);
+      stepsOf.set(id, tags);
     });
   }
   const duration = formatDuration(incidentDurationMs(incident, now));
@@ -153,7 +158,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
           <ol className="relative space-y-4 border-l pl-6">
             {entries.map((entry) => {
               const severity = SEVERITY_CONFIG[entry.severity];
-              const step = stepOf.get(entry.anomalyId);
+              const steps = stepsOf.get(entry.anomalyId) ?? [];
               return (
                 <li key={entry.anomalyId} data-testid="incident-entry" className="relative">
                   <span
@@ -169,11 +174,14 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                     >
                       {entry.severity.toUpperCase()}
                     </span>
-                    {step !== undefined && (
-                      <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                        {step === null ? 'Supporting signal' : `Step ${step}`}
+                    {steps.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
+                      >
+                        {tag}
                       </span>
-                    )}
+                    ))}
                     {entry.nodeAddr && (
                       <span className="text-xs text-muted-foreground">{entry.nodeAddr}</span>
                     )}

@@ -153,7 +153,9 @@ export const metricsApi = {
     if (options?.endTime) params.set('endTime', options.endTime.toString());
     if (options?.limit) params.set('limit', options.limit.toString());
     const queryString = params.toString();
-    return fetchApi<ScanSkewReport>(`/commandlog-analytics/scan-skew${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<ScanSkewReport>(
+      `/commandlog-analytics/scan-skew${queryString ? `?${queryString}` : ''}`,
+    );
   },
   getSlowLogPatternAnalysis: (count?: number) => {
     const params = count ? `?count=${count}` : '';
@@ -428,7 +430,9 @@ export const metricsApi = {
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
-    return fetchApi<CorrelatedAnomalyGroup[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<CorrelatedAnomalyGroup[]>(
+      `/anomaly/groups${queryString ? `?${queryString}` : ''}`,
+    );
   },
 
   getAnomalySummary: (params?: { startTime?: number; endTime?: number }) => {
@@ -451,17 +455,25 @@ export const metricsApi = {
     );
   },
 
-  getIncidents: (params?: { limit?: number; startTime?: number; endTime?: number }) => {
+  getIncidents: (
+    params?: { limit?: number; startTime?: number; endTime?: number },
+    signal?: AbortSignal,
+  ) => {
     const query = new URLSearchParams();
-    if (params?.limit) query.append('limit', params.limit.toString());
-    if (params?.startTime) query.append('startTime', params.startTime.toString());
-    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    if (params?.limit !== undefined) query.append('limit', params.limit.toString());
+    if (params?.startTime !== undefined) query.append('startTime', params.startTime.toString());
+    if (params?.endTime !== undefined) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
-    return fetchApi<IncidentTimeline[]>(`/anomaly/incidents${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<IncidentTimeline[]>(
+      `/anomaly/incidents${queryString ? `?${queryString}` : ''}`,
+      { signal },
+    );
   },
 
-  getIncident: (incidentId: string) =>
-    fetchApi<IncidentTimeline>(`/anomaly/incidents/${encodeURIComponent(incidentId)}`),
+  getIncident: (incidentId: string, signal?: AbortSignal) =>
+    fetchApi<IncidentTimeline>(`/anomaly/incidents/${encodeURIComponent(incidentId)}`, {
+      signal,
+    }),
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {

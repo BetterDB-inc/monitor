@@ -1,4 +1,5 @@
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { ConnectionLink } from '../components/ConnectionLink';
 import { AlertTriangle, ArrowLeft, SearchX } from 'lucide-react';
 import { metricsApi } from '../api/metrics';
 import { ApiError } from '../api/client';
@@ -23,7 +24,7 @@ export function IncidentDetail() {
     loading,
     lastUpdated,
   } = usePolling<IncidentTimeline>({
-    fetcher: () => metricsApi.getIncident(incidentId),
+    fetcher: (signal) => metricsApi.getIncident(incidentId, signal),
     interval: (latest) =>
       latest?.recovery.status === 'recovered' ? RECOVERED_INCIDENT_POLL_MS : OPEN_INCIDENT_POLL_MS,
     refetchKey: `${currentConnection?.id ?? ''}:${incidentId}`,
@@ -34,15 +35,26 @@ export function IncidentDetail() {
 
   return (
     <div className="space-y-6">
-      <Link
+      <ConnectionLink
         to={backTo}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="w-4 h-4" />
         Back to incidents
-      </Link>
+      </ConnectionLink>
       {incident ? (
         <>
+          {error && !notFound && (
+            <div
+              role="status"
+              className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4 text-sm"
+            >
+              <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
+              <p>
+                Could not refresh the incident: {error.message}. Showing the last timeline loaded.
+              </p>
+            </div>
+          )}
           {notFound && (
             <div
               role="status"

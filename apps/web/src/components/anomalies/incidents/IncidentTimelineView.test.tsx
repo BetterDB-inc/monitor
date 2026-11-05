@@ -158,6 +158,43 @@ describe('IncidentTimelineView', () => {
     expect(within(third).getByText('Step 3')).toBeInTheDocument();
   });
 
+  it('shows every rule step of an event that matched more than one rule', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          matchedPatterns: ['backlog_exhaustion', 'recovery_amplification'],
+          entries: [
+            entry({ anomalyId: 'a', metricType: 'repl_backlog' }),
+            entry({ anomalyId: 'b', metricType: 'resync_escalation', timestamp: T0 + 1 }),
+          ],
+          sequenceMatches: [
+            {
+              pattern: 'backlog_exhaustion',
+              anomalyIds: ['a', 'b'],
+              steps: [1, 2],
+              diagnosis: 'Backlog ran out',
+              recommendations: [],
+              severity: 'warning',
+            },
+            {
+              pattern: 'recovery_amplification',
+              anomalyIds: ['b'],
+              steps: [1],
+              diagnosis: 'Resync made it worse',
+              recommendations: [],
+              severity: 'warning',
+            },
+          ],
+        })}
+      />,
+    );
+
+    const [, second] = screen.getAllByTestId('incident-entry');
+    expect(within(second).getByText('Backlog Exhaustion: Step 2')).toBeInTheDocument();
+    expect(within(second).getByText('Recovery Amplification: Step 1')).toBeInTheDocument();
+  });
+
   it('titles an incident without a pattern by its first signal', () => {
     render(<IncidentTimelineView now={T0} incident={incident()} />);
     expect(screen.getByRole('heading', { name: 'Connections' })).toBeInTheDocument();
