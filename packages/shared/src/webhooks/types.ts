@@ -360,10 +360,17 @@ export interface ReplicationDivergenceData {
   slopeBytesPerWindow: number;
   windowCount: number;
   correlatedSignals: string[];
+  replicaView: ReplicationReplicaView | null;
   message: string;
   timestamp: number;
   instance: WebhookInstanceInfo;
   connectionId?: string;
+}
+
+export interface ReplicationReplicaView {
+  gapBytes: number;
+  linkStatus: string | null;
+  applyBacklogBytes: number | null;
 }
 
 export interface ReplicationRecoveredData {
