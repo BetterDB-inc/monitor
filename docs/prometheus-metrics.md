@@ -579,7 +579,7 @@ The two rate gauges are absent until two polls have produced a connection rate. 
 - `pattern`: each sequence pattern the incident matched (for example `retry_storm`, `backlog_exhaustion`), or `none` when it matched none. An incident that matched two patterns is counted under both.
 - `status`: `active`, `recovering`, `degraded`. Recovered incidents and incidents whose recovery is unknown are not counted.
 
-An incident that spans several connections is counted under each of them. An incident stays counted for as long as it is open, however long ago its last event was. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series. Unlike the other per-connection gauges, it is kept while the connection is stale, so an incident on a node that went down stays visible. If incidents cannot be read from storage, the last values are kept; after three failed refreshes in a row the series are removed.
+An incident that spans several connections is counted under each of them. An incident stays counted for as long as it is open, up to the 30-day incident lookback, including after a restart. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series. Unlike the other per-connection gauges, it is kept while the connection is stale, so an incident on a node that went down stays visible. If incidents cannot be read from storage, the last values are kept; after three failed refreshes in a row the series are removed.
 
 ### Metric Forecasting Metrics
 

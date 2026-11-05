@@ -10487,7 +10487,7 @@ describe('AnomalyService', () => {
       await (service as any).updatePrometheusSummary();
       await (service as any).updatePrometheusSummary();
 
-      expect(read.mock.calls[0][1]).toBeLessThanOrEqual(now - 24 * 3600_000 + 1000);
+      expect(read.mock.calls[0][1]).toBeLessThanOrEqual(now - 30 * 24 * 3600_000 + 1000);
       expect(read.mock.calls[1][1]).toBe(oldEvent);
       expect(prometheusService.updateActiveIncidents).toHaveBeenLastCalledWith(
         new Map([['conn-1', [{ pattern: 'none', status: 'degraded', count: 1 }]]]),

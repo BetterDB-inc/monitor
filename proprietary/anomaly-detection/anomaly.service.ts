@@ -415,7 +415,6 @@ const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
 const OPEN_INCIDENT_STATUSES: ReadonlySet<string> = new Set(['active', 'recovering', 'degraded']);
-const INCIDENT_GAUGE_SEED_LOOKBACK_MS = 24 * 60 * 60_000;
 const INCIDENT_GAUGE_MAX_FAILURES = 3;
 const DIVERGENCE_LEVEL_GAUGE = { none: 0, warning: 1, critical: 2 } as const;
 const RETRY_STATE_GAUGE = { none: 0, candidate: 1, amplifying: 2 } as const;
@@ -9652,7 +9651,7 @@ export class AnomalyService
     if (this.incidentGaugesInFlight) return;
     this.incidentGaugesInFlight = true;
     try {
-      const from = Math.min(since, this.openIncidentSince ?? Date.now() - INCIDENT_GAUGE_SEED_LOOKBACK_MS);
+      const from = Math.min(since, this.openIncidentSince ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS);
       const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
       const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
       let oldestOpen: number | null = null;
