@@ -442,6 +442,8 @@ If the replica alerts again, the old event closes with no `replication.recovered
 }
 ```
 
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+
 #### cve.critical_detected (Pro)
 
 Fired only when a CVE scan finds new critical findings vs the previous stored
@@ -550,6 +552,8 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
 
 `trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+
+On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`.
 
 ```json
 {

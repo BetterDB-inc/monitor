@@ -39,6 +39,7 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
         timestamp: anomaly.timestamp,
         sourceHost: anomaly.sourceHost,
         sourcePort: anomaly.sourcePort,
+        nodeAddr: anomaly.nodeAddr,
         connectionId: anomaly.connectionId,
       };
 

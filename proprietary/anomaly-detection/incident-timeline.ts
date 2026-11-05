@@ -9,6 +9,7 @@ export type IncidentScopeResolver = (connectionId: string) => string;
 export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
+  nodeAddr?: string;
   timestamp: number;
   metricType: MetricType;
   severity: AnomalySeverity;
@@ -44,7 +45,19 @@ export interface IncidentTimeline {
   };
 }
 
-export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
+export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'nodeAddr' | 'timestamp'>;
+
+type EventSource = Pick<AnomalyEvent, 'connectionId' | 'nodeAddr'>;
+
+export function sameSource(a: EventSource, b: EventSource): boolean {
+  return a.connectionId === b.connectionId && (a.nodeAddr ?? '') === (b.nodeAddr ?? '');
+}
+
+function sourceKey(event: EventSource): string {
+  return event.nodeAddr
+    ? `${event.connectionId ?? ''}\u0000${event.nodeAddr}`
+    : (event.connectionId ?? '');
+}
 
 export interface IncidentBoundary {
   scopeId: string;
@@ -127,7 +140,7 @@ export function mergeRuleSteps(
 ): RuleStepEvent[] {
   const steps = new Map<string, RuleStepEvent>();
   for (const step of [...known, ...seen]) {
-    steps.set(`${step.metricType}\u0000${step.connectionId ?? ''}\u0000${step.timestamp}`, step);
+    steps.set(`${step.metricType}\u0000${sourceKey(step)}\u0000${step.timestamp}`, step);
   }
   return [...steps.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -158,7 +171,7 @@ export function matchSequence(
       (e) =>
         !matched.includes(e) &&
         step.includes(e.metricType) &&
-        (!rule.sameConnection || e.connectionId === first.connectionId) &&
+        (!rule.sameConnection || sameSource(e, first)) &&
         e.timestamp >= reached - lead &&
         Math.max(reached, e.timestamp) - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
     );
@@ -183,7 +196,7 @@ export function matchSequence(
       (e) =>
         !matched.includes(e) &&
         rule.optionalMetrics?.includes(e.metricType) &&
-        (!rule.sameConnection || e.connectionId === first.connectionId) &&
+        (!rule.sameConnection || sameSource(e, first)) &&
         Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
     );
     return [...matched, ...optional];
@@ -201,7 +214,7 @@ export function reachesStep(
     .filter(
       (e) =>
         e.timestamp <= event.timestamp &&
-        (!rule.sameConnection || e.connectionId === event.connectionId),
+        (!rule.sameConnection || sameSource(e, event)),
     )
     .sort((a, b) => a.timestamp - b.timestamp);
   return candidates.some((first) => {
@@ -240,7 +253,7 @@ export function precedesLeadStep(
       earlier.some(
         (e) =>
           step.includes(e.metricType) &&
-          (!rule.sameConnection || e.connectionId === event.connectionId) &&
+          (!rule.sameConnection || sameSource(e, event)) &&
           e.timestamp <= event.timestamp &&
           event.timestamp - e.timestamp <= lead,
       )
@@ -271,6 +284,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
   return {
     anomalyId: event.id,
     connectionId: event.connectionId ?? '',
+    ...(event.nodeAddr ? { nodeAddr: event.nodeAddr } : {}),
     timestamp: event.timestamp,
     metricType: event.metricType,
     severity: event.severity,
@@ -289,7 +303,7 @@ function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
 }
 
 export function signalKey(event: AnomalyEvent): string {
-  const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
+  const signal = `${sourceKey(event)}\u0000${event.metricType}`;
   return POINT_IN_TIME_METRICS.has(event.metricType)
     ? `${signal}\u0000${(event.commands ?? []).join(',')}`
     : signal;

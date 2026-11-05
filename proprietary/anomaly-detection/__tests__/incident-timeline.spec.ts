@@ -878,6 +878,40 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidents).toHaveLength(2);
     });
 
+    it('splits a same-connection rule across nodes of one connection', () => {
+      const scopes = new IncidentTimelineBuilder({}, () => 'shared', () => [
+        { ...escalation, sameConnection: true },
+      ]);
+
+      const incidents = scopes.build(
+        [
+          event({ metricType: MetricType.CONNECTIONS, nodeAddr: '10.0.0.5:6379' }),
+          event({ timestamp: T0 + 5 * MIN, nodeAddr: '10.0.0.7:6379' }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incidents).toHaveLength(2);
+    });
+
+    it('keeps a same-connection rule together on one node', () => {
+      const scopes = new IncidentTimelineBuilder({}, () => 'shared', () => [
+        { ...escalation, sameConnection: true },
+      ]);
+
+      const incidents = scopes.build(
+        [
+          event({ metricType: MetricType.CONNECTIONS, nodeAddr: '10.0.0.5:6379' }),
+          event({ timestamp: T0 + 5 * MIN, nodeAddr: '10.0.0.5:6379' }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incidents).toHaveLength(1);
+    });
+
     describe('when the earlier step is no longer held', () => {
       const anchor = {
         scopeId: 'conn-a',

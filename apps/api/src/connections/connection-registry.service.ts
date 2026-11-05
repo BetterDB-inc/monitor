@@ -108,6 +108,13 @@ function isDefaultCandidate(config: DatabaseConnectionConfig): boolean {
   return config.membership?.origin !== 'auto' && config.membership?.retiredAt === undefined;
 }
 
+function dataNodeCredentialsOf(seed: DatabaseConnectionConfig): { username?: string; password?: string } {
+  return {
+    username: seed.nodeUsername ?? seed.username,
+    password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
+  };
+}
+
 function membershipFields(node: DesiredNode): Pick<TopologyMembership, 'nodeId' | 'source' | 'group' | 'role'> {
   return {
     nodeId: node.nodeId,
@@ -1413,6 +1420,15 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  sentinelDataNodeCredentials(seedId: string): { username?: string; password?: string } | null {
+    const seed = this.configs.get(seedId);
+    if (!seed || seed.membership || seed.sshTunnel?.enabled) return null;
+    if (seed.connectionType === 'external' || seed.host === 'agent') return null;
+    if (seed.credentialStatus === 'decryption_failed' || seed.nodePasswordEncrypted) return null;
+    if (seed.nodeUsername === undefined && seed.nodePassword === undefined) return null;
+    return { username: seed.nodeUsername, password: seed.nodePassword };
+  }
+
   async addManagedChild(seedId: string, node: DesiredNode): Promise<string> {
     const seed = this.configs.get(seedId);
     if (!seed) {
@@ -1424,8 +1440,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       name: `${seed.name} · ${node.host}:${node.port}`,
       host: node.host,
       port: node.port,
-      username: seed.nodeUsername ?? seed.username,
-      password: seed.nodePasswordEncrypted ? seed.password : seed.nodePassword ?? seed.password,
+      ...dataNodeCredentialsOf(seed),
       dbIndex: 0,
       tls: seed.tls,
       // Discovered nodes sit behind the same PKI as the seed: reuse its CA and
