@@ -10,7 +10,15 @@
   "homepage": "https://betterdb.com",
   "repository": "https://github.com/BetterDB-inc/monitor",
   "license": "MIT",
-  "keywords": ["valkey", "redis", "observability", "monitoring", "database", "slowlog", "cluster"],
+  "keywords": [
+    "valkey",
+    "redis",
+    "observability",
+    "monitoring",
+    "database",
+    "slowlog",
+    "cluster"
+  ],
   "userConfig": {
     "betterdb_url": {
       "type": "string",
@@ -23,6 +31,12 @@
       "title": "MCP token",
       "description": "Token from Settings → MCP Tokens in BetterDB. Leave empty for a local monitor without auth",
       "sensitive": true
+    },
+    "telemetry": {
+      "type": "boolean",
+      "title": "Usage telemetry",
+      "description": "Send tool usage events (tool name, success, duration, error) to your BetterDB Monitor",
+      "default": true
     }
   }
 }
