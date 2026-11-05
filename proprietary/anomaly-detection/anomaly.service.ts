@@ -4000,7 +4000,7 @@ export class AnomalyService
     try {
       this.prometheusService.updateRetrySignals(ctx.connectionId, nodeAddr ?? `${ctx.host}:${ctx.port}`, {
         connectsPerSecond: connectsPerSec,
-        churnPerOp: connectsPerSec === null ? null : connectsPerOp(connectsPerSec, opsPerSec),
+        churnPerOp: connectsPerSec === null || opsPerSec === null || opsPerSec <= 0 ? null : connectsPerSec / opsPerSec,
         retryState: RETRY_STATE_GAUGE[describeRetryAmplificationState(state).classification],
       });
     } catch (err) {

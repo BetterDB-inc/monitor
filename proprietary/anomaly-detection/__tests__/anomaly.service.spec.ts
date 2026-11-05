@@ -14315,6 +14315,26 @@ describe('AnomalyService', () => {
           });
         });
 
+        it.each([
+          ['unknown', {}],
+          ['idle', { instantaneous_ops_per_sec: '0' }],
+        ])('leaves churn per op out when ops per second is %s', async (_label, info) => {
+          (service as any).connectionChurnSamples.set('conn-1', {
+            timestamp: T0,
+            connectsPerSec: 50,
+            connectedClients: 10,
+            retainedRatio: 1,
+          });
+
+          await (service as any).detectRetryAmplification({ ...info, connected_clients: '10' }, mockCtx, T0);
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
+            connectsPerSecond: 50,
+            churnPerOp: null,
+            retryState: 0,
+          });
+        });
+
         it('keeps detecting when a gauge update throws', async () => {
           prometheusService.updateRetrySignals.mockImplementation(() => {
             throw new Error('registry gone');
