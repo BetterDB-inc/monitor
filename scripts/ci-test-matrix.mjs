@@ -33,6 +33,8 @@ const CLUSTER_SUITE_EXCLUSION = "-- --exclude '**/*.cluster.integration.test.ts'
 /** Paths that cannot change the outcome of any test. */
 const INERT_PATHS = [/^docs\//, /\.md$/];
 
+const DOCS_READ_BY_TESTS = new Map([['docs/minimum-acl.md', 'api']]);
+
 function workspaceGlobs() {
   const raw = readFileSync(join(ROOT, 'pnpm-workspace.yaml'), 'utf8');
   const globs = [];
@@ -251,6 +253,11 @@ function selectDirectly(paths, packages) {
   const selected = new Set();
 
   for (const path of paths) {
+    const reader = DOCS_READ_BY_TESTS.get(path);
+    if (reader !== undefined) {
+      selected.add(reader);
+      continue;
+    }
     const owner = owningDir(path, dirs);
     if (owner !== null) {
       for (const pkg of packages) {

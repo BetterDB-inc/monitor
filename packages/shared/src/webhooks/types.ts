@@ -441,6 +441,16 @@ export interface IWebhookEventsProService {
 
   clearReplicationLag(connectionId: string): void;
 
+  observeReplication(
+    connectionId: string,
+    replication: Record<string, string | undefined> | undefined,
+    instance: WebhookInstanceInfo,
+  ): void;
+
+  forgetReplication(connectionId: string): void;
+
+  endReplicationStall(connectionId: string, replica: string): void;
+
   dispatchClusterFailover(data: {
     clusterState: string;
     previousState?: string;

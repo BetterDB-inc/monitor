@@ -234,6 +234,7 @@ describe('ClusterDiscoveryService', () => {
         client: { status: string; quit: jest.Mock };
         lastHealthCheck: number;
         healthy: boolean;
+        connectionId?: string;
       };
       const internal = service as unknown as {
         discoveredNodes: Map<string, FakeConn>;
@@ -246,6 +247,7 @@ describe('ClusterDiscoveryService', () => {
         client: readyClient,
         lastHealthCheck: staleStamp,
         healthy: true,
+        connectionId: 'test-connection',
       });
 
       const returned = await service.getNodeConnection(target.id);
@@ -257,6 +259,163 @@ describe('ClusterDiscoveryService', () => {
       const entry = internal.discoveredNodes.get(target.id)!;
       expect(entry.client).toBe(readyClient);
       expect(entry.lastHealthCheck).toBeGreaterThan(staleStamp);
+    });
+
+    it("does not hand one connection another connection's node client", async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      internal.discoveredNodes.set(target.id, {
+        node: target,
+        client: othersClient,
+        lastHealthCheck: Date.now(),
+        healthy: true,
+        connectionId: 'other-connection',
+      });
+
+      const returned = await service.getNodeConnection(target.id, 'test-connection');
+
+      expect(returned).not.toBe(othersClient);
+      expect((internal.discoveredNodes.get(target.id) as { client: unknown }).client).toBe(othersClient);
+      expect(await service.getNodeConnection(target.id, 'test-connection')).toBe(returned);
+    });
+
+    it('does not reuse a client another connection opened during discovery', async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      const discover = service.discoverNodes.bind(service);
+      jest.spyOn(service, 'discoverNodes').mockImplementationOnce(async (id?: string) => {
+        internal.discoveredNodes.set(target.id, {
+          node: target,
+          client: othersClient,
+          lastHealthCheck: Date.now(),
+          healthy: true,
+          connectionId: 'other-connection',
+        });
+        return discover(id);
+      });
+
+      expect(await service.getNodeConnection(target.id, 'test-connection')).not.toBe(othersClient);
+    });
+
+    it('shares one CLUSTER NODES call between concurrent callers', async () => {
+      await Promise.all([service.discoverNodes('test-connection'), service.discoverNodes('test-connection')]);
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries discovery after the connection lookup throws', async () => {
+      mockConnectionRegistry.get.mockImplementationOnce(() => {
+        throw new Error('Connection not found');
+      });
+
+      await expect(service.discoverNodes('test-connection')).rejects.toThrow('Connection not found');
+      await expect(service.discoverNodes('test-connection')).resolves.toHaveLength(2);
+    });
+
+    it('does not cache a discovery that finishes after its connection is released', async () => {
+      let finish!: (nodes: typeof mockClusterNodes) => void;
+      mockDbClient.getClusterNodes.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+      const pending = service.discoverNodes('test-connection');
+      await Promise.resolve();
+
+      await service.releaseConnection('test-connection');
+      finish(mockClusterNodes);
+      await pending;
+      await service.discoverNodes('test-connection');
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it('closes the node clients of a removed connection', async () => {
+      const nodes = await service.discoverNodes();
+      const client = await service.getNodeConnection(nodes[0].id, 'test-connection');
+
+      await service.releaseConnection('test-connection');
+
+      expect(client.quit).toHaveBeenCalled();
+      expect((service as unknown as { discoveredNodes: Map<string, unknown> }).discoveredNodes.size).toBe(0);
+    });
+
+    it('closes address clients the connection no longer reads', async () => {
+      mockConnectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue({ password: 'p' });
+      const kept = await service.getAddressConnection('10.0.0.2', 6379, 'test-connection');
+      const moved = await service.getAddressConnection('10.0.0.3', 6379, 'test-connection');
+
+      await service.retainAddressConnections('test-connection', new Set(['10.0.0.2:6379']));
+
+      expect(moved.quit).toHaveBeenCalled();
+      expect(kept.quit).not.toHaveBeenCalled();
+    });
+
+    it("keeps another connection's client that was stored while this one was connecting", async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, { client: unknown }> };
+      const othersClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined), disconnect: jest.fn() };
+      const ownClient = {
+        status: 'ready',
+        connect: jest.fn(async () => {
+          internal.discoveredNodes.set(target.id, {
+            node: target,
+            client: othersClient,
+            lastHealthCheck: Date.now(),
+            healthy: true,
+            connectionId: 'other-connection',
+          } as never);
+        }),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce((() => ownClient) as never);
+
+      const returned = await service.getNodeConnection(target.id, 'test-connection');
+
+      expect(returned).toBe(ownClient);
+      expect(othersClient.quit).not.toHaveBeenCalled();
+      expect(othersClient.disconnect).not.toHaveBeenCalled();
+      expect(internal.discoveredNodes.get(target.id)?.client).toBe(othersClient);
+      expect(internal.discoveredNodes.get(`node:test-connection:${target.id}`)?.client).toBe(ownClient);
+    });
+
+    it('drops the old client without waiting on it once the node moves to another address', async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, { client: unknown }> };
+      const oldClient = { status: 'ready', quit: jest.fn(() => new Promise(() => {})), disconnect: jest.fn() };
+      internal.discoveredNodes.set(target.id, {
+        node: { ...target, address: '10.9.9.9:6379' },
+        client: oldClient,
+        lastHealthCheck: Date.now(),
+        healthy: true,
+        connectionId: 'test-connection',
+      } as never);
+
+      const returned = await service.getNodeConnection(target.id, 'test-connection');
+
+      expect(returned).not.toBe(oldClient);
+      expect(oldClient.disconnect).toHaveBeenCalled();
+      expect(oldClient.quit).not.toHaveBeenCalled();
+    });
+
+    it("keeps using a connection's own client once the shared one is gone", async () => {
+      const nodes = await service.discoverNodes();
+      const target = nodes[0];
+      const internal = service as unknown as { discoveredNodes: Map<string, unknown> };
+      const ownClient = { status: 'ready', quit: jest.fn().mockResolvedValue(undefined) };
+      internal.discoveredNodes.set(`node:test-connection:${target.id}`, {
+        node: target,
+        client: ownClient,
+        lastHealthCheck: Date.now(),
+        healthy: true,
+        connectionId: 'test-connection',
+      });
+
+      expect(await service.getNodeConnection(target.id, 'test-connection')).toBe(ownClient);
     });
 
     it('should throw error for invalid node address', async () => {
@@ -454,6 +613,48 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('getAddressConnection', () => {
+    beforeEach(() => {
+      mockConnectionRegistry.sentinelDataNodeCredentials = jest
+        .fn()
+        .mockReturnValue({ username: 'node-user', password: 'node-pass' });
+    });
+
+    it('dials the address with the data-node credentials of the connection', async () => {
+      await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+
+      expect(mockConnectionRegistry.sentinelDataNodeCredentials).toHaveBeenCalledWith('test-connection');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.1.5',
+          port: 6380,
+          username: 'node-user',
+          password: 'node-pass',
+        }),
+      );
+    });
+
+    it('refuses to dial without data-node credentials', async () => {
+      mockConnectionRegistry.sentinelDataNodeCredentials.mockReturnValue(null);
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      await expect(service.getAddressConnection('10.0.1.5', 6380, 'test-connection')).rejects.toThrow(
+        'no data-node credentials',
+      );
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
+    });
+
+    it('reuses the client for the same address', async () => {
+      const first = await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      const second = await service.getAddressConnection('10.0.1.5', 6380, 'test-connection');
+
+      expect(second).toBe(first);
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
+    });
+  });
+
   describe('discoverNodesIsolated', () => {
     const seedOptions = { host: 'seed.example', port: 7001, username: 'u', password: 'p', tls: { servername: 'seed.example' } };
 
@@ -509,6 +710,47 @@ describe('ClusterDiscoveryService', () => {
   });
 
   describe('healthCheckAll', () => {
+    it("records the result on the checked client, not another connection's", async () => {
+      const nodes = await service.discoverNodes();
+      const internal = service as unknown as { discoveredNodes: Map<string, { lastHealthCheck: number }> };
+      const stamp = Date.now() - 60_000;
+      for (const node of nodes) {
+        internal.discoveredNodes.set(node.id, {
+          node,
+          client: { status: 'ready', quit: jest.fn() },
+          lastHealthCheck: stamp,
+          healthy: true,
+          connectionId: 'other-connection',
+        } as never);
+      }
+
+      const valkey = Valkey as unknown as jest.Mock;
+      const original = valkey.getMockImplementation();
+      valkey.mockImplementation(() => ({
+        status: 'ready',
+        connect: jest.fn().mockResolvedValue(undefined),
+        quit: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+        ping: jest.fn().mockResolvedValue('NOPE'),
+        on: jest.fn(),
+      }));
+      try {
+        await service.healthCheckAll();
+      } finally {
+        valkey.mockImplementation(original);
+      }
+
+      for (const node of nodes) {
+        const scoped = internal.discoveredNodes.get(`node:test-connection:${node.id}`) as {
+          lastHealthCheck: number;
+          healthy: boolean;
+        };
+        expect(internal.discoveredNodes.get(node.id)!.lastHealthCheck).toBe(stamp);
+        expect(scoped.lastHealthCheck).toBeGreaterThan(stamp);
+        expect(scoped.healthy).toBe(false);
+      }
+    });
+
     it('should return health status for all nodes', async () => {
       const health = await service.healthCheckAll();
 

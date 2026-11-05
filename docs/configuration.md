@@ -149,6 +149,8 @@ This means:
 | `DB_PASSWORD` | No       | -           | Valkey/Redis password                       |
 | `DB_TYPE`     | No       | `auto`      | Database type: `auto`, `valkey`, or `redis` |
 
+BetterDB does not need an admin user. See [Minimum ACL](minimum-acl) for a read-only monitoring user and the features each command enables.
+
 ### Storage Backend
 
 | Variable                  | Required    | Default           | Description                                                                                                                                                                                                       |

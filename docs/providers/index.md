@@ -51,7 +51,7 @@ Required for:
 - Any database on a port other than 6379, 6380, or 443
 
 The agent supports two authentication modes:
-- **Password** - works against any Valkey/Redis instance with AUTH or ACL credentials.
+- **Password** - works against any Valkey/Redis instance with AUTH or ACL credentials. See [Minimum ACL](../minimum-acl) for the permissions a monitoring user needs.
 - **AWS IAM** - SigV4-signed short-lived tokens for ElastiCache Valkey 7.2+ / Redis OSS 7.0+. No static passwords; credentials rotate automatically. See [AWS ElastiCache](aws-elasticache) for setup.
 
 See the [Agent Connection guide](../agent-connection) for full configuration, environment variables, and troubleshooting.

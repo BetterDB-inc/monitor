@@ -234,6 +234,14 @@ describe('evaluateResyncLoop', () => {
     expect(finding).not.toBeNull();
   });
 
+  it("treats a KeyDB 'active-replica' with a down link as a resync loop", () => {
+    const state = createResyncLoopState();
+    const finding = pollThroughWindow(state, (i) => {
+      return { role: 'active-replica', masterSyncInProgress: togglingSync(i) };
+    });
+    expect(finding).not.toBeNull();
+  });
+
   it('stays silent before the minimum window even with enough failed attempts', () => {
     const state = createResyncLoopState();
     // Two failed attempts inside the first four polls — still within the

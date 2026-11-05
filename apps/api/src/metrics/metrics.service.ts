@@ -21,6 +21,7 @@ import {
 } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 /** Comma-separated addresses of slot-owning primaries missing from a slot stats response. */
 export const SLOT_STATS_FAILED_NODES_HEADER = 'x-slot-stats-failed-nodes';
@@ -208,7 +209,7 @@ export class MetricsService {
 
     const role = replication?.role ?? 'unknown';
     let replicationLag: number | null = null;
-    if (role === 'slave' || role === 'replica') {
+    if (isReplicaRole(role)) {
       const lastIo = Number(replication?.master_last_io_seconds_ago ?? -1);
       replicationLag = lastIo >= 0 ? lastIo : null;
     }

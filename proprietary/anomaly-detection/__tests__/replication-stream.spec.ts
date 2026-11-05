@@ -1,7 +1,7 @@
 import {
   REPLICATION_RATE_EWMA_ALPHA,
   ReplicationStreamTracker,
-  parseReplicaLines,
+  parseReplicaOffsetLines,
 } from '../replication-stream';
 
 const T0 = 1_700_000_000_000;
@@ -23,9 +23,9 @@ function primaryInfo(over: Record<string, string> = {}): Record<string, string> 
   };
 }
 
-describe('parseReplicaLines', () => {
+describe('parseReplicaOffsetLines', () => {
   it('parses every slaveN line into an offset observation', () => {
-    expect(parseReplicaLines(primaryInfo())).toEqual([
+    expect(parseReplicaOffsetLines(primaryInfo())).toEqual([
       { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 9000, lagSec: 0 },
       { key: 'slave1', addr: '10.0.0.3:6380', state: 'online', offset: 10000, lagSec: 1 },
     ]);
@@ -37,7 +37,7 @@ describe('parseReplicaLines', () => {
       replica0: 'ip=10.0.0.2,port=6379,state=online,offset=9000,lag=0',
       replica_read_only: '1',
     };
-    expect(parseReplicaLines(info)).toEqual([
+    expect(parseReplicaOffsetLines(info)).toEqual([
       { key: 'replica0', addr: '10.0.0.2:6379', state: 'online', offset: 9000, lagSec: 0 },
     ]);
   });
@@ -47,7 +47,7 @@ describe('parseReplicaLines', () => {
       replica1: 'ip=10.0.0.3,port=6379,state=online,offset=1,lag=0',
       slave0: 'ip=10.0.0.2,port=6379,state=online,offset=1,lag=0',
     };
-    expect(parseReplicaLines(info).map((r) => r.key)).toEqual(['slave0', 'replica1']);
+    expect(parseReplicaOffsetLines(info).map((r) => r.key)).toEqual(['slave0', 'replica1']);
   });
 
   it('skips malformed lines and keys that only look like slaveN', () => {
@@ -57,13 +57,23 @@ describe('parseReplicaLines', () => {
       slave_repl_offset: '42',
       slave_read_only: '1',
     });
-    expect(parseReplicaLines(info).map((r) => r.key)).toEqual(['slave0', 'slave1']);
+    expect(parseReplicaOffsetLines(info).map((r) => r.key)).toEqual(['slave0', 'slave1']);
   });
 
   it('reports a null lag when the field is missing', () => {
     const info = { slave0: 'ip=10.0.0.2,port=6379,state=wait_bgsave,offset=0' };
-    expect(parseReplicaLines(info)).toEqual([
+    expect(parseReplicaOffsetLines(info)).toEqual([
       { key: 'slave0', addr: '10.0.0.2:6379', state: 'wait_bgsave', offset: 0, lagSec: null },
+    ]);
+  });
+
+  it('skips a line without an address', () => {
+    expect(parseReplicaOffsetLines({ slave0: 'state=online,offset=9000,lag=0' })).toEqual([]);
+  });
+
+  it('reports an unknown state when the field is missing', () => {
+    expect(parseReplicaOffsetLines({ slave0: 'ip=10.0.0.2,port=6379,offset=9000' })).toEqual([
+      { key: 'slave0', addr: '10.0.0.2:6379', state: 'unknown', offset: 9000, lagSec: null },
     ]);
   });
 
@@ -72,7 +82,7 @@ describe('parseReplicaLines', () => {
       slave10: 'ip=h10,port=1,state=online,offset=1,lag=0',
       slave2: 'ip=h2,port=1,state=online,offset=1,lag=0',
     };
-    expect(parseReplicaLines(info).map((r) => r.key)).toEqual(['slave2', 'slave10']);
+    expect(parseReplicaOffsetLines(info).map((r) => r.key)).toEqual(['slave2', 'slave10']);
   });
 });
 

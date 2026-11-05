@@ -220,6 +220,15 @@ describe('evaluateWriteRejection', () => {
     ]);
   });
 
+  it('counts READONLY on a writable active-replica', () => {
+    const s = createWriteRejectionState();
+    ev(s, healthy, stats({ READONLY: 0 }), 0, { role: 'active-replica' });
+    expect(ev(s, healthy, stats({ READONLY: 3 }), 5_000, { role: 'active-replica' })).toMatchObject({
+      transition: 'rejected',
+      causes: ['write_to_replica'],
+    });
+  });
+
   it('ignores rdb err when BGSAVE failure does not stop writes', () => {
     const s = createWriteRejectionState();
     expect(ev(s, bgsaveFailed, stats({}), 0, { rdbStopsWrites: false }).transition).toBeNull();

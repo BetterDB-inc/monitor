@@ -363,6 +363,13 @@ Escalation of an open edge, after clients start receiving `MISCONF`:
 
 Sent when a divergence opens or escalates, once the event has been saved. If storage is down the webhook waits for the retry, and is skipped if the event closes first. `reason` is one of `growth`, `ceiling`, `not_catching_up`, `not_applying` or `not_acking`. `not_applying` means writes have stopped and the gap is not draining; a window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle. `secondsBehind` is `null` when writes have stopped.
 
+When the primary and the stalled replica are both monitored, a webhook subscribed to both `replication.lag` and `replication.divergence` gets one alert when the replica stops acknowledging writes, whichever is delivered first:
+
+- **Divergence first.** Once the webhook has received a `not_acking` divergence for the open stall, the replica's `replication.lag` alert is skipped. A divergence with another reason does not skip it. The skipped alert stays latched, so it is not sent until lag drops below the recovery level and crosses the threshold again, even if the stall recovers in between.
+- **Lag first.** If the webhook's lag alert is still active when the stall opens with `not_acking`, that divergence is skipped, and so is the stall's `replication.recovered`. A lag alert covers one stall only: an escalation to `critical` is sent (followed by `replication.recovered`), and so is any later stall.
+
+An alert only counts once its delivery succeeds, so a failed or dropped delivery never suppresses the other one. Divergences with other reasons are always sent. The anomaly event is still recorded either way.
+
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
 ```json
@@ -434,6 +441,8 @@ If the replica alerts again, the old event closes with no `replication.recovered
   "timestamp": 1706457600000
 }
 ```
+
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
 
 #### cve.critical_detected (Pro)
 
@@ -543,6 +552,8 @@ Fires when the anomaly detector sees a self-sustaining retry loop rather than a 
 This event replaces the generic `anomaly.detected` for retry amplification, so one finding is delivered once.
 
 `trigger` is the stress signal that showed up first: `latency`, `errors` or `churn`. `loadRatio` is commands per client against baseline; `value` is the same ratio rounded to two decimals against a `baseline` of 1, which is what Slack and Discord show. `topContributors` lists up to 5 clients grouped by name, then user, then IP. `commandRateGrowth` compares each client's command rate during the episode with its rate just before the episode and needs CLIENT LIST `tot-cmds` (Valkey 8+). It is `null` for a client with no reading from before the episode. On older servers it is `null` for every client, and clients are ranked by `newConnections` (reconnects seen in client snapshots). `topContributors` is `null` when neither source could be read.
+
+On a cluster or Sentinel connection the finding can come from another primary the connection reads rather than the registered node. `instance` is then that primary's address, `connectionId` stays the cluster or Sentinel connection, and `topContributors` is `null`.
 
 ```json
 {

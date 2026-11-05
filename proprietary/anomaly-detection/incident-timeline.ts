@@ -1,7 +1,7 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
-import { SequenceRule } from './sequence-rules';
+import { SequenceRule, leadOf } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
@@ -9,6 +9,7 @@ export type IncidentScopeResolver = (connectionId: string) => string;
 export interface IncidentTimelineEntry {
   anomalyId: string;
   connectionId: string;
+  nodeAddr?: string;
   timestamp: number;
   metricType: MetricType;
   severity: AnomalySeverity;
@@ -44,7 +45,19 @@ export interface IncidentTimeline {
   };
 }
 
-export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'timestamp'>;
+export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'nodeAddr' | 'timestamp'>;
+
+type EventSource = Pick<AnomalyEvent, 'connectionId' | 'nodeAddr'>;
+
+export function sameSource(a: EventSource, b: EventSource): boolean {
+  return a.connectionId === b.connectionId && (a.nodeAddr ?? '') === (b.nodeAddr ?? '');
+}
+
+function sourceKey(event: EventSource): string {
+  return event.nodeAddr
+    ? `${event.connectionId ?? ''}\u0000${event.nodeAddr}`
+    : (event.connectionId ?? '');
+}
 
 export interface IncidentBoundary {
   scopeId: string;
@@ -125,13 +138,11 @@ export function mergeRuleSteps(
   known: readonly RuleStepEvent[],
   seen: readonly RuleStepEvent[],
 ): RuleStepEvent[] {
-  const latest = new Map<string, RuleStepEvent>();
+  const steps = new Map<string, RuleStepEvent>();
   for (const step of [...known, ...seen]) {
-    const key = `${step.metricType}\u0000${step.connectionId ?? ''}`;
-    const held = latest.get(key);
-    if (!held || step.timestamp > held.timestamp) latest.set(key, step);
+    steps.set(`${step.metricType}\u0000${sourceKey(step)}\u0000${step.timestamp}`, step);
   }
-  return [...latest.values()];
+  return [...steps.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export function incidentIdFor(scope: string, firstAnomalyId: string, startedAt: number): string {
@@ -147,44 +158,121 @@ export function incidentStartOf(incidentId: string): number | null {
 export function matchSequence(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
+  accept: (matched: IncidentTimelineEntry[]) => boolean = () => true,
 ): IncidentTimelineEntry[] | null {
+  const extend = (matched: IncidentTimelineEntry[]): IncidentTimelineEntry[] | 'unreachable' | 'rejected' => {
+    if (matched.length === rule.steps.length) return accept(matched) ? matched : 'rejected';
+    const first = matched[0];
+    const reached = Math.max(...matched.map((e) => e.timestamp));
+    const earliest = Math.min(...matched.map((e) => e.timestamp));
+    const step = rule.steps[matched.length];
+    const lead = leadOf(rule, matched.length);
+    const options = entries.filter(
+      (e) =>
+        !matched.includes(e) &&
+        step.includes(e.metricType) &&
+        (!rule.sameConnection || sameSource(e, first)) &&
+        e.timestamp >= reached - lead &&
+        Math.max(reached, e.timestamp) - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
+    );
+    let outcome: 'unreachable' | 'rejected' = 'unreachable';
+    for (const next of options) {
+      const found = extend([...matched, next]);
+      if (found === 'unreachable') {
+        if (lead === 0) break;
+        continue;
+      }
+      if (found !== 'rejected') return found;
+      outcome = 'rejected';
+    }
+    return outcome;
+  };
+
   for (const first of entries) {
     if (!rule.steps[0].includes(first.metricType)) continue;
-    const matched = [first];
-    for (const step of rule.steps.slice(1)) {
-      const previous = matched[matched.length - 1];
-      const next = entries.find(
-        (e) =>
-          !matched.includes(e) &&
-          step.includes(e.metricType) &&
-          (!rule.sameConnection || e.connectionId === first.connectionId) &&
-          e.timestamp >= previous.timestamp &&
-          e.timestamp - first.timestamp <= rule.maxSpanMs,
-      );
-      if (!next) break;
-      matched.push(next);
-    }
-    if (matched.length === rule.steps.length) {
-      const optional = entries.filter(
-        (e) =>
-          !matched.includes(e) &&
-          rule.optionalMetrics?.includes(e.metricType) &&
-          (!rule.sameConnection || e.connectionId === first.connectionId) &&
-          Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
-      );
-      return [...matched, ...optional];
-    }
+    const matched = extend([first]);
+    if (typeof matched === 'string') continue;
+    const optional = entries.filter(
+      (e) =>
+        !matched.includes(e) &&
+        rule.optionalMetrics?.includes(e.metricType) &&
+        (!rule.sameConnection || sameSource(e, first)) &&
+        Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
+    );
+    return [...matched, ...optional];
   }
   return null;
+}
+
+export function reachesStep(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+  stepIndex: number,
+): boolean {
+  const candidates = earlier
+    .filter(
+      (e) =>
+        e.timestamp <= event.timestamp &&
+        (!rule.sameConnection || sameSource(e, event)),
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+  return candidates.some((first) => {
+    if (!rule.steps[0].includes(first.metricType)) return false;
+    if (event.timestamp - first.timestamp > rule.maxSpanMs) return false;
+    const used: RuleStepEvent[] = [first];
+    let reached = first.timestamp;
+    let earliest = first.timestamp;
+    for (let i = 1; i < stepIndex; i++) {
+      const lead = leadOf(rule, i);
+      const next = candidates.find(
+        (e) =>
+          !used.includes(e) &&
+          rule.steps[i].includes(e.metricType) &&
+          e.timestamp >= reached - lead &&
+          event.timestamp - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
+      );
+      if (!next) return false;
+      used.push(next);
+      reached = Math.max(reached, next.timestamp);
+      earliest = Math.min(earliest, next.timestamp);
+    }
+    return true;
+  });
+}
+
+export function precedesLeadStep(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+): boolean {
+  return rule.steps.some((step, i) => {
+    const lead = Math.min(leadOf(rule, i), rule.maxSpanMs);
+    return (
+      lead > 0 &&
+      earlier.some(
+        (e) =>
+          step.includes(e.metricType) &&
+          (!rule.sameConnection || sameSource(e, event)) &&
+          e.timestamp <= event.timestamp &&
+          event.timestamp - e.timestamp <= lead,
+      )
+    );
+  });
 }
 
 export function matchSequences(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
+  accept?: (matched: IncidentTimelineEntry[]) => boolean,
 ): IncidentTimelineEntry[][] {
   const matches: IncidentTimelineEntry[][] = [];
   let remaining = entries;
-  for (let matched = matchSequence(remaining, rule); matched; matched = matchSequence(remaining, rule)) {
+  for (
+    let matched = matchSequence(remaining, rule, accept);
+    matched;
+    matched = matchSequence(remaining, rule, accept)
+  ) {
     matches.push(matched);
     const used = matched;
     remaining = remaining.filter((e) => !used.includes(e));
@@ -196,6 +284,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
   return {
     anomalyId: event.id,
     connectionId: event.connectionId ?? '',
+    ...(event.nodeAddr ? { nodeAddr: event.nodeAddr } : {}),
     timestamp: event.timestamp,
     metricType: event.metricType,
     severity: event.severity,
@@ -214,7 +303,7 @@ function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
 }
 
 export function signalKey(event: AnomalyEvent): string {
-  const signal = `${event.connectionId ?? ''}\u0000${event.metricType}`;
+  const signal = `${sourceKey(event)}\u0000${event.metricType}`;
   return POINT_IN_TIME_METRICS.has(event.metricType)
     ? `${signal}\u0000${(event.commands ?? []).join(',')}`
     : signal;
@@ -223,6 +312,7 @@ export function signalKey(event: AnomalyEvent): string {
 interface IncidentCluster {
   events: AnomalyEvent[];
   start?: IncidentBoundary;
+  prefix: RuleStepEvent[];
 }
 
 function positionsOf(sorted: AnomalyEvent[]): (anomalyId: string) => number {
@@ -329,6 +419,7 @@ export class IncidentTimelineBuilder {
     let start: IncidentBoundary | undefined;
     let latest: IncidentBoundary | undefined;
     let used: IncidentBoundary | undefined;
+    let prefix: RuleStepEvent[] = [];
     let next = 0;
     for (const event of sorted) {
       while (next < boundaries.length && startsByEvent(boundaries[next], event, positionOf)) {
@@ -338,7 +429,8 @@ export class IncidentTimelineBuilder {
       const stored =
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
-      const continues = first !== undefined && this.continuesIncident(current, event, spans);
+      const continues =
+        first !== undefined && this.continuesIncident(prefix, current, event, spans);
       if (
         continues &&
         !start &&
@@ -355,17 +447,20 @@ export class IncidentTimelineBuilder {
           !continues ||
           event.timestamp - (start?.startedAt ?? first.timestamp) > this.opts.maxSpanMs)
       ) {
-        clusters.push({ events: current, start });
+        clusters.push({ events: current, start, prefix });
         current = [];
         start = undefined;
+        prefix = [];
       }
       if (current.length === 0 && stored !== undefined && stored !== used) {
         const anchorDroppedAt = this.anchorDroppedAt(stored, droppedAt, spans);
+        const dropped = this.droppedPrefix(stored, anchorDroppedAt);
         const anchorDropped =
           positionOf(stored.anomalyId) < 0 &&
           stored.startedAt <= anchorDroppedAt &&
           (event.timestamp - anchorDroppedAt <= this.opts.gapMs ||
-            this.bridgesFromDropped(event, stored, anchorDroppedAt));
+            this.followsRuleStep(dropped, event));
+        if (anchorDropped) prefix = dropped;
         if (
           anchorDropped ||
           stored.anomalyId === event.id ||
@@ -377,7 +472,7 @@ export class IncidentTimelineBuilder {
       }
       current.push(event);
     }
-    if (current.length > 0) clusters.push({ events: current, start });
+    if (current.length > 0) clusters.push({ events: current, start, prefix });
     return clusters;
   }
 
@@ -434,11 +529,7 @@ export class IncidentTimelineBuilder {
     return reach > from && to - reach <= this.opts.gapMs;
   }
 
-  private bridgesFromDropped(
-    event: AnomalyEvent,
-    stored: IncidentBoundary,
-    droppedAt: number,
-  ): boolean {
+  private droppedPrefix(stored: IncidentBoundary, droppedAt: number): RuleStepEvent[] {
     const anchor: RuleStepEvent[] =
       stored.metricType === undefined
         ? []
@@ -450,38 +541,37 @@ export class IncidentTimelineBuilder {
             },
           ];
     const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
-    return this.followsRuleStep([...anchor, ...dropped], event);
+    return [...anchor, ...dropped];
   }
 
   private continuesIncident(
-    current: AnomalyEvent[],
+    prefix: readonly RuleStepEvent[],
+    current: readonly RuleStepEvent[],
     event: AnomalyEvent,
     spans: DroppedSpan[] = [],
   ): boolean {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
     if (this.bridges(spans, last.timestamp, event.timestamp)) return true;
-    return this.followsRuleStep(current, event);
+    return this.followsRuleStep([...prefix, ...current], event);
   }
 
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
     return this.rules().some((rule) =>
-      rule.steps.slice(1).some(
+      rule.steps.some(
         (step, i) =>
           step.includes(event.metricType) &&
-          current.some(
-            (earlier) =>
-              rule.steps[i].includes(earlier.metricType) &&
-              (!rule.sameConnection || earlier.connectionId === event.connectionId) &&
-              event.timestamp - earlier.timestamp <= rule.maxSpanMs,
-          ),
+          (i === 0
+            ? precedesLeadStep(current, event, rule)
+            : reachesStep(current, event, rule, i) ||
+              (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
       ),
     );
   }
 
   private toTimeline(
     scope: string,
-    { events, start }: IncidentCluster,
+    { events, start, prefix }: IncidentCluster,
     now: number,
     probe: RecoveryProbe,
     nextOccurrence: (event: AnomalyEvent) => number | null,
@@ -517,16 +607,37 @@ export class IncidentTimelineBuilder {
       if (!sequence.includes(entry.metricType)) sequence.push(entry.metricType);
     }
 
+    const dropped = prefix.map(
+      (step): IncidentTimelineEntry => ({
+        anomalyId: '',
+        connectionId: step.connectionId ?? '',
+        timestamp: step.timestamp,
+        metricType: step.metricType,
+        severity: AnomalySeverity.INFO,
+        message: '',
+        recoveredAt: null,
+      }),
+    );
+    const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);
     const sequenceMatches: IncidentSequenceMatch[] = [];
+    const recommendedBy = new Map<string, AnomalyPattern>();
     for (const rule of this.rules()) {
-      for (const matched of matchSequences(entries, rule)) {
+      const holdsStep = (matched: IncidentTimelineEntry[]) =>
+        matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
+      for (const matched of matchSequences(candidates, rule, holdsStep)) {
+        const held = matched.filter((e) => !dropped.includes(e));
         sequenceMatches.push({
           pattern: rule.pattern,
-          anomalyIds: matched.map((e) => e.anomalyId),
+          anomalyIds: held.map((e) => e.anomalyId),
           diagnosis: rule.diagnosis,
-          recommendations: rule.recommendations,
-          severity: maxSeverity(matched.map((e) => e.severity)),
+          recommendations: rule.recommendations.filter(
+            (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
+          ),
+          severity: maxSeverity(held.map((e) => e.severity)),
         });
+        for (const r of rule.recommendations) {
+          if (!recommendedBy.has(r)) recommendedBy.set(r, rule.pattern);
+        }
       }
     }
 

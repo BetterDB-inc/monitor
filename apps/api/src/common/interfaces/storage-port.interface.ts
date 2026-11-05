@@ -166,6 +166,7 @@ export interface StoredAnomalyEvent {
   correlationId?: string;
   relatedMetrics?: string[];
   replicaAddr?: string;
+  nodeAddr?: string;
   dedupeKey?: string;
   commands?: string[];
   eventSequence?: number;
