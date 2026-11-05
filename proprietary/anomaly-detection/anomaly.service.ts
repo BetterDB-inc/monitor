@@ -8391,7 +8391,7 @@ export class AnomalyService
     for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
       if (outcome.kind === 'divergence') {
         const view = await this.crossCheckReplica(ctx, outcome.addr, readPrimary);
-        if (view && replicaCaughtUp(view)) {
+        if (view && outcome.reason !== 'not_acking' && replicaCaughtUp(view)) {
           this.logger.debug(
             `Replica ${outcome.addr} of ${ctx.connectionName} reports it is caught up; skipping the divergence alert.`,
           );
@@ -8453,9 +8453,11 @@ export class AnomalyService
     port: number,
   ): (() => Promise<Record<string, string>>) | null {
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
-    if (registeredId && registeredId !== connectionId) {
-      const registered = this.connectionRegistry.list().find((c) => c.id === registeredId);
-      if (!registered?.isConnected) return null;
+    if (
+      registeredId &&
+      registeredId !== connectionId &&
+      this.connectionRegistry.list().some((c) => c.id === registeredId && c.isConnected)
+    ) {
       return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
     }
     const discovery = this.clusterDiscovery;

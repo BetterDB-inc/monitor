@@ -14017,6 +14017,18 @@ describe('AnomalyService', () => {
           expect(hook()).not.toHaveBeenCalled();
           expect((service as any).clusterDiscovery.getNodeConnection).not.toHaveBeenCalledWith('node-r', 'conn-1');
         });
+
+        it('reads through cluster discovery when the replica connection is down', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB));
+          const registry = (service as any).connectionRegistry;
+          registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.1.6' ? 'conn-r' : null));
+          registry.list.mockReturnValue([{ id: 'conn-r', isConnected: false }]);
+
+          await poll([target], 18, T0);
+
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-r', 'conn-1');
+          expect(hook()).not.toHaveBeenCalled();
+        });
       });
 
       it('evaluates retry amplification with the node INFO', async () => {
@@ -14584,6 +14596,40 @@ describe('AnomalyService', () => {
         reason: 'caught_up',
         gapBytes: expect.any(Number),
         message: 'Replica 10.0.0.2:6379 is back under the alert thresholds.',
+      });
+    });
+
+    it('alerts for not acking with the replica view even when the replica is caught up', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.0.2' ? 'conn-r' : null));
+      registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+      const getInfoParsed = jest.fn().mockResolvedValue({
+        replication: {
+          role: 'slave',
+          master_replid: 'a'.repeat(40),
+          master_link_status: 'up',
+          slave_repl_offset: 100,
+        },
+      });
+      registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+      const readPrimary = jest.fn().mockResolvedValue({ master_replid: 'a'.repeat(40), master_repl_offset: '100' });
+      let t = await feed([0, 0], T0);
+      for (let i = 0; i < 16; i++) {
+        const base = sample(t, 9 * MiB);
+        await (service as any).detectReplicationDivergence(
+          { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) },
+          mockCtx,
+          undefined,
+          readPrimary,
+        );
+        t += 10_000;
+      }
+
+      const hook = (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+      expect(hook).toHaveBeenCalled();
+      expect(hook.mock.calls[0][0]).toMatchObject({
+        reason: 'not_acking',
+        replicaView: { gapBytes: 0, linkStatus: 'up' },
       });
     });
 
