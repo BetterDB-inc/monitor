@@ -51,11 +51,19 @@ export function findIncidentForAnomalies(
   byAnomaly: Map<string, IncidentTimeline>,
   anomalyIds: string[],
 ): IncidentTimeline | undefined {
+  const hits = new Map<IncidentTimeline, number>();
   for (const id of anomalyIds) {
     const incident = byAnomaly.get(id);
-    if (incident) return incident;
+    if (incident) hits.set(incident, (hits.get(incident) ?? 0) + 1);
   }
-  return undefined;
+  let best: IncidentTimeline | undefined;
+  for (const [incident, count] of hits) {
+    const bestCount = best ? hits.get(best)! : 0;
+    if (count > bestCount || (count === bestCount && incident.startedAt > best!.startedAt)) {
+      best = incident;
+    }
+  }
+  return best;
 }
 
 export function dateRangeQuery(

@@ -62,6 +62,24 @@ describe('incident summary helpers', () => {
     expect(findIncidentForAnomalies(incidentsByAnomaly(null), ['x'])).toBeUndefined();
   });
 
+  it('links a group spanning incidents to the one holding most of it, then the newest', () => {
+    const older = incident({
+      incidentId: 'older',
+      startedAt: T0,
+      entries: [entry({ anomalyId: 'a' })],
+    });
+    const newer = incident({
+      incidentId: 'newer',
+      startedAt: T0 + 600_000,
+      entries: [entry({ anomalyId: 'b' }), entry({ anomalyId: 'c' })],
+    });
+    const byAnomaly = incidentsByAnomaly([older, newer]);
+
+    expect(findIncidentForAnomalies(byAnomaly, ['a', 'b', 'c'])).toBe(newer);
+    expect(findIncidentForAnomalies(byAnomaly, ['a', 'b'])).toBe(newer);
+    expect(findIncidentForAnomalies(byAnomaly, ['a'])).toBe(older);
+  });
+
   it('encodes the incident id in its path and keeps the date range', () => {
     expect(incidentPath('1-a/b')).toBe('/anomalies/incidents/1-a%2Fb');
     expect(incidentPath('1-a', dateRangeQuery(100, 200))).toBe(
