@@ -29,9 +29,12 @@ export function replicaCaughtUp(view: ReplicaView): boolean {
   return view.linkStatus === 'up' && view.gapBytes < DIVERGENCE_FLOOR_BYTES;
 }
 
-export function describeReplicaView(view: ReplicaView): string {
+export function describeReplicaView(view: ReplicaView, staleAcks = false): string {
   if (view.linkStatus !== 'up') {
     return ` The replica reports its link to the primary is ${view.linkStatus ?? 'unknown'} and it is ${formatBytes(view.gapBytes)} behind.`;
+  }
+  if (staleAcks && replicaCaughtUp(view)) {
+    return ` The replica reports it is only ${formatBytes(view.gapBytes)} behind, so its acknowledgements are not reaching the primary.`;
   }
   const reported = ` The replica confirms it is ${formatBytes(view.gapBytes)} behind`;
   if (view.applyBacklogBytes === null) return `${reported}.`;

@@ -14631,6 +14631,7 @@ describe('AnomalyService', () => {
         reason: 'not_acking',
         replicaView: { gapBytes: 0, linkStatus: 'up' },
       });
+      expect(hook.mock.calls[0][0].message).toContain('acknowledgements are not reaching the primary');
     });
 
     it('reports the current gap as latest while a replica is alerted for not acking', async () => {

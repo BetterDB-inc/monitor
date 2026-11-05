@@ -9116,7 +9116,7 @@ export class AnomalyService
       ),
     ];
     const isCritical = finding.level === 'critical';
-    const message = describeDivergence(finding) + (replicaView ? describeReplicaView(replicaView) : '');
+    const message = describeDivergence(finding) + (replicaView ? describeReplicaView(replicaView, finding.reason === 'not_acking') : '');
     const event: AnomalyEvent = {
       id: randomUUID(),
       timestamp,

@@ -41,5 +41,9 @@ describe('replica cross-check', () => {
     expect(describeReplicaView(view(MiB / 2))).not.toContain('slow to apply');
     expect(describeReplicaView(view(2 * MiB))).toContain('so it is slow to apply.');
     expect(describeReplicaView(view(null))).toMatch(/behind\.$/);
+    const caughtUp = { gapBytes: 0, linkStatus: 'up', applyBacklogBytes: 0 };
+    expect(describeReplicaView(caughtUp, true)).toContain('acknowledgements are not reaching the primary');
+    expect(describeReplicaView(caughtUp, true)).not.toContain('stream is not reaching it');
+    expect(describeReplicaView(view(0), true)).toContain('stream is not reaching it');
   });
 });
