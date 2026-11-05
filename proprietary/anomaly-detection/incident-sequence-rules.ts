@@ -1,4 +1,7 @@
-import { RESYNC_ESCALATION_WINDOW_MS } from './recovery-amplification-detector';
+import {
+  RAISE_REPL_BACKLOG_RECOMMENDATION,
+  RESYNC_ESCALATION_WINDOW_MS,
+} from './recovery-amplification-detector';
 import { registerSequenceRule } from './sequence-rules';
 import { AnomalyPattern, MetricType } from './types';
 
@@ -77,7 +80,7 @@ registerSequenceRule({
   diagnosis:
     'The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.',
   recommendations: [
-    'Raise repl-backlog-size to cover the longest expected replica disconnect',
+    RAISE_REPL_BACKLOG_RECOMMENDATION,
     'Check why the replica disconnected',
     'Act on backlog coverage warnings before a disconnect turns them into a full resync',
   ],

@@ -1361,6 +1361,43 @@ describe('IncidentTimelineBuilder', () => {
       });
     });
 
+    it('lists a recommendation once when two matches of one incident share it', () => {
+      const other: SequenceRule = {
+        ...escalation,
+        pattern: AnomalyPattern.CONNECTION_LEAK,
+        recommendations: ['Check clients', 'Close idle connections'],
+      };
+
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [escalation, other]).build(
+        [event({ metricType: MetricType.CONNECTIONS }), event({ timestamp: T0 + MIN })],
+        T0 + 2 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.sequenceMatches.map((m) => m.recommendations)).toEqual([
+        ['Check clients'],
+        ['Close idle connections'],
+      ]);
+    });
+
+    it('keeps the recommendations on every match of the same rule', () => {
+      const [incident] = builder().build(
+        [
+          event({ metricType: MetricType.CONNECTIONS }),
+          event({ timestamp: T0 + MIN }),
+          event({ metricType: MetricType.CONNECTIONS, timestamp: T0 + 2 * MIN }),
+          event({ timestamp: T0 + 3 * MIN }),
+        ],
+        T0 + 4 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.sequenceMatches.map((m) => m.recommendations)).toEqual([
+        escalation.recommendations,
+        escalation.recommendations,
+      ]);
+    });
+
     it('matches steps that land in the same poll in either order', () => {
       const mem = event({ metricType: MetricType.MEMORY_USED, id: 'evt-a' });
       const conn = event({ metricType: MetricType.CONNECTIONS, id: 'evt-b' });

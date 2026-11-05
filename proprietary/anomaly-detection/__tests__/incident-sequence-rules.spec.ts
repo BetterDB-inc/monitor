@@ -185,4 +185,27 @@ describe('incident sequence rules', () => {
       },
     );
   });
+
+  it('recommends raising the backlog once when backlog exhaustion and recovery amplification share an incident', () => {
+    const rules = [
+      ruleFor(AnomalyPattern.RECOVERY_AMPLIFICATION),
+      ruleFor(AnomalyPattern.BACKLOG_EXHAUSTION),
+    ];
+    const [incident] = new IncidentTimelineBuilder({}, (id) => id, () => rules).build(
+      [
+        event(MetricType.BACKLOG_COVERAGE_RISK, 0),
+        event(MetricType.RESYNC_ESCALATION, MIN),
+        event(MetricType.FORK_MEMORY_RISK, 2 * MIN),
+      ],
+      T0 + 60 * MIN,
+      neverRecovers,
+    );
+
+    const recommendations = incident.sequenceMatches.flatMap((m) => m.recommendations);
+
+    expect(incident.matchedPatterns).toEqual(
+      expect.arrayContaining([AnomalyPattern.RECOVERY_AMPLIFICATION, AnomalyPattern.BACKLOG_EXHAUSTION]),
+    );
+    expect(recommendations.filter((r) => r.includes('repl-backlog-size'))).toHaveLength(1);
+  });
 });
