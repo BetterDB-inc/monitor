@@ -145,33 +145,43 @@ export function incidentStartOf(incidentId: string): number | null {
 export function matchSequence(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
+  accept: (matched: IncidentTimelineEntry[]) => boolean = () => true,
 ): IncidentTimelineEntry[] | null {
+  const extend = (matched: IncidentTimelineEntry[]): IncidentTimelineEntry[] | 'unreachable' | 'rejected' => {
+    if (matched.length === rule.steps.length) return accept(matched) ? matched : 'rejected';
+    const first = matched[0];
+    const previous = matched[matched.length - 1];
+    const step = rule.steps[matched.length];
+    const options = entries.filter(
+      (e) =>
+        !matched.includes(e) &&
+        step.includes(e.metricType) &&
+        (!rule.sameConnection || e.connectionId === first.connectionId) &&
+        e.timestamp >= previous.timestamp &&
+        e.timestamp - first.timestamp <= rule.maxSpanMs,
+    );
+    let outcome: 'unreachable' | 'rejected' = 'unreachable';
+    for (const next of options) {
+      const found = extend([...matched, next]);
+      if (found === 'unreachable') break;
+      if (found !== 'rejected') return found;
+      outcome = 'rejected';
+    }
+    return outcome;
+  };
+
   for (const first of entries) {
     if (!rule.steps[0].includes(first.metricType)) continue;
-    const matched = [first];
-    for (const step of rule.steps.slice(1)) {
-      const previous = matched[matched.length - 1];
-      const next = entries.find(
-        (e) =>
-          !matched.includes(e) &&
-          step.includes(e.metricType) &&
-          (!rule.sameConnection || e.connectionId === first.connectionId) &&
-          e.timestamp >= previous.timestamp &&
-          e.timestamp - first.timestamp <= rule.maxSpanMs,
-      );
-      if (!next) break;
-      matched.push(next);
-    }
-    if (matched.length === rule.steps.length) {
-      const optional = entries.filter(
-        (e) =>
-          !matched.includes(e) &&
-          rule.optionalMetrics?.includes(e.metricType) &&
-          (!rule.sameConnection || e.connectionId === first.connectionId) &&
-          Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
-      );
-      return [...matched, ...optional];
-    }
+    const matched = extend([first]);
+    if (typeof matched === 'string') continue;
+    const optional = entries.filter(
+      (e) =>
+        !matched.includes(e) &&
+        rule.optionalMetrics?.includes(e.metricType) &&
+        (!rule.sameConnection || e.connectionId === first.connectionId) &&
+        Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
+    );
+    return [...matched, ...optional];
   }
   return null;
 }
@@ -207,10 +217,15 @@ export function reachesStep(
 export function matchSequences(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
+  accept?: (matched: IncidentTimelineEntry[]) => boolean,
 ): IncidentTimelineEntry[][] {
   const matches: IncidentTimelineEntry[][] = [];
   let remaining = entries;
-  for (let matched = matchSequence(remaining, rule); matched; matched = matchSequence(remaining, rule)) {
+  for (
+    let matched = matchSequence(remaining, rule, accept);
+    matched;
+    matched = matchSequence(remaining, rule, accept)
+  ) {
     matches.push(matched);
     const used = matched;
     remaining = remaining.filter((e) => !used.includes(e));
@@ -552,9 +567,10 @@ export class IncidentTimelineBuilder {
     const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);
     const sequenceMatches: IncidentSequenceMatch[] = [];
     for (const rule of this.rules()) {
-      for (const matched of matchSequences(candidates, rule)) {
+      const holdsStep = (matched: IncidentTimelineEntry[]) =>
+        matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
+      for (const matched of matchSequences(candidates, rule, holdsStep)) {
         const held = matched.filter((e) => !dropped.includes(e));
-        if (!held.some((e) => rule.steps.some((step) => step.includes(e.metricType)))) continue;
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),

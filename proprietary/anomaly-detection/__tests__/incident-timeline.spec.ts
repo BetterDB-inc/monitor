@@ -1104,6 +1104,29 @@ describe('IncidentTimelineBuilder', () => {
       });
     });
 
+    it('matches a retained later step when an earlier copy of it was dropped too', () => {
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [escalation]).build(
+        [event({ id: 'held', timestamp: T0 + 4 * MIN })],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.CONNECTIONS,
+            connectionId: 'conn-a',
+            members: [{ metricType: MetricType.MEMORY_USED, connectionId: 'conn-a', timestamp: T0 + MIN }],
+          },
+        ],
+        new Map([['conn-a', T0 + MIN]]),
+      );
+
+      expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      expect(incident.matchedPatterns).toEqual([escalation.pattern]);
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual(['held']);
+    });
+
     it('takes in a step stamped ahead of an incident that already has a boundary', () => {
       const cost = event({ timestamp: T0 + 5 * MIN });
       const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };
