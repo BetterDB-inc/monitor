@@ -5,6 +5,7 @@ import {
   RESHARD_UNDER_WRITES_MAX_SPAN_MS,
   RETRY_STORM_MAX_SPAN_MS,
 } from '../incident-sequence-rules';
+import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { SequenceRule, getSequenceRules } from '../sequence-rules';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, AnomalyType, MetricType } from '../types';
 
@@ -52,6 +53,7 @@ interface RuleCase {
   steps: MetricType[];
   optional?: MetricType;
   spanMs: number;
+  lead?: { step: number; ms: number };
   sameConnection: boolean;
 }
 
@@ -61,6 +63,7 @@ const cases: RuleCase[] = [
     steps: [MetricType.INPUT_KBPS, MetricType.REPLICATION_DIVERGENCE, MetricType.REPL_BUFFER_PRESSURE],
     optional: MetricType.EVICTED_KEYS,
     spanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
+    lead: { step: 2, ms: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
     sameConnection: true,
   },
   {
@@ -75,12 +78,14 @@ const cases: RuleCase[] = [
     steps: [MetricType.ERROR_REPLIES, MetricType.RETRY_AMPLIFICATION, MetricType.CLIENT_LOCKOUT_RISK],
     optional: MetricType.CONNECTION_CHURN,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
+    lead: { step: 2, ms: RETRY_STORM_MAX_SPAN_MS },
     sameConnection: true,
   },
   {
     pattern: AnomalyPattern.BACKLOG_EXHAUSTION,
     steps: [MetricType.BACKLOG_COVERAGE_RISK, MetricType.RESYNC_ESCALATION],
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
+    lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
     sameConnection: true,
   },
 ];
@@ -97,7 +102,7 @@ describe('incident sequence rules', () => {
     expect(rule.recommendations.length).toBeGreaterThan(0);
   });
 
-  describe.each(cases)('$pattern', ({ pattern, steps, optional, spanMs, sameConnection }) => {
+  describe.each(cases)('$pattern', ({ pattern, steps, optional, spanMs, lead, sameConnection }) => {
     const inOrder = (gapMs = MIN) => steps.map((metric, i) => event(metric, i * gapMs));
 
     it('matches its steps in order', () => {
@@ -111,7 +116,8 @@ describe('incident sequence rules', () => {
     });
 
     it('does not match its steps in reverse', () => {
-      const reversed = [...steps].reverse().map((metric, i) => event(metric, i * MIN));
+      const gapMs = (lead?.ms ?? 0) + MIN;
+      const reversed = [...steps].reverse().map((metric, i) => event(metric, i * gapMs));
 
       expect(patternsOf(reversed, pattern)).toEqual([]);
     });
@@ -129,6 +135,31 @@ describe('incident sequence rules', () => {
 
       expect(patternsOf(missing, pattern)).toEqual([]);
     });
+
+    if (lead) {
+      const withLeadStepAt = (leadAt: (previousAt: number, lastOtherAt: number) => number) => {
+        const others = steps.filter((_, i) => i !== lead.step);
+        const lastOtherAt = (others.length - 1) * MIN;
+        const previousAt = (lead.step - 1) * MIN;
+        return steps.map((metric, i) =>
+          event(metric, i === lead.step ? leadAt(previousAt, lastOtherAt) : (i < lead.step ? i : i - 1) * MIN),
+        );
+      };
+
+      it('matches its lead step before the step it follows, within the lead', () => {
+        const events = withLeadStepAt(
+          (previousAt, lastOtherAt) => previousAt - Math.min(lead.ms, spanMs - lastOtherAt),
+        );
+
+        expect(patternsOf(events, pattern)).toEqual([pattern]);
+      });
+
+      it('does not match its lead step further back than the lead', () => {
+        const events = withLeadStepAt((previousAt) => previousAt - lead.ms - MIN);
+
+        expect(patternsOf(events, pattern)).toEqual([]);
+      });
+    }
 
     if (optional) {
       it('takes in its optional signal', () => {

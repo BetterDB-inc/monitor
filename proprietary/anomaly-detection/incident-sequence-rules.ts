@@ -1,3 +1,4 @@
+import { RESYNC_ESCALATION_WINDOW_MS } from './recovery-amplification-detector';
 import { registerSequenceRule } from './sequence-rules';
 import { AnomalyPattern, MetricType } from './types';
 
@@ -17,9 +18,10 @@ registerSequenceRule({
   ],
   optionalMetrics: [MetricType.EVICTED_KEYS, MetricType.EVICTED_CLIENTS, MetricType.FORK_MEMORY_RISK],
   maxSpanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
+  leadMs: { 2: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
   sameConnection: true,
   diagnosis:
-    'A write-rate rise outpaced replication, the replicas fell behind, and the primary then took the memory cost of holding the unshipped writes.',
+    'A write-rate rise outpaced replication, the replicas fell behind, and the primary took the memory cost of holding the unshipped writes.',
   recommendations: [
     'Find the client or job behind the write rise and throttle or batch it',
     'Check replica network and CPU headroom so they can apply writes at the new rate',
@@ -55,9 +57,10 @@ registerSequenceRule({
   ],
   optionalMetrics: [MetricType.CONNECTION_CHURN],
   maxSpanMs: RETRY_STORM_MAX_SPAN_MS,
+  leadMs: { 2: RETRY_STORM_MAX_SPAN_MS },
   sameConnection: true,
   diagnosis:
-    'Slow or failing commands made clients retry, the retries multiplied the load, and the server then ran out of client or processing headroom.',
+    'Slow or failing commands made clients retry while the server was out of client or processing headroom, and the retries multiplied the load.',
   recommendations: [
     'Add backoff with jitter and a retry budget to the clients',
     'Fix the slow or failing commands that started the retries',
@@ -69,6 +72,7 @@ registerSequenceRule({
   pattern: AnomalyPattern.BACKLOG_EXHAUSTION,
   steps: [[MetricType.BACKLOG_COVERAGE_RISK], [MetricType.RESYNC_ESCALATION]],
   maxSpanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
+  leadMs: { 1: RESYNC_ESCALATION_WINDOW_MS },
   sameConnection: true,
   diagnosis:
     'The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.',
