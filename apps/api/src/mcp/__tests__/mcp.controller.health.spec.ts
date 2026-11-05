@@ -25,11 +25,13 @@ describe('McpController getHealth', () => {
   };
 
   let metricsService: { getHealthSummary: jest.Mock };
-  let configHazards: { getHazards: jest.Mock };
+  let configHazards: { probeHazards: jest.Mock };
 
   beforeEach(() => {
     metricsService = { getHealthSummary: jest.fn().mockResolvedValue(summary) };
-    configHazards = { getHazards: jest.fn().mockResolvedValue([hazardFinding]) };
+    configHazards = {
+      probeHazards: jest.fn().mockResolvedValue({ findings: [hazardFinding], complete: true }),
+    };
   });
 
   const build = (withHazardService: boolean): McpController => {
@@ -51,7 +53,8 @@ describe('McpController getHealth', () => {
     const result = await controller.getHealth('conn-1');
     expect(result).toMatchObject(summary);
     expect(result.configHazards).toEqual([hazardFinding]);
-    expect(configHazards.getHazards).toHaveBeenCalledWith('conn-1');
+    expect(result.configHazardsUnavailable).toBeUndefined();
+    expect(configHazards.probeHazards).toHaveBeenCalledWith('conn-1');
   });
 
   it('returns the plain summary when the hazard service is not wired', async () => {
@@ -62,11 +65,27 @@ describe('McpController getHealth', () => {
   });
 
   it('still returns the summary when the hazard probe throws', async () => {
-    configHazards.getHazards.mockRejectedValue(new Error('probe failed'));
+    configHazards.probeHazards.mockRejectedValue(new Error('probe failed'));
     const controller = build(true);
     const result = await controller.getHealth('conn-1');
     expect(result).toMatchObject(summary);
     expect(result.configHazards).toBeUndefined();
+    expect(result.configHazardsUnavailable).toBe(true);
+  });
+
+  it('does not present an incomplete empty probe as a clean result', async () => {
+    configHazards.probeHazards.mockResolvedValue({ findings: [], complete: false });
+    const controller = build(true);
+    const result = await controller.getHealth('conn-1');
+    expect(result.configHazards).toBeUndefined();
+    expect(result.configHazardsUnavailable).toBe(true);
+  });
+
+  it('keeps partial findings and marks the probe incomplete', async () => {
+    configHazards.probeHazards.mockResolvedValue({ findings: [hazardFinding], complete: false });
+    const controller = build(true);
+    const result = await controller.getHealth('conn-1');
+    expect(result.configHazards).toEqual([hazardFinding]);
     expect(result.configHazardsUnavailable).toBe(true);
   });
 });

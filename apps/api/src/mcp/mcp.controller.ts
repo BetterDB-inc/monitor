@@ -440,7 +440,15 @@ export class McpController {
       } = { ...summary };
       if (this.configHazardService) {
         try {
-          result.configHazards = await this.configHazardService.getHazards(id);
+          const probe = await this.configHazardService.probeHazards(id);
+          if (probe.complete) {
+            result.configHazards = probe.findings;
+          } else {
+            if (probe.findings.length > 0) {
+              result.configHazards = probe.findings;
+            }
+            result.configHazardsUnavailable = true;
+          }
         } catch (err) {
           this.logger.debug(
             `Config-hazard probe failed for ${id}: ${err instanceof Error ? err.message : err}`,

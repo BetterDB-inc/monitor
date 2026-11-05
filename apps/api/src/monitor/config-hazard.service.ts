@@ -50,9 +50,20 @@ export class ConfigHazardService {
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
 
   async getHazards(connectionId: string): Promise<ConfigHazardFinding[]> {
+    return (await this.probeHazards(connectionId)).findings;
+  }
+
+  /**
+   * Same probe as getHazards, plus whether it finished. A missing connection
+   * or a failed CONFIG GET returns no findings and complete: false. Callers
+   * that only have the array cannot tell that apart from a clean instance.
+   */
+  async probeHazards(
+    connectionId: string,
+  ): Promise<{ findings: ConfigHazardFinding[]; complete: boolean }> {
     const cached = this.cache.get(connectionId);
     if (cached !== undefined && cached.expiresAt > Date.now()) {
-      return cached.findings;
+      return { findings: cached.findings, complete: true };
     }
 
     const result = await this.probe(connectionId);
@@ -62,7 +73,7 @@ export class ConfigHazardService {
         expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
       });
     }
-    return result.findings;
+    return { findings: result.findings, complete: result.cacheable };
   }
 
   private async probe(connectionId: string): Promise<ProbeResult> {

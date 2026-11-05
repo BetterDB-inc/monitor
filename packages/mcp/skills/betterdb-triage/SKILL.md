@@ -12,7 +12,11 @@ Answer "is it healthy?" from one structured summary. Every later BetterDB skill 
 ## Steps
 
 1. Call `list_instances`.
-2. If one instance is connected, pass its id as `instanceId` on every later call. If more than one is connected, ask which instance to check, then pass that id. `select_instance` only sets server memory for the next call. Calls made before an id exists return `No instance selected`.
+2. Count instances whose status is connected.
+   - None: say so and stop. Ask the user to connect an instance. Do not call `get_health`.
+   - One: pass its id as `instanceId` on every later call.
+   - More than one: ask which instance to check, then pass that id.
+   `select_instance` stores that id for the rest of the MCP process. Later calls that omit `instanceId` use it. Pass `instanceId` anyway when you already know which instance the question is about.
 3. Call `get_health` with that id.
 4. Read the result as the verdict. Open another skill only for the signal that is actually off:
    - Fragmentation far from 1, or memory near a ceiling: `betterdb-memory`.
@@ -25,7 +29,7 @@ Answer "is it healthy?" from one structured summary. Every later BetterDB skill 
 
 ## How to read get_health
 
-Report hit rate, key count, connected clients, role, replication lag, fragmentation, and `configHazards`. An empty `configHazards` list means the probe ran and found nothing. A missing `configHazards`, or `configHazardsUnavailable: true`, means the check did not run. `replicationLag: null` on a primary means there is no replica measurement, not that replication is broken.
+Report hit rate, key count, connected clients, role, replication lag, fragmentation, and `configHazards`. An empty `configHazards` list with no `configHazardsUnavailable` flag means the probe finished and found nothing. `configHazardsUnavailable: true` means the probe did not finish. Findings alongside that flag are partial. A missing `configHazards` with the flag means the probe produced nothing. Do not call either case "no hazards." `replicationLag` is set only for a replica. `null` on a primary means lag was not measured, even when replicas exist.
 
 ## Common mistakes
 
