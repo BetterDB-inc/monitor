@@ -12,15 +12,16 @@ A named interval comes from persisted COMMANDLOG history. The live slowlog buffe
 ## Steps
 
 1. Follow `betterdb-triage` until you have an instance id.
-2. Convert the requested window to Unix milliseconds. Call `get_commandlog_history` and `get_commandlog_patterns` with `startTime`, `endTime`, and `instanceId`.
-3. If both are empty, say the window has no persisted COMMANDLOG rows.
-4. Only then call `get_slowlog`. Label it as the live buffer. Give each row's timestamp. Do not call that buffer "the last hour."
-5. `get_slowlog_patterns` also has no `startTime`. Use it to group the buffer, and say it is the whole buffer, not the requested window.
-6. Durations on these tools are microseconds. Divide by 1000 before saying milliseconds.
+2. Convert the requested window to Unix milliseconds. Call `get_commandlog_history` and `get_commandlog_patterns` with `startTime`, `endTime`, and `instanceId`. With `limit` omitted, history returns the newest 100 matching rows and patterns are built from the newest 500. Both are ordered by time, not by duration. In a busy window the slowest command can sit outside that cap. Say the answer is the newest capped rows, not a proven slowest command, unless a higher `limit` still covers the window.
+3. If the text is a license sentence, report that sentence. Do not describe the window as empty.
+4. If both results are empty, say the window has no persisted COMMANDLOG rows.
+5. Only then call `get_slowlog`. Label it as the live buffer. Give each row's timestamp. Do not call that buffer "the last hour."
+6. `get_slowlog_patterns` reads persisted slowlog rows, including entries that have left the live buffer, and it has no `startTime`. Use it to group that stored history. Do not call it the current buffer or the requested window.
+7. `get_slowlog` durations, and history rows whose `type` is `slow` or missing, are microseconds. Divide those by 1000 before saying milliseconds. History rows whose `type` is `large-request` or `large-reply` store bytes in `duration`. Report those as bytes. Pattern totals drop `type`, so do not convert a pattern duration to milliseconds when the rows mix slow and large entries.
 
 ## How to report
 
-Lead with whether the window had any rows. Then list command, normalized key pattern, duration, client, and timestamp. If the buffer is older than the window, say that in the same sentence as the rows.
+Lead with a license sentence when that is the result. Otherwise lead with whether the window had any rows, and say when the answer is capped at the newest 100 or 500. Then list command, normalized key pattern, duration, client, and timestamp. If the live buffer is older than the window, say that in the same sentence as those rows.
 
 ## Common mistakes
 

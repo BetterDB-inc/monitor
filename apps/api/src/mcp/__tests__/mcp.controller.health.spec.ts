@@ -66,6 +66,7 @@ describe('McpController getHealth', () => {
     const controller = build(true);
     const result = await controller.getHealth('conn-1');
     expect(result).toMatchObject(summary);
-    expect(result.configHazards).toEqual([]);
+    expect(result.configHazards).toBeUndefined();
+    expect(result.configHazardsUnavailable).toBe(true);
   });
 });

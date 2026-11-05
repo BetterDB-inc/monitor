@@ -7,14 +7,15 @@ description: Use when the user asks about hot keys, uneven key access, a key dom
 
 ## Overview
 
-Rank keys by access frequency. If that call fails, say so and fall back. Do not retry the same call.
+`lfu` rows rank by access frequency (`freqScore`). `idletime` rows rank by recency (`idleSeconds`, lower is more recent) and have no frequency. If the call fails, say so and fall back. Do not retry it.
 
 ## Steps
 
 1. Follow `betterdb-triage` until you have an instance id.
 2. Call `get_hot_keys` with the requested `startTime`, `endTime`, `limit`, and `instanceId`.
 3. Read the result:
-   - Rows with `signalType`: report key, frequency, and whether the signal was `lfu` or `idletime`.
+   - `signalType` `lfu`: report the key and `freqScore`.
+   - `signalType` `idletime`: report the key and `idleSeconds`. A key touched once just now outranks a key touched often and then left idle. Do not call that a frequency.
    - The sentence `Failed to get hot keys`: stop. The monitor replaced the exception with that sentence. Say the hot-key scan failed and the cause was not returned.
    - A license sentence: key analytics is not available on this tier. Say that.
 4. Fall back, in order, and label each fallback:
