@@ -60,6 +60,7 @@ import {
   mergeRuleSteps,
 } from './incident-timeline';
 import { getSequenceRules } from './sequence-rules';
+import './incident-sequence-rules';
 import {
   RESHARD_MIN_PRIMARIES,
   RESHARD_PERSIST_POLLS,

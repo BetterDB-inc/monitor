@@ -990,6 +990,93 @@ describe('IncidentTimelineBuilder', () => {
       });
     });
 
+    describe('with a rule of three steps', () => {
+      const chain: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+      };
+
+      it('does not take in the last step when only the step before it was seen', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + 5 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('takes in the last step once every earlier step was seen in order', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + 6 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].matchedPatterns).toEqual([chain.pattern]);
+      });
+
+      it('does not take in the last step when the earlier steps came out of order', () => {
+        const incidents = build(
+          [
+            event({ metricType: MetricType.OPS_PER_SEC }),
+            event({ timestamp: T0 + MIN, metricType: MetricType.CONNECTIONS }),
+            event({ timestamp: T0 + 6 * MIN }),
+          ],
+          chain,
+        );
+
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('does not bridge a dropped start on the last step when only the step before it was dropped', () => {
+        const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [event({ id: 'late', timestamp: T0 + 5 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.OPS_PER_SEC,
+              connectionId: 'conn-a',
+            },
+          ],
+          new Map([['conn-a', T0]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0 + 5 * MIN);
+      });
+
+      it('bridges a dropped start on the last step when every earlier step was dropped', () => {
+        const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [chain]).build(
+          [event({ id: 'late', timestamp: T0 + 5 * MIN })],
+          T0 + 20 * MIN,
+          neverRecovers,
+          [
+            {
+              scopeId: 'conn-a',
+              startedAt: T0,
+              anomalyId: 'z-gone',
+              metricType: MetricType.CONNECTIONS,
+              connectionId: 'conn-a',
+              members: [{ metricType: MetricType.OPS_PER_SEC, connectionId: 'conn-a', timestamp: T0 + MIN }],
+            },
+          ],
+          new Map([['conn-a', T0 + MIN]]),
+        );
+
+        expect(incidentStartOf(incident.incidentId)).toBe(T0);
+      });
+    });
+
     it('takes in a step stamped ahead of an incident that already has a boundary', () => {
       const cost = event({ timestamp: T0 + 5 * MIN });
       const started = { scopeId: 'conn-a', startedAt: cost.timestamp, anomalyId: cost.id };

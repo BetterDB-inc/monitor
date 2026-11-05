@@ -151,6 +151,10 @@ export enum AnomalyPattern {
   RETRY_AMPLIFICATION = 'retry_amplification',
   REPLICATION_DIVERGENCE = 'replication_divergence',
   RECOVERY_AMPLIFICATION = 'recovery_amplification',
+  DIVERGENCE_UNDER_PRESSURE = 'divergence_under_pressure',
+  RESHARD_UNDER_WRITES = 'reshard_under_writes',
+  RETRY_STORM = 'retry_storm',
+  BACKLOG_EXHAUSTION = 'backlog_exhaustion',
   UNKNOWN = 'unknown',
 }
 

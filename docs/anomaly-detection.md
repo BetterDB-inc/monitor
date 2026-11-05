@@ -12,6 +12,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [Overview](#overview)
 - [How It Works](#how-it-works)
 - [Detected Patterns](#detected-patterns)
+- [Incident Sequence Rules](#incident-sequence-rules)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -423,6 +424,30 @@ Detection runs on each monitored connection that currently reports a primary rol
 - Correlate with external monitoring data
 
 **Example scenario**: `fragmentation_ratio` spikes to 2.5 with no other metrics affected.
+
+## Incident Sequence Rules
+
+Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap as long as it stays within the rule's span.
+
+A step only counts once every step before it has occurred, in order, within the rule's span. A later step alone never joins or extends an incident. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster.
+
+| Rule | Steps | Optional | Span | Same connection |
+| --- | --- | --- | --- | --- |
+| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`, `memory_overhead` or `output_kbps` | `connection_churn` | 10 min | yes |
+| `divergence_under_pressure` | `ops_per_sec` or `input_kbps` → `replication_divergence` → `memory_used`, `memory_overhead` or `repl_buffer_pressure` | `evicted_keys`, `evicted_clients`, `fork_memory_risk` | 15 min | yes |
+| `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | `command_p99` | 15 min | no |
+| `retry_storm` | `command_p99` or `error_replies` → `retry_amplification` → `client_saturation`, `load_saturation`, `rejected_connections` or `client_lockout_risk` | `connection_churn` | 10 min | yes |
+| `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | — | 30 min | yes |
+
+Why each span is that long:
+
+- **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
+- **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that.
+- **reshard_under_writes**: skew already means an active reshard with slower writes, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
+- **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation follows within minutes or it has another cause.
+- **backlog_exhaustion**: a coverage warning can stand for a long time before the disconnect that exhausts it, so this rule uses the full incident span.
+
+Write P99 regressions are part of `reshard_shard_skew`, and a replica disconnect is stamped on `resync_escalation`, so neither needs a step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
 
 ## Severity Levels
 

@@ -178,6 +178,34 @@ export function matchSequence(
   return null;
 }
 
+export function reachesStep(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+  stepIndex: number,
+): boolean {
+  const candidates = earlier
+    .filter(
+      (e) =>
+        e.timestamp <= event.timestamp &&
+        (!rule.sameConnection || e.connectionId === event.connectionId),
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+  return candidates.some((first) => {
+    if (!rule.steps[0].includes(first.metricType)) return false;
+    if (event.timestamp - first.timestamp > rule.maxSpanMs) return false;
+    let reached = first.timestamp;
+    for (const step of rule.steps.slice(1, stepIndex)) {
+      const next = candidates.find(
+        (e) => e !== first && step.includes(e.metricType) && e.timestamp >= reached,
+      );
+      if (!next) return false;
+      reached = next.timestamp;
+    }
+    return true;
+  });
+}
+
 export function matchSequences(
   entries: IncidentTimelineEntry[],
   rule: SequenceRule,
@@ -466,15 +494,8 @@ export class IncidentTimelineBuilder {
 
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
     return this.rules().some((rule) =>
-      rule.steps.slice(1).some(
-        (step, i) =>
-          step.includes(event.metricType) &&
-          current.some(
-            (earlier) =>
-              rule.steps[i].includes(earlier.metricType) &&
-              (!rule.sameConnection || earlier.connectionId === event.connectionId) &&
-              event.timestamp - earlier.timestamp <= rule.maxSpanMs,
-          ),
+      rule.steps.some(
+        (step, i) => i > 0 && step.includes(event.metricType) && reachesStep(current, event, rule, i),
       ),
     );
   }
