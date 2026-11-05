@@ -416,7 +416,7 @@ export class IncidentTimelineBuilder {
         latest && event.timestamp - latest.startedAt <= this.opts.maxSpanMs ? latest : undefined;
       const first = current[0];
       const continues =
-        first !== undefined && this.continuesIncident([...prefix, ...current], event, spans);
+        first !== undefined && this.continuesIncident(prefix, current, event, spans);
       if (
         continues &&
         !start &&
@@ -531,6 +531,7 @@ export class IncidentTimelineBuilder {
   }
 
   private continuesIncident(
+    prefix: readonly RuleStepEvent[],
     current: readonly RuleStepEvent[],
     event: AnomalyEvent,
     spans: DroppedSpan[] = [],
@@ -538,7 +539,7 @@ export class IncidentTimelineBuilder {
     const last = current[current.length - 1];
     if (event.timestamp - last.timestamp <= this.opts.gapMs) return true;
     if (this.bridges(spans, last.timestamp, event.timestamp)) return true;
-    return this.followsRuleStep(current, event);
+    return this.followsRuleStep([...prefix, ...current], event);
   }
 
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
