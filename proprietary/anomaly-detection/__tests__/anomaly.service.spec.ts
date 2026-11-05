@@ -3505,7 +3505,7 @@ describe('AnomalyService', () => {
         'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n' +
         'bbbbbbbb 10.0.0.2:6380@16380 myself,master - 0 0 2 connected 8192-16383';
       const nodeClient = { call: jest.fn().mockResolvedValue(selfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -3552,7 +3552,7 @@ describe('AnomalyService', () => {
         },
       ]);
       const getNodeConnection = jest.fn().mockResolvedValue({ call: jest.fn() });
-      (service as any).clusterDiscovery = { getNodeConnection };
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
 
       await poll();
       now += 31_000;
@@ -3606,7 +3606,7 @@ describe('AnomalyService', () => {
         'bbbbbbbb 10.0.0.2:6380@16380 myself,slave aaaaaaaa 0 0 1 connected [42-<-aaaaaaaa]';
       const nodeClient = { call: jest.fn().mockResolvedValue(replicaSelfView) };
       const getNodeConnection = jest.fn().mockResolvedValue(nodeClient);
-      (service as any).clusterDiscovery = { getNodeConnection };
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
 
       await poll();
       expect(slotEvents()).toHaveLength(0); // within grace
@@ -3661,7 +3661,7 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
       const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -3687,7 +3687,7 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
       const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -13338,7 +13338,7 @@ describe('AnomalyService', () => {
 
       it('alerts on a replica of a primary the seed does not see', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
 
         await poll([target], 18, T0);
 
@@ -13358,7 +13358,7 @@ describe('AnomalyService', () => {
 
       it('leaves a primary another connection already covers', async () => {
         const client = nodeClient([2]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
         jest.spyOn(Date, 'now').mockReturnValue(T0);
         (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
 
@@ -13370,7 +13370,7 @@ describe('AnomalyService', () => {
       it('reaches a Sentinel-managed primary by address', async () => {
         const client = nodeClient([2]);
         const getAddressConnection = jest.fn().mockResolvedValue(client);
-        (service as any).clusterDiscovery = { getAddressConnection };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getAddressConnection };
 
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
@@ -13404,7 +13404,7 @@ describe('AnomalyService', () => {
 
       it('keeps per-node state apart from the seed', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
 
         await poll([target], 18, T0);
         await feed([0, 0, 0], T0);
@@ -13416,7 +13416,7 @@ describe('AnomalyService', () => {
 
       it('resolves a node event once that node stops being a primary', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
         const t = await poll([target], 18, T0);
 
         await poll([], 1, t);
@@ -13441,7 +13441,7 @@ describe('AnomalyService', () => {
             resolved: false,
           },
         ]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
 
         await poll([], 1, T0);
 
@@ -13467,7 +13467,7 @@ describe('AnomalyService', () => {
 
       it('keeps the alert of a primary flagged as failed while it stays in the topology', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
         const t = await poll([target], 18, T0);
 
         await poll([], 3, t, new Set([NODE]));
@@ -13488,7 +13488,7 @@ describe('AnomalyService', () => {
             resolved: false,
           },
         ]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
         const t = await poll([], 1, T0, new Set([NODE]));
         expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('failed-node-event', expect.any(Number));
 
@@ -13499,7 +13499,7 @@ describe('AnomalyService', () => {
 
       it('saves the closed windows of a retired primary once storage recovers', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
         storage.saveReplicationDivergenceWindows.mockRejectedValue(new Error('storage down'));
         let t = await poll([target], 18, T0);
         t = await poll([], 1, t);
@@ -13514,7 +13514,7 @@ describe('AnomalyService', () => {
 
       it('reads stored history once a retired primary had windows in the range', async () => {
         const client = nodeClient([2, 4, 6, 8, 10, 12]);
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
         let t = await poll([target], 18, T0);
         t = await feed([0, 0, 0, 0, 0, 0], t);
         await poll([], 1, t);
@@ -13528,7 +13528,7 @@ describe('AnomalyService', () => {
 
       it('reads the open divergence events once per poll', async () => {
         const second = { addr: '10.0.1.7:6379', host: '10.0.1.7', port: 6379, nodeId: 'node-c' };
-        (service as any).clusterDiscovery = {
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
           getNodeConnection: jest.fn(async () => nodeClient([2])),
         };
         storage.getAnomalyEvents.mockClear();
@@ -13543,7 +13543,7 @@ describe('AnomalyService', () => {
       });
 
       it('gives up its claim on a primary it cannot reach', async () => {
-        (service as any).clusterDiscovery = {
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
           getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
         };
 
@@ -13552,10 +13552,40 @@ describe('AnomalyService', () => {
         expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, T0, 30_000)).toBe(false);
       });
 
+      it('waits longer before each retry of a primary it cannot reach', async () => {
+        const getNodeConnection = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection,
+        };
+        const interval = (service as any).getIntervalMs();
+        const attemptAt = async (at: number) => {
+          jest.spyOn(Date, 'now').mockReturnValue(at);
+          await (service as any).detectTopologyDivergence(mockCtx, { targets: [target], members: new Set([NODE]) });
+          return getNodeConnection.mock.calls.length;
+        };
+
+        expect(await attemptAt(T0)).toBe(1);
+        expect(await attemptAt(T0 + interval / 2)).toBe(1);
+        expect(await attemptAt(T0 + interval)).toBe(2);
+        expect(await attemptAt(T0 + 2 * interval)).toBe(2);
+        expect(await attemptAt(T0 + 3 * interval)).toBe(3);
+        expect((service as any).topologyFanoutUnreachable.get('conn-1')).toBe(1);
+      });
+
+      it('closes the node clients of a removed connection', () => {
+        const releaseConnection = jest.fn().mockResolvedValue(undefined);
+        (service as any).clusterDiscovery = { releaseConnection };
+
+        (service as any).onConnectionRemoved('conn-1');
+
+        expect(releaseConnection).toHaveBeenCalledWith('conn-1');
+      });
+
       it('marks a primary unreachable when connecting to it stalls', async () => {
         jest.useFakeTimers();
         try {
-          (service as any).clusterDiscovery = { getNodeConnection: jest.fn(() => new Promise(() => {})) };
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn(() => new Promise(() => {})) };
 
           const done = poll([target], 1, T0);
           await jest.advanceTimersByTimeAsync(5_000);
@@ -13568,7 +13598,7 @@ describe('AnomalyService', () => {
       });
 
       it('clears the unreachable count once no primary is left to read', async () => {
-        (service as any).clusterDiscovery = { getNodeConnection: jest.fn() };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
         (service as any).topologyFanoutUnreachable.set('conn-1', 1);
         const log = jest.spyOn((service as any).logger, 'log');
 
@@ -13582,7 +13612,7 @@ describe('AnomalyService', () => {
         jest.useFakeTimers();
         try {
           const client = { info: jest.fn(() => new Promise(() => {})) };
-          (service as any).clusterDiscovery = { getNodeConnection: jest.fn().mockResolvedValue(client) };
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
 
           for (let i = 0; i < 3; i++) {
             const done = poll([target], 1, T0 + i * 10_000);
@@ -13686,7 +13716,7 @@ describe('AnomalyService', () => {
       it('logs unreachable primaries once and keeps their state', async () => {
         const client = nodeClient([2, 4]);
         const getNodeConnection = jest.fn().mockResolvedValue(client);
-        (service as any).clusterDiscovery = { getNodeConnection };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
         const warn = jest.spyOn((service as any).logger, 'warn');
         let t = await poll([target], 6, T0);
 

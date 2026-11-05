@@ -81,9 +81,7 @@ export function sentinelTargets(
 }
 
 function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): TopologyScope {
-  const targets = [...reachable.values()]
-    .sort((a, b) => a.addr.localeCompare(b.addr))
-    .slice(0, TOPOLOGY_TARGET_LIMIT);
+  const targets = [...reachable.values()].sort((a, b) => a.addr.localeCompare(b.addr));
   const unreachable = [...down].filter((addr) => !reachable.has(addr));
   return { targets, members: new Set([...targets.map((t) => t.addr), ...unreachable]) };
 }
@@ -96,17 +94,16 @@ export class TopologyTargetClaims {
     targets: TopologyTarget[],
     now: number,
     staleMs: number,
+    limit = TOPOLOGY_TARGET_LIMIT,
   ): TopologyTarget[] {
-    const wanted = new Set(targets.map((t) => t.addr));
+    const free = targets.filter((target) => !this.heldByOther(connectionId, target.addr, now, staleMs));
+    const claimed = free.slice(0, limit);
+    const wanted = new Set(claimed.map((t) => t.addr));
     for (const [addr, owner] of this.owners) {
       if (owner.connectionId === connectionId && !wanted.has(addr)) this.owners.delete(addr);
     }
-    return targets.filter((target) => {
-      const owner = this.owners.get(target.addr);
-      if (owner && owner.connectionId !== connectionId && now - owner.at <= staleMs) return false;
-      this.owners.set(target.addr, { connectionId, at: now });
-      return true;
-    });
+    for (const target of claimed) this.owners.set(target.addr, { connectionId, at: now });
+    return claimed;
   }
 
   heldByOther(connectionId: string, addr: string, now: number, staleMs: number): boolean {

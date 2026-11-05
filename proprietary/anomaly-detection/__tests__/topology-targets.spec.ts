@@ -80,15 +80,21 @@ describe('topology targets', () => {
       expect(members.size).toBe(0);
     });
 
-    it('caps the fan-out and leaves capped primaries out of scope', () => {
+    it('leaves the cap to the claims so other connections can take the rest', () => {
       const nodes = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 5 }, (_, i) =>
         clusterNode(`n${i}`, `10.0.1.${i}:6379@16379`, ['master']),
       );
+      const { targets } = clusterTargets(nodes, nothingRegistered);
+      const claims = new TopologyTargetClaims();
 
-      const { targets, members } = clusterTargets(nodes, nothingRegistered);
+      const first = claims.claim('conn-a', targets, 0, 30_000);
+      const second = claims.claim('conn-b', targets, 0, 30_000);
 
-      expect(targets).toHaveLength(TOPOLOGY_TARGET_LIMIT);
-      expect([...members].sort()).toEqual(targets.map((t) => t.addr).sort());
+      expect(targets).toHaveLength(TOPOLOGY_TARGET_LIMIT + 5);
+      expect(first).toHaveLength(TOPOLOGY_TARGET_LIMIT);
+      expect(second.map((t) => t.addr)).toEqual(
+        targets.filter((t) => !first.includes(t)).map((t) => t.addr),
+      );
     });
   });
 

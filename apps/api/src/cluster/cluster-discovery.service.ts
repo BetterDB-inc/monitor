@@ -46,13 +46,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   private discoveredNodes: Map<string, NodeConnection> = new Map();
   // Per-connection discovery cache to prevent cross-connection cache contamination
   private discoveryCacheByConnection: Map<string, DiscoveryCache> = new Map();
+  private discoveryInFlight: Map<string, Promise<DiscoveredNode[]>> = new Map();
   private loggedConnectionErrors: Set<string> = new Set();
   private loggedGetConnectionErrors: Set<string> = new Set();
   private readonly MAX_LOGGED_ERRORS = 1000; // Prevent unbounded growth
   private readonly DISCOVERY_CACHE_TTL = 30000; // 30 seconds
   private readonly CONNECTION_TIMEOUT = 5000; // 5 seconds
   private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
-  private readonly MAX_CONNECTIONS = 100; // Maximum number of concurrent connections
+  private readonly MAX_CONNECTIONS = 512; // Maximum number of concurrent connections
 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
@@ -69,16 +70,24 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     if (cached) {
       return cached;
     }
+    const pending = this.discoveryInFlight.get(cacheKey);
+    if (pending) return pending;
 
-    try {
-      const client = this.connectionRegistry.get(connectionId);
-      return this.remember(cacheKey, await client.getClusterNodes());
-    } catch (error) {
-      this.logger.error(
-        `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
-      );
-      throw error;
-    }
+    const discovery = (async () => {
+      try {
+        const client = this.connectionRegistry.get(connectionId);
+        return this.remember(cacheKey, await client.getClusterNodes());
+      } catch (error) {
+        this.logger.error(
+          `Failed to discover cluster nodes: ${error instanceof Error ? error.message : error}`,
+        );
+        throw error;
+      } finally {
+        this.discoveryInFlight.delete(cacheKey);
+      }
+    })();
+    this.discoveryInFlight.set(cacheKey, discovery);
+    return discovery;
   }
 
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
@@ -479,6 +488,22 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   getActiveConnections(): NodeConnection[] {
     return Array.from(this.discoveredNodes.values());
+  }
+
+  async releaseConnection(connectionId: string): Promise<void> {
+    const owned = [...this.discoveredNodes].filter(([, connection]) => connection.connectionId === connectionId);
+    for (const [key] of owned) this.discoveredNodes.delete(key);
+    this.discoveryCacheByConnection.delete(connectionId);
+    await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
+  }
+
+  async retainAddressConnections(connectionId: string, addrs: ReadonlySet<string>): Promise<void> {
+    const prefix = `addr:${connectionId}:`;
+    const dropped = [...this.discoveredNodes].filter(
+      ([key]) => key.startsWith(prefix) && !addrs.has(key.slice(prefix.length)),
+    );
+    for (const [key] of dropped) this.discoveredNodes.delete(key);
+    await Promise.allSettled(dropped.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
   async disconnectAll(): Promise<void> {
