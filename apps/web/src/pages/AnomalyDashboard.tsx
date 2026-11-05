@@ -122,14 +122,6 @@ const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; col
     color: 'var(--destructive)',
   },
   retry_amplification: { icon: AlertTriangle, label: 'Retry Amplification', color: 'var(--chart-warning)' },
-  divergence_under_pressure: {
-    icon: Database,
-    label: 'Divergence Under Pressure',
-    color: 'var(--destructive)',
-  },
-  reshard_under_writes: { icon: Database, label: 'Reshard Under Writes', color: 'var(--chart-warning)' },
-  retry_storm: { icon: AlertTriangle, label: 'Retry Storm', color: 'var(--destructive)' },
-  backlog_exhaustion: { icon: Database, label: 'Backlog Exhaustion', color: 'var(--destructive)' },
   replication_divergence: {
     icon: Database,
     label: 'Replication Divergence',
