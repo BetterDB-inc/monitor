@@ -172,10 +172,11 @@ export class ConfigHazardService {
     // and the CRC verdict is unverified when cluster mode is missing. An unread
     // appendfsync under AOF is the same case: the advisory it would raise is
     // missing, not ruled out. Keep findings already collected and re-probe next
-    // poll. A null cluster-crc-enabled on a cluster is a completed probe: no
-    // released build has the setting yet (valkey#4201 is unmerged), and
-    // cluster-enabled came back through the same CONFIG GET, so the read was
-    // not filtered.
+    // poll. A null cluster-crc-enabled on a cluster is treated as the setting
+    // being absent, so the probe counts as complete: no released build has it
+    // yet (valkey#4201 is unmerged). It is a separate CONFIG GET from
+    // cluster-enabled, so a filter on that one parameter would also read null
+    // and look the same. Revisit once valkey#4201 ships.
     const configStateUnknown =
       appendonly === null || clusterEnabled === null || appendfsyncUnread;
     return { findings, cacheable: !configStateUnknown };

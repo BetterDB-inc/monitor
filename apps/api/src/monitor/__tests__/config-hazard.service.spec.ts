@@ -141,7 +141,7 @@ describe('ConfigHazardService', () => {
 
   it('caches a cluster probe on a build without cluster-crc-enabled', async () => {
     // No released Valkey or Redis has the setting, so null is the normal reply
-    // on a cluster. cluster-enabled read fine, so the CONFIG GET was not filtered.
+    // on a cluster and is treated as the setting being absent.
     client.getConfigValue.mockImplementation((param: string) => {
       if (param === 'appendonly') return Promise.resolve('no');
       if (param === 'cluster-enabled') return Promise.resolve('yes');
