@@ -5,6 +5,36 @@ All notable changes to `@betterdb/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - Unreleased
+
+### Added
+
+- `--no-monitor-tools` flag: don't register `start_monitor` and
+  `stop_monitor`.
+- `BETTERDB_LOCAL_TOKEN`: token for a monitor started with `--autostart` or
+  `start_monitor` when `BETTERDB_URL` is set to a different monitor.
+- `BETTERDB_MCP_TELEMETRY`: turns off the MCP server's usage events without
+  affecting a monitor it starts. Usage events are off if it or
+  `BETTERDB_TELEMETRY` is off.
+- `BETTERDB_MONITOR_<NAME>` variables are passed to the started monitor as
+  `<NAME>`.
+
+### Fixed
+
+- The monitor started by `--autostart` or `start_monitor` no longer inherits
+  `BETTERDB_URL`, `BETTERDB_TOKEN`, `BETTERDB_LOCAL_TOKEN`,
+  `BETTERDB_INSTANCE_ID` or `BETTERDB_MCP_TELEMETRY`.
+- A monitor started with `--autostart` or `start_monitor` gets
+  `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` only when `BETTERDB_URL` is
+  unset or points at it. `stop_monitor` switches back to the previous
+  monitor, token and instance.
+- `--autostart` and `start_monitor` work on native Windows with Node 20.12.2
+  and later.
+- Tool calls and their usage events go to the monitor the call started on,
+  also when the session switches monitors during the call.
+- `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no` and `off`,
+  not only `false`.
+
 ## [1.4.0] - 2026-07-28
 
 ### Added

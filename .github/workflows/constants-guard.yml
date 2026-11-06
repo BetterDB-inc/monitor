@@ -49,3 +49,30 @@ jobs:
 
       - name: Check Dockerfile.aiven is generated from Dockerfile
         run: node scripts/generate-dockerfile-aiven.mjs --check
+
+  mcp-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check the MCP telemetry off-values mirror the API's negative env values
+        run: node scripts/check-env-negatives.mjs
+
+      - name: Fetch the base branch
+        run: git fetch --no-tags --depth=1 origin "$BASE_REF"
+        env:
+          BASE_REF: ${{ github.base_ref || 'master' }}
+
+      - name: Check @betterdb/mcp versions and that the plugin pin is published
+        run: node scripts/check-mcp-versions.mjs --check-published --base FETCH_HEAD

@@ -20,9 +20,10 @@
  *      stops a schema quietly going back to a hand-typed ceiling.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { lineAt, sourceFiles } from './lib/source-files.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -30,21 +31,6 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CANONICAL_FILE = 'packages/shared/src/utils/cache-proposals.ts';
 
 const NAMES = ['TTL_SECONDS_MIN', 'TTL_SECONDS_MAX'];
-
-/** Directories that never hold a declaration or a bound worth guarding. */
-const SKIPPED_DIRS = new Set([
-  'node_modules',
-  'dist',
-  'build',
-  'coverage',
-  '.git',
-  '.turbo',
-  '.next',
-  '.venv',
-  'venv',
-  '__pycache__',
-  'examples',
-]);
 
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.py', '.mjs', '.js'];
 
@@ -108,32 +94,6 @@ const CLAMP_WINDOW = 300;
 /** A name that denotes a TTL. */
 const TTL_MENTION = /\b[A-Za-z_]*ttl(?:_?seconds)?\b/i;
 
-function isSkipped(name) {
-  return SKIPPED_DIRS.has(name);
-}
-
-function sourceFiles(dir, found = []) {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      if (isSkipped(entry.name) === false) {
-        sourceFiles(path, found);
-      }
-      continue;
-    }
-
-    const isSource = SOURCE_EXTENSIONS.some((ext) => {
-      return entry.name.endsWith(ext);
-    });
-    if (isSource) {
-      found.push(path);
-    }
-  }
-
-  return found;
-}
-
 function repoSourceFiles() {
   const roots = ['apps', 'packages', 'proprietary', 'scripts'].filter((name) => {
     const stats = statSync(join(repoRoot, name), { throwIfNoEntry: false });
@@ -142,7 +102,7 @@ function repoSourceFiles() {
 
   const files = [];
   for (const root of roots) {
-    files.push(...sourceFiles(join(repoRoot, root)));
+    files.push(...sourceFiles(join(repoRoot, root), SOURCE_EXTENSIONS));
   }
 
   return files.map((path) => {
@@ -208,10 +168,6 @@ function isDeclarationLine(line) {
  */
 function isCommentLine(line) {
   return /^(?:\/\/|\/\*|\*|#)/.test(line);
-}
-
-function lineAt(source, offset) {
-  return source.slice(0, offset).split('\n').length;
 }
 
 function textAt(lines, line) {

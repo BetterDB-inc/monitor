@@ -73,17 +73,10 @@ jobs:
             echo "version=${GITHUB_REF_NAME#mcp-v}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Update package.json version
+      - name: Check committed versions match the release
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          cd packages/mcp
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
-            pkg.version = process.env.VERSION;
-            fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+        run: node scripts/check-mcp-versions.mjs --expect "$VERSION"
 
       - name: Build MCP server
         run: pnpm --filter @betterdb/mcp build

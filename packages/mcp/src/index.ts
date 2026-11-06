@@ -2,10 +2,19 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
-import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+import {
+  initTelemetry,
+  trackToolCall,
+  stopTelemetry,
+  flushTelemetry,
+  moveTelemetry,
+  type TelemetryEvent,
+} from './telemetry.js';
+import type { MonitorTarget } from './monitor-target.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -16,6 +25,7 @@ const args = process.argv.slice(2);
 const AUTOSTART = args.includes('--autostart');
 const PERSIST = args.includes('--persist');
 const STOP = args.includes('--stop');
+const MONITOR_TOOLS = !args.includes('--no-monitor-tools');
 
 function getArgValue(flag: string, fallback: string): string {
   const i = args.indexOf(flag);
@@ -47,26 +57,89 @@ if (STOP) {
   process.exit(0);
 }
 
-let BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
-const BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
-const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
+interface Session {
+  target: MonitorTarget;
+  instanceId: string | null;
+}
 
-let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
-
-// Auto-detect whether the API lives at /api/* (production) or /* (local dev).
-// Probe once on first request, then cache the result.
-let detectedPrefix: string | null = null;
 const API_PREFIXES = ['/api', ''];
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
-async function rawFetch(prefix: string, path: string): Promise<Response> {
-  const url = `${BETTERDB_URL}${prefix}${path}`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
+function monitorKey(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = LOOPBACK_HOSTS.has(parsed.hostname) ? 'localhost' : parsed.hostname;
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    return `${parsed.protocol}//${host}:${port}`;
+  } catch {
+    return null;
   }
-  return fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+}
+
+function isSameMonitor(a: string, b: string): boolean {
+  const key = monitorKey(a);
+  return key !== null && key === monitorKey(b);
+}
+
+function isConfiguredMonitor(url: string): boolean {
+  const configured = process.env.BETTERDB_URL;
+  return !configured || isSameMonitor(url, configured);
+}
+
+function tokenFor(url: string): string | undefined {
+  return isConfiguredMonitor(url)
+    ? process.env.BETTERDB_TOKEN
+    : process.env.BETTERDB_LOCAL_TOKEN || undefined;
+}
+
+function instanceFor(url: string): string | null {
+  return isConfiguredMonitor(url) ? process.env.BETTERDB_INSTANCE_ID || null : null;
+}
+
+const configuredUrl = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
+let target: MonitorTarget = { url: configuredUrl, token: tokenFor(configuredUrl), prefix: null };
+let activeInstanceId: string | null = instanceFor(configuredUrl);
+let sessionBeforeLocalMonitor: Session | null = null;
+
+function switchTo(url: string, remember: boolean): void {
+  if (isSameMonitor(target.url, url)) return;
+  if (remember) {
+    sessionBeforeLocalMonitor ??= { target, instanceId: activeInstanceId };
+  }
+  target = { url, token: tokenFor(url), prefix: null };
+  activeInstanceId = instanceFor(url);
+}
+
+function restoreSessionAfterStop(): MonitorTarget | null {
+  if (!sessionBeforeLocalMonitor) return null;
+  const stopped = target;
+  target = sessionBeforeLocalMonitor.target;
+  activeInstanceId = sessionBeforeLocalMonitor.instanceId;
+  sessionBeforeLocalMonitor = null;
+  return stopped;
+}
+
+function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (to.token) {
+    headers['Authorization'] = `Bearer ${to.token}`;
+  }
+  return headers;
+}
+
+async function rawFetch(
+  to: MonitorTarget,
+  prefix: string,
+  path: string,
+  timeoutMs: number,
+): Promise<Response> {
+  return fetch(`${to.url}${prefix}${path}`, {
+    headers: authHeaders(to, true),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
 }
 
 function isJsonResponse(res: Response): boolean {
@@ -74,10 +147,10 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
-async function detectPrefix(): Promise<string> {
+async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
   for (const prefix of API_PREFIXES) {
     try {
-      const res = await rawFetch(prefix, '/mcp/instances');
+      const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
       if (res.ok && isJsonResponse(res)) {
         return prefix;
       }
@@ -85,7 +158,6 @@ async function detectPrefix(): Promise<string> {
       // network error — try next prefix
     }
   }
-  // Fall back to /api if detection fails entirely
   return '/api';
 }
 
@@ -98,23 +170,31 @@ class ApiHttpError extends Error {
   }
 }
 
+function sendTelemetry(to: MonitorTarget, events: TelemetryEvent[]): Promise<unknown> {
+  return requestTo(to, 'POST', '/mcp/telemetry', { events }, 5_000);
+}
+
+const callTargets = new AsyncLocalStorage<MonitorTarget>();
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
-  if (detectedPrefix === null) {
-    detectedPrefix = await detectPrefix();
+  return requestTo(callTargets.getStore() ?? target, method, path, body);
+}
+
+async function requestTo(
+  to: MonitorTarget,
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = 30_000,
+): Promise<unknown> {
+  if (to.prefix === null) {
+    to.prefix = await detectPrefix(to, timeoutMs);
   }
-  const url = `${BETTERDB_URL}${detectedPrefix}${path}`;
-  const headers: Record<string, string> = {};
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
-  }
-  const res = await fetch(url, {
+  const res = await fetch(`${to.url}${to.prefix}${path}`, {
     method,
-    headers,
+    headers: authHeaders(to, body !== undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (res.status === 402) {
@@ -225,12 +305,17 @@ function resolveInstanceId(overrideId?: string): string {
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
-async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+async function withTelemetry(
+  toolName: string,
+  fn: () => Promise<ToolResult>,
+  credit: 'call' | 'switched' = 'call',
+): Promise<ToolResult> {
+  const callTarget = target;
   const start = Date.now();
   let success = true;
   let error: string | undefined;
   try {
-    const result = await fn();
+    const result = await callTargets.run(callTarget, fn);
     if (result.isError) {
       success = false;
       error = result.content[0]?.text?.slice(0, 200);
@@ -241,7 +326,8 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
     error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     throw err;
   } finally {
-    trackToolCall({ toolName, success, durationMs: Date.now() - start, error });
+    const creditTarget = credit === 'switched' ? target : callTarget;
+    trackToolCall(creditTarget, { toolName, success, durationMs: Date.now() - start, error });
   }
 }
 
@@ -256,6 +342,7 @@ server.tool(
   {},
   async () =>
     withTelemetry('list_instances', async () => {
+      const selectedId = activeInstanceId;
       const data = (await apiFetch('/mcp/instances')) as {
         instances: Array<{
           id: string;
@@ -266,7 +353,7 @@ server.tool(
         }>;
       };
       const lines = data.instances.map((inst) => {
-        const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
+        const active = inst.id === selectedId ? ' [ACTIVE]' : '';
         const status = inst.isConnected ? 'connected' : 'disconnected';
         return `${inst.id} - ${inst.name} (${status})${inst.isDefault ? ' [default]' : ''}${active}`;
       });
@@ -293,6 +380,17 @@ server.tool(
       const found = data.instances.find((inst) => inst.id === instanceId);
       if (!found) {
         return instanceNotFoundResult(instanceId);
+      }
+      if (target !== callTargets.getStore()) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'The monitor changed while selecting the instance. Call list_instances again.',
+            },
+          ],
+          isError: true,
+        };
       }
       activeInstanceId = instanceId;
       return {
@@ -875,47 +973,47 @@ server.tool(
 
 // --- Monitor lifecycle tools ---
 
-server.tool(
-  'start_monitor',
-  'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
-  {
-    port: z
-      .number()
-      .int()
-      .min(1)
-      .max(65535)
-      .default(3001)
-      .describe('Port for the monitor API (default 3001)'),
-    storage: z
-      .enum(['sqlite', 'memory'])
-      .default('sqlite')
-      .describe('Storage backend (default sqlite)'),
-  },
-  async ({ port, storage }) =>
-    withTelemetry('start_monitor', async () => {
-      try {
-        const { startMonitor } = await import('./autostart.js');
-        const result = await startMonitor({ persist: true, port, storage });
-        BETTERDB_URL = result.url;
-        process.env.BETTERDB_URL = result.url;
-        detectedPrefix = null;
-        const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
-        return {
-          content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'start_monitor',
+    'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
+    {
+      port: z
+        .number()
+        .int()
+        .min(1)
+        .max(65535)
+        .default(3001)
+        .describe('Port for the monitor API (default 3001)'),
+      storage: z
+        .enum(['sqlite', 'memory'])
+        .default('sqlite')
+        .describe('Storage backend (default sqlite)'),
+    },
+    async ({ port, storage }) =>
+      withTelemetry('start_monitor', async () => {
+        try {
+          const { startMonitor } = await import('./autostart.js');
+          const result = await startMonitor({ persist: true, port, storage });
+          switchTo(result.url, true);
+          const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+          return {
+            content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }, 'switched'),
+  );
+}
 
 const CACHE_NAME_DESC =
   "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
@@ -1611,31 +1709,41 @@ function formatProposalText(data: {
   };
 }
 
-server.tool(
-  'stop_monitor',
-  'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
-  {},
-  async () =>
-    withTelemetry('stop_monitor', async () => {
-      try {
-        const { stopMonitor } = await import('./autostart.js');
-        const result = await stopMonitor();
-        return {
-          content: [{ type: 'text' as const, text: result.message }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'stop_monitor',
+    'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
+    {},
+    async () =>
+      withTelemetry('stop_monitor', async () => {
+        try {
+          const { stopMonitor } = await import('./autostart.js');
+          const result = await stopMonitor();
+          const stopped = restoreSessionAfterStop();
+          let text = result.message;
+          if (stopped) {
+            moveTelemetry(stopped, target);
+            text += ` Switched back to ${target.url}.`;
+          } else if (result.url && isSameMonitor(target.url, result.url)) {
+            text += ` This session still points at ${target.url}, which is no longer running. Call start_monitor before using other tools.`;
+          }
+          return {
+            content: [{ type: 'text' as const, text }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }, 'switched'),
+  );
+}
 
 // --- Memory tools ---
 server.tool(
@@ -2171,13 +2279,10 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    // Always update URL/prefix to target the monitor (whether freshly started or already running)
-    BETTERDB_URL = result.url;
-    process.env.BETTERDB_URL = result.url;
-    detectedPrefix = null;
+    switchTo(result.url, false);
   }
 
-  initTelemetry(apiRequest);
+  initTelemetry(sendTelemetry);
 
   let shuttingDown = false;
   const shutdown = async () => {
