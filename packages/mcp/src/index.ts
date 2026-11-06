@@ -61,9 +61,13 @@ const API_PREFIXES = ['/api', ''];
 
 function useLocalMonitor(url: string): void {
   BETTERDB_URL = url;
-  BETTERDB_TOKEN = undefined;
+  BETTERDB_TOKEN = process.env.BETTERDB_LOCAL_TOKEN || undefined;
   process.env.BETTERDB_URL = url;
-  delete process.env.BETTERDB_TOKEN;
+  if (BETTERDB_TOKEN) {
+    process.env.BETTERDB_TOKEN = BETTERDB_TOKEN;
+  } else {
+    delete process.env.BETTERDB_TOKEN;
+  }
   detectedPrefix = null;
 }
 

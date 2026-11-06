@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Switching to a local monitor with `start_monitor` or `--autostart` no longer
-  sends the configured `BETTERDB_TOKEN` to it.
+  sends the configured `BETTERDB_TOKEN` to it. Set the new
+  `BETTERDB_LOCAL_TOKEN` when the local monitor needs a token.
 - `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no`, `off` and an
   empty string, not only `false`.
 

@@ -120,6 +120,7 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
+| `BETTERDB_LOCAL_TOKEN` | — | Token for the local monitor used after `--autostart` or `start_monitor`. `BETTERDB_TOKEN` is never sent to it |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
 | `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no`, `off` or an empty string to stop posting tool usage events (tool name, success, duration, error) to the monitor |
 
@@ -205,7 +206,7 @@ For AI components (semantic caches, agent caches, agent-memory stores, retrieval
 
 ### Monitor Lifecycle Tools
 
-Registered only with `--autostart` or `--monitor-tools`. They run `npx --yes @betterdb/monitor` as a background process, and after `start_monitor` the server talks to that local monitor without sending `BETTERDB_TOKEN`.
+Registered only with `--autostart` or `--monitor-tools`. They run `npx --yes @betterdb/monitor` as a background process, and after `start_monitor` the server talks to that local monitor without sending `BETTERDB_TOKEN`. Set `BETTERDB_LOCAL_TOKEN` if that monitor needs a token, for example for write tools.
 
 | Tool | Description |
 |---|---|
