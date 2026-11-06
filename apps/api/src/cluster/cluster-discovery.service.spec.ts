@@ -706,6 +706,15 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('neither reads nor fills the discovery cache, so each call sees the node its own socket reached', async () => {
+      await service.discoverNodes('test-connection');
+      dedicatedClient(jest.fn().mockResolvedValue('vip 10.0.0.9:7009@17009 myself,master - 0 0 1 connected 0-16383\n'));
+      const isolated = await service.discoverNodesIsolated('test-connection', 10_000);
+      expect(isolated.map((n) => n.id)).toEqual(['vip']);
+      const cached = await service.discoverNodes('test-connection');
+      expect(cached.map((n) => n.id)).not.toContain('vip');
+    });
+
     it('closes the dedicated client when CLUSTER NODES times out', async () => {
       const client = dedicatedClient(jest.fn().mockRejectedValue(new Error('Command timed out')));
       await expect(service.discoverNodesIsolated('test-connection', 10_000)).rejects.toThrow('Command timed out');

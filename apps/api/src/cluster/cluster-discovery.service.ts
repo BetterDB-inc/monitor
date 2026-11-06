@@ -92,12 +92,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return discovery;
   }
 
+  /**
+   * CLUSTER NODES over a socket of its own, opened for this call. Never served
+   * from or written to the discovery cache: the cache holds the main socket's
+   * view, while a seed behind a VIP lands each new socket on an arbitrary
+   * node, and topology sync relies on seeing which node that was.
+   */
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
-    const cached = this.freshCache(connectionId);
-    if (cached) {
-      return cached;
-    }
-
     const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
     const client = new Valkey({
       host,
@@ -118,7 +119,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     try {
       await client.connect();
       const raw = await client.call('CLUSTER', 'NODES');
-      return this.remember(connectionId, MetricsParser.parseClusterNodes(raw as string));
+      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
     } finally {
       client.disconnect();
     }
