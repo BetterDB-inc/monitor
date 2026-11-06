@@ -59,7 +59,7 @@ For other clients such as OpenAI Codex, or to configure Claude Code by hand, add
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.6.0"],
+      "args": ["-y", "@betterdb/mcp@1.5.0"],
       "env": {
         "BETTERDB_URL": "https://<your-workspace>.app.betterdb.com",
         "BETTERDB_TOKEN": "<your-token>"
@@ -77,7 +77,7 @@ For local development with an existing monitor (token not required):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.6.0"],
+      "args": ["-y", "@betterdb/mcp@1.5.0"],
       "env": {
         "BETTERDB_URL": "http://localhost:3001"
       }
@@ -94,7 +94,7 @@ For zero-config local development (auto-starts and manages a monitor process):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.6.0", "--autostart", "--persist"]
+      "args": ["-y", "@betterdb/mcp@1.5.0", "--autostart", "--persist"]
     }
   }
 }
