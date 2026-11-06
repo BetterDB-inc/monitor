@@ -29,14 +29,17 @@ export interface LogSourceRead {
  * through another address (a load balancer IP per zone, IPv4 vs IPv6) keeps its
  * identity, and a restarted process gets a new one even on the same address.
  *
- * Address tracking cannot tell nodes apart behind one address (an SSH tunnel or
- * a proxy to several nodes with INFO denied); entries are then attributed to the
- * address, and a node change behind it shows only through ID wraparound.
+ * When INFO is refused for good the address is tracked instead, even for a
+ * connection that reported a run id before. Address tracking cannot tell nodes
+ * apart behind one address (an SSH tunnel or a proxy to several nodes with INFO
+ * denied); entries are then attributed to the address, and a node change
+ * behind it shows only through ID wraparound.
  */
 export class LogSourceTracker {
   private readonly tracked = new Map<string, { key: string; label: string }>();
-  // Connections that have reported a run id: once seen, an INFO failure means
-  // the source is unknown for that poll, not that it moved to address tracking.
+  // Connections that have reported a run id: once seen, an INFO failure other
+  // than a refusal means the source is unknown for that poll, not that it moved
+  // to address tracking.
   private readonly withRunId = new Set<string>();
 
   /**
@@ -50,24 +53,29 @@ export class LogSourceTracker {
   async read(ctx: ConnectionContext): Promise<LogSourceRead | null> {
     const generation = ctx.client.getConnectionGeneration?.() ?? null;
     let runId = '';
+    let refused = false;
     try {
       const info = await ctx.client.getInfo(['server']);
       runId = (info.server as Record<string, string> | undefined)?.run_id ?? '';
     } catch (err) {
       // INFO refused for good (ACL, a renamed or blocked command): the address
-      // is the only identity there will be. Any other failure is a moment the
-      // run id could not be read, and storing that poll under the address would
-      // store the same entries again under the run id once INFO answers.
-      if (!isBlockedCommandError(err instanceof Error ? err : String(err))) return null;
+      // is the only identity there will be, whatever was stored before. Any
+      // other failure is a moment the run id could not be read, and storing
+      // that poll under the address would store the same entries again under
+      // the run id once INFO answers.
+      refused = isBlockedCommandError(err instanceof Error ? err : String(err));
+      if (!refused) return null;
     }
-    if (!runId && !this.withRunId.has(ctx.connectionId)) {
-      try {
-        if (await this.hasRunIdHistory(ctx.connectionId)) this.withRunId.add(ctx.connectionId);
-      } catch {
-        return null;
+    if (!runId && !refused) {
+      if (!this.withRunId.has(ctx.connectionId)) {
+        try {
+          if (await this.hasRunIdHistory(ctx.connectionId)) this.withRunId.add(ctx.connectionId);
+        } catch {
+          return null;
+        }
       }
+      if (this.withRunId.has(ctx.connectionId)) return null;
     }
-    if (!runId && this.withRunId.has(ctx.connectionId)) return null;
     // Read after the INFO reply: a reconnect while it was pending would resend
     // it to another node, so the endpoint must come from the same socket.
     if (generation !== null && ctx.client.getConnectionGeneration?.() !== generation) return null;

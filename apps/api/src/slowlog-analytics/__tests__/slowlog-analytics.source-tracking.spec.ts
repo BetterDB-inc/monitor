@@ -180,13 +180,13 @@ describe('SlowLogAnalyticsService source tracking', () => {
     served = entries([0, 1], 1000);
     await poll();
 
-    runId = null;
+    infoError = new Error('Command timed out');
     served = entries([0, 1, 2, 3], 1000);
     await poll();
     let stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
     expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
 
-    runId = 'run-a';
+    infoError = null;
     await poll();
     stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
     expect(stored.map((e) => e.id).sort()).toEqual([0, 1, 2, 3]);
@@ -200,12 +200,27 @@ describe('SlowLogAnalyticsService source tracking', () => {
     await poll();
 
     service = newService();
-    runId = null;
+    infoError = new Error('Command timed out');
     served = entries([0, 1, 2], 1000);
     await poll();
 
     const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
     expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
+  });
+
+  it('tracks by address once INFO is refused for a connection that reported a run id', async () => {
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    await poll();
+
+    // An ACL change now denies INFO for good; collection must not stop.
+    runId = null;
+    served = entries([0, 1, 2], 1000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.filter((e) => e.sourceRunId === '').map((e) => e.id).sort()).toEqual([0, 1, 2]);
   });
 
   it('notices run id entries another replica stored after an earlier check found none', async () => {

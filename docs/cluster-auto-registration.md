@@ -60,13 +60,16 @@ against the node that served them, not the seed's hostname, so history stays
 complete and attributable when the seed moves between nodes.
 
 The node is identified by its `run_id` from `INFO server`, which stays the
-same whatever address reaches it. When `INFO` fails, entries are stored
-against the address instead. If a connection has never reported a `run_id`
-and `INFO` later starts working, the entries still in a server's log (at most
-128 per log type) are stored once more under that server's `run_id`, so
-history can show those entries twice. This happens once for each server
-whose entries were stored under the address, so a seed that moved between
-nodes while `INFO` was failing can repeat it for several of them.
+same whatever address reaches it. When `INFO` is refused (an ACL or a blocked
+command), entries are stored against the address instead, also for a
+connection that reported a `run_id` before. A poll in which `INFO` fails for
+any other reason, such as a timeout, is skipped, and its entries are stored by
+the next poll. If a connection's entries were stored under the address and
+`INFO` later starts working, the entries still in a server's log (at most 128
+per log type) are stored once more under that server's `run_id`, so history
+can show those entries twice. This happens once for each server whose entries
+were stored under the address, so a seed that moved between nodes while
+`INFO` was refused can repeat it for several of them.
 
 ### TLS certificates
 
