@@ -22,13 +22,12 @@ You need Node.js 20 or later and a running BetterDB Monitor. To run one locally,
 
 The plugin starts one local MCP server over stdio: the [`@betterdb/mcp`](https://www.npmjs.com/package/@betterdb/mcp) package from npm, launched with `npx`. The package itself is pinned to an exact version; its dependencies (`@modelcontextprotocol/sdk` and `zod`) resolve within their published semver ranges. The server's source is in [`packages/mcp`](https://github.com/BetterDB-inc/monitor/tree/master/packages/mcp).
 
-The plugin does not start a BetterDB Monitor on its own. The server does include a `start_monitor` tool: if you let Claude run it, it starts `npx --yes @betterdb/monitor` (latest version, not pinned) as a background process that keeps running until `stop_monitor` is called.
+The plugin does not start a BetterDB Monitor. It runs the server with `--no-monitor-tools`, so the `start_monitor` and `stop_monitor` tools are not available.
 
 ## What it sends and fetches
 
-- `npx` downloads `@betterdb/mcp` and its dependencies from the npm registry on first run, and `@betterdb/monitor` if `start_monitor` runs.
+- `npx` downloads `@betterdb/mcp` and its dependencies from the npm registry on first run.
 - Every tool call is an HTTPS or HTTP request to the BetterDB URL you configured, with your token as a bearer token.
-- After `start_monitor`, tool calls go to `http://localhost:<port>` instead, and still carry your configured token. Don't run `start_monitor` while the plugin holds a BetterDB Cloud token.
 - After tool calls, the server posts usage events to the same BetterDB Monitor: tool name, success, duration and any error message. Turn off the **Usage telemetry** setting to stop this.
 
 Some tools change state in BetterDB, such as adding or removing a database connection, so Claude Code asks before running them unless you allow them.

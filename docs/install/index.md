@@ -16,7 +16,7 @@ port 3001 by default.
 | [Docker](docker.md) | Quickest start, servers, air-gapped hosts | `docker run -d -p 3001:3001 betterdb/monitor:latest` |
 | [Kubernetes (Helm)](kubernetes.md) | Clusters, GitOps, durable / HA installs | `helm install betterdb-monitor betterdb/betterdb-monitor` |
 | [npm / CLI](npm.md) | Local runs without Docker, laptops | `npx @betterdb/monitor` |
-| [LLM (MCP)](llm.md) | Driving the monitor from Claude or an MCP client | `npx @betterdb/mcp` |
+| [LLM (MCP)](llm.md) | Driving the monitor from Claude or an MCP client | `npx -y @betterdb/mcp@1.6.0` |
 
 Storage (in-memory, PostgreSQL, or SQLite), licensing, and every tunable are
 shared across all methods — see [Configuration](../configuration.md).

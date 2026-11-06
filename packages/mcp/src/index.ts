@@ -5,7 +5,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
-import { initTelemetry, trackToolCall, stopTelemetry, drainTelemetry } from './telemetry.js';
+import {
+  initTelemetry,
+  trackToolCall,
+  stopTelemetry,
+  flushTelemetry,
+  type TelemetryEvent,
+} from './telemetry.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -16,7 +22,7 @@ const args = process.argv.slice(2);
 const AUTOSTART = args.includes('--autostart');
 const PERSIST = args.includes('--persist');
 const STOP = args.includes('--stop');
-const MONITOR_TOOLS = AUTOSTART || args.includes('--monitor-tools');
+const MONITOR_TOOLS = !args.includes('--no-monitor-tools');
 
 function getArgValue(flag: string, fallback: string): string {
   const i = args.indexOf(flag);
@@ -48,66 +54,84 @@ if (STOP) {
   process.exit(0);
 }
 
-let BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
-let BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
-const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
+interface MonitorTarget {
+  url: string;
+  token: string | undefined;
+  prefix: string | null;
+}
 
-let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
+interface Session {
+  target: MonitorTarget;
+  instanceId: string | null;
+}
 
-// Auto-detect whether the API lives at /api/* (production) or /* (local dev).
-// Probe once on first request, then cache the result.
-let detectedPrefix: string | null = null;
+let target: MonitorTarget = {
+  url: (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, ''),
+  token: process.env.BETTERDB_TOKEN,
+  prefix: null,
+};
+
+let activeInstanceId: string | null = process.env.BETTERDB_INSTANCE_ID || null;
+let sessionBeforeLocalMonitor: Session | null = null;
+
 const API_PREFIXES = ['/api', ''];
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function monitorKey(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = LOOPBACK_HOSTS.has(parsed.hostname) ? 'localhost' : parsed.hostname;
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    return `${parsed.protocol}//${host}:${port}`;
+  } catch {
+    return null;
+  }
+}
 
 function isSameMonitor(a: string, b: string): boolean {
-  try {
-    return new URL(a).origin === new URL(b).origin;
-  } catch {
-    return false;
-  }
+  const key = monitorKey(a);
+  return key !== null && key === monitorKey(b);
 }
 
-function sendPendingTelemetry(): void {
-  const events = drainTelemetry();
-  if (events.length === 0) return;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
-  }
-  fetch(`${BETTERDB_URL}${detectedPrefix ?? '/api'}/mcp/telemetry`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ events }),
-    signal: AbortSignal.timeout(5_000),
-  }).catch(() => {});
+function useAutostartedMonitor(url: string): void {
+  target = { url, token: target.token, prefix: null };
 }
 
-function useLocalMonitor(url: string): void {
-  const sameMonitor = isSameMonitor(BETTERDB_URL, url);
-  sendPendingTelemetry();
-  BETTERDB_URL = url;
-  BETTERDB_TOKEN = process.env.BETTERDB_LOCAL_TOKEN || (sameMonitor ? BETTERDB_TOKEN : undefined);
-  if (!sameMonitor) {
-    activeInstanceId = null;
+function useStartedMonitor(url: string): void {
+  if (isSameMonitor(target.url, url)) {
+    target = { url, token: target.token, prefix: null };
+    return;
   }
-  process.env.BETTERDB_URL = url;
-  if (BETTERDB_TOKEN) {
-    process.env.BETTERDB_TOKEN = BETTERDB_TOKEN;
-  } else {
-    delete process.env.BETTERDB_TOKEN;
-  }
-  detectedPrefix = null;
+  void flushTelemetry(target);
+  sessionBeforeLocalMonitor ??= { target, instanceId: activeInstanceId };
+  target = { url, token: process.env.BETTERDB_LOCAL_TOKEN || undefined, prefix: null };
+  activeInstanceId = null;
 }
 
-async function rawFetch(prefix: string, path: string): Promise<Response> {
-  const url = `${BETTERDB_URL}${prefix}${path}`;
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
+function restoreSessionAfterStop(): boolean {
+  if (!sessionBeforeLocalMonitor) return false;
+  target = sessionBeforeLocalMonitor.target;
+  activeInstanceId = sessionBeforeLocalMonitor.instanceId;
+  sessionBeforeLocalMonitor = null;
+  return true;
+}
+
+function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (json) {
+    headers['Content-Type'] = 'application/json';
   }
-  return fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  if (to.token) {
+    headers['Authorization'] = `Bearer ${to.token}`;
+  }
+  return headers;
+}
+
+async function rawFetch(to: MonitorTarget, prefix: string, path: string): Promise<Response> {
+  return fetch(`${to.url}${prefix}${path}`, {
+    headers: authHeaders(to, true),
+    signal: AbortSignal.timeout(30_000),
+  });
 }
 
 function isJsonResponse(res: Response): boolean {
@@ -115,10 +139,10 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
-async function detectPrefix(): Promise<string> {
+async function detectPrefix(to: MonitorTarget): Promise<string> {
   for (const prefix of API_PREFIXES) {
     try {
-      const res = await rawFetch(prefix, '/mcp/instances');
+      const res = await rawFetch(to, prefix, '/mcp/instances');
       if (res.ok && isJsonResponse(res)) {
         return prefix;
       }
@@ -126,7 +150,6 @@ async function detectPrefix(): Promise<string> {
       // network error — try next prefix
     }
   }
-  // Fall back to /api if detection fails entirely
   return '/api';
 }
 
@@ -139,23 +162,29 @@ class ApiHttpError extends Error {
   }
 }
 
+function sendTelemetry(to: MonitorTarget, events: TelemetryEvent[]): Promise<unknown> {
+  return requestTo(to, 'POST', '/mcp/telemetry', { events }, 5_000);
+}
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
-  if (detectedPrefix === null) {
-    detectedPrefix = await detectPrefix();
+  return requestTo(target, method, path, body);
+}
+
+async function requestTo(
+  to: MonitorTarget,
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = 30_000,
+): Promise<unknown> {
+  if (to.prefix === null) {
+    to.prefix = await detectPrefix(to);
   }
-  const url = `${BETTERDB_URL}${detectedPrefix}${path}`;
-  const headers: Record<string, string> = {};
-  if (body !== undefined) {
-    headers['Content-Type'] = 'application/json';
-  }
-  if (BETTERDB_TOKEN) {
-    headers['Authorization'] = `Bearer ${BETTERDB_TOKEN}`;
-  }
-  const res = await fetch(url, {
+  const res = await fetch(`${to.url}${to.prefix}${path}`, {
     method,
-    headers,
+    headers: authHeaders(to, body !== undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (res.status === 402) {
@@ -267,6 +296,7 @@ function resolveInstanceId(overrideId?: string): string {
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
 async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+  const callTarget = target;
   const start = Date.now();
   let success = true;
   let error: string | undefined;
@@ -282,7 +312,7 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
     error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     throw err;
   } finally {
-    trackToolCall({ toolName, success, durationMs: Date.now() - start, error });
+    trackToolCall(callTarget, { toolName, success, durationMs: Date.now() - start, error });
   }
 }
 
@@ -938,7 +968,7 @@ if (MONITOR_TOOLS) {
         try {
           const { startMonitor } = await import('./autostart.js');
           const result = await startMonitor({ persist: true, port, storage });
-          useLocalMonitor(result.url);
+          useStartedMonitor(result.url);
           const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
           return {
             content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
@@ -1661,9 +1691,15 @@ if (MONITOR_TOOLS) {
       withTelemetry('stop_monitor', async () => {
         try {
           const { stopMonitor } = await import('./autostart.js');
+          if (sessionBeforeLocalMonitor) {
+            await flushTelemetry(target);
+          }
           const result = await stopMonitor();
+          const text = result.stopped && restoreSessionAfterStop()
+            ? `${result.message} Switched back to ${target.url}.`
+            : result.message;
           return {
-            content: [{ type: 'text' as const, text: result.message }],
+            content: [{ type: 'text' as const, text }],
           };
         } catch (err) {
           return {
@@ -2214,10 +2250,10 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    useLocalMonitor(result.url);
+    useAutostartedMonitor(result.url);
   }
 
-  initTelemetry(apiRequest);
+  initTelemetry(sendTelemetry);
 
   let shuttingDown = false;
   const shutdown = async () => {

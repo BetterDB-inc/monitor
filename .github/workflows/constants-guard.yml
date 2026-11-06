@@ -66,5 +66,8 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Check the MCP telemetry off-values mirror the API's negative env values
+        run: node scripts/check-env-negatives.mjs
+
       - name: Check @betterdb/mcp versions and that the plugin pin is published
         run: node scripts/check-mcp-versions.mjs --check-published

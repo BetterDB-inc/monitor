@@ -7,24 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.6.0] - Unreleased
 
-### Changed
-
-- `start_monitor` and `stop_monitor` are registered only with `--autostart` or
-  the new `--monitor-tools` flag. Add `--monitor-tools` to keep them without
-  `--autostart`.
-
 ### Added
 
-- `BETTERDB_LOCAL_TOKEN`: token for the local monitor used after
-  `--autostart` or `start_monitor`.
+- `--no-monitor-tools` flag: don't register `start_monitor` and
+  `stop_monitor`.
+- `BETTERDB_LOCAL_TOKEN`: token for a local monitor started with
+  `start_monitor` while `BETTERDB_URL` points at a different monitor.
+- `BETTERDB_MONITOR_<NAME>` variables are passed to the started monitor as
+  `<NAME>`.
+
+### Changed
+
+- The monitor started by `--autostart` or `start_monitor` no longer inherits
+  the MCP server's environment. It gets system variables such as `PATH`,
+  `HOME`, `NODE_*` and `npm_config_*`, plus `BETTERDB_MONITOR_<NAME>`
+  variables.
 
 ### Fixed
 
-- Switching to a local monitor no longer sends `BETTERDB_TOKEN` to it, unless
-  `BETTERDB_URL` already pointed at that monitor, and no longer passes it to
-  the spawned monitor process.
-- Switching to a local monitor clears the selected instance and flushes
-  pending telemetry to the previous monitor first.
+- `start_monitor` from a session pointed at a different monitor no longer
+  sends `BETTERDB_TOKEN` to the local monitor, and clears the selected
+  instance. `stop_monitor` switches back to the previous monitor, token and
+  instance.
+- `--autostart` keeps `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` for the
+  started monitor.
+- Tool usage events go to the monitor the call was made against, also when
+  the session switches monitors during the call.
 - `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no` and `off`,
   not only `false`.
 

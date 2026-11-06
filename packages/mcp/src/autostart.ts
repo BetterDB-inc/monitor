@@ -20,6 +20,56 @@ function registerEphemeralHandlers(): void {
   process.once('SIGINT', () => { ephemeralChild?.kill(); process.exit(0); });
 }
 
+const INHERITED_ENV = new Set([
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'LANG',
+  'TZ',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'SYSTEMROOT',
+  'SystemRoot',
+  'WINDIR',
+  'COMSPEC',
+  'ComSpec',
+  'PATHEXT',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'USERPROFILE',
+  'PROGRAMDATA',
+  'ProgramData',
+  'PROGRAMFILES',
+  'ProgramFiles',
+]);
+const INHERITED_ENV_PREFIXES = ['LC_', 'NODE_', 'npm_config_', 'NPM_CONFIG_'];
+const MONITOR_ENV_PREFIX = 'BETTERDB_MONITOR_';
+
+export function monitorEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (key.startsWith(MONITOR_ENV_PREFIX) && key.length > MONITOR_ENV_PREFIX.length) {
+      env[key.slice(MONITOR_ENV_PREFIX.length)] = value;
+    } else if (
+      INHERITED_ENV.has(key) ||
+      INHERITED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
+      env[key] ??= value;
+    }
+  }
+  return env;
+}
+
 async function checkHealth(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(2000) });
@@ -92,13 +142,8 @@ export async function startMonitor(opts: {
     }
   }
 
-  // Build env — filter out undefined values from process.env
   const env: Record<string, string> = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([k, v]) => v !== undefined && k !== 'BETTERDB_TOKEN' && k !== 'BETTERDB_LOCAL_TOKEN',
-      ),
-    ) as Record<string, string>,
+    ...monitorEnv(process.env),
     PORT: String(opts.port),
     STORAGE_TYPE: opts.storage,
     NODE_ENV: 'production',

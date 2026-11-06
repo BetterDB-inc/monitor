@@ -59,7 +59,7 @@ For other clients such as OpenAI Codex, or to configure Claude Code by hand, add
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.5.0"],
+      "args": ["-y", "@betterdb/mcp@1.6.0"],
       "env": {
         "BETTERDB_URL": "https://<your-workspace>.app.betterdb.com",
         "BETTERDB_TOKEN": "<your-token>"
@@ -77,7 +77,7 @@ For local development with an existing monitor (token not required):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.5.0"],
+      "args": ["-y", "@betterdb/mcp@1.6.0"],
       "env": {
         "BETTERDB_URL": "http://localhost:3001"
       }
@@ -94,7 +94,7 @@ For zero-config local development (auto-starts and manages a monitor process):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@betterdb/mcp@1.5.0", "--autostart", "--persist"]
+      "args": ["-y", "@betterdb/mcp@1.6.0", "--autostart", "--persist"]
     }
   }
 }
@@ -120,16 +120,17 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
-| `BETTERDB_LOCAL_TOKEN` | — | Token for the local monitor used after `--autostart` or `start_monitor`. If unset, `BETTERDB_TOKEN` is kept only when `BETTERDB_URL` already points at that local monitor (same origin, e.g. `http://localhost:3001`); otherwise it is never sent to it or passed to the monitor process |
+| `BETTERDB_LOCAL_TOKEN` | — | Token for a local monitor started with `start_monitor` while `BETTERDB_URL` points at a different monitor. Without it, that local monitor gets no token. With `--autostart`, `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` apply to the started monitor |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
-| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to stop posting tool usage events (tool name, success, duration, error) to the monitor |
+| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to stop posting tool usage events (tool name, success, duration, error) to the monitor. Each event goes to the monitor the call was made against |
+| `BETTERDB_MONITOR_<NAME>` | — | Passed to a monitor started with `--autostart` or `start_monitor` as `<NAME>`, for example `BETTERDB_MONITOR_BETTERDB_TELEMETRY=false`. Other variables are not passed, apart from system ones such as `PATH`, `HOME`, `NODE_*` and `npm_config_*` |
 
 ### CLI Arguments
 
 | Argument | Default | Description |
 |---|---|---|
-| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup. Also registers `start_monitor` and `stop_monitor` |
-| `--monitor-tools` | — | Register `start_monitor` and `stop_monitor` without auto-starting a monitor |
+| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup |
+| `--no-monitor-tools` | — | Do not register `start_monitor` and `stop_monitor` |
 | `--persist` | — | Keep the monitor running after the MCP server exits (requires `--autostart`) |
 | `--port <number>` | `3001` | Port for the auto-started monitor API |
 | `--storage <type>` | `sqlite` | Storage backend: `sqlite` or `memory` |
@@ -206,7 +207,7 @@ For AI components (semantic caches, agent caches, agent-memory stores, retrieval
 
 ### Monitor Lifecycle Tools
 
-Registered only with `--autostart` or `--monitor-tools`. They run `npx --yes @betterdb/monitor` as a background process, and after `start_monitor` the server talks to that local monitor without sending `BETTERDB_TOKEN`. Set `BETTERDB_LOCAL_TOKEN` if that monitor needs a token, for example for write tools.
+Registered unless `--no-monitor-tools` is set. `start_monitor` runs `npx --yes @betterdb/monitor` as a background process and switches the session to it. If `BETTERDB_URL` pointed at a different monitor, `BETTERDB_TOKEN` is not sent to the local one and the selected instance is cleared; set `BETTERDB_LOCAL_TOKEN` if the local monitor needs a token, for example for write tools. `stop_monitor` switches back to the previous monitor, token and instance.
 
 | Tool | Description |
 |---|---|

@@ -50,8 +50,8 @@
         },
         {
           "type": "named",
-          "name": "--monitor-tools",
-          "description": "Register the start_monitor and stop_monitor tools (always on with --autostart)",
+          "name": "--no-monitor-tools",
+          "description": "Do not register the start_monitor and stop_monitor tools",
           "format": "boolean",
           "isRequired": false
         },

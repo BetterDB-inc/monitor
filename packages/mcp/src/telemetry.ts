@@ -1,4 +1,4 @@
-interface TelemetryEvent {
+export interface TelemetryEvent {
   toolName: string;
   success: boolean;
   durationMs: number;
@@ -6,25 +6,27 @@ interface TelemetryEvent {
   error?: string;
 }
 
-type ApiRequestFn = (method: string, path: string, body?: unknown) => Promise<unknown>;
+type SendFn<T> = (target: T, events: TelemetryEvent[]) => Promise<unknown>;
 
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_BUFFER_SIZE = 50;
 
-let buffer: TelemetryEvent[] = [];
+const buffers = new Map<unknown, TelemetryEvent[]>();
 let flushTimer: ReturnType<typeof setInterval> | null = null;
-let apiRequestFn: ApiRequestFn | null = null;
+let sendFn: SendFn<unknown> | null = null;
 let disabled = false;
 
-function flush(): Promise<void> {
-  if (buffer.length === 0 || !apiRequestFn) return Promise.resolve();
-  const events = buffer;
-  buffer = [];
-  return apiRequestFn('POST', '/mcp/telemetry', { events })
+export function flushTelemetry(target: unknown): Promise<void> {
+  const events = buffers.get(target);
+  buffers.delete(target);
+  if (!events || events.length === 0 || !sendFn) return Promise.resolve();
+  return sendFn(target, events)
     .then(() => {})
-    .catch(() => {
-      // swallow — telemetry must never break the MCP server
-    });
+    .catch(() => {});
+}
+
+function flushAll(): Promise<void> {
+  return Promise.all([...buffers.keys()].map(flushTelemetry)).then(() => {});
 }
 
 const OFF_VALUES = new Set(['false', '0', 'no', 'off']);
@@ -33,28 +35,24 @@ export function isTelemetryDisabled(value: string | undefined): boolean {
   return value !== undefined && OFF_VALUES.has(value.trim().toLowerCase());
 }
 
-export function initTelemetry(apiFn: ApiRequestFn): void {
+export function initTelemetry<T>(send: SendFn<T>): void {
   if (isTelemetryDisabled(process.env.BETTERDB_TELEMETRY)) {
     disabled = true;
     return;
   }
-  apiRequestFn = apiFn;
-  flushTimer = setInterval(flush, FLUSH_INTERVAL_MS);
+  sendFn = send as SendFn<unknown>;
+  flushTimer = setInterval(flushAll, FLUSH_INTERVAL_MS);
   flushTimer.unref();
 }
 
-export function trackToolCall(event: Omit<TelemetryEvent, 'timestamp'>): void {
+export function trackToolCall(target: unknown, event: Omit<TelemetryEvent, 'timestamp'>): void {
   if (disabled) return;
-  buffer.push({ ...event, timestamp: Date.now() });
-  if (buffer.length >= MAX_BUFFER_SIZE) {
-    flush();
+  const events = buffers.get(target) ?? [];
+  events.push({ ...event, timestamp: Date.now() });
+  buffers.set(target, events);
+  if (events.length >= MAX_BUFFER_SIZE) {
+    flushTelemetry(target);
   }
-}
-
-export function drainTelemetry(): TelemetryEvent[] {
-  const events = buffer;
-  buffer = [];
-  return events;
 }
 
 export async function stopTelemetry(): Promise<void> {
@@ -62,5 +60,5 @@ export async function stopTelemetry(): Promise<void> {
     clearInterval(flushTimer);
     flushTimer = null;
   }
-  await flush();
+  await flushAll();
 }

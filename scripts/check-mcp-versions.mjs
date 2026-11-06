@@ -1,66 +1,95 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readText = (path) => readFileSync(join(repoRoot, path), 'utf8');
 const readJson = (path) => JSON.parse(readText(path));
-
-const argValue = (flag) => {
-  const index = process.argv.indexOf(flag);
-  return index === -1 ? undefined : process.argv[index + 1];
-};
+const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 
 const PACKAGE = '@betterdb/mcp';
-const PIN_PATTERN = /@betterdb\/mcp@([0-9][0-9A-Za-z.+-]*)/g;
-const UNPINNED_PATTERNS = [/npx(?:\s+(?:-y|--yes))?\s+@betterdb\/mcp(?![@\w/-])/g, /["']@betterdb\/mcp["']/g];
-const PIN_DOCS = ['packages/mcp/README.md', 'packages/mcp/claude-plugin/README.md'];
+const EXACT_VERSION = /^\d+\.\d+\.\d+(-[\w.]+)?$/;
+const PIN_PATTERN = /@betterdb\/mcp@([^\s"'`)\]},]*)/g;
+const UNPINNED_PATTERNS = [
+  /npx(?:\s+(?:-y|--yes))?\s+@betterdb\/mcp(?![@\w/-])/g,
+  /["']@betterdb\/mcp["']/g,
+];
+const SCANNED_FILES = ['README.md', 'packages/mcp/README.md', 'packages/mcp/claude-plugin/README.md'];
+const SCANNED_DIRS = [
+  { dir: 'docs', extensions: ['.md'] },
+  { dir: 'apps/web/src', extensions: ['.ts', '.tsx'] },
+];
+const SKIPPED_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage']);
+
+function walk(dir, extensions, found = []) {
+  for (const name of readdirSync(join(repoRoot, dir))) {
+    const path = join(dir, name);
+    if (statSync(join(repoRoot, path)).isDirectory()) {
+      if (!SKIPPED_DIRS.has(name)) walk(path, extensions, found);
+    } else if (extensions.some((extension) => name.endsWith(extension))) {
+      found.push(path);
+    }
+  }
+  return found;
+}
+
+const problems = [];
+
+const expectIndex = process.argv.indexOf('--expect');
+let packageExpected;
+if (expectIndex !== -1) {
+  packageExpected = process.argv[expectIndex + 1];
+  if (!packageExpected || packageExpected.startsWith('--')) {
+    console.error('--expect needs a version');
+    process.exit(1);
+  }
+}
 
 const packageVersion = readJson('packages/mcp/package.json').version;
 const server = readJson('packages/mcp/server.json');
-const plugin = readJson('packages/mcp/claude-plugin/.claude-plugin/plugin.json');
-const pluginArgs = readJson('packages/mcp/claude-plugin/.mcp.json').mcpServers.betterdb.args;
-const pluginPin = pluginArgs.find((arg) => arg.startsWith(`${PACKAGE}@`))?.slice(PACKAGE.length + 1);
-
-const packageExpected = argValue('--expect') ?? packageVersion;
+packageExpected ??= packageVersion;
 const packageGroup = [
   ['packages/mcp/package.json version', packageVersion],
   ['packages/mcp/server.json version', server.version],
   ['packages/mcp/server.json packages[0].version', server.packages[0].version],
 ];
-
-const pluginGroup = [
-  ['packages/mcp/claude-plugin/.mcp.json pin', pluginPin],
-  ['packages/mcp/claude-plugin/.claude-plugin/plugin.json version', plugin.version],
-];
-const problems = [];
-
-for (const doc of PIN_DOCS) {
-  const text = readText(doc);
-  for (const match of text.matchAll(PIN_PATTERN)) {
-    const line = text.slice(0, match.index).split('\n').length;
-    pluginGroup.push([`${doc}:${line} pin`, match[1]]);
-  }
-  for (const pattern of UNPINNED_PATTERNS) {
-    for (const match of text.matchAll(pattern)) {
-      const line = text.slice(0, match.index).split('\n').length;
-      problems.push(`${doc}:${line} launches ${PACKAGE} without a version`);
-    }
-  }
-}
-
 for (const [where, version] of packageGroup) {
   if (version !== packageExpected) {
     problems.push(`${where} is ${version ?? 'missing'}, expected ${packageExpected}`);
   }
 }
 
-for (const [where, version] of pluginGroup) {
-  if (version !== pluginPin) {
-    problems.push(`${where} is ${version ?? 'missing'}, expected the plugin pin ${pluginPin}`);
+const pluginArgs = readJson('packages/mcp/claude-plugin/.mcp.json').mcpServers.betterdb.args;
+const pluginArg = pluginArgs.find((arg) => arg.startsWith(PACKAGE));
+const pluginPin = pluginArg?.startsWith(`${PACKAGE}@`) ? pluginArg.slice(PACKAGE.length + 1) : undefined;
+if (!pluginPin || !EXACT_VERSION.test(pluginPin)) {
+  problems.push(
+    `packages/mcp/claude-plugin/.mcp.json launches ${pluginArg ?? 'no package'}, expected an exact ${PACKAGE} version`,
+  );
+}
+
+const files = [
+  ...SCANNED_FILES,
+  ...SCANNED_DIRS.flatMap(({ dir, extensions }) => walk(dir, extensions)),
+].map((path) => relative(repoRoot, join(repoRoot, path)));
+
+for (const file of files) {
+  const text = readText(file);
+  for (const match of text.matchAll(PIN_PATTERN)) {
+    const where = `${file}:${lineOf(text, match.index)}`;
+    if (!EXACT_VERSION.test(match[1])) {
+      problems.push(`${where} pins ${PACKAGE}@${match[1]}, expected an exact version`);
+    } else if (match[1] !== pluginPin) {
+      problems.push(`${where} pins ${PACKAGE}@${match[1]}, expected the plugin pin ${pluginPin}`);
+    }
+  }
+  for (const pattern of UNPINNED_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      problems.push(`${file}:${lineOf(text, match.index)} launches ${PACKAGE} without a version`);
+    }
   }
 }
 
