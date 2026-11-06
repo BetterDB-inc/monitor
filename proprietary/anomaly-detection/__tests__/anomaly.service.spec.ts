@@ -11288,6 +11288,34 @@ describe('AnomalyService', () => {
       await expect(lookup(['missing'])).resolves.toBeNull();
     });
 
+    it('bounds an incident lookup to the incident lookback window', async () => {
+      const now = Date.now();
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      storage.getIncidentBoundaries.mockResolvedValue([]);
+
+      await expect(
+        service.findIncidentIdForAnomalies(['a'], 0, now + 365 * 24 * 60 * MIN, 'conn-1'),
+      ).resolves.toBeNull();
+
+      const loadedFrom = Math.min(
+        ...storage.getAnomalyEvents.mock.calls.map(([q]: any) => q.startTime),
+      );
+      const loadedTo = Math.max(
+        ...storage.getAnomalyEvents.mock.calls.map(([q]: any) => q.endTime ?? 0),
+      );
+      expect(loadedFrom).toBeGreaterThan(now - 31 * 24 * 60 * MIN);
+      expect(loadedTo).toBeLessThan(now + 24 * 60 * MIN);
+    });
+
+    it('skips the incident lookup for a window entirely outside the lookback', async () => {
+      storage.getAnomalyEvents.mockClear();
+
+      await expect(
+        service.findIncidentIdForAnomalies(['a'], 0, 1_000, 'conn-1'),
+      ).resolves.toBeNull();
+      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
+    });
+
     it('keeps a live incident on its stored start once its first events age out', async () => {
       const now = Date.now();
       const startedAt = now - 62 * MIN;

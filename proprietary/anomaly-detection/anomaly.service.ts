@@ -7660,10 +7660,14 @@ export class AnomalyService
     connectionId?: string,
   ): Promise<string | null> {
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const now = Date.now();
+    const from = Math.max(startTime, now - MAX_INCIDENT_LOOKBACK_MS);
+    const to = Math.min(endTime, now);
+    if (to < from) return null;
     const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
-      startTime - maxSpanMs,
-      endTime + maxSpanMs,
+      from - maxSpanMs,
+      to + maxSpanMs,
     );
     const wanted = new Set(anomalyIds);
     let best: { incidentId: string; hits: number; startedAt: number } | null = null;
