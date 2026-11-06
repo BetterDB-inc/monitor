@@ -19,6 +19,7 @@ A named interval comes from persisted COMMANDLOG history. The live slowlog buffe
 6. Only then call `get_slowlog`. Label it as the live buffer. Give each row's timestamp. Do not call that buffer "the last hour."
 7. `get_slowlog_patterns` reads persisted slowlog rows, including entries that have left the live buffer, and it has no `startTime`. Use it to group that stored history. Do not call it the current buffer or the requested window.
 8. `get_slowlog` durations, `get_slowlog_patterns` durations, and history rows whose `type` is `slow` or missing, are microseconds. Divide those by 1000 before saying milliseconds. History rows whose `type` is `large-request` or `large-reply` store bytes in `duration`. Report those as bytes. `get_commandlog_patterns` aggregates rows of mixed types and omits `type`, so do not convert its duration fields. Use history rows when the duration has a known unit.
+9. Row `timestamp` values from `get_slowlog`, `get_commandlog`, and `get_commandlog_history` are Unix seconds. The window you passed is Unix milliseconds. Multiply a row timestamp by 1000 before comparing it to the window.
 
 ## How to report
 
