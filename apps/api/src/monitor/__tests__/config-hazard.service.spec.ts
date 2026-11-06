@@ -351,6 +351,39 @@ describe('ConfigHazardService', () => {
       expect(findings[0].status).toBe('advisory');
     });
 
+    it('does not cache the probe when the appendfsync read fails', async () => {
+      setupFsyncClient();
+      const base = client.getConfigValue.getMockImplementation()!;
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'appendfsync') return Promise.reject(new Error('NOPERM'));
+        return base(param);
+      });
+      const first = await service.probeHazards('conn-1');
+      expect(first.complete).toBe(false);
+      expect(first.findings).toHaveLength(0);
+
+      // The next poll re-probes and picks up the advisory once the read works.
+      client.getConfigValue.mockImplementation(base);
+      const second = await service.probeHazards('conn-1');
+      expect(second.complete).toBe(true);
+      expect(second.findings.map((f) => f.id)).toEqual(['appendfsync-always-blocking']);
+      expect(appendonlyProbeCount()).toBe(2);
+    });
+
+    it('does not cache the probe when appendfsync reads null', async () => {
+      setupFsyncClient();
+      const base = client.getConfigValue.getMockImplementation()!;
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'appendfsync') return Promise.resolve(null);
+        return base(param);
+      });
+      const first = await service.probeHazards('conn-1');
+      expect(first.complete).toBe(false);
+
+      await service.probeHazards('conn-1');
+      expect(appendonlyProbeCount()).toBe(2);
+    });
+
     it('stays quiet for a healthy everysec', async () => {
       setupFsyncClient({ appendfsync: 'everysec' });
       const findings = await service.getHazards('conn-1');

@@ -106,6 +106,7 @@ export class ConfigHazardService {
     }
 
     const findings: ConfigHazardFinding[] = [];
+    let appendfsyncUnread = false;
 
     // valkey#3983 (AOF + default-user data loss) and valkey#3515 (appendfsync
     // stalls) only apply when AOF is enabled.
@@ -132,9 +133,10 @@ export class ConfigHazardService {
         findings.push(aclFinding);
       }
 
-      const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
-      if (fsyncFinding !== null) {
-        findings.push(fsyncFinding);
+      const fsync = await this.probeAppendfsync(connectionId, client, appendonly);
+      appendfsyncUnread = fsync.unread;
+      if (fsync.finding !== null) {
+        findings.push(fsync.finding);
       }
     } else {
       this.delayedFsyncTrend.delete(connectionId);
@@ -170,11 +172,12 @@ export class ConfigHazardService {
     // returns null both for a build that predates the setting and for a filtered
     // read, and the evaluator reports no finding either way. Caching that as
     // clean would hide a disabled CRC. Keep findings already collected and
-    // re-probe next poll.
+    // re-probe next poll. An unread appendfsync under AOF is the same case: the
+    // advisory it would raise is missing, not ruled out.
     const crcUnreadable =
       clusterEnabled === 'yes' && clusterCrcEnabled === null;
     const configStateUnknown =
-      appendonly === null || clusterEnabled === null || crcUnreadable;
+      appendonly === null || clusterEnabled === null || crcUnreadable || appendfsyncUnread;
     return { findings, cacheable: !configStateUnknown };
   }
 
@@ -217,7 +220,7 @@ export class ConfigHazardService {
     connectionId: string,
     client: ProbeClientLike,
     appendonly: string | null,
-  ): Promise<ConfigHazardFinding | null> {
+  ): Promise<{ finding: ConfigHazardFinding | null; unread: boolean }> {
     let appendfsync: string | null;
     try {
       appendfsync = await client.getConfigValue('appendfsync');
@@ -225,11 +228,16 @@ export class ConfigHazardService {
       this.logger.debug(
         `CONFIG GET appendfsync failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return null;
+      return { finding: null, unread: true };
+    }
+    // Only called with AOF on, where appendfsync always exists, so null is a
+    // filtered read rather than an absent setting.
+    if (appendfsync === null) {
+      return { finding: null, unread: true };
     }
     if (appendfsync !== 'always' && appendfsync !== 'everysec') {
       this.delayedFsyncTrend.delete(connectionId);
-      return null;
+      return { finding: null, unread: false };
     }
 
     let aofDelayedFsync: number | null = null;
@@ -286,7 +294,7 @@ export class ConfigHazardService {
       this.logger.debug(`LATENCY LATEST failed for ${connectionId}: ${(err as Error).message}`);
     }
 
-    return evaluateAppendfsyncHazard({
+    const finding = evaluateAppendfsyncHazard({
       appendonly,
       appendfsync,
       aofDelayedFsync,
@@ -294,6 +302,7 @@ export class ConfigHazardService {
       aofLastWriteStatus,
       latencyEvents,
     });
+    return { finding, unread: false };
   }
 
   /**
