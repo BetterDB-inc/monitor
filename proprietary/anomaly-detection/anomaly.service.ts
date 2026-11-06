@@ -7670,8 +7670,41 @@ export class AnomalyService
       to + maxSpanMs,
     );
     const wanted = new Set(anomalyIds);
-    let best: { incidentId: string; hits: number; startedAt: number } | null = null;
-    for (const timeline of this.incidentTimelineBuilder.build(
+    const candidate = this.mostHeldIncident(this.buildIncidents(events, boundaries), wanted);
+    if (!candidate) return null;
+    const startedAt = incidentStartOf(candidate.incidentId);
+    if (startedAt === null) return candidate.incidentId;
+    const window = await this.loadIncidentWindow(startedAt, connectionId);
+    return (
+      this.mostHeldIncident(this.buildIncidents(window.events, window.boundaries), wanted)
+        ?.incidentId ?? null
+    );
+  }
+
+  private mostHeldIncident(
+    timelines: IncidentTimeline[],
+    wanted: ReadonlySet<string>,
+  ): IncidentTimeline | null {
+    let best: { timeline: IncidentTimeline; hits: number } | null = null;
+    for (const timeline of timelines) {
+      const hits = timeline.entries.filter((e) => wanted.has(e.anomalyId)).length;
+      if (
+        hits > 0 &&
+        (!best ||
+          hits > best.hits ||
+          (hits === best.hits && timeline.startedAt > best.timeline.startedAt))
+      ) {
+        best = { timeline, hits };
+      }
+    }
+    return best?.timeline ?? null;
+  }
+
+  private buildIncidents(
+    events: AnomalyEvent[],
+    boundaries: StoredIncidentBoundary[],
+  ): IncidentTimeline[] {
+    return this.incidentTimelineBuilder.build(
       events,
       Date.now(),
       this.incidentHistoryProbe,
@@ -7679,18 +7712,22 @@ export class AnomalyService
       new Map(),
       Number.NEGATIVE_INFINITY,
       this.incidentEventsDroppedSpans,
-    )) {
-      const hits = timeline.entries.filter((e) => wanted.has(e.anomalyId)).length;
-      if (
-        hits > 0 &&
-        (!best ||
-          hits > best.hits ||
-          (hits === best.hits && timeline.startedAt > best.startedAt))
-      ) {
-        best = { incidentId: timeline.incidentId, hits, startedAt: timeline.startedAt };
-      }
-    }
-    return best?.incidentId ?? null;
+    );
+  }
+
+  private async loadIncidentWindow(
+    startedAt: number,
+    connectionId: string | undefined,
+  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[]; windowEnd: number }> {
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const windowEnd = startedAt + 2 * maxSpanMs;
+    const anchors = await this.readIncidentBoundaries(connectionId, startedAt, startedAt);
+    const history = await this.loadIncidentHistory(
+      connectionId,
+      anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
+      windowEnd,
+    );
+    return { ...history, windowEnd };
   }
 
   async getIncidentTimeline(
@@ -7708,26 +7745,12 @@ export class AnomalyService
       );
       return timelines.find((t) => t.incidentId === incidentId) ?? null;
     }
-    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
-    const windowEnd = startedAt + 2 * maxSpanMs;
-    const anchors = await this.readIncidentBoundaries(connectionId, startedAt, startedAt);
-    const { events, boundaries } = await this.loadIncidentHistory(
+    const { events, boundaries, windowEnd } = await this.loadIncidentWindow(
+      startedAt,
       connectionId,
-      anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
-      windowEnd,
     );
     const find = (all: AnomalyEvent[]) =>
-      this.incidentTimelineBuilder
-        .build(
-          all,
-          Date.now(),
-          this.incidentHistoryProbe,
-          boundaries,
-          new Map(),
-          Number.NEGATIVE_INFINITY,
-          this.incidentEventsDroppedSpans,
-        )
-        .find((t) => t.incidentId === incidentId) ?? null;
+      this.buildIncidents(all, boundaries).find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
     const signals = new Map<string, { connectionId: string; metricType: MetricType }>();

@@ -676,7 +676,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.recoveredAt).toBe(T0 + 90_000);
     });
 
-    it('reports an unknown recovery for a resolved row without resolvedAt', () => {
+    it('treats a resolved row without resolvedAt as recovered at an unknown time', () => {
       const [incident] = new IncidentTimelineBuilder().build(
         [
           event({ resolved: true }),
@@ -693,15 +693,15 @@ describe('IncidentTimelineBuilder', () => {
       );
 
       expect(incident.recovery).toEqual({
-        status: 'unknown',
+        status: 'recovered',
         openSignals: [],
-        unknownSignals: [MetricType.MEMORY_USED],
+        unknownSignals: [],
         recoveredAt: null,
       });
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
       expect(incident.entries.map((e) => e.recoveryState)).toEqual([
-        'recurred',
-        'unknown',
+        'recovered',
+        'recovered',
         'recovered',
       ]);
     });

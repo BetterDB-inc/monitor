@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  Body,
   Controller,
   Get,
   Post,
@@ -11,6 +12,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ApiHeader } from '@nestjs/swagger';
+import { ArrayMaxSize, ArrayMinSize, IsInt, IsString } from 'class-validator';
 import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
@@ -24,6 +26,7 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
+import { AllowMembers } from '../../apps/api/src/auth/guards/roles.decorator';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
 
 function parseTimeRange(
@@ -40,6 +43,19 @@ function parseTimeRange(
 
 const MAX_INCIDENT_LIMIT = 1000;
 const MAX_LOOKUP_ANOMALY_IDS = 500;
+
+export class IncidentLookupDto {
+  @IsString({ each: true })
+  @ArrayMinSize(1)
+  @ArrayMaxSize(MAX_LOOKUP_ANOMALY_IDS)
+  anomalyIds!: string[];
+
+  @IsInt()
+  startTime!: number;
+
+  @IsInt()
+  endTime!: number;
+}
 
 function parseLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -203,30 +219,23 @@ export class AnomalyController {
     );
   }
 
-  @Get('incidents/lookup')
+  @Post('incidents/lookup')
+  @HttpCode(HttpStatus.OK)
+  @AllowMembers()
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   async lookupIncident(
+    @Body() body: IncidentLookupDto,
     @ConnectionId() connectionId?: string,
-    @Query('anomalyIds') anomalyIds?: string,
-    @Query('startTime') startTime?: string,
-    @Query('endTime') endTime?: string,
   ): Promise<{ incidentId: string }> {
-    const ids = (anomalyIds ?? '').split(',').filter((id) => id !== '');
-    if (ids.length === 0 || ids.length > MAX_LOOKUP_ANOMALY_IDS) {
-      throw new BadRequestException(
-        `anomalyIds must list between 1 and ${MAX_LOOKUP_ANOMALY_IDS} ids`,
-      );
-    }
-    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
-    if (parsedStartTime === undefined || parsedEndTime === undefined) {
-      throw new BadRequestException('startTime and endTime are required');
+    if (body.startTime > body.endTime) {
+      throw new BadRequestException('startTime must not be after endTime');
     }
     const incidentId = await this.anomalyService.findIncidentIdForAnomalies(
-      ids,
-      parsedStartTime,
-      parsedEndTime,
+      body.anomalyIds,
+      body.startTime,
+      body.endTime,
       connectionId,
     );
     if (!incidentId) throw new NotFoundException('No incident holds these anomalies');

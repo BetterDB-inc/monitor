@@ -1,3 +1,4 @@
+import { ApiError } from '../../../api/client';
 import type { IncidentRecoveryStatus, IncidentTimeline } from '../../../types/anomaly';
 import { metricLabel, patternLabel } from '../anomaly-display';
 
@@ -6,6 +7,10 @@ const OPEN_STATUSES: ReadonlySet<IncidentRecoveryStatus> = new Set([
   'recovering',
   'degraded',
 ]);
+
+export function isNotFoundError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
 
 export function isIncidentOpen(incident: IncidentTimeline): boolean {
   return OPEN_STATUSES.has(incident.recovery.status);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError } from '../../../api/client';
@@ -55,5 +55,27 @@ describe('GroupIncidentLink', () => {
 
     await waitFor(() => expect(lookupIncident).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('drops the link once a refetch finds no incident', async () => {
+    lookupIncident.mockResolvedValueOnce({ incidentId: '100-abc' });
+    lookupIncident.mockRejectedValue(new ApiError('No incident holds these anomalies', 404));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <GroupIncidentLink
+            connectionId="conn-1"
+            anomalies={[{ id: 'a', timestamp: 1000 }]}
+            linkQuery=""
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole('link')).toBeInTheDocument();
+    await act(() => client.refetchQueries());
+    await waitFor(() => expect(screen.queryByRole('link')).not.toBeInTheDocument());
+    expect(lookupIncident).toHaveBeenCalledTimes(2);
   });
 });

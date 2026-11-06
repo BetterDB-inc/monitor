@@ -474,12 +474,11 @@ export const metricsApi = {
     params: { anomalyIds: string[]; startTime: number; endTime: number },
     signal?: AbortSignal,
   ) => {
-    const query = new URLSearchParams({
-      anomalyIds: params.anomalyIds.join(','),
-      startTime: params.startTime.toString(),
-      endTime: params.endTime.toString(),
+    return fetchApi<{ incidentId: string }>('/anomaly/incidents/lookup', {
+      method: 'POST',
+      body: JSON.stringify(params),
+      signal,
     });
-    return fetchApi<{ incidentId: string }>(`/anomaly/incidents/lookup?${query}`, { signal });
   },
 
   getIncident: (incidentId: string, signal?: AbortSignal) =>

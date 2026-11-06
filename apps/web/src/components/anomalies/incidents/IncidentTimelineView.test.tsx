@@ -222,6 +222,19 @@ describe('IncidentTimelineView', () => {
     expect(screen.getByText(new RegExp(`Back to baseline at ${nextDay}`))).toBeInTheDocument();
   });
 
+  it('shows a recovery without a recorded time', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries: [entry({ anomalyId: 'a', recoveredAt: null, recoveryState: 'recovered' })],
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Back to baseline (time not recorded)')).toBeInTheDocument();
+  });
+
   it('tolerates a sequence match without step numbers', () => {
     const match = {
       pattern: 'retry_storm',

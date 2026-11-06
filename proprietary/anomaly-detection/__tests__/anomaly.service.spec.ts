@@ -11286,6 +11286,9 @@ describe('AnomalyService', () => {
       await expect(lookup(['a', 'b'])).resolves.toBe(newer.incidentId);
       await expect(lookup(['a'])).resolves.toBe(older.incidentId);
       await expect(lookup(['missing'])).resolves.toBeNull();
+      await expect(
+        service.getIncidentTimeline((await lookup(['a', 'b', 'c']))!, 'conn-1'),
+      ).resolves.toMatchObject({ incidentId: newer.incidentId });
     });
 
     it('bounds an incident lookup to the incident lookback window', async () => {

@@ -109,6 +109,7 @@ export function AnomalyDashboard() {
     hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) && !!currentConnection?.id;
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = searchParams.get('tab') === 'incidents' ? 'incidents' : 'overview';
+  const overviewOpen = tab === 'overview';
   const setTab = (value: string) => {
     setSearchParams(
       (prev) => {
@@ -178,12 +179,14 @@ export function AnomalyDashboard() {
   const { data: summary, error: summaryError } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
   const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
@@ -224,6 +227,7 @@ export function AnomalyDashboard() {
   const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
@@ -246,12 +250,14 @@ export function AnomalyDashboard() {
     fetcher: () =>
       currentConnection?.id ? metricsApi.getReplicationDivergence() : Promise.resolve([]),
     interval: 10000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
   const { data: buffers, error: buffersError } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 

@@ -20,6 +20,11 @@ export interface IncidentTimelineEntry {
 
 export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
 
+type SignalRecovery =
+  | { state: 'recovered'; at: number | null }
+  | { state: 'open' }
+  | { state: 'unknown' };
+
 export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
 
 export interface IncidentSequenceMatch {
@@ -588,11 +593,11 @@ export class IncidentTimelineBuilder {
       if (!firstBySignal.has(key)) firstBySignal.set(key, event);
       lastBySignal.set(key, event);
     }
-    const recoveredAtBySignal = new Map<string, number | null | undefined>();
+    const recoveryBySignal = new Map<string, SignalRecovery>();
     for (const [key, event] of lastBySignal) {
-      recoveredAtBySignal.set(
+      recoveryBySignal.set(
         key,
-        this.recoveredAt(event, firstBySignal.get(key)!, nextOccurrence(event), now, probe),
+        this.signalRecovery(event, firstBySignal.get(key)!, nextOccurrence(event), now, probe),
       );
     }
 
@@ -600,15 +605,14 @@ export class IncidentTimelineBuilder {
       const key = signalKey(event);
       const entry = toTimelineEntry(event);
       if (lastBySignal.get(key) !== event) {
-        const resolvedAt = this.recoveredAtIfResolved(event);
-        return resolvedAt === null
-          ? { ...entry, recoveryState: 'recurred' }
-          : { ...entry, recoveredAt: resolvedAt, recoveryState: 'recovered' };
+        return event.resolved
+          ? { ...entry, recoveredAt: event.resolvedAt ?? null, recoveryState: 'recovered' }
+          : { ...entry, recoveryState: 'recurred' };
       }
-      const at = recoveredAtBySignal.get(key);
-      if (at === undefined) return { ...entry, recoveryState: 'unknown' };
-      if (at === null) return { ...entry, recoveryState: 'open' };
-      return { ...entry, recoveredAt: at, recoveryState: 'recovered' };
+      const recovery = recoveryBySignal.get(key)!;
+      return recovery.state === 'recovered'
+        ? { ...entry, recoveredAt: recovery.at, recoveryState: 'recovered' }
+        : { ...entry, recoveryState: recovery.state };
     });
 
     const sequence: MetricType[] = [];
@@ -658,14 +662,17 @@ export class IncidentTimelineBuilder {
     const openSignals: MetricType[] = [];
     const unknownSignals: MetricType[] = [];
     let recoveredAt: number | null = null;
-    for (const [key, at] of recoveredAtBySignal) {
+    let recoveryTimeKnown = true;
+    for (const [key, recovery] of recoveryBySignal) {
       const metricType = lastBySignal.get(key)!.metricType;
-      if (at === null) {
+      if (recovery.state === 'open') {
         if (!openSignals.includes(metricType)) openSignals.push(metricType);
-      } else if (at === undefined) {
+      } else if (recovery.state === 'unknown') {
         if (!unknownSignals.includes(metricType)) unknownSignals.push(metricType);
-      } else if (recoveredAt === null || at > recoveredAt) {
-        recoveredAt = at;
+      } else if (recovery.at === null) {
+        recoveryTimeKnown = false;
+      } else if (recoveredAt === null || recovery.at > recoveredAt) {
+        recoveredAt = recovery.at;
       }
     }
 
@@ -686,25 +693,24 @@ export class IncidentTimelineBuilder {
         status: this.status(now, lastEventAt, openSignals.length, unknownSignals.length),
         openSignals,
         unknownSignals,
-        recoveredAt: openSignals.length === 0 && unknownSignals.length === 0 ? recoveredAt : null,
+        recoveredAt:
+          openSignals.length === 0 && unknownSignals.length === 0 && recoveryTimeKnown
+            ? recoveredAt
+            : null,
       },
     };
   }
 
-  private recoveredAtIfResolved(event: AnomalyEvent): number | null {
-    return event.resolved ? (event.resolvedAt ?? null) : null;
-  }
-
-  private recoveredAt(
+  private signalRecovery(
     event: AnomalyEvent,
     first: AnomalyEvent,
     until: number | null,
     now: number,
     probe: RecoveryProbe,
-  ): number | null | undefined {
-    if (event.resolved) return event.resolvedAt;
-    if (now - event.timestamp < this.opts.settleMs) return null;
-    return probe({
+  ): SignalRecovery {
+    if (event.resolved) return { state: 'recovered', at: event.resolvedAt ?? null };
+    if (now - event.timestamp < this.opts.settleMs) return { state: 'open' };
+    const at = probe({
       connectionId: event.connectionId ?? '',
       metricType: event.metricType,
       since: event.timestamp,
@@ -715,6 +721,8 @@ export class IncidentTimelineBuilder {
       now,
       kind: event.kind,
     });
+    if (at === undefined) return { state: 'unknown' };
+    return at === null ? { state: 'open' } : { state: 'recovered', at };
   }
 
   private status(

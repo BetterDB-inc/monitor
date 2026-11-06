@@ -71,7 +71,7 @@ describe('IncidentDetail', () => {
     expect(screen.getByText('Loading incident…')).toBeInTheDocument();
   });
 
-  it('stops polling on an error or once the incident reaches a final state', () => {
+  it('stops polling only on a 404 and slows down for settled incidents and errors', () => {
     renderAt('/anomalies/incidents/123-abc');
 
     const interval = polling.interval as Exclude<Interval, number>;
@@ -80,10 +80,11 @@ describe('IncidentDetail', () => {
     expect(interval(undefined, null)).toBe(15_000);
     expect(interval(withStatus('active'), null)).toBe(15_000);
     expect(interval(withStatus('degraded'), null)).toBe(15_000);
-    expect(interval(incident(), null)).toBe(false);
-    expect(interval(withStatus('unknown'), null)).toBe(false);
+    expect(interval(incident(), null)).toBe(60_000);
+    expect(interval(withStatus('unknown'), null)).toBe(60_000);
+    expect(interval(withStatus('active'), new ApiError('Storage unavailable', 502))).toBe(60_000);
+    expect(interval(undefined, new Error('Failed to fetch'))).toBe(60_000);
     expect(interval(withStatus('active'), new ApiError('Not found', 404))).toBe(false);
-    expect(interval(undefined, new ApiError('Storage unavailable', 500))).toBe(false);
   });
 
   it('does not retry a 404', () => {

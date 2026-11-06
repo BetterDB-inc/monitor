@@ -2,7 +2,6 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { ConnectionLink } from '../components/ConnectionLink';
 import { ArrowLeft, SearchX } from 'lucide-react';
 import { metricsApi } from '../api/metrics';
-import { ApiError } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
 import { Button } from '../components/ui/button';
@@ -10,14 +9,20 @@ import { EmptyState } from '../components/ui/empty-state';
 import { QueryErrorState } from '../components/QueryErrorState';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import { IncidentTimelineView } from '../components/anomalies/incidents/IncidentTimelineView';
-import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
+import {
+  dateRangeQuery,
+  isNotFoundError,
+} from '../components/anomalies/incidents/incident-summary';
 import type { IncidentRecoveryStatus, IncidentTimeline } from '../types/anomaly';
 
 const INCIDENT_POLL_MS = 15_000;
-const TERMINAL_STATUSES: ReadonlySet<IncidentRecoveryStatus> = new Set(['recovered', 'unknown']);
+const SLOW_POLL_MS = 60_000;
+const SETTLED_STATUSES: ReadonlySet<IncidentRecoveryStatus> = new Set(['recovered', 'unknown']);
 
-function isNotFound(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 404;
+function pollInterval(latest: IncidentTimeline | undefined, error: Error | null): number | false {
+  if (isNotFoundError(error)) return false;
+  if (error) return SLOW_POLL_MS;
+  return latest && SETTLED_STATUSES.has(latest.recovery.status) ? SLOW_POLL_MS : INCIDENT_POLL_MS;
 }
 
 export function IncidentDetail() {
@@ -32,14 +37,11 @@ export function IncidentDetail() {
     refresh,
   } = usePolling<IncidentTimeline>({
     fetcher: (signal) => metricsApi.getIncident(incidentId, signal),
-    interval: (latest, latestError) =>
-      latestError || (latest && TERMINAL_STATUSES.has(latest.recovery.status))
-        ? false
-        : INCIDENT_POLL_MS,
-    shouldRetry: (retryError) => !isNotFound(retryError),
+    interval: pollInterval,
+    shouldRetry: (retryError) => !isNotFoundError(retryError),
     refetchKey: `${currentConnection?.id ?? ''}:${incidentId}`,
   });
-  const notFound = isNotFound(error);
+  const notFound = isNotFoundError(error);
   const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));
   const backTo = `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
 

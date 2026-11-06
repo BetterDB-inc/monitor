@@ -33,10 +33,10 @@ function recoveryTime(firedAt: number, recoveredAt: number): string {
 
 function recoveryText(entry: IncidentTimelineEntry): string {
   switch (entry.recoveryState) {
-    case 'recovered': {
-      const recoveredAt = entry.recoveredAt!;
-      return `Back to baseline at ${recoveryTime(entry.timestamp, recoveredAt)} (after ${formatDuration(recoveredAt - entry.timestamp)})`;
-    }
+    case 'recovered':
+      return entry.recoveredAt === null
+        ? 'Back to baseline (time not recorded)'
+        : `Back to baseline at ${recoveryTime(entry.timestamp, entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
     case 'recurred':
       return 'Fired again later';
     case 'unknown':
@@ -96,9 +96,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
           title="Recovery debt: the cluster has not returned to its pre-incident state"
         >
           No new anomalies have fired, but{' '}
-          {incident.recovery.openSignals.length > 0
-            ? `${incident.recovery.openSignals.map(metricLabel).join(', ')} ${incident.recovery.openSignals.length === 1 ? 'is' : 'are'} still away from baseline.`
-            : 'some signals are still away from baseline.'}
+          {incident.recovery.openSignals.map(metricLabel).join(', ')}{' '}
+          {incident.recovery.openSignals.length === 1 ? 'is' : 'are'} still away from baseline.
         </IncidentNotice>
       )}
 
