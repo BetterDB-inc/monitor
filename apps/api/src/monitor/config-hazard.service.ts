@@ -187,14 +187,13 @@ export class ConfigHazardService {
    * one can be suppressed. Anchoring both sides to the server removes skew from
    * the comparison entirely.
    *
-   * Falls back to the local clock when TIME is unavailable — no worse than
-   * comparing against the local clock unconditionally, which is what this
-   * replaces.
+   * Returns null when TIME is unavailable. The caller then falls back to the
+   * local clock, which can misjudge freshness, so it treats the read as failed.
    */
   private async readServerTimeSeconds(
     connectionId: string,
     client: ProbeClientLike,
-  ): Promise<number> {
+  ): Promise<number | null> {
     try {
       const raw = await client.call('TIME', []);
       if (Array.isArray(raw) && raw.length > 0) {
@@ -206,13 +205,15 @@ export class ConfigHazardService {
     } catch (err) {
       this.logger.debug(`TIME failed for ${connectionId}: ${(err as Error).message}`);
     }
-    return Math.floor(Date.now() / 1000);
+    return null;
   }
 
   /**
    * AOF fsync-policy hazard (valkey#3515). Symptom probes are best-effort: a
    * failed INFO or LATENCY read degrades to config-only evaluation (the
    * low-severity advisory) rather than suppressing the finding or the poll.
+   * The probe is still reported unread when a failed symptom read could have
+   * changed the verdict, so the result is not cached as complete.
    */
   private async probeAppendfsync(
     connectionId: string,
@@ -240,9 +241,15 @@ export class ConfigHazardService {
 
     let aofDelayedFsync: number | null = null;
     let aofLastWriteStatus: string | null = null;
+    // INFO persistence feeds both policies; LATENCY LATEST and TIME only feed
+    // the always verdict.
+    let infoReadFailed = false;
+    let latencyReadFailed = false;
     try {
       const raw = await client.call('INFO', ['persistence']);
-      if (typeof raw === 'string') {
+      if (typeof raw !== 'string') {
+        infoReadFailed = true;
+      } else {
         const fields = this.parseInfoFields(raw);
         const delayed = parseInt(fields['aof_delayed_fsync'] ?? '', 10);
         if (Number.isFinite(delayed)) {
@@ -251,6 +258,7 @@ export class ConfigHazardService {
         aofLastWriteStatus = fields['aof_last_write_status'] ?? null;
       }
     } catch (err) {
+      infoReadFailed = true;
       this.logger.debug(`INFO persistence failed for ${connectionId}: ${(err as Error).message}`);
     }
 
@@ -268,9 +276,15 @@ export class ConfigHazardService {
 
     let latencyEvents: string[] = [];
     try {
-      const nowSeconds = await this.readServerTimeSeconds(connectionId, client);
+      const serverSeconds = await this.readServerTimeSeconds(connectionId, client);
+      if (serverSeconds === null) {
+        latencyReadFailed = true;
+      }
+      const nowSeconds = serverSeconds ?? Math.floor(Date.now() / 1000);
       const raw = await client.call('LATENCY', ['LATEST']);
-      if (Array.isArray(raw)) {
+      if (!Array.isArray(raw)) {
+        latencyReadFailed = true;
+      } else {
         latencyEvents = raw
           .map((entry) => {
             if (Array.isArray(entry) === false) {
@@ -289,6 +303,7 @@ export class ConfigHazardService {
           });
       }
     } catch (err) {
+      latencyReadFailed = true;
       this.logger.debug(`LATENCY LATEST failed for ${connectionId}: ${(err as Error).message}`);
     }
 
@@ -300,7 +315,12 @@ export class ConfigHazardService {
       aofLastWriteStatus,
       latencyEvents,
     });
-    return { finding, unread: false };
+    // A confirmed hazard cannot be downgraded by a missing symptom, so only a
+    // non-hazard verdict built on a failed read is incomplete.
+    const symptomReadFailed =
+      infoReadFailed || (appendfsync === 'always' && latencyReadFailed);
+    const unread = symptomReadFailed && finding?.status !== 'hazard';
+    return { finding, unread };
   }
 
   /**

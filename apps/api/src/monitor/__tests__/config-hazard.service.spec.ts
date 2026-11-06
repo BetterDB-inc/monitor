@@ -344,11 +344,72 @@ describe('ConfigHazardService', () => {
       expect(findings[0].status).toBe('advisory');
     });
 
-    it('keeps the advisory when the LATENCY probe fails', async () => {
+    it('keeps the advisory but does not cache when the LATENCY probe fails', async () => {
       setupFsyncClient({ latency: new Error('ERR unknown command') });
-      const findings = await service.getHazards('conn-1');
-      expect(findings).toHaveLength(1);
-      expect(findings[0].status).toBe('advisory');
+      const first = await service.probeHazards('conn-1');
+      expect(first.findings).toHaveLength(1);
+      expect(first.findings[0].status).toBe('advisory');
+      // The missing LATENCY read could have escalated the advisory.
+      expect(first.complete).toBe(false);
+
+      await service.probeHazards('conn-1');
+      expect(appendonlyProbeCount()).toBe(2);
+    });
+
+    it('keeps the advisory but does not cache when TIME fails under always', async () => {
+      setupFsyncClient();
+      const base = client.call.getMockImplementation()!;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'TIME') return Promise.reject(new Error('NOPERM'));
+        return base(cmd, args);
+      });
+      const result = await service.probeHazards('conn-1');
+      expect(result.findings.map((f) => f.status)).toEqual(['advisory']);
+      expect(result.complete).toBe(false);
+    });
+
+    it('does not cache when INFO persistence fails under always', async () => {
+      setupFsyncClient();
+      const base = client.call.getMockImplementation()!;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO' && args[0] === 'persistence') return Promise.reject(new Error('NOPERM'));
+        return base(cmd, args);
+      });
+      const result = await service.probeHazards('conn-1');
+      expect(result.findings.map((f) => f.status)).toEqual(['advisory']);
+      expect(result.complete).toBe(false);
+    });
+
+    it('does not cache a quiet everysec when INFO persistence fails', async () => {
+      setupFsyncClient({ appendfsync: 'everysec' });
+      const base = client.call.getMockImplementation()!;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'INFO' && args[0] === 'persistence') return Promise.reject(new Error('NOPERM'));
+        return base(cmd, args);
+      });
+      const first = await service.probeHazards('conn-1');
+      expect(first.findings).toHaveLength(0);
+      expect(first.complete).toBe(false);
+
+      await service.probeHazards('conn-1');
+      expect(appendonlyProbeCount()).toBe(2);
+    });
+
+    it('caches a quiet everysec when only the LATENCY probe fails', async () => {
+      // LATENCY LATEST does not feed the everysec verdict.
+      setupFsyncClient({ appendfsync: 'everysec', latency: new Error('ERR unknown command') });
+      const result = await service.probeHazards('conn-1');
+      expect(result.findings).toHaveLength(0);
+      expect(result.complete).toBe(true);
+    });
+
+    it('caches a confirmed always hazard even when the LATENCY probe fails', async () => {
+      // A failed write status already confirms the hazard; a missing LATENCY
+      // read cannot change that verdict.
+      setupFsyncClient({ writeStatus: 'err', latency: new Error('ERR unknown command') });
+      const result = await service.probeHazards('conn-1');
+      expect(result.findings.map((f) => f.status)).toEqual(['hazard']);
+      expect(result.complete).toBe(true);
     });
 
     it('does not cache the probe when the appendfsync read fails', async () => {
