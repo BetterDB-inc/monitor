@@ -1,7 +1,6 @@
 import { ApiError } from '../../../api/client';
 import type { IncidentRecoveryStatus, IncidentTimeline } from '../../../types/anomaly';
 import { metricLabel, patternLabel } from '../anomaly-display';
-import type { DateRange } from '../../ui/date-range-picker';
 
 const OPEN_STATUSES: ReadonlySet<IncidentRecoveryStatus> = new Set([
   'active',
@@ -39,16 +38,6 @@ export function dateRangeQuery(
 ): string {
   if (start == null || end == null) return '';
   return new URLSearchParams({ start: String(start), end: String(end) }).toString();
-}
-
-export function dateRangeFromParams(
-  start: string | null,
-  end: string | null,
-): DateRange | undefined {
-  if (!start || !end) return undefined;
-  const from = new Date(Number(start));
-  const to = new Date(Number(end));
-  return isNaN(from.getTime()) || isNaN(to.getTime()) ? undefined : { from, to };
 }
 
 export function incidentPath(incidentId: string, query = ''): string {

@@ -27,10 +27,15 @@ type SignalRecovery =
 
 export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
 
+export interface IncidentSequenceStep {
+  anomalyId: string;
+  step: number | null;
+}
+
 export interface IncidentSequenceMatch {
   pattern: AnomalyPattern;
   anomalyIds: string[];
-  steps: (number | null)[];
+  steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;
@@ -646,7 +651,10 @@ export class IncidentTimelineBuilder {
           anomalyIds: held.map((e) => e.anomalyId),
           steps: held.map((e) => {
             const position = matched.indexOf(e);
-            return position < rule.steps.length ? position + 1 : null;
+            return {
+              anomalyId: e.anomalyId,
+              step: position < rule.steps.length ? position + 1 : null,
+            };
           }),
           diagnosis: rule.diagnosis,
           recommendations: rule.recommendations.filter(

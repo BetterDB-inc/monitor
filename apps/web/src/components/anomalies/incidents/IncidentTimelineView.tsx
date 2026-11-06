@@ -3,10 +3,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import type { IncidentTimeline, IncidentTimelineEntry } from '../../../types/anomaly';
 import { SEVERITY_CONFIG, formatTime, metricLabel, patternLabel } from '../anomaly-display';
 import { formatDateTime, formatDuration } from '../../../lib/formatters';
-import { useNow } from '../../../hooks/useNow';
 import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
-import { incidentDurationMs, incidentTitle, isIncidentOpen } from './incident-summary';
+import { LiveDuration } from './LiveDuration';
+import { incidentTitle } from './incident-summary';
 
 interface IncidentTimelineViewProps {
   incident: IncidentTimeline;
@@ -50,24 +50,21 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
 }
 
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
-  const ticking = useNow(now === undefined && isIncidentOpen(incident));
   const entries = incident.entries;
   const namePattern = incident.sequenceMatches.length > 1;
   const entryById = new Map(incident.entries.map((entry) => [entry.anomalyId, entry]));
   const stepsOf = new Map<string, { key: string; label: string }[]>();
   incident.sequenceMatches.forEach((match, matchIndex) => {
-    match.anomalyIds.forEach((id, i) => {
-      const step = match.steps?.[i] ?? null;
+    match.steps.forEach(({ anomalyId, step }, i) => {
       const label = step === null ? 'Supporting signal' : `Step ${step}`;
-      const tags = stepsOf.get(id) ?? [];
+      const tags = stepsOf.get(anomalyId) ?? [];
       tags.push({
         key: `${matchIndex}:${i}`,
         label: namePattern ? `${patternLabel(match.pattern)}: ${label}` : label,
       });
-      stepsOf.set(id, tags);
+      stepsOf.set(anomalyId, tags);
     });
   });
-  const duration = formatDuration(incidentDurationMs(incident, now ?? ticking));
   const connections = incident.connectionIds.length;
   const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
   const eventTime = spansDays ? formatDateTime : formatTime;
@@ -81,8 +78,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       </div>
       <p className="text-sm text-muted-foreground">
         Started {formatDateTime(incident.startedAt)} ·{' '}
-        {isIncidentOpen(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
-        event{incident.entries.length === 1 ? '' : 's'}
+        <LiveDuration incident={incident} now={now} /> · {incident.entries.length} event
+        {incident.entries.length === 1 ? '' : 's'}
         {connections > 0 && ` across ${connections} connection${connections === 1 ? '' : 's'}`}
       </p>
 
@@ -110,9 +107,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">{match.diagnosis}</p>
             <ol className="space-y-1 text-sm">
-              {match.anomalyIds.map((id, i) => {
+              {match.steps.map(({ anomalyId: id, step }) => {
                 const entry = entryById.get(id);
-                const step = match.steps?.[i] ?? null;
                 return (
                   <li key={id} className="flex gap-2">
                     <span className="font-mono text-primary">

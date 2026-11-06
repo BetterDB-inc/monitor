@@ -90,10 +90,15 @@ export interface IncidentTimelineEntry {
   recoveryState: IncidentEntryRecovery;
 }
 
+export interface IncidentSequenceStep {
+  anomalyId: string;
+  step: number | null;
+}
+
 export interface IncidentSequenceMatch {
   pattern: string;
   anomalyIds: string[];
-  steps: (number | null)[];
+  steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;

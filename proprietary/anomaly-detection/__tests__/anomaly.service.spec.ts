@@ -10445,7 +10445,7 @@ describe('AnomalyService', () => {
       });
     });
 
-    it('counts an incident without a connection under an empty connection id', async () => {
+    it('leaves an incident without a connection out of the gauges', async () => {
       jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
         { connectionIds: [], matchedPatterns: [], recovery: { status: 'active' } },
       ] as any);
@@ -10453,9 +10453,7 @@ describe('AnomalyService', () => {
       await (service as any).updatePrometheusSummary();
 
       const [byConnection] = prometheusService.updateActiveIncidents.mock.calls[0];
-      expect(Object.fromEntries(byConnection)).toEqual({
-        '': [{ pattern: 'none', status: 'active', count: 1 }],
-      });
+      expect(byConnection.size).toBe(0);
     });
 
     it('still publishes the summary when incidents cannot be read', async () => {

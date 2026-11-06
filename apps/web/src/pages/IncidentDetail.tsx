@@ -10,10 +10,10 @@ import { QueryErrorState } from '../components/QueryErrorState';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import { IncidentTimelineView } from '../components/anomalies/incidents/IncidentTimelineView';
 import {
-  dateRangeFromParams,
   dateRangeQuery,
   isNotFoundError,
 } from '../components/anomalies/incidents/incident-summary';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import type { IncidentRecoveryStatus, IncidentTimeline } from '../types/anomaly';
 
 const INCIDENT_POLL_MS = 15_000;

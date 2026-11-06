@@ -9746,8 +9746,7 @@ export class AnomalyService
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
         oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
         const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
-        const connectionIds = timeline.connectionIds.length > 0 ? timeline.connectionIds : [''];
-        for (const connectionId of new Set(connectionIds)) {
+        for (const connectionId of new Set(timeline.connectionIds)) {
           const counts = byConnection.get(connectionId) ?? new Map();
           for (const pattern of patterns) {
             const label = `${pattern}\u0000${status}`;

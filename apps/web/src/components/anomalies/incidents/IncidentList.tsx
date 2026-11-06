@@ -3,15 +3,10 @@ import { Siren } from 'lucide-react';
 import { EmptyState } from '../../ui/empty-state';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import type { IncidentTimeline } from '../../../types/anomaly';
-import { formatDateTime, formatDuration } from '../../../lib/formatters';
-import { useNow } from '../../../hooks/useNow';
+import { formatDateTime } from '../../../lib/formatters';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
-import {
-  incidentDurationMs,
-  incidentPath,
-  incidentTitle,
-  isIncidentOpen,
-} from './incident-summary';
+import { LiveDuration } from './LiveDuration';
+import { incidentPath, incidentTitle } from './incident-summary';
 
 interface IncidentListProps {
   incidents: IncidentTimeline[] | undefined;
@@ -26,12 +21,10 @@ function scopeLabel(incident: IncidentTimeline): string {
   const connections = incident.connectionIds.length;
   const parts = connections > 0 ? [`${connections} connection${connections === 1 ? '' : 's'}`] : [];
   if (nodes.size > 0) parts.push(`${nodes.size} node${nodes.size === 1 ? '' : 's'}`);
-  return parts.join(' · ');
+  return parts.join(' · ') || 'Unscoped';
 }
 
 export function IncidentList({ incidents, now, loading, limit, linkQuery }: IncidentListProps) {
-  const ticking = useNow(now === undefined && !!incidents?.some(isIncidentOpen));
-  const currentTime = now ?? ticking;
   if (!incidents && loading) {
     return <p className="text-sm text-muted-foreground">Loading incidents…</p>;
   }
@@ -64,34 +57,31 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
           </TableRow>
         </TableHeader>
         <TableBody>
-          {incidents.slice(0, limit).map((incident) => {
-            const duration = formatDuration(incidentDurationMs(incident, currentTime));
-            return (
-              <TableRow key={incident.incidentId}>
-                <TableCell>
-                  <ConnectionLink
-                    to={incidentPath(incident.incidentId, linkQuery)}
-                    className="font-medium hover:underline"
-                  >
-                    {incidentTitle(incident)}
-                  </ConnectionLink>
-                  <p className="text-xs text-muted-foreground">
-                    {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
-                  </p>
-                </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  {scopeLabel(incident)}
-                </TableCell>
-                <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
-                <TableCell className="text-sm">
-                  {isIncidentOpen(incident) ? `${duration} so far` : duration}
-                </TableCell>
-                <TableCell>
-                  <IncidentStatusBadge status={incident.recovery.status} />
-                </TableCell>
-              </TableRow>
-            );
-          })}
+          {incidents.slice(0, limit).map((incident) => (
+            <TableRow key={incident.incidentId}>
+              <TableCell>
+                <ConnectionLink
+                  to={incidentPath(incident.incidentId, linkQuery)}
+                  className="font-medium hover:underline"
+                >
+                  {incidentTitle(incident)}
+                </ConnectionLink>
+                <p className="text-xs text-muted-foreground">
+                  {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
+                </p>
+              </TableCell>
+              <TableCell className="text-sm text-muted-foreground">
+                {scopeLabel(incident)}
+              </TableCell>
+              <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
+              <TableCell className="text-sm">
+                <LiveDuration incident={incident} now={now} />
+              </TableCell>
+              <TableCell>
+                <IncidentStatusBadge status={incident.recovery.status} />
+              </TableCell>
+            </TableRow>
+          ))}
         </TableBody>
       </Table>
     </div>

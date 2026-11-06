@@ -6,6 +6,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useCapabilities } from '../hooks/useCapabilities';
 import { useLicense } from '../hooks/useLicense';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { EmptyState } from '../components/ui/empty-state';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -58,16 +59,9 @@ export function ClientAnalyticsDeepDive() {
   const hasAnomalyDetection = hasFeature(Feature.ANOMALY_DETECTION);
 
   // Time filter — initialise from URL ?start=&end= (epoch ms)
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
-    const s = searchParams.get('start');
-    const e = searchParams.get('end');
-    if (s && e) {
-      const from = new Date(Number(s));
-      const to = new Date(Number(e));
-      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
-    }
-    return undefined;
-  });
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() =>
+    dateRangeFromParams(searchParams.get('start'), searchParams.get('end')),
+  );
 
   const timeRangeParams = useMemo(() => {
     if (dateRange?.from && dateRange?.to) {

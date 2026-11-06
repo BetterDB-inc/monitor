@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { IncidentList } from './IncidentList';
 import { entry, incident, T0 } from './incident-fixtures';
@@ -81,5 +81,35 @@ describe('IncidentList', () => {
     expect(screen.getByRole('link', { name: 'Connections' })).toBeInTheDocument();
     expect(screen.getByText('10m 0s so far')).toBeInTheDocument();
     expect(screen.getByText('Degraded')).toBeInTheDocument();
+  });
+
+  it('marks an incident without a connection as unscoped', () => {
+    renderList([incident({ connectionIds: [] })]);
+
+    expect(screen.getByText('Unscoped')).toBeInTheDocument();
+  });
+
+  it('ticks the duration of an open incident without a fixed clock', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0 + 60_000);
+    try {
+      renderList(
+        [
+          incident({
+            recovery: { status: 'active', openSignals: [], unknownSignals: [], recoveredAt: null },
+          }),
+        ],
+        { now: undefined },
+      );
+      expect(screen.getByText('1m 0s so far')).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(2_000);
+      });
+
+      expect(screen.getByText('1m 2s so far')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

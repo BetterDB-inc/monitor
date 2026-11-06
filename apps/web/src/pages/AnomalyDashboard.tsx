@@ -7,6 +7,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { EmptyState } from '../components/ui/empty-state';
@@ -26,10 +27,7 @@ import {
 } from '../components/anomalies/anomaly-display';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
-import {
-  dateRangeFromParams,
-  dateRangeQuery,
-} from '../components/anomalies/incidents/incident-summary';
+import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
@@ -240,6 +238,7 @@ export function AnomalyDashboard() {
     interval: INCIDENT_POLL_MS,
     enabled: tab === 'incidents',
     refetchKey: rangeKey,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
@@ -321,7 +320,7 @@ export function AnomalyDashboard() {
           <h1 className="text-3xl font-bold">Anomaly Detection</h1>
           <p className="text-muted-foreground">Real-time monitoring across all metrics</p>
         </div>
-        <DateRangePicker value={dateRange} onChange={changeDateRange} />
+        <DateRangePicker value={dateRange} onChange={changeDateRange} placeholder="Last 24 hours" />
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -334,11 +333,6 @@ export function AnomalyDashboard() {
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Incidents</CardTitle>
-              {startTime === undefined && (
-                <p className="text-sm text-muted-foreground">
-                  Last 24 hours. Pick a date range to see older incidents.
-                </p>
-              )}
             </CardHeader>
             <CardContent>
               {incidentsError && !incidents ? (

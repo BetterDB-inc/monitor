@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { IncidentTimelineView } from './IncidentTimelineView';
 import { entry, incident, T0 } from './incident-fixtures';
-import type { IncidentTimeline } from '../../../types/anomaly';
 
 describe('IncidentTimelineView', () => {
   it('renders events in server order', () => {
@@ -110,7 +109,10 @@ describe('IncidentTimelineView', () => {
             {
               pattern: 'retry_storm',
               anomalyIds: ['a', 'b'],
-              steps: [1, 2],
+              steps: [
+                { anomalyId: 'a', step: 1 },
+                { anomalyId: 'b', step: 2 },
+              ],
               diagnosis: 'Clients are retrying slow commands',
               recommendations: ['Add client backoff'],
               severity: 'critical',
@@ -143,7 +145,11 @@ describe('IncidentTimelineView', () => {
             {
               pattern: 'retry_storm',
               anomalyIds: ['a', 'c', 'b'],
-              steps: [2, 3, null],
+              steps: [
+                { anomalyId: 'a', step: 2 },
+                { anomalyId: 'c', step: 3 },
+                { anomalyId: 'b', step: null },
+              ],
               diagnosis: 'Clients are retrying slow commands',
               recommendations: [],
               severity: 'critical',
@@ -173,7 +179,10 @@ describe('IncidentTimelineView', () => {
             {
               pattern: 'backlog_exhaustion',
               anomalyIds: ['a', 'b'],
-              steps: [1, 2],
+              steps: [
+                { anomalyId: 'a', step: 1 },
+                { anomalyId: 'b', step: 2 },
+              ],
               diagnosis: 'Backlog ran out',
               recommendations: [],
               severity: 'warning',
@@ -181,7 +190,7 @@ describe('IncidentTimelineView', () => {
             {
               pattern: 'recovery_amplification',
               anomalyIds: ['b'],
-              steps: [1],
+              steps: [{ anomalyId: 'b', step: 1 }],
               diagnosis: 'Resync made it worse',
               recommendations: [],
               severity: 'warning',
@@ -220,28 +229,6 @@ describe('IncidentTimelineView', () => {
       day: 'numeric',
     });
     expect(screen.getByText(new RegExp(`Back to baseline at ${nextDay}`))).toBeInTheDocument();
-  });
-
-  it('tolerates a sequence match without step numbers', () => {
-    const match = {
-      pattern: 'retry_storm',
-      anomalyIds: ['a1'],
-      diagnosis: 'Clients are retrying slow commands',
-      recommendations: [],
-      severity: 'warning' as const,
-    };
-    render(
-      <IncidentTimelineView
-        now={T0}
-        incident={incident({
-          matchedPatterns: ['retry_storm'],
-          sequenceMatches: [match as unknown as IncidentTimeline['sequenceMatches'][number]],
-        })}
-      />,
-    );
-
-    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
-    expect(screen.getByText('Supporting signal')).toBeInTheDocument();
   });
 
   it('dates event times when an incident crosses midnight', () => {

@@ -715,7 +715,7 @@ describe('IncidentTimelineBuilder', () => {
         unknownSignals: [MetricType.MEMORY_USED],
         recoveredAt: null,
       });
-      expect(incident.recovery.status).not.toBe('recovered');
+      expect(incident.recovery.status).toBe('unknown');
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
       expect(incident.entries.map((e) => e.recoveryState)).toEqual([
         'unknown',
@@ -1187,7 +1187,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
       expect(incident.matchedPatterns).toEqual([escalation.pattern]);
       expect(incident.sequenceMatches[0].anomalyIds).toEqual(['held']);
-      expect(incident.sequenceMatches[0].steps).toEqual([2]);
+      expect(incident.sequenceMatches[0].steps).toEqual([{ anomalyId: 'held', step: 2 }]);
     });
 
     describe('with a step that may come before the step it follows', () => {
@@ -1291,7 +1291,10 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.sequenceMatches[0]).toEqual(
         expect.objectContaining({
           anomalyIds: [conn.id, mem.id],
-          steps: [1, 2],
+          steps: [
+            { anomalyId: conn.id, step: 1 },
+            { anomalyId: mem.id, step: 2 },
+          ],
           severity: AnomalySeverity.CRITICAL,
           diagnosis: escalation.diagnosis,
         }),
@@ -1308,7 +1311,11 @@ describe('IncidentTimelineBuilder', () => {
       ]).build([conn, evicted, mem], T0 + 3 * MIN, neverRecovers);
 
       expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id, evicted.id]);
-      expect(incident.sequenceMatches[0].steps).toEqual([1, 2, null]);
+      expect(incident.sequenceMatches[0].steps).toEqual([
+        { anomalyId: conn.id, step: 1 },
+        { anomalyId: mem.id, step: 2 },
+        { anomalyId: evicted.id, step: null },
+      ]);
     });
 
     it('does not match the steps in reverse order', () => {
