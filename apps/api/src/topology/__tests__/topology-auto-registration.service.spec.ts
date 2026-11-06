@@ -527,14 +527,17 @@ describe('TopologyAutoRegistrationService with a seed that fronts several nodes'
       seedAddresses: ['10.0.0.1', '10.0.0.2'],
     });
 
+    // The first sync only notes the alias verdict; the second acts on it.
+    await service.reconcile('seed');
+    expect(registry.addManagedChild).not.toHaveBeenCalled();
     await service.reconcile('seed');
 
     expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.1', nodeId: 'n1' }));
     expect(registry.addManagedChild).toHaveBeenCalledWith('seed', expect.objectContaining({ host: '10.0.0.2', nodeId: 'n2' }));
   });
 
-  it('retires no child when a later sync lands on another node or the DNS answer shrinks', async () => {
-    const { service, registry, discovery, clusterSource } = build({
+  it('retires no child when a later sync lands on another node', async () => {
+    const { service, registry, discovery } = build({
       seed: { host: 'valkey.ns.svc.cluster.local', port: 6379 },
       members: [child('n1', '10.0.0.1', 6379), child('n2', '10.0.0.2', 6379)],
       nodes: [
@@ -544,16 +547,25 @@ describe('TopologyAutoRegistrationService with a seed that fronts several nodes'
       seedAddresses: ['10.0.0.1', '10.0.0.2'],
     });
     await service.reconcile('seed');
+    await service.reconcile('seed');
 
-    // Next sync: discovery lands on n2, and a rollout leaves only n2 behind the Service.
+    // Next sync: discovery lands on n2.
     discovery.discoverNodesIsolated.mockResolvedValueOnce([
       discovered('n1', '10.0.0.1:6379@16379', ['slave']),
       discovered('n2', '10.0.0.2:6379@16379', ['myself', 'master']),
     ]);
-    clusterSource.resolveHost = async () => ['10.0.0.2'];
     await service.reconcile('seed');
 
     expect(registry.retireChild).not.toHaveBeenCalled();
     expect(registry.addManagedChild).not.toHaveBeenCalled();
+  });
+
+  it('forgets the alias verdict of a seed once auto-registration is turned off', async () => {
+    const { service, clusterSource } = build({ seed: { autoRegisterNodes: false } });
+    const forget = jest.spyOn(clusterSource, 'forget');
+
+    await service.reconcile('seed');
+
+    expect(forget).toHaveBeenCalledWith('seed');
   });
 });

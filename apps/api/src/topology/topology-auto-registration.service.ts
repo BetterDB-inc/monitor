@@ -62,6 +62,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
 
   protected onConnectionRemoved(connectionId: string): void {
     this.heldRetirements.delete(connectionId);
+    for (const source of this.sources) source.forget?.(connectionId);
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
@@ -88,6 +89,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
         const active = members.filter((m) => m.membership?.origin === 'auto' && m.membership.retiredAt === undefined);
         await this.applyEach(active.map((m) => m.id), (id) => this.connectionRegistry.retireChild(id), 'retire');
         this.heldRetirements.delete(seedId);
+        for (const source of this.sources) source.forget?.(seedId);
         return;
       }
 

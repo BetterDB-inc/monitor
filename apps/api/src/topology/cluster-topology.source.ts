@@ -39,11 +39,13 @@ export class ClusterTopologySource implements TopologySource {
   resolveHost: (host: string) => Promise<string[]> = resolveHostAddresses;
 
   /**
-   * Seeds (by id and address) seen as an alias at least once. A Service whose
-   * DNS answer shrinks to one node for a while (a rollout) would otherwise flip
-   * to a single-node seed and retire `myself`, then restore it on the next sync.
+   * Per seed id, for the address it had: whether the last sync called it an
+   * alias. A seed is only treated as an alias once two syncs in a row say so,
+   * so one stale CLUSTER NODES reply (after a pod IP change) cannot register
+   * its own node as a duplicate child; it is one node again as soon as a sync
+   * says so.
    */
-  private readonly aliasSeeds = new Set<string>();
+  private readonly lastAliasVerdict = new Map<string, { address: string; alias: boolean }>();
 
   constructor(private readonly discovery: ClusterDiscoveryService) {}
 
@@ -60,11 +62,22 @@ export class ClusterTopologySource implements TopologySource {
     // Without the seed's addresses `myself` cannot be told apart from the seed;
     // leave membership as it is for this sync rather than guess.
     if (seedAddresses.length === 0) return null;
-    const aliasKey = `${seed.id}|${addressKey(seed.host, seed.port)}`;
-    if (seedIsAlias(seed, seedAddresses, nodes)) this.aliasSeeds.add(aliasKey);
-    return {
-      nodes: desiredFromDiscovery(seed, nodes, { seedIsAlias: this.aliasSeeds.has(aliasKey) }),
-      unknownGroups: [],
-    };
+    const address = addressKey(seed.host, seed.port);
+    const prior = this.lastAliasVerdict.get(seed.id);
+    const verdict = seedIsAlias(seed, seedAddresses, nodes);
+    this.lastAliasVerdict.set(seed.id, { address, alias: verdict });
+    const confirmed = verdict && prior?.address === address && prior.alias;
+    const desired = desiredFromDiscovery(seed, nodes, { seedIsAlias: confirmed });
+    // A first alias verdict is not trusted yet. Where it decides whether
+    // `myself` is a child, leave membership as it is for this sync rather than
+    // add that node or retire it.
+    if (verdict && !confirmed && desiredFromDiscovery(seed, nodes, { seedIsAlias: true }).length !== desired.length) {
+      return null;
+    }
+    return { nodes: desired, unknownGroups: [] };
+  }
+
+  forget(seedId: string): void {
+    this.lastAliasVerdict.delete(seedId);
   }
 }

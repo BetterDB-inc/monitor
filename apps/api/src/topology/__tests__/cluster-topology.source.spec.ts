@@ -32,7 +32,10 @@ describe('ClusterTopologySource', () => {
     ]) };
     const source = new ClusterTopologySource(discovery as never);
     source.resolveHost = jest.fn().mockResolvedValue(['10.0.0.1', '10.0.0.2']);
-    const result = await source.discover({ ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 } as never, 10_000);
+    const service = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+    // The first alias verdict is not trusted yet, so membership is left alone.
+    await expect(source.discover(service as never, 10_000)).resolves.toBeNull();
+    const result = await source.discover(service as never, 10_000);
     expect(result?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
     expect(source.resolveHost).toHaveBeenCalledWith('valkey.ns.svc.cluster.local');
   });
@@ -41,9 +44,11 @@ describe('ClusterTopologySource', () => {
     { id: 'n1', address: '10.0.0.1:6379@16379', flags: ['myself', 'master'], role: 'master', slots: [], configEpoch: 0, healthy: true },
     { id: 'n2', address: '10.0.0.2:6379@16379', flags: ['slave'], role: 'replica', slots: [], configEpoch: 0, healthy: true },
   ];
+  // Two syncs, so an alias verdict is confirmed; the second sync's result.
   const discoverWith = async (addresses: string[]) => {
     const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
     source.resolveHost = jest.fn().mockResolvedValue(addresses);
+    await source.discover({ ...seed, host: 'node-1.example', port: 6379 } as never, 10_000);
     return source.discover({ ...seed, host: 'node-1.example', port: 6379 } as never, 10_000);
   };
 
@@ -60,13 +65,41 @@ describe('ClusterTopologySource', () => {
     await expect(discoverWith([])).resolves.toBeNull();
   });
 
-  it('keeps treating a seed as an alias when its DNS answer shrinks to the answering node', async () => {
-    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
-    const service = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
-    source.resolveHost = jest.fn().mockResolvedValueOnce(['10.0.0.1', '10.0.0.2']).mockResolvedValueOnce(['10.0.0.1']);
+  const single = { ...seed, host: 'node-1.example', port: 6379 };
+  const ids = (result: Awaited<ReturnType<ClusterTopologySource['discover']>>) => result?.nodes.map((n) => n.nodeId);
 
-    expect((await source.discover(service as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
-    // A rollout leaves one ready pod behind the Service; myself must not be retired.
-    expect((await source.discover(service as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  it('does not let one stale alias verdict register a single-node seed as its own child', async () => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    // The pod IP changed and the cached answer does not match myself for one sync.
+    source.resolveHost = jest.fn()
+      .mockResolvedValueOnce(['10.0.0.1'])
+      .mockResolvedValueOnce(['10.0.0.9'])
+      .mockResolvedValueOnce(['10.0.0.1']);
+
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
+    await expect(source.discover(single as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
+  });
+
+  it('treats a seed as an alias after two alias verdicts in a row, and as one node again at once', async () => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    source.resolveHost = jest.fn()
+      .mockResolvedValueOnce(['10.0.0.1', '10.0.0.2'])
+      .mockResolvedValueOnce(['10.0.0.1', '10.0.0.2'])
+      .mockResolvedValueOnce(['10.0.0.1']);
+
+    await expect(source.discover(single as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n1', 'n2']);
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
+  });
+
+  it('starts over for a seed it was told to forget', async () => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    source.resolveHost = jest.fn().mockResolvedValue(['10.0.0.1', '10.0.0.2']);
+
+    await source.discover(single as never, 10_000);
+    source.forget('seed');
+
+    await expect(source.discover(single as never, 10_000)).resolves.toBeNull();
   });
 });

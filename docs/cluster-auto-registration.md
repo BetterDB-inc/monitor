@@ -50,7 +50,10 @@ the headless Service a Kubernetes operator creates for a cluster. The seed then
 connects to whichever node the name resolves to, and to a different one after a
 reconnect. When the seed host resolves to more than one address, every node in
 `CLUSTER NODES` is registered as a child, including the node that answered the
-sync, so the children stay stable across syncs.
+sync, so the children stay stable across syncs. A seed is only treated this way
+once two syncs in a row agree, so one stale answer cannot register a single
+node twice, and it is treated as a single node again as soon as a sync
+resolves it to just the node that answered.
 
 Slow log and command log entries collected through such a seed are stored
 against the node that served them, not the seed's hostname, so history stays

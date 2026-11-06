@@ -12,6 +12,8 @@ export interface TopologySource {
   readonly envFlag: string;
   handles(caps: DatabaseCapabilities): boolean;
   discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery | null>;
+  /** Drop whatever the source remembers about a seed that was removed. */
+  forget?(seedId: string): void;
 }
 
 export const TOPOLOGY_SOURCES = Symbol('TOPOLOGY_SOURCES');
