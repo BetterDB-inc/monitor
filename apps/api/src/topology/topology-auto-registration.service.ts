@@ -95,7 +95,10 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
 
       const source = this.sourceFor(seed);
       if (!source) return;
-      const discovery = await this.discover(seed, source);
+      const registeredNodeIds = new Set(
+        members.flatMap((m) => (m.membership && m.membership.retiredAt === undefined && m.membership.nodeId ? [m.membership.nodeId] : [])),
+      );
+      const discovery = await this.discover(seed, source, registeredNodeIds);
       if (!discovery) return;
 
       const unknown = new Set(discovery.unknownGroups);
@@ -134,7 +137,11 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     return config.autoRegisterNodes ?? (source ? isTrueFlag(this.configService.get<string>(source.envFlag)) : false);
   }
 
-  private async discover(seed: DatabaseConnectionConfig, source: TopologySource): Promise<TopologyDiscovery | null> {
+  private async discover(
+    seed: DatabaseConnectionConfig,
+    source: TopologySource,
+    registeredNodeIds: ReadonlySet<string>,
+  ): Promise<TopologyDiscovery | null> {
     if (seed.sshTunnel?.enabled) {
       this.logOnce(`ssh:${seed.id}`, `Skipping auto-registration for ${seed.name}: SSH-tunnelled seeds are not supported`);
       return null;
@@ -147,7 +154,7 @@ export class TopologyAutoRegistrationService extends MultiConnectionPoller imple
     const settled = (): void => {
       this.pendingDiscovery.delete(seed.id);
     };
-    const call = source.discover(seed, DISCOVERY_TIMEOUT_MS);
+    const call = source.discover(seed, DISCOVERY_TIMEOUT_MS, registeredNodeIds);
     call.then(settled, settled);
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {

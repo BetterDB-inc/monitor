@@ -53,7 +53,11 @@ export class ClusterTopologySource implements TopologySource {
     return caps.clusterEnabled === true;
   }
 
-  async discover(seed: DatabaseConnectionConfig, timeoutMs: number): Promise<TopologyDiscovery | null> {
+  async discover(
+    seed: DatabaseConnectionConfig,
+    timeoutMs: number,
+    registeredNodeIds?: ReadonlySet<string>,
+  ): Promise<TopologyDiscovery | null> {
     const [nodes, seedAddresses] = await Promise.all([
       this.discovery.discoverNodesIsolated(seed.id, timeoutMs),
       this.resolveHost(seed.host),
@@ -66,13 +70,17 @@ export class ClusterTopologySource implements TopologySource {
     const verdict = seedIsAlias(seed, seedAddresses, nodes);
     const known = this.aliasState.get(seed.id);
     const prior = known?.address === address ? known : undefined;
-    const alias = prior ? (verdict === prior.last ? verdict : prior.alias) : false;
+    // With nothing remembered (a new seed, or a restarted monitor), start from
+    // what is registered: `myself` already a member means the seed was an alias.
+    const myself = nodes.find((n) => n.flags.includes('myself'));
+    const initial = myself !== undefined && registeredNodeIds?.has(myself.id) === true;
+    const alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;
     this.aliasState.set(seed.id, { address, alias, last: verdict });
     const desired = desiredFromDiscovery(seed, nodes, { seedIsAlias: alias });
-    // A first alias verdict for a seed is not trusted yet. Where it decides
-    // whether `myself` is a child, leave membership as it is for this sync, so
-    // a restarted monitor does not retire that node only to add it back.
-    if (!prior && verdict && desiredFromDiscovery(seed, nodes, { seedIsAlias: true }).length !== desired.length) {
+    // A first verdict that disagrees with the starting point is not trusted
+    // yet. Where it decides whether `myself` is a child, leave membership as it
+    // is for this sync rather than add that node or retire it.
+    if (!prior && verdict !== initial && desiredFromDiscovery(seed, nodes, { seedIsAlias: verdict }).length !== desired.length) {
       return null;
     }
     return { nodes: desired, unknownGroups: [] };

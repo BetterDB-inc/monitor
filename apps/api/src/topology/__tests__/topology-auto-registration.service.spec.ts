@@ -561,6 +561,24 @@ describe('TopologyAutoRegistrationService with a seed that fronts several nodes'
     expect(registry.addManagedChild).not.toHaveBeenCalled();
   });
 
+  it('keeps the answering node after a monitor restart whose first DNS answer is one pod', async () => {
+    const { service, registry } = build({
+      seed: { host: 'valkey.ns.svc.cluster.local', port: 6379 },
+      members: [child('n1', '10.0.0.1', 6379), child('n2', '10.0.0.2', 6379)],
+      nodes: [
+        discovered('n1', '10.0.0.1:6379@16379', ['myself', 'master']),
+        discovered('n2', '10.0.0.2:6379@16379', ['slave']),
+      ],
+      // A rollout or stale cache leaves only the answering pod behind the name.
+      seedAddresses: ['10.0.0.1'],
+    });
+
+    await service.reconcile('seed');
+
+    expect(registry.retireChild).not.toHaveBeenCalled();
+    expect(registry.addManagedChild).not.toHaveBeenCalled();
+  });
+
   it('forgets the alias verdict of a seed once auto-registration is turned off', async () => {
     const { service, clusterSource } = build({ seed: { autoRegisterNodes: false } });
     const forget = jest.spyOn(clusterSource, 'forget');
