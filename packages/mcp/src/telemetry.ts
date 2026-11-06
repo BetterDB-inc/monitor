@@ -51,8 +51,10 @@ export function trackToolCall(event: Omit<TelemetryEvent, 'timestamp'>): void {
   }
 }
 
-export function flushTelemetry(): Promise<void> {
-  return flush();
+export function drainTelemetry(): TelemetryEvent[] {
+  const events = buffer;
+  buffer = [];
+  return events;
 }
 
 export async function stopTelemetry(): Promise<void> {

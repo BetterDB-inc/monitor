@@ -120,7 +120,7 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
-| `BETTERDB_LOCAL_TOKEN` | — | Token for the local monitor used after `--autostart` or `start_monitor`. If unset, `BETTERDB_TOKEN` is kept only when `BETTERDB_URL` already points at that local monitor; otherwise it is never sent to it or passed to the monitor process |
+| `BETTERDB_LOCAL_TOKEN` | — | Token for the local monitor used after `--autostart` or `start_monitor`. If unset, `BETTERDB_TOKEN` is kept only when `BETTERDB_URL` already points at that local monitor (same origin, e.g. `http://localhost:3001`); otherwise it is never sent to it or passed to the monitor process |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
 | `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to stop posting tool usage events (tool name, success, duration, error) to the monitor |
 
