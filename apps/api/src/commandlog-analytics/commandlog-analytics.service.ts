@@ -111,9 +111,11 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
     // Load lastSeenIds from storage on first poll for this connection
     const connectionLastSeenIds = this.lastSeenIds.get(ctx.connectionId)!;
+    const legacy = await this.logSources.legacySource(ctx, read);
     for (const type of this.LOG_TYPES) {
       if (connectionLastSeenIds.get(type) === null) {
-        const lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId, source);
+        let lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId, source);
+        if (lastId === null && legacy) lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId, legacy);
         connectionLastSeenIds.set(type, lastId);
       }
     }

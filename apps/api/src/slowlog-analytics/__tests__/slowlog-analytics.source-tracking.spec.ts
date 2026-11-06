@@ -269,6 +269,54 @@ describe('SlowLogAnalyticsService source tracking', () => {
     expect(stored.every((e) => e.sourceRunId === 'run-a')).toBe(true);
   });
 
+  it('resumes after the entries stored before the upgrade instead of storing them again', async () => {
+    // Rows from before log sources were tracked: configured address, no run id.
+    await repo.saveSlowLogEntries(
+      entries([0, 1, 2, 3], 1000).map((e) => ({
+        ...e,
+        capturedAt: 1,
+        sourceHost: 'valkey.ns.svc.cluster.local',
+        sourcePort: 6379,
+        connectionId: 'seed',
+      })),
+      'seed',
+    );
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2, 3, 4], 1000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.filter((e) => e.sourceRunId === 'run-a').map((e) => e.id)).toEqual([4]);
+    expect(stored).toHaveLength(5);
+  });
+
+  it('starts a later new process from its first entry, whatever was stored before the upgrade', async () => {
+    await repo.saveSlowLogEntries(
+      entries([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 1000).map((e) => ({
+        ...e,
+        capturedAt: 1,
+        sourceHost: 'valkey.ns.svc.cluster.local',
+        sourcePort: 6379,
+        connectionId: 'seed',
+      })),
+      'seed',
+    );
+    runId = 'run-a';
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 1000);
+    await poll();
+
+    // The seed now reaches another node whose log IDs overlap the legacy ones.
+    runId = 'run-b';
+    endpoint = { host: '10.0.0.2', port: 6379 };
+    served = entries([5, 6, 7, 8, 9, 10, 11, 12], 2000);
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.filter((e) => e.sourceRunId === 'run-b')).toHaveLength(8);
+  });
+
   it('skips the poll when the connection reconnects while INFO is pending', async () => {
     runId = 'run-a';
     endpoint = { host: '10.0.0.1', port: 6379 };
