@@ -164,6 +164,10 @@ export class ClusterMetricsService {
   private loggedErrors: Set<string> = new Set();
   private readonly commandVerdicts: Map<string, boolean> = new Map();
   private readonly MAX_LOGGED_ERRORS = 500;
+  // Commands a fan-out gave up waiting for, by node socket. They stay queued on
+  // that socket, so the node is reported as not answering until they settle
+  // instead of stacking another batch behind them on every scrape.
+  private readonly stalledNodes: Map<string, Promise<void>> = new Map();
 
   constructor(
     private readonly discoveryService: ClusterDiscoveryService,
@@ -176,6 +180,26 @@ export class ClusterMetricsService {
       this.loggedErrors.clear();
     }
     this.loggedErrors.add(errorKey);
+  }
+
+  private stalledNodeKey(node: DiscoveredNode, connectionId?: string): string {
+    return `${connectionId || this.connectionRegistry.getDefaultId() || ''}:${node.id}`;
+  }
+
+  private assertNodeNotStalled(node: DiscoveredNode, key: string): void {
+    if (this.stalledNodes.has(key)) {
+      throw new Error(`${node.address} has not answered earlier commands yet`);
+    }
+  }
+
+  private markNodeStalled(key: string, work: Promise<unknown>): void {
+    const settled: Promise<void> = work.then(
+      () => undefined,
+      () => undefined,
+    ).finally(() => {
+      if (this.stalledNodes.get(key) === settled) this.stalledNodes.delete(key);
+    });
+    this.stalledNodes.set(key, settled);
   }
 
   private clearNodeError(nodeId: string, operation: string): void {
@@ -466,6 +490,8 @@ export class ClusterMetricsService {
       primaries.map(async (node) => {
         const deadline = Date.now() + timeoutMs;
         const timeoutMessage = `${node.address} did not answer within ${timeoutMs}ms`;
+        const stalledKey = this.stalledNodeKey(node, connectionId);
+        this.assertNodeNotStalled(node, stalledKey);
         const client = await withTimeout(
           this.discoveryService.getNodeConnection(node.id, connectionId),
           timeoutMs,
@@ -474,6 +500,7 @@ export class ClusterMetricsService {
         // Replies on one connection arrive in order, so once the deadline passes
         // the ranges still unanswered are failed; the answered ones are kept.
         const answers: (PromiseSettledResult<unknown> | undefined)[] = new Array(node.slots.length);
+        const issued: Promise<void>[] = [];
         let expired: unknown;
         for (let i = 0; i < node.slots.length && expired === undefined; i += SLOT_RANGE_BATCH_SIZE) {
           const batch = node.slots.slice(i, i + SLOT_RANGE_BATCH_SIZE).map(([start, end], j) =>
@@ -482,10 +509,12 @@ export class ClusterMetricsService {
               (reason: unknown) => void (answers[i + j] = { status: 'rejected', reason }),
             ),
           );
+          issued.push(...batch);
           await withTimeout(Promise.all(batch), Math.max(0, deadline - Date.now()), timeoutMessage).catch((err) => {
             expired = err;
           });
         }
+        if (expired !== undefined) this.markNodeStalled(stalledKey, Promise.all(issued));
         const perRange: PromiseSettledResult<unknown>[] = Array.from(
           answers,
           (answer) => answer ?? { status: 'rejected', reason: expired },
@@ -542,7 +571,8 @@ export class ClusterMetricsService {
   /**
    * Run commands against one node within `timeoutMs`, so a node that accepts
    * the connection but never replies cannot hold up a fan-out. The timeout
-   * releases the caller; it does not cancel the command on the socket.
+   * releases the caller; it does not cancel the command on the socket, so the
+   * node is skipped until that command settles.
    */
   private onNode<T>(
     node: DiscoveredNode,
@@ -550,10 +580,24 @@ export class ClusterMetricsService {
     timeoutMs: number,
     run: (client: Valkey) => Promise<T>,
   ): Promise<T> {
-    return withTimeout(
-      this.discoveryService.getNodeConnection(node.id, connectionId).then(run),
-      timeoutMs,
-      `${node.address} did not answer within ${timeoutMs}ms`,
+    const key = this.stalledNodeKey(node, connectionId);
+    try {
+      this.assertNodeNotStalled(node, key);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    let settled = false;
+    const work = this.discoveryService
+      .getNodeConnection(node.id, connectionId)
+      .then(run)
+      .finally(() => {
+        settled = true;
+      });
+    return withTimeout(work, timeoutMs, `${node.address} did not answer within ${timeoutMs}ms`).catch(
+      (error: unknown) => {
+        if (!settled) this.markNodeStalled(key, work);
+        throw error;
+      },
     );
   }
 

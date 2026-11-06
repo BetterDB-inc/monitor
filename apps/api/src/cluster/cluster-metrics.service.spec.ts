@@ -730,6 +730,40 @@ used_cpu_user:20.3\r
       }
     });
 
+    it('does not queue more slot stats behind a primary that has not answered the last ones', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
+          { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        ]);
+        let release: (value: unknown) => void = () => undefined;
+        const stuck = jest.fn(() => new Promise((resolve) => (release = resolve)));
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+          call: nodeId === 'p1' ? jest.fn().mockResolvedValue([[1, ['key-count', 50]]]) : stuck,
+        }));
+
+        const first = service.getClusterSlotStatsResult('key-count', 10);
+        await jest.advanceTimersByTimeAsync(5_000);
+        await first;
+        expect(stuck).toHaveBeenCalledTimes(1);
+
+        const second = await service.getClusterSlotStatsResult('key-count', 10);
+        expect(stuck).toHaveBeenCalledTimes(1);
+        expect(second.failedNodes).toEqual(['10.0.0.3:6379']);
+
+        // Once the stuck reply arrives, the next scrape asks the primary again.
+        release([[8192, ['key-count', 7]]]);
+        await jest.advanceTimersByTimeAsync(0);
+        stuck.mockResolvedValue([[8192, ['key-count', 7]]]);
+        const third = await service.getClusterSlotStatsResult('key-count', 10);
+        expect(stuck).toHaveBeenCalledTimes(2);
+        expect(third.failedNodes).toEqual([]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('fails only when no primary answered', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
