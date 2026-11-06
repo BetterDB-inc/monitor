@@ -225,6 +225,17 @@ describe('SlowLogAnalyticsService source tracking', () => {
     expect(stored.filter((e) => !e.sourceRunId).map((e) => e.id).sort()).toEqual([0, 1]);
   });
 
+  it('tracks by address when a managed server blocks INFO', async () => {
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    infoError = new Error("ERR Command is not available: 'INFO'");
+    await poll();
+
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
+    expect(stored.every((e) => e.sourceRunId === '')).toBe(true);
+  });
+
   it('skips the poll when INFO fails for a reason other than being refused', async () => {
     endpoint = { host: '10.0.0.1', port: 6379 };
     served = entries([0, 1], 1000);

@@ -1,5 +1,6 @@
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConnectionRegistry } from '../../connections/connection-registry.service';
+import { isBlockedCommandError } from '../../connections/runtime-capability-tracker.service';
 import { DatabasePort } from '../interfaces/database-port.interface';
 import type { LogSource } from '../interfaces/storage-port.interface';
 import { withTimeout } from '../utils/with-timeout';
@@ -12,12 +13,6 @@ export function logSourceKey(source: LogSource): string {
 export function describeLogSource(source: LogSource): string {
   return `${source.host}:${source.port}${source.runId ? ` (run ${source.runId.slice(0, 8)})` : ''}`;
 }
-
-// INFO refused for good (ACL, a renamed or disabled command): the address is
-// the only identity there will be. Any other failure is a moment the run id
-// could not be read, and storing that poll under the address would store the
-// same entries again under the run id once INFO answers.
-const INFO_UNAVAILABLE = /NOPERM|unknown (sub)?command|disabled/i;
 
 export interface LogSourceRead {
   source: LogSource;
@@ -59,8 +54,11 @@ export class LogSourceTracker {
       const info = await ctx.client.getInfo(['server']);
       runId = (info.server as Record<string, string> | undefined)?.run_id ?? '';
     } catch (err) {
-      if (!INFO_UNAVAILABLE.test(err instanceof Error ? err.message : String(err))) return null;
-      // INFO denied or unsupported: fall back to tracking by address.
+      // INFO refused for good (ACL, a renamed or blocked command): the address
+      // is the only identity there will be. Any other failure is a moment the
+      // run id could not be read, and storing that poll under the address would
+      // store the same entries again under the run id once INFO answers.
+      if (!isBlockedCommandError(err instanceof Error ? err : String(err))) return null;
     }
     if (!runId && !this.withRunId.has(ctx.connectionId)) {
       try {
