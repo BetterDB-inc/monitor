@@ -34,25 +34,25 @@ const INHERITED_ENV = new Set([
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'NO_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'no_proxy',
   'SYSTEMROOT',
-  'SystemRoot',
   'WINDIR',
   'COMSPEC',
-  'ComSpec',
   'PATHEXT',
   'APPDATA',
   'LOCALAPPDATA',
   'USERPROFILE',
   'PROGRAMDATA',
-  'ProgramData',
   'PROGRAMFILES',
-  'ProgramFiles',
 ]);
-const INHERITED_ENV_PREFIXES = ['LC_', 'NODE_', 'npm_config_', 'NPM_CONFIG_'];
+const INHERITED_ENV_PREFIXES = ['LC_', 'NODE_', 'NPM_CONFIG_'];
 const MONITOR_ENV_PREFIX = 'BETTERDB_MONITOR_';
+
+function isInheritedEnv(upperKey: string): boolean {
+  return (
+    INHERITED_ENV.has(upperKey) ||
+    INHERITED_ENV_PREFIXES.some((prefix) => upperKey.startsWith(prefix))
+  );
+}
 
 export function monitorEnv(source: NodeJS.ProcessEnv): Record<string, string> {
   const env: Record<string, string> = {};
@@ -60,10 +60,7 @@ export function monitorEnv(source: NodeJS.ProcessEnv): Record<string, string> {
     if (value === undefined) continue;
     if (key.startsWith(MONITOR_ENV_PREFIX) && key.length > MONITOR_ENV_PREFIX.length) {
       env[key.slice(MONITOR_ENV_PREFIX.length)] = value;
-    } else if (
-      INHERITED_ENV.has(key) ||
-      INHERITED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
-    ) {
+    } else if (isInheritedEnv(key.toUpperCase())) {
       env[key] ??= value;
     }
   }
