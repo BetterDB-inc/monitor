@@ -855,7 +855,7 @@ used_cpu_user:20.3\r
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
-          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
         ]);
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
 
