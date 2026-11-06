@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -13,12 +13,21 @@ export const PID_FILE = path.join(BETTERDB_DIR, 'monitor.pid');
 let ephemeralChild: ChildProcess | null = null;
 let signalHandlersRegistered = false;
 
+function terminate(pid: number | undefined): void {
+  if (pid === undefined) return;
+  if (isWindows) {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+}
+
 function registerEphemeralHandlers(): void {
   if (signalHandlersRegistered) return;
   signalHandlersRegistered = true;
-  process.once('exit', () => { ephemeralChild?.kill(); });
-  process.once('SIGTERM', () => { ephemeralChild?.kill(); process.exit(0); });
-  process.once('SIGINT', () => { ephemeralChild?.kill(); process.exit(0); });
+  process.once('exit', () => { terminate(ephemeralChild?.pid); });
+  process.once('SIGTERM', () => { terminate(ephemeralChild?.pid); process.exit(0); });
+  process.once('SIGINT', () => { terminate(ephemeralChild?.pid); process.exit(0); });
 }
 
 const MCP_ENV = new Set([
@@ -109,7 +118,7 @@ export async function startMonitor(opts: {
           return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
         }
         // Process is alive but unhealthy — terminate it before re-spawning
-        try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+        terminate(pid);
         // Wait for the port to be released (up to 5s)
         const killDeadline = Date.now() + 5_000;
         while (Date.now() < killDeadline) {
@@ -157,7 +166,7 @@ export async function startMonitor(opts: {
       await waitForHealth(opts.port);
     } catch (err) {
       // Health check failed — kill the orphaned child and clean up PID file
-      try { process.kill(child.pid!, 'SIGTERM'); } catch { /* already dead */ }
+      terminate(child.pid);
       try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
       throw err;
     }
@@ -210,7 +219,7 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
   try {
     process.kill(pid, 0);
     wasRunning = true;
-    process.kill(pid, 'SIGTERM');
+    terminate(pid);
   } catch {
     // Process not running — stale PID file
   }
