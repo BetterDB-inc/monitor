@@ -58,11 +58,13 @@ the name for a sync does not retire the node that answered.
 When no node announces the seed's address, as with a ClusterIP Service, a load
 balancer VIP, NAT or a port mapping, the address alone cannot tell, so the
 monitor watches which node answers each sync. A VIP lands on an arbitrary node,
-so a node that answered before soon answers again after another one did; the
-seed then fronts several nodes and every node is registered. One node behind
-NAT keeps answering as itself, and after a failover or replacement as the new
-node: once that node has answered three syncs in a row, it is the seed's node.
-Membership is left as it is while that is still unclear. A seed treated as
+so a node that answered before soon answers again after another one did, or
+three different nodes answer; the seed then fronts several nodes and every node
+is registered. One node behind NAT keeps answering as itself, and after a
+failover or replacement as the new node: once that node has answered three
+syncs in a row, it is the seed's node, and the nodes before it no longer count,
+so a later failback is treated as another move. Membership is left as it is
+while that is still unclear, which lasts at most a few syncs. A seed treated as
 fronting several nodes goes back to one node after ten syncs in a row are
 answered by the same node.
 

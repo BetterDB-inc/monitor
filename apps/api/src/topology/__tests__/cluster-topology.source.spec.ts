@@ -92,6 +92,34 @@ describe('ClusterTopologySource', () => {
     expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1']);
   });
 
+  it('treats a failback after a settled move as another move, not as a VIP', async () => {
+    const source = unmatchedSource(nodes, landedOnN2, landedOnN2, landedOnN2, nodes, nodes, nodes);
+
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1']);
+    // n1 answers again: not proof of a VIP, since n2 settled in between.
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+  });
+
+  it('decides a VIP in front of many nodes once a third different node answers', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      ...nodes[0],
+      id: `m${i}`,
+      address: `10.0.1.${i}:6379@16379`,
+      flags: ['master'],
+    }));
+    const landedOn = (i: number) => many.map((n, j) => (j === i ? { ...n, flags: ['myself', 'master'] } : n));
+    const source = unmatchedSource(landedOn(0), landedOn(1), landedOn(2));
+
+    expect(ids(await source.discover(vip as never, 10_000))).toHaveLength(11);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toHaveLength(12);
+  });
+
   it('drops myself for a seed that matches no node while the same node keeps answering (NAT, a port mapping)', async () => {
     expect((await discoverWith(['203.0.113.5']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
   });

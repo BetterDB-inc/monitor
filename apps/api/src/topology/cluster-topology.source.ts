@@ -10,7 +10,10 @@ import type { TopologyDiscovery, TopologySource } from './topology-source';
 const RESOLVE_TIMEOUT_MS = 2_000;
 /** Syncs of `myself` remembered for a seed that matches no node. */
 const RECENT_ANSWERS = 10;
-/** Syncs in a row one node must answer before a change of `myself` is a move. */
+/**
+ * Syncs in a row one node must answer before a change of `myself` is a move,
+ * and the number of different nodes answering that proves a VIP.
+ */
 const SETTLED_ANSWERS = 3;
 
 /**
@@ -48,7 +51,8 @@ export class ClusterTopologySource implements TopologySource {
    * disagree with it, so one stale CLUSTER NODES reply (after a pod IP change)
    * cannot register a single node's seed as its own child, and a Service whose
    * DNS answer shrinks to one pod for a sync (a rollout) does not retire `myself`.
-   * `answered` holds the recent `myself` ids, oldest first.
+   * `answered` holds the recent `myself` ids, oldest first, since the node
+   * behind a seed that matches no node last settled.
    */
   private readonly aliasState = new Map<
     string,
@@ -81,7 +85,7 @@ export class ClusterTopologySource implements TopologySource {
     // what is registered: `myself` already a member means the seed was an alias.
     const myself = nodes.find((n) => n.flags.includes('myself'));
     const initial = myself !== undefined && registeredNodeIds?.has(myself.id) === true;
-    const answered = [...(prior?.answered ?? []), ...(myself ? [myself.id] : [])].slice(-RECENT_ANSWERS);
+    let answered = [...(prior?.answered ?? []), ...(myself ? [myself.id] : [])].slice(-RECENT_ANSWERS);
     const matched = seedIsAlias(seed, seedAddresses, nodes);
     let verdict: boolean;
     let alias: boolean;
@@ -89,19 +93,25 @@ export class ClusterTopologySource implements TopologySource {
     if (matched === null) {
       // No node announces the seed's address. A VIP lands discovery on an
       // arbitrary node each sync, so a node that answered before answers again
-      // after another one did. One node behind NAT or a port mapping answers as
-      // itself, and after a failover or replacement as the new node, for good.
+      // after another one did, or several different nodes answer. One node
+      // behind NAT or a port mapping answers as itself, and after a failover or
+      // replacement as the new node, for good.
       const current = answered[answered.length - 1];
       const previous = answered[answered.length - 2];
       const settled = (count: number) =>
         answered.length >= count && answered.slice(-count).every((id) => id === current);
       const returned = previous !== undefined && current !== previous && answered.slice(0, -2).includes(current);
       const wasAlias = prior ? prior.alias : initial;
-      alias = returned || (wasAlias && !settled(RECENT_ANSWERS));
+      alias =
+        returned || new Set(answered).size >= SETTLED_ANSWERS || (wasAlias && !settled(RECENT_ANSWERS));
       verdict = alias;
-      // A change of `myself` not seen to return yet is either; leave membership
-      // as it is until the new node has answered a few syncs in a row.
+      // A change of `myself` not yet seen as either is left alone until the new
+      // node has answered a few syncs in a row, at most until a third node or an
+      // earlier one answers.
       undecided = !alias && new Set(answered.slice(-SETTLED_ANSWERS)).size > 1;
+      // A settled node is the seed's node; the nodes before it no longer count,
+      // so a later failback is a move again, not a return.
+      if (!alias && settled(SETTLED_ANSWERS)) answered = [current];
     } else {
       verdict = matched;
       alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;
