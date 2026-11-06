@@ -94,6 +94,15 @@ describe('seedIsAlias', () => {
     expect(seedIsAlias(seed, addresses as string[], nodes)).toBe(expected);
   });
 
+  it.each([
+    ['an IP literal reached through NAT', { host: '192.168.5.5', port: 6379 }, ['192.168.5.5']],
+    ['an IP literal on a mapped port', { host: '10.0.0.1', port: 7001 }, ['10.0.0.1']],
+    ['localhost on a forwarded port', { host: 'localhost', port: 7001 }, ['127.0.0.1', '::1']],
+    ['a name that resolves to loopback', { host: 'tunnel.local', port: 6379 }, ['127.0.0.1']],
+  ])('treats %s that matches no node as one node', (_label, single, addresses) => {
+    expect(seedIsAlias(single, addresses, nodes)).toBe(false);
+  });
+
   it('ignores addresses on another port', () => {
     expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBe(true);
   });
