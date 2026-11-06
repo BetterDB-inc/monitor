@@ -188,6 +188,9 @@ export async function startMonitor(opts: {
     }
 
     ephemeralChild = child;
+    child.once('exit', () => {
+      if (ephemeralChild === child) ephemeralChild = null;
+    });
     registerEphemeralHandlers();
 
     await waitForHealth(opts.port);
