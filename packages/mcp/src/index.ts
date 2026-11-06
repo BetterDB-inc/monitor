@@ -558,7 +558,7 @@ server.tool(
 
 server.tool(
   'get_health',
-  'Get a synthetic health summary for the active instance: keyspace hit rate, memory fragmentation ratio, connected clients, replication lag (replicas only), keyspace size, and `configHazards` (risky server config findings). `configHazardsUnavailable: true` means the hazard probe failed or did not finish: `configHazards` is then omitted or partial, not a clean result. Use this as the first call when investigating an instance — it surfaces the most actionable signals without requiring you to parse raw INFO output.',
+  'Get a synthetic health summary for the active instance: keyspace hit rate, memory fragmentation ratio, connected clients, replication lag (replicas only), and keyspace size. Use this as the first call when investigating an instance — it surfaces the most actionable signals without requiring you to parse raw INFO output.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
   async ({ instanceId }) =>
     withTelemetry('get_health', async () => {

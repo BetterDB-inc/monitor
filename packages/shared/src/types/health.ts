@@ -98,6 +98,4 @@ export interface DetailedHealthResponse extends HealthResponse {
   anomalyDetection?: AnomalyWarmupStatus;
   license?: LicenseWarmupStatus;
   configHazards?: ConfigHazardFinding[];
-  /** Set when the config-hazard probe failed or did not finish; configHazards is then not a clean result. */
-  configHazardsUnavailable?: true;
 }

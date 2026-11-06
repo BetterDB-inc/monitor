@@ -434,24 +434,15 @@ export class McpController {
   async getHealth(@Param('id', ValidateInstanceIdPipe) id: string) {
     try {
       const summary = await this.metricsService.getHealthSummary(id);
-      const result: typeof summary & {
-        configHazards?: ConfigHazardFinding[];
-        configHazardsUnavailable?: true;
-      } = { ...summary };
+      const result: typeof summary & { configHazards?: ConfigHazardFinding[] } = { ...summary };
       if (this.configHazardService) {
         try {
-          const probe = await this.configHazardService.probeHazards(id);
-          if (probe.complete || probe.findings.length > 0) {
-            result.configHazards = probe.findings;
-          }
-          if (!probe.complete) {
-            result.configHazardsUnavailable = true;
-          }
+          result.configHazards = await this.configHazardService.getHazards(id);
         } catch (err) {
           this.logger.debug(
             `Config-hazard probe failed for ${id}: ${err instanceof Error ? err.message : err}`,
           );
-          result.configHazardsUnavailable = true;
+          result.configHazards = [];
         }
       }
       return result;

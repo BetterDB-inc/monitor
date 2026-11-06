@@ -24,7 +24,7 @@ describe('HealthService detailed health', () => {
   };
   let registry: ConnectionRegistry;
   let tracker: RuntimeCapabilityTracker;
-  let configHazards: { probeHazards: jest.Mock };
+  let configHazards: { getHazards: jest.Mock };
 
   beforeEach(() => {
     client = {
@@ -44,9 +44,7 @@ describe('HealthService detailed health', () => {
       getCapabilities: jest.fn().mockReturnValue(null),
       getDisabledReasons: jest.fn().mockReturnValue(null),
     } as unknown as RuntimeCapabilityTracker;
-    configHazards = {
-      probeHazards: jest.fn().mockResolvedValue({ findings: [hazardFinding], complete: true }),
-    };
+    configHazards = { getHazards: jest.fn().mockResolvedValue([hazardFinding]) };
   });
 
   const build = (withHazardService: boolean): HealthService => {
@@ -65,14 +63,13 @@ describe('HealthService detailed health', () => {
     const service = build(true);
     const detailed = await service.getDetailedHealth('conn-1');
     expect(detailed.configHazards).toEqual([hazardFinding]);
-    expect(detailed.configHazardsUnavailable).toBeUndefined();
-    expect(configHazards.probeHazards).toHaveBeenCalledWith('conn-1');
+    expect(configHazards.getHazards).toHaveBeenCalledWith('conn-1');
   });
 
   it('resolves the default connection for the hazard probe when none is given', async () => {
     const service = build(true);
     await service.getDetailedHealth();
-    expect(configHazards.probeHazards).toHaveBeenCalledWith('conn-1');
+    expect(configHazards.getHazards).toHaveBeenCalledWith('conn-1');
   });
 
   it('omits configHazards when the hazard service is not wired', async () => {
@@ -82,20 +79,11 @@ describe('HealthService detailed health', () => {
   });
 
   it('still returns detailed health when the hazard probe throws', async () => {
-    configHazards.probeHazards.mockRejectedValue(new Error('probe failed'));
+    configHazards.getHazards.mockRejectedValue(new Error('probe failed'));
     const service = build(true);
     const detailed = await service.getDetailedHealth('conn-1');
     expect(detailed.status).toBe('connected');
     expect(detailed.configHazards).toEqual([]);
-    expect(detailed.configHazardsUnavailable).toBe(true);
-  });
-
-  it('marks an incomplete hazard probe as unavailable and keeps its findings', async () => {
-    configHazards.probeHazards.mockResolvedValue({ findings: [hazardFinding], complete: false });
-    const service = build(true);
-    const detailed = await service.getDetailedHealth('conn-1');
-    expect(detailed.configHazards).toEqual([hazardFinding]);
-    expect(detailed.configHazardsUnavailable).toBe(true);
   });
 
   it('retries connect when disconnected and returns connected after recovery', async () => {

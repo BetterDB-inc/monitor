@@ -50,20 +50,9 @@ export class ConfigHazardService {
   constructor(private readonly connectionRegistry: ConnectionRegistry) {}
 
   async getHazards(connectionId: string): Promise<ConfigHazardFinding[]> {
-    return (await this.probeHazards(connectionId)).findings;
-  }
-
-  /**
-   * Same probe as getHazards, plus whether it finished. A missing connection
-   * or a failed CONFIG GET returns no findings and complete: false. Callers
-   * that only have the array cannot tell that apart from a clean instance.
-   */
-  async probeHazards(
-    connectionId: string,
-  ): Promise<{ findings: ConfigHazardFinding[]; complete: boolean }> {
     const cached = this.cache.get(connectionId);
     if (cached !== undefined && cached.expiresAt > Date.now()) {
-      return { findings: cached.findings, complete: true };
+      return cached.findings;
     }
 
     const result = await this.probe(connectionId);
@@ -73,7 +62,7 @@ export class ConfigHazardService {
         expiresAt: Date.now() + ConfigHazardService.CACHE_TTL_MS,
       });
     }
-    return { findings: result.findings, complete: result.cacheable };
+    return result.findings;
   }
 
   private async probe(connectionId: string): Promise<ProbeResult> {
@@ -106,7 +95,6 @@ export class ConfigHazardService {
     }
 
     const findings: ConfigHazardFinding[] = [];
-    let appendfsyncUnread = false;
 
     // valkey#3983 (AOF + default-user data loss) and valkey#3515 (appendfsync
     // stalls) only apply when AOF is enabled.
@@ -133,14 +121,11 @@ export class ConfigHazardService {
         findings.push(aclFinding);
       }
 
-      const fsync = await this.probeAppendfsync(connectionId, client, appendonly);
-      appendfsyncUnread = fsync.unread;
-      if (fsync.finding !== null) {
-        findings.push(fsync.finding);
+      const fsyncFinding = await this.probeAppendfsync(connectionId, client, appendonly);
+      if (fsyncFinding !== null) {
+        findings.push(fsyncFinding);
       }
-    } else if (appendonly !== null) {
-      // Only an explicit AOF-off read resets the everysec trend. A null read is
-      // filtered or transient and must not wipe a rising streak.
+    } else {
       this.delayedFsyncTrend.delete(connectionId);
     }
 
@@ -167,19 +152,11 @@ export class ConfigHazardService {
       findings.push(crcFinding);
     }
 
-    // A null appendonly or cluster-enabled read is a filtered/empty CONFIG GET,
-    // not a completed probe. AOF checks are skipped when appendonly is missing,
-    // and the CRC verdict is unverified when cluster mode is missing. An unread
-    // appendfsync under AOF is the same case: the advisory it would raise is
-    // missing, not ruled out. Keep findings already collected and re-probe next
-    // poll. A null cluster-crc-enabled on a cluster is treated as the setting
-    // being absent, so the probe counts as complete: no released build has it
-    // yet (valkey#4201 is unmerged). It is a separate CONFIG GET from
-    // cluster-enabled, so a filter on that one parameter would also read null
-    // and look the same. Revisit once valkey#4201 ships.
-    const configStateUnknown =
-      appendonly === null || clusterEnabled === null || appendfsyncUnread;
-    return { findings, cacheable: !configStateUnknown };
+    // A null cluster-enabled read is a filtered/empty CONFIG GET, not a
+    // completed probe: the CRC verdict is unverified, so caching now would pin a
+    // false clean (or a transient unverified) for a full TTL. Re-probe next poll.
+    const clusterStateUnknown = clusterEnabled === null;
+    return { findings, cacheable: !clusterStateUnknown };
   }
 
   /**
@@ -190,13 +167,14 @@ export class ConfigHazardService {
    * one can be suppressed. Anchoring both sides to the server removes skew from
    * the comparison entirely.
    *
-   * Returns null when TIME is unavailable. The caller then falls back to the
-   * local clock, which can misjudge freshness, so it treats the read as failed.
+   * Falls back to the local clock when TIME is unavailable — no worse than
+   * comparing against the local clock unconditionally, which is what this
+   * replaces.
    */
   private async readServerTimeSeconds(
     connectionId: string,
     client: ProbeClientLike,
-  ): Promise<number | null> {
+  ): Promise<number> {
     try {
       const raw = await client.call('TIME', []);
       if (Array.isArray(raw) && raw.length > 0) {
@@ -208,21 +186,19 @@ export class ConfigHazardService {
     } catch (err) {
       this.logger.debug(`TIME failed for ${connectionId}: ${(err as Error).message}`);
     }
-    return null;
+    return Math.floor(Date.now() / 1000);
   }
 
   /**
    * AOF fsync-policy hazard (valkey#3515). Symptom probes are best-effort: a
    * failed INFO or LATENCY read degrades to config-only evaluation (the
    * low-severity advisory) rather than suppressing the finding or the poll.
-   * The probe is still reported unread when a failed symptom read could have
-   * changed the verdict, so the result is not cached as complete.
    */
   private async probeAppendfsync(
     connectionId: string,
     client: ProbeClientLike,
     appendonly: string | null,
-  ): Promise<{ finding: ConfigHazardFinding | null; unread: boolean }> {
+  ): Promise<ConfigHazardFinding | null> {
     let appendfsync: string | null;
     try {
       appendfsync = await client.getConfigValue('appendfsync');
@@ -230,29 +206,18 @@ export class ConfigHazardService {
       this.logger.debug(
         `CONFIG GET appendfsync failed for ${connectionId}: ${(err as Error).message}`,
       );
-      return { finding: null, unread: true };
-    }
-    // Only called with AOF on, where appendfsync always exists, so null is a
-    // filtered read rather than an absent setting.
-    if (appendfsync === null) {
-      return { finding: null, unread: true };
+      return null;
     }
     if (appendfsync !== 'always' && appendfsync !== 'everysec') {
       this.delayedFsyncTrend.delete(connectionId);
-      return { finding: null, unread: false };
+      return null;
     }
 
     let aofDelayedFsync: number | null = null;
     let aofLastWriteStatus: string | null = null;
-    // INFO persistence feeds both policies; LATENCY LATEST and TIME only feed
-    // the always verdict.
-    let infoReadFailed = false;
-    let latencyReadFailed = false;
     try {
       const raw = await client.call('INFO', ['persistence']);
-      if (typeof raw !== 'string') {
-        infoReadFailed = true;
-      } else {
+      if (typeof raw === 'string') {
         const fields = this.parseInfoFields(raw);
         const delayed = parseInt(fields['aof_delayed_fsync'] ?? '', 10);
         if (Number.isFinite(delayed)) {
@@ -261,7 +226,6 @@ export class ConfigHazardService {
         aofLastWriteStatus = fields['aof_last_write_status'] ?? null;
       }
     } catch (err) {
-      infoReadFailed = true;
       this.logger.debug(`INFO persistence failed for ${connectionId}: ${(err as Error).message}`);
     }
 
@@ -278,18 +242,10 @@ export class ConfigHazardService {
     }
 
     let latencyEvents: string[] = [];
-    let clockUntrusted = false;
     try {
-      const serverSeconds = await this.readServerTimeSeconds(connectionId, client);
-      if (serverSeconds === null) {
-        latencyReadFailed = true;
-        clockUntrusted = true;
-      }
-      const nowSeconds = serverSeconds ?? Math.floor(Date.now() / 1000);
+      const nowSeconds = await this.readServerTimeSeconds(connectionId, client);
       const raw = await client.call('LATENCY', ['LATEST']);
-      if (!Array.isArray(raw)) {
-        latencyReadFailed = true;
-      } else {
+      if (Array.isArray(raw)) {
         latencyEvents = raw
           .map((entry) => {
             if (Array.isArray(entry) === false) {
@@ -308,11 +264,10 @@ export class ConfigHazardService {
           });
       }
     } catch (err) {
-      latencyReadFailed = true;
       this.logger.debug(`LATENCY LATEST failed for ${connectionId}: ${(err as Error).message}`);
     }
 
-    const finding = evaluateAppendfsyncHazard({
+    return evaluateAppendfsyncHazard({
       appendonly,
       appendfsync,
       aofDelayedFsync,
@@ -320,16 +275,6 @@ export class ConfigHazardService {
       aofLastWriteStatus,
       latencyEvents,
     });
-    // A confirmed hazard cannot be downgraded by a missing symptom, so only a
-    // non-hazard verdict built on a failed read is incomplete. The exception is
-    // a failed TIME read: spike freshness was then judged on the monitor clock,
-    // which can raise a hazard as wrongly as it can miss one.
-    const symptomReadFailed =
-      infoReadFailed || (appendfsync === 'always' && latencyReadFailed);
-    const unread =
-      (symptomReadFailed && finding?.status !== 'hazard') ||
-      (appendfsync === 'always' && clockUntrusted);
-    return { finding, unread };
   }
 
   /**

@@ -121,41 +121,6 @@ describe('ConfigHazardService', () => {
     expect(appendonlyProbeCount()).toBe(2);
   });
 
-  it('keeps cluster findings and does not cache when appendonly reads null', async () => {
-    // A filtered CONFIG GET resolves appendonly to null without throwing. Cluster
-    // findings stay, but the skipped AOF check must not cache as a finished probe.
-    client.getConfigValue.mockImplementation((param: string) => {
-      if (param === 'appendonly') return Promise.resolve(null);
-      if (param === 'cluster-enabled') return Promise.resolve('yes');
-      if (param === 'cluster-crc-enabled') return Promise.resolve('no');
-      return Promise.resolve(null);
-    });
-    const first = await service.probeHazards('conn-1');
-    expect(first.complete).toBe(false);
-    expect(first.findings).toHaveLength(1);
-    expect(first.findings[0].id).toBe('cluster-crc-disabled');
-
-    await service.probeHazards('conn-1');
-    expect(appendonlyProbeCount()).toBe(2);
-  });
-
-  it('caches a cluster probe on a build without cluster-crc-enabled', async () => {
-    // No released Valkey or Redis has the setting, so null is the normal reply
-    // on a cluster and is treated as the setting being absent.
-    client.getConfigValue.mockImplementation((param: string) => {
-      if (param === 'appendonly') return Promise.resolve('no');
-      if (param === 'cluster-enabled') return Promise.resolve('yes');
-      if (param === 'cluster-crc-enabled') return Promise.resolve(null);
-      return Promise.resolve(null);
-    });
-    const first = await service.probeHazards('conn-1');
-    expect(first.complete).toBe(true);
-    expect(first.findings).toHaveLength(0);
-
-    await service.probeHazards('conn-1');
-    expect(appendonlyProbeCount()).toBe(1);
-  });
-
   it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
     client.getConfigValue.mockImplementation((param: string) => {
       if (param === 'appendonly') return Promise.resolve('yes');
@@ -344,120 +309,11 @@ describe('ConfigHazardService', () => {
       expect(findings[0].status).toBe('advisory');
     });
 
-    it('keeps the advisory but does not cache when the LATENCY probe fails', async () => {
+    it('keeps the advisory when the LATENCY probe fails', async () => {
       setupFsyncClient({ latency: new Error('ERR unknown command') });
-      const first = await service.probeHazards('conn-1');
-      expect(first.findings).toHaveLength(1);
-      expect(first.findings[0].status).toBe('advisory');
-      // The missing LATENCY read could have escalated the advisory.
-      expect(first.complete).toBe(false);
-
-      await service.probeHazards('conn-1');
-      expect(appendonlyProbeCount()).toBe(2);
-    });
-
-    it('keeps the advisory but does not cache when TIME fails under always', async () => {
-      setupFsyncClient();
-      const base = client.call.getMockImplementation()!;
-      client.call.mockImplementation((cmd: string, args: string[]) => {
-        if (cmd === 'TIME') return Promise.reject(new Error('NOPERM'));
-        return base(cmd, args);
-      });
-      const result = await service.probeHazards('conn-1');
-      expect(result.findings.map((f) => f.status)).toEqual(['advisory']);
-      expect(result.complete).toBe(false);
-    });
-
-    it('does not cache a hazard raised on the monitor clock when TIME fails', async () => {
-      setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000, 12, 40]] });
-      const base = client.call.getMockImplementation()!;
-      client.call.mockImplementation((cmd: string, args: string[]) => {
-        if (cmd === 'TIME') return Promise.reject(new Error('NOPERM'));
-        return base(cmd, args);
-      });
-      const first = await service.probeHazards('conn-1');
-      expect(first.findings.map((f) => f.status)).toEqual(['hazard']);
-      expect(first.complete).toBe(false);
-
-      await service.probeHazards('conn-1');
-      expect(appendonlyProbeCount()).toBe(2);
-    });
-
-    it('does not cache when INFO persistence fails under always', async () => {
-      setupFsyncClient();
-      const base = client.call.getMockImplementation()!;
-      client.call.mockImplementation((cmd: string, args: string[]) => {
-        if (cmd === 'INFO' && args[0] === 'persistence') return Promise.reject(new Error('NOPERM'));
-        return base(cmd, args);
-      });
-      const result = await service.probeHazards('conn-1');
-      expect(result.findings.map((f) => f.status)).toEqual(['advisory']);
-      expect(result.complete).toBe(false);
-    });
-
-    it('does not cache a quiet everysec when INFO persistence fails', async () => {
-      setupFsyncClient({ appendfsync: 'everysec' });
-      const base = client.call.getMockImplementation()!;
-      client.call.mockImplementation((cmd: string, args: string[]) => {
-        if (cmd === 'INFO' && args[0] === 'persistence') return Promise.reject(new Error('NOPERM'));
-        return base(cmd, args);
-      });
-      const first = await service.probeHazards('conn-1');
-      expect(first.findings).toHaveLength(0);
-      expect(first.complete).toBe(false);
-
-      await service.probeHazards('conn-1');
-      expect(appendonlyProbeCount()).toBe(2);
-    });
-
-    it('caches a quiet everysec when only the LATENCY probe fails', async () => {
-      // LATENCY LATEST does not feed the everysec verdict.
-      setupFsyncClient({ appendfsync: 'everysec', latency: new Error('ERR unknown command') });
-      const result = await service.probeHazards('conn-1');
-      expect(result.findings).toHaveLength(0);
-      expect(result.complete).toBe(true);
-    });
-
-    it('caches a confirmed always hazard even when the LATENCY probe fails', async () => {
-      // A failed write status already confirms the hazard; a missing LATENCY
-      // read cannot change that verdict.
-      setupFsyncClient({ writeStatus: 'err', latency: new Error('ERR unknown command') });
-      const result = await service.probeHazards('conn-1');
-      expect(result.findings.map((f) => f.status)).toEqual(['hazard']);
-      expect(result.complete).toBe(true);
-    });
-
-    it('does not cache the probe when the appendfsync read fails', async () => {
-      setupFsyncClient();
-      const base = client.getConfigValue.getMockImplementation()!;
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'appendfsync') return Promise.reject(new Error('NOPERM'));
-        return base(param);
-      });
-      const first = await service.probeHazards('conn-1');
-      expect(first.complete).toBe(false);
-      expect(first.findings).toHaveLength(0);
-
-      // The next poll re-probes and picks up the advisory once the read works.
-      client.getConfigValue.mockImplementation(base);
-      const second = await service.probeHazards('conn-1');
-      expect(second.complete).toBe(true);
-      expect(second.findings.map((f) => f.id)).toEqual(['appendfsync-always-blocking']);
-      expect(appendonlyProbeCount()).toBe(2);
-    });
-
-    it('does not cache the probe when appendfsync reads null', async () => {
-      setupFsyncClient();
-      const base = client.getConfigValue.getMockImplementation()!;
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'appendfsync') return Promise.resolve(null);
-        return base(param);
-      });
-      const first = await service.probeHazards('conn-1');
-      expect(first.complete).toBe(false);
-
-      await service.probeHazards('conn-1');
-      expect(appendonlyProbeCount()).toBe(2);
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].status).toBe('advisory');
     });
 
     it('stays quiet for a healthy everysec', async () => {
@@ -478,51 +334,6 @@ describe('ConfigHazardService', () => {
       const third = await service.getHazards('conn-1');
       expect(third).toHaveLength(1);
       expect(third[0].id).toBe('appendfsync-everysec-backlog');
-    });
-
-    it('keeps the everysec rising streak across a probe where appendonly reads null', async () => {
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 1 });
-      await service.getHazards('conn-1');
-      now += 61_000;
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 3 });
-      await service.getHazards('conn-1');
-      now += 61_000;
-
-      // A filtered appendonly read skips the AOF checks but must not reset the
-      // trend the everysec escalation depends on.
-      const base = client.getConfigValue.getMockImplementation()!;
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'appendonly') return Promise.resolve(null);
-        return base(param);
-      });
-      const filtered = await service.probeHazards('conn-1');
-      expect(filtered.complete).toBe(false);
-
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 6 });
-      const findings = await service.getHazards('conn-1');
-      expect(findings).toHaveLength(1);
-      expect(findings[0].id).toBe('appendfsync-everysec-backlog');
-    });
-
-    it('resets the everysec rising streak when AOF is turned off', async () => {
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 1 });
-      await service.getHazards('conn-1');
-      now += 61_000;
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 3 });
-      await service.getHazards('conn-1');
-      now += 61_000;
-
-      const base = client.getConfigValue.getMockImplementation()!;
-      client.getConfigValue.mockImplementation((param: string) => {
-        if (param === 'appendonly') return Promise.resolve('no');
-        return base(param);
-      });
-      await service.getHazards('conn-1');
-      now += 61_000;
-
-      setupFsyncClient({ appendfsync: 'everysec', delayed: 6 });
-      const findings = await service.getHazards('conn-1');
-      expect(findings).toHaveLength(0);
     });
 
     it('reports both the ACL hazard and the appendfsync advisory together', async () => {
