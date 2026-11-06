@@ -280,6 +280,18 @@ export interface AnomalyStats {
 }
 
 // Slow Log Entry Types
+/**
+ * The server a slow/command log entry was read from. Log IDs are per server
+ * process, so entries are tracked and deduplicated per process (`runId`, from
+ * INFO server). host/port is where the process was reached; it is only the key
+ * when the run id is unavailable (empty).
+ */
+export interface LogSource {
+  host: string;
+  port: number;
+  runId?: string;
+}
+
 export interface StoredSlowLogEntry {
   id: number; // Original slowlog ID from Valkey/Redis
   timestamp: number; // Unix timestamp in seconds
@@ -290,6 +302,8 @@ export interface StoredSlowLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 
@@ -328,6 +342,8 @@ export interface StoredCommandLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 
@@ -772,14 +788,16 @@ export interface StoragePort {
   // Slow Log Methods - connectionId required for writes, optional filter for reads
   saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number>;
   getSlowLogEntries(options?: SlowLogQueryOptions): Promise<StoredSlowLogEntry[]>;
-  getLatestSlowLogId(connectionId?: string): Promise<number | null>;
+  getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Command Log Methods (Valkey-specific) - connectionId required for writes, optional filter for reads
   saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number>;
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
-  getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null>;
+  getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Whether any slow or command log entry of the connection was stored under a run id. */
+  hasRunIdLogEntries(connectionId: string): Promise<boolean>;
 
   // Latency Snapshot Methods - connectionId required for writes, optional filter for reads
   saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number>;

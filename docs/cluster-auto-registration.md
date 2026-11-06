@@ -43,6 +43,47 @@ as disconnected. Configure `cluster-announce-ip` and `cluster-announce-port`
 on the cluster nodes so they announce addresses the monitor can actually
 reach.
 
+### Seeds that resolve to several nodes
+
+A seed host can be a DNS name that resolves to several cluster nodes, such as
+the headless Service a Kubernetes operator creates for a cluster. The seed then
+connects to whichever node the name resolves to, and to a different one after a
+reconnect. When the seed host resolves to more than one address, every node in
+`CLUSTER NODES` is registered as a child, including the node that answered the
+sync, so the children stay stable across syncs. A seed changes between this
+and a single node only when two syncs in a row agree, so one stale answer
+cannot register a single node twice, and a rollout that leaves one pod behind
+the name for a sync does not retire the node that answered.
+
+When no node announces the seed's address, as with a ClusterIP Service, a load
+balancer VIP, NAT or a port mapping, the address alone cannot tell, so the
+monitor watches which node answers each sync. A VIP lands on an arbitrary node,
+so a node that answered before soon answers again after another one did, or
+three different nodes answer; the seed then fronts several nodes and every node
+is registered. One node behind NAT keeps answering as itself, and after a
+failover or replacement as the new node: once that node has answered three
+syncs in a row, it is the seed's node, and the nodes before it no longer count,
+so a later failback is treated as another move. Membership is left as it is
+while that is still unclear, which lasts at most a few syncs. A seed treated as
+fronting several nodes goes back to one node after ten syncs in a row are
+answered by the same node.
+
+Slow log and command log entries collected through such a seed are stored
+against the node that served them, not the seed's hostname, so history stays
+complete and attributable when the seed moves between nodes.
+
+The node is identified by its `run_id` from `INFO server`, which stays the
+same whatever address reaches it. When `INFO` is refused (an ACL or a blocked
+command), entries are stored against the address instead, also for a
+connection that reported a `run_id` before. A poll in which `INFO` fails for
+any other reason, such as a timeout, is skipped, and its entries are stored by
+the next poll. If a connection's entries were stored under the address and
+`INFO` later starts working, the entries still in a server's log (at most 128
+per log type) are stored once more under that server's `run_id`, so history
+can show those entries twice. This happens once for each server whose entries
+were stored under the address, so a seed that moved between nodes while
+`INFO` was refused can repeat it for several of them.
+
 ### TLS certificates
 
 `CLUSTER NODES` always reports nodes by IP address. When a node also

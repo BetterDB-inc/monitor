@@ -199,6 +199,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
   private authenticatedUser: string | undefined;
+  // Bumped on every `ready` of the main client, see getConnectionGeneration().
+  private connectionGeneration = 0;
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     // In certificate mode both are undefined, so iovalkey sends no AUTH and the
@@ -385,6 +387,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     let initialReady = true;
     client.on('ready', () => {
       if (this._client !== client) return;
+      this.connectionGeneration++;
       if (initialReady) {
         initialReady = false;
         return;
@@ -1721,6 +1724,19 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       return cli.call(command, ...args);
     }
     return this.client.call(command, ...args);
+  }
+
+  getConnectionGeneration(): number {
+    return this.connectionGeneration;
+  }
+
+  getServingEndpoint(): { host: string; port: number } | null {
+    // Through a tunnel the socket peer is the local forwarder, not the node.
+    // Before `ready` the socket may be open but the connection is not usable.
+    if (this.usesTunnel || this._client?.status !== 'ready') return null;
+    const { remoteAddress, remotePort } = this._client.stream ?? {};
+    if (!remoteAddress || !remotePort) return null;
+    return { host: remoteAddress.replace(/^::ffff:/, ''), port: remotePort };
   }
 
   getClient(): Valkey {

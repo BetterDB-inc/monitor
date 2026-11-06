@@ -4,6 +4,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
+import { parseNodeAddress } from '../topology/membership-diff';
 
 export interface DiscoveredNode {
   id: string;
@@ -91,12 +92,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     return discovery;
   }
 
+  /**
+   * CLUSTER NODES over a socket of its own, opened for this call. Never served
+   * from or written to the discovery cache: the cache holds the main socket's
+   * view, while a seed behind a VIP lands each new socket on an arbitrary
+   * node, and topology sync relies on seeing which node that was.
+   */
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
-    const cached = this.freshCache(connectionId);
-    if (cached) {
-      return cached;
-    }
-
     const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
     const client = new Valkey({
       host,
@@ -117,7 +119,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     try {
       await client.connect();
       const raw = await client.call('CLUSTER', 'NODES');
-      return this.remember(connectionId, MetricsParser.parseClusterNodes(raw as string));
+      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
     } finally {
       client.disconnect();
     }
@@ -144,8 +146,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       lastDiscoveryTime: Date.now(),
     });
 
+    // A failed node lingers in CLUSTER NODES until it is forgotten; keep it out
+    // of the role counts so a dead primary is not reported as a fourth master.
+    const failed = discovered.filter((n) => !n.healthy).length;
     this.logger.log(
-      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.role === 'master').length} masters, ${discovered.filter(n => n.role === 'replica').length} replicas)`,
+      `Discovered ${discovered.length} nodes for connection ${cacheKey} (${discovered.filter(n => n.healthy && n.role === 'master').length} masters, ${discovered.filter(n => n.healthy && n.role === 'replica').length} replicas${failed > 0 ? `, ${failed} failed` : ''})`,
     );
 
     return discovered;
@@ -155,9 +160,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const discovered: DiscoveredNode[] = [];
 
     for (const node of clusterNodes) {
-      const isHealthy =
-        node.flags.includes('connected') ||
-        (!node.flags.includes('disconnected') && !node.flags.includes('fail'));
+      // The link state is the answering node's own cluster-bus link to this
+      // one, not whether Monitor can reach it, so only a failure flag counts.
+      const isHealthy = !node.flags.includes('fail');
 
       const isMaster = node.flags.includes('master');
       const isReplica = node.flags.includes('slave') || node.flags.includes('replica');
@@ -201,14 +206,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
 
-    // Cluster node addresses include bus port: "host:port@busport"
-    // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
-
-    if (!host || isNaN(port)) {
+    // Cluster node addresses include bus port: "host:port@busport", and an
+    // IPv6 host has colons of its own, so the port is after the last one.
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) {
       throw new Error(`Invalid node address: ${node.address}`);
     }
+    const { host, port } = parsed;
 
     const primaryClient = this.connectionRegistry.get(ownerId).getClient();
     return this.openNodeClient(key, node, host, port, ownerId, {
@@ -502,6 +506,19 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     this.discoveryCacheByConnection.delete(connectionId);
     this.discoveryInFlight.delete(connectionId);
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
+  }
+
+  /**
+   * Drop and disconnect a node client a caller gave up waiting on. Node
+   * clients have no command timeout, so on a socket that went silent the
+   * queued commands would otherwise wait for TCP to give up; disconnecting
+   * rejects them now, and the next getNodeConnection opens a fresh client.
+   */
+  evictNodeClient(client: Valkey): void {
+    for (const [key, connection] of this.discoveredNodes) {
+      if (connection.client === client) this.discoveredNodes.delete(key);
+    }
+    client.disconnect();
   }
 
   async retainAddressConnections(connectionId: string, addrs: ReadonlySet<string>): Promise<void> {

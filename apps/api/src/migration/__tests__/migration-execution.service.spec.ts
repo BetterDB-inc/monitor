@@ -314,7 +314,11 @@ describe('MigrationExecutionService', () => {
       });
 
       // Let the mocked process run to close (resolves at 20ms) so the job is terminal.
-      await new Promise(r => setTimeout(r, 30));
+      // Poll rather than sleep a fixed time: a loaded CI runner can take longer.
+      const deadline = Date.now() + 2_000;
+      while (crossForkService.getExecution(id)!.status !== 'completed' && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 10));
+      }
       const result = crossForkService.getExecution(id);
       expect(result!.status).toBe('completed');
       expect(result!.notices!.some(n => /functions are excluded/i.test(n))).toBe(true);

@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { chunkedSqliteDelete } from './sqlite-chunked-delete';
+import { LOG_RUN_ID_UNIQUE_INDEXES } from './log-run-id-indexes';
 import { toIncidentBoundary, type IncidentBoundaryRow } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import * as path from 'path';
@@ -15,6 +16,7 @@ import type {
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
   KvCacheSampleTotals,
+  LogSource,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessBand,
@@ -444,8 +446,9 @@ const SLOW_LOG_ENTRIES_COLUMNS = `
   captured_at INTEGER NOT NULL,
   source_host TEXT NOT NULL,
   source_port INTEGER NOT NULL,
+  source_run_id TEXT NOT NULL DEFAULT '',
   connection_id TEXT NOT NULL DEFAULT 'env-default',
-  UNIQUE(slowlog_id, source_host, source_port, connection_id)
+  UNIQUE(slowlog_id, source_host, source_port, source_run_id, connection_id)
 `;
 
 const SLOW_LOG_ENTRIES_INDEXES = `
@@ -455,6 +458,7 @@ const SLOW_LOG_ENTRIES_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_slowlog_client_name ON slow_log_entries(client_name);
   CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
   CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_slowlog_connection_source ON slow_log_entries(connection_id, source_run_id, source_host, source_port, slowlog_id);
 `;
 
 const COMMAND_LOG_ENTRIES_COLUMNS = `
@@ -469,8 +473,9 @@ const COMMAND_LOG_ENTRIES_COLUMNS = `
   captured_at INTEGER NOT NULL,
   source_host TEXT NOT NULL,
   source_port INTEGER NOT NULL,
+  source_run_id TEXT NOT NULL DEFAULT '',
   connection_id TEXT NOT NULL DEFAULT 'env-default',
-  UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+  UNIQUE(commandlog_id, log_type, source_host, source_port, source_run_id, connection_id)
 `;
 
 const COMMAND_LOG_ENTRIES_INDEXES = `
@@ -480,20 +485,30 @@ const COMMAND_LOG_ENTRIES_INDEXES = `
   CREATE INDEX IF NOT EXISTS idx_commandlog_client_name ON command_log_entries(client_name);
   CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
   CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
+  CREATE INDEX IF NOT EXISTS idx_commandlog_connection_source ON command_log_entries(log_type, connection_id, source_run_id, source_host, source_port, commandlog_id);
 `;
 
 // Rebuild spec per table, consumed by migrateConnectionIdUniqueConstraints.
+// `uniqueColumns` are the columns the canonical unique constraint must include;
+// a table whose unique constraints lack any of them is rebuilt.
 const CONNECTION_ID_UNIQUE_REBUILDS = [
-  { table: 'acl_audit', columns: ACL_AUDIT_COLUMNS, indexes: ACL_AUDIT_INDEXES },
+  {
+    table: 'acl_audit',
+    columns: ACL_AUDIT_COLUMNS,
+    indexes: ACL_AUDIT_INDEXES,
+    uniqueColumns: ['connection_id'],
+  },
   {
     table: 'slow_log_entries',
     columns: SLOW_LOG_ENTRIES_COLUMNS,
     indexes: SLOW_LOG_ENTRIES_INDEXES,
+    uniqueColumns: ['connection_id', 'source_run_id'],
   },
   {
     table: 'command_log_entries',
     columns: COMMAND_LOG_ENTRIES_COLUMNS,
     indexes: COMMAND_LOG_ENTRIES_INDEXES,
+    uniqueColumns: ['connection_id', 'source_run_id'],
   },
 ] as const;
 
@@ -680,6 +695,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       this.createSchema();
       // Run migrations for existing databases
       this.runMigrations();
+      this.ensureLogRunIdUniqueIndexes();
       this.webhookRepo = new WebhookSqliteRepository(this.db, this.mappers);
       this.slowlogRepo = new SlowLogSqliteRepository(this.db, this.mappers);
       this.invitationRepo = new InvitationSqliteRepository(this.db);
@@ -934,11 +950,34 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
    *   constraint could hold genuine duplicates, and dropping those is exactly
    *   what the canonical constraint enforces going forward.
    */
+  /**
+   * A log entry with a run id is one entry per (id, run id), whatever address
+   * it was read through: two collectors reaching one server process through
+   * different addresses must not store it twice. Rows already duplicated that
+   * way are collapsed to their first copy before the index is built.
+   */
+  private ensureLogRunIdUniqueIndexes(): void {
+    if (!this.db) return;
+    const db = this.db;
+    for (const { table, index, columns } of LOG_RUN_ID_UNIQUE_INDEXES) {
+      const exists = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(index);
+      if (exists) continue;
+      db.transaction(() => {
+        db.exec(
+          `DELETE FROM ${table} WHERE source_run_id <> '' AND pk NOT IN (
+             SELECT MIN(pk) FROM ${table} WHERE source_run_id <> '' GROUP BY ${columns}
+           )`,
+        );
+        db.exec(`CREATE UNIQUE INDEX ${index} ON ${table}(${columns}) WHERE source_run_id <> ''`);
+      })();
+    }
+  }
+
   private migrateConnectionIdUniqueConstraints(): void {
     if (!this.db) return;
     const db = this.db;
 
-    for (const { table, columns, indexes: indexesDdl } of CONNECTION_ID_UNIQUE_REBUILDS) {
+    for (const { table, columns, indexes: indexesDdl, uniqueColumns } of CONNECTION_ID_UNIQUE_REBUILDS) {
       try {
         // PRAGMA statements return an empty result (not an error) for a missing
         // table, so check existence explicitly: a brand-new database has none of
@@ -957,10 +996,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
               (c) => c.name,
             ),
           );
-        const hasCanonicalUnique = uniqueColumnSets.some((cols) => cols.includes('connection_id'));
-        const hasStaleUnique = uniqueColumnSets.some((cols) => !cols.includes('connection_id'));
-        // Canonical already: exactly the connection_id-inclusive constraint and
-        // no leftover narrow one. Nothing to do.
+        const isCanonical = (cols: string[]) => uniqueColumns.every((column) => cols.includes(column));
+        const hasCanonicalUnique = uniqueColumnSets.some(isCanonical);
+        const hasStaleUnique = uniqueColumnSets.some((cols) => !isCanonical(cols));
+        // Canonical already: exactly the canonical constraint and no leftover
+        // narrower one. Nothing to do. (Log tables gained source_run_id in their
+        // key: widening keeps every existing row unique, so the copy keeps them all.)
         if (hasCanonicalUnique && !hasStaleUnique) continue;
 
         const existingColumns = (
@@ -3946,9 +3987,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.slowlogRepo.getSlowLogEntries(options);
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.db) throw new Error('Database not initialized');
-    return this.slowlogRepo.getLatestSlowLogId(connectionId);
+    return this.slowlogRepo.getLatestSlowLogId(connectionId, source);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -3966,8 +4007,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO command_log_entries (
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -3984,6 +4025,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           entry.capturedAt,
           entry.sourceHost,
           entry.sourcePort,
+          entry.sourceRunId ?? '',
           connId,
         );
         if (result.changes > 0) count++;
@@ -4045,7 +4087,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     const rows = this.db
       .prepare(
         `SELECT commandlog_id, timestamp, duration, command,
-              client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+              client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
        FROM command_log_entries
        ${whereClause}
        ${orderBy}
@@ -4056,22 +4098,41 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
-  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.db) throw new Error('Database not initialized');
 
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    conditions.push('log_type = ?');
+    params.push(type);
     if (connectionId) {
-      const row = this.db
-        .prepare(
-          'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ? AND connection_id = ?',
-        )
-        .get(type, connectionId) as any;
-      return row?.max_id ?? null;
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
     }
-
+    if (source) {
+      conditions.push('source_run_id = ?');
+      params.push(source.runId ?? '');
+      if (!source.runId) {
+        conditions.push('source_host = ?', 'source_port = ?');
+        params.push(source.host, source.port);
+      }
+    }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     const row = this.db
-      .prepare('SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = ?')
-      .get(type) as any;
+      .prepare(`SELECT MAX(commandlog_id) as max_id FROM command_log_entries${where}`)
+      .get(...params) as { max_id: number | null } | undefined;
     return row?.max_id ?? null;
+  }
+
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = this.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM slow_log_entries WHERE connection_id = ? AND source_run_id <> '')
+             OR EXISTS (SELECT 1 FROM command_log_entries WHERE connection_id = ? AND source_run_id <> '') AS found`,
+      )
+      .get(connectionId, connectionId) as { found: number } | undefined;
+    return !!row?.found;
   }
 
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {

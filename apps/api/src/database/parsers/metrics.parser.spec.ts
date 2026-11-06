@@ -245,6 +245,35 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
       });
     });
 
+    it('reads every metric of a slot from the Valkey 9 reply', () => {
+      // Real Valkey 9.0 reply via iovalkey, cluster-slot-stats-enabled yes.
+      const rawResponse = [
+        [0, ['key-count', 3, 'cpu-usec', 120, 'network-bytes-in', 64, 'network-bytes-out', 32]],
+        [1, ['key-count', 0, 'cpu-usec', 0, 'network-bytes-in', 0, 'network-bytes-out', 0]],
+      ];
+
+      const stats = MetricsParser.parseSlotStats(rawResponse);
+
+      expect(stats['0']).toEqual({
+        key_count: 3,
+        expires_count: 0,
+        total_reads: 0,
+        total_writes: 0,
+        cpu_usec: 120,
+        network_bytes_in: 64,
+        network_bytes_out: 32,
+      });
+      expect(stats['1']).toEqual({
+        key_count: 0,
+        expires_count: 0,
+        total_reads: 0,
+        total_writes: 0,
+        cpu_usec: 0,
+        network_bytes_in: 0,
+        network_bytes_out: 0,
+      });
+    });
+
     it('should handle empty response', () => {
       const stats = MetricsParser.parseSlotStats([]);
 

@@ -1,7 +1,32 @@
 import {
+  LogSource,
   SlowLogQueryOptions,
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
+
+/** Same rule as the SQL adapters: match the run id, and the address only when it is unknown. */
+export function matchesLogSource(
+  entry: { sourceHost: string; sourcePort: number; sourceRunId?: string },
+  source: LogSource,
+): boolean {
+  if ((entry.sourceRunId ?? '') !== (source.runId ?? '')) return false;
+  return source.runId ? true : entry.sourceHost === source.host && entry.sourcePort === source.port;
+}
+
+/**
+ * Same keys as the SQL unique constraints: entries with a run id are one entry
+ * per (id, run id), whatever address they were read through; entries without
+ * one are keyed by address.
+ */
+export function isSameLogEntry(
+  a: { id: number; sourceHost: string; sourcePort: number; sourceRunId?: string; connectionId?: string },
+  b: { id: number; sourceHost: string; sourcePort: number; sourceRunId?: string },
+  connectionId: string,
+): boolean {
+  if (a.id !== b.id || a.connectionId !== connectionId) return false;
+  if ((a.sourceRunId ?? '') !== (b.sourceRunId ?? '')) return false;
+  return a.sourceRunId ? true : a.sourceHost === b.sourceHost && a.sourcePort === b.sourcePort;
+}
 
 export class SlowLogMemoryRepository {
   private slowLogEntries: StoredSlowLogEntry[] = [];
@@ -9,14 +34,7 @@ export class SlowLogMemoryRepository {
   async saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number> {
     let savedCount = 0;
     for (const entry of entries) {
-      // Check for duplicates based on unique constraint (including connectionId)
-      const exists = this.slowLogEntries.some(
-        (e) =>
-          e.id === entry.id &&
-          e.sourceHost === entry.sourceHost &&
-          e.sourcePort === entry.sourcePort &&
-          e.connectionId === connectionId,
-      );
+      const exists = this.slowLogEntries.some((e) => isSameLogEntry(e, entry, connectionId));
       if (!exists) {
         this.slowLogEntries.push({ ...entry, connectionId });
         savedCount++;
@@ -60,13 +78,20 @@ export class SlowLogMemoryRepository {
       .slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 100));
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     let entries = this.slowLogEntries;
     if (connectionId) {
       entries = entries.filter((e) => e.connectionId === connectionId);
     }
+    if (source) {
+      entries = entries.filter((e) => matchesLogSource(e, source));
+    }
     if (entries.length === 0) return null;
     return Math.max(...entries.map((e) => e.id));
+  }
+
+  hasRunIdEntries(connectionId: string): boolean {
+    return this.slowLogEntries.some((e) => e.connectionId === connectionId && !!e.sourceRunId);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {

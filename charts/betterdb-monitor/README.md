@@ -81,8 +81,12 @@ requests. See [docs/offline-licenses.md](../../docs/offline-licenses.md).
 
 ```bash
 helm repo update
-helm upgrade betterdb-monitor betterdb/betterdb-monitor -n betterdb --reuse-values
+helm upgrade betterdb-monitor betterdb/betterdb-monitor -n betterdb --reset-then-reuse-values
 ```
+
+`--reset-then-reuse-values` (Helm 3.14+) keeps your overrides and picks up the
+new chart's defaults; `--reuse-values` would keep the old defaults too. On
+older Helm, pass your values file with `-f` instead.
 
 ## Releasing the chart (maintainers)
 
