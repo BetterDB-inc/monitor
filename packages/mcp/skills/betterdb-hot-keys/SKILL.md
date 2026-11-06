@@ -20,7 +20,7 @@ description: Use when the user asks about hot keys, uneven key access, a key dom
    - A license sentence: key analytics is not available on this tier. Say that.
    - An empty list: no hot-key snapshot exists for that window. That is also what community tier and an instance with no capture yet return. Do not say no key is hot.
 4. Fall back, in order, and label each fallback:
-   - `get_largest_keys` ranks memory, not access frequency. A license sentence here is the result.
+   - `get_largest_keys` ranks memory, not access frequency. A license sentence or a `Key analytics is unavailable` sentence here is the result (see `betterdb-triage`).
    - `get_commandlog_patterns` for the same window. These are slow or large commands, not a hot-key ranking.
 5. Do not propose a key delete, rename, or TTL from a failed hot-key call.
 

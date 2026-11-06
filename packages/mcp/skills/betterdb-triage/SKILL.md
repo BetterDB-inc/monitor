@@ -31,6 +31,15 @@ Answer "is it healthy?" from one structured summary. Every later BetterDB skill 
 
 Report hit rate, key count, connected clients, role, replication lag, fragmentation, and `configHazards`. An empty `configHazards` list with no `configHazardsUnavailable` flag means the probe finished and found nothing. `configHazardsUnavailable: true` means the probe did not finish. Findings alongside that flag are partial. A missing `configHazards` with the flag means the probe produced nothing. A response with neither `configHazards` nor `configHazardsUnavailable` means hazard probing is unavailable or unsupported. Do not call any of those cases "no hazards." `replicationLag` is set only for a replica. `null` on a primary means lag was not measured, even when replicas exist.
 
+## Results that end a tool step
+
+Every BetterDB skill uses this rule. Two sentences are the final result for the tool that returned them:
+
+- A license sentence: `This feature requires a <tier> license (current tier: <tier>). Upgrade at <url>`.
+- An unavailable sentence: `<Feature> is unavailable: this monitor build ...`. The monitor build lacks that route.
+
+Report the sentence. Do not retry the tool or call it again with other arguments. Neither one means the data is empty.
+
 ## Common mistakes
 
 - Calling `get_health`, `get_slowlog`, or `get_memory` before an instance id exists.

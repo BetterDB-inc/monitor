@@ -15,7 +15,7 @@ Name the latency event, or say that none is recorded. An empty list is an answer
 2. Call `get_latency` with `instanceId`.
 3. If the list is empty, say no latency events are recorded. `get_latency` reads LATENCY LATEST, which stays empty while `latency-monitor-threshold` is 0, the server default. No MCP tool reads that setting. Say the latency monitor may be off, so the empty list cannot rule out stalls. Do not call `get_latency_history`.
 4. If the list names an event, call `get_latency_history` with that `eventName`. Event names match `^[a-zA-Z0-9_.-]+$`. Typical names are `command` and `fork`.
-5. Call `get_latency_regressions` with the requested `startTime` when the user says the database got slower. A license sentence means regression detection is not available on this tier. Say that, and keep the `get_latency` result.
+5. Call `get_latency_regressions` with the requested `startTime` when the user says the database got slower. A license sentence means regression detection is not available on this tier. A `Latency regression detection is unavailable` sentence means this monitor build lacks it. Either one ends this step (see `betterdb-triage`). Say that, and keep the `get_latency` result.
 6. For "which command was slow," switch to `betterdb-slow-commands`. Latency events are not the slowlog.
 
 ## Optional context from get_info

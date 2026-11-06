@@ -26,7 +26,7 @@ Report peak, current, bytes per key, fragmentation, and the forecast. The MEMORY
 - `timeToLimitHuman` of "Not projected to reach ceiling" is the answer when `timeToLimitMs` is null and a ceiling exists.
 - For `usedMemory`, `ceiling` null means no ceiling is configured: `maxmemory` is 0 and no forecast ceiling is set. `mode` is then `trend` and `timeToLimitHuman` is a growth summary, not a time to limit. Say no ceiling is configured and report the trend.
 - For `opsPerSec`, `mode` may be `trend` and `ceiling` may be null. Quote the current value and the direction. A large `growthPercent` on a base near 1 op/s is not an incident.
-- A license sentence, `insufficientData: true`, or `enabled: false` ends the forecast section. Do not invent a date.
+- A license sentence, a `Metric forecasting is unavailable` sentence (see `betterdb-triage`), `insufficientData: true`, or `enabled: false` ends the forecast section. Do not invent a date.
 - With `enabled: false`, forecasting is off for this metric. Its `currentValue` 0 and `trendDirection` stable are placeholders. Do not report 0 bytes as current memory. Take current memory from `get_memory`.
 
 ## Common mistakes

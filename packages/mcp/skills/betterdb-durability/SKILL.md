@@ -16,7 +16,7 @@ Say what a process death would lose, from persistence and replication INFO. Age 
 3. Compute last-save age as `server_time_usec / 1000000` minus `rdb_last_save_time`, in seconds. Report that age, `rdb_last_bgsave_status`, `rdb_changes_since_last_save`, and `aof_enabled`.
 4. From replication, report `role`, `connected_slaves`, `repl_backlog_active`, and `master_repl_offset`.
 5. Read the mode from `server_mode`, `redis_mode`, or `valkey_mode` in the `server` section before any cluster tool. Redis reports `redis_mode`. Valkey reports `server_mode` or `valkey_mode`. For `standalone`, or when none of those fields is present, do not call `get_cluster_nodes`, `get_cluster_node_stats`, `get_cluster_slowlog`, or `get_slot_stats`. Those calls fail with a generic error on a standalone instance. Call them only when a field says `cluster`.
-6. For a primary with replicas and a question about the gap growing, call `get_replication_divergence` when that tool exists. If the client reports the tool was not found, say replica-gap history is not in this connector and stop at the INFO fields above.
+6. For a primary with replicas and a question about the gap growing, call `get_replication_divergence` when that tool exists. If the client reports the tool was not found, say replica-gap history is not in this connector and stop at the INFO fields above. A `Replication divergence detection is unavailable` sentence is the same stop: this monitor build lacks the route (see `betterdb-triage`). Report it and do not retry.
 
 ## How to verdict
 
