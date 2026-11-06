@@ -15,13 +15,27 @@ export interface IncidentTimelineEntry {
   severity: AnomalySeverity;
   message: string;
   recoveredAt: number | null;
+  recoveryState: IncidentEntryRecovery;
 }
 
+export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
+
+type SignalRecovery =
+  | { state: 'recovered'; at: number }
+  | { state: 'open' }
+  | { state: 'unknown' };
+
 export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
+
+export interface IncidentSequenceStep {
+  anomalyId: string;
+  step: number | null;
+}
 
 export interface IncidentSequenceMatch {
   pattern: AnomalyPattern;
   anomalyIds: string[];
+  steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
   severity: AnomalySeverity;
@@ -290,6 +304,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     severity: event.severity,
     message: event.message,
     recoveredAt: null,
+    recoveryState: 'open',
   };
 }
 
@@ -583,23 +598,27 @@ export class IncidentTimelineBuilder {
       if (!firstBySignal.has(key)) firstBySignal.set(key, event);
       lastBySignal.set(key, event);
     }
-    const recoveredAtBySignal = new Map<string, number | null | undefined>();
+    const recoveryBySignal = new Map<string, SignalRecovery>();
     for (const [key, event] of lastBySignal) {
-      recoveredAtBySignal.set(
+      recoveryBySignal.set(
         key,
-        this.recoveredAt(event, firstBySignal.get(key)!, nextOccurrence(event), now, probe),
+        this.signalRecovery(event, firstBySignal.get(key)!, nextOccurrence(event), now, probe),
       );
     }
 
     const entries: IncidentTimelineEntry[] = events.map((event) => {
       const key = signalKey(event);
-      const isLast = lastBySignal.get(key) === event;
-      return {
-        ...toTimelineEntry(event),
-        recoveredAt: isLast
-          ? (recoveredAtBySignal.get(key) ?? null)
-          : this.recoveredAtIfResolved(event),
-      };
+      const entry = toTimelineEntry(event);
+      if (lastBySignal.get(key) !== event) {
+        if (!event.resolved) return { ...entry, recoveryState: 'recurred' };
+        return typeof event.resolvedAt === 'number'
+          ? { ...entry, recoveredAt: event.resolvedAt, recoveryState: 'recovered' }
+          : { ...entry, recoveryState: 'unknown' };
+      }
+      const recovery = recoveryBySignal.get(key)!;
+      return recovery.state === 'recovered'
+        ? { ...entry, recoveredAt: recovery.at, recoveryState: 'recovered' }
+        : { ...entry, recoveryState: recovery.state };
     });
 
     const sequence: MetricType[] = [];
@@ -616,6 +635,7 @@ export class IncidentTimelineBuilder {
         severity: AnomalySeverity.INFO,
         message: '',
         recoveredAt: null,
+        recoveryState: 'open',
       }),
     );
     const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);
@@ -629,6 +649,13 @@ export class IncidentTimelineBuilder {
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),
+          steps: held.map((e) => {
+            const position = matched.indexOf(e);
+            return {
+              anomalyId: e.anomalyId,
+              step: position < rule.steps.length ? position + 1 : null,
+            };
+          }),
           diagnosis: rule.diagnosis,
           recommendations: rule.recommendations.filter(
             (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
@@ -644,14 +671,14 @@ export class IncidentTimelineBuilder {
     const openSignals: MetricType[] = [];
     const unknownSignals: MetricType[] = [];
     let recoveredAt: number | null = null;
-    for (const [key, at] of recoveredAtBySignal) {
+    for (const [key, recovery] of recoveryBySignal) {
       const metricType = lastBySignal.get(key)!.metricType;
-      if (at === null) {
+      if (recovery.state === 'open') {
         if (!openSignals.includes(metricType)) openSignals.push(metricType);
-      } else if (at === undefined) {
+      } else if (recovery.state === 'unknown') {
         if (!unknownSignals.includes(metricType)) unknownSignals.push(metricType);
-      } else if (recoveredAt === null || at > recoveredAt) {
-        recoveredAt = at;
+      } else if (recoveredAt === null || recovery.at > recoveredAt) {
+        recoveredAt = recovery.at;
       }
     }
 
@@ -661,7 +688,7 @@ export class IncidentTimelineBuilder {
     return {
       incidentId: incidentIdFor(scope, start?.anomalyId ?? events[0].id, anchoredAt),
       scope,
-      connectionIds: [...new Set(entries.map((e) => e.connectionId))],
+      connectionIds: [...new Set(entries.map((e) => e.connectionId))].filter((id) => id !== ''),
       startedAt: Math.min(anchoredAt, events[0].timestamp),
       lastEventAt,
       entries,
@@ -672,25 +699,26 @@ export class IncidentTimelineBuilder {
         status: this.status(now, lastEventAt, openSignals.length, unknownSignals.length),
         openSignals,
         unknownSignals,
-        recoveredAt: openSignals.length === 0 && unknownSignals.length === 0 ? recoveredAt : null,
+        recoveredAt:
+          openSignals.length === 0 && unknownSignals.length === 0 ? recoveredAt : null,
       },
     };
   }
 
-  private recoveredAtIfResolved(event: AnomalyEvent): number | null {
-    return event.resolved ? (event.resolvedAt ?? null) : null;
-  }
-
-  private recoveredAt(
+  private signalRecovery(
     event: AnomalyEvent,
     first: AnomalyEvent,
     until: number | null,
     now: number,
     probe: RecoveryProbe,
-  ): number | null | undefined {
-    if (event.resolved) return event.resolvedAt;
-    if (now - event.timestamp < this.opts.settleMs) return null;
-    return probe({
+  ): SignalRecovery {
+    if (event.resolved) {
+      return typeof event.resolvedAt === 'number'
+        ? { state: 'recovered', at: event.resolvedAt }
+        : { state: 'unknown' };
+    }
+    if (now - event.timestamp < this.opts.settleMs) return { state: 'open' };
+    const at = probe({
       connectionId: event.connectionId ?? '',
       metricType: event.metricType,
       since: event.timestamp,
@@ -701,6 +729,8 @@ export class IncidentTimelineBuilder {
       now,
       kind: event.kind,
     });
+    if (at === undefined) return { state: 'unknown' };
+    return at === null ? { state: 'open' } : { state: 'recovered', at };
   }
 
   private status(

@@ -73,3 +73,51 @@ export interface ReplicaDivergenceHistory {
   latest: ReplicationDivergenceWindow | null;
   windows: ReplicationDivergenceWindow[];
 }
+
+export type IncidentRecoveryStatus = 'active' | 'recovering' | 'recovered' | 'degraded' | 'unknown';
+
+export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
+
+export interface IncidentTimelineEntry {
+  anomalyId: string;
+  connectionId: string;
+  nodeAddr?: string;
+  timestamp: number;
+  metricType: string;
+  severity: AnomalySeverity;
+  message: string;
+  recoveredAt: number | null;
+  recoveryState: IncidentEntryRecovery;
+}
+
+export interface IncidentSequenceStep {
+  anomalyId: string;
+  step: number | null;
+}
+
+export interface IncidentSequenceMatch {
+  pattern: string;
+  anomalyIds: string[];
+  steps: IncidentSequenceStep[];
+  diagnosis: string;
+  recommendations: string[];
+  severity: AnomalySeverity;
+}
+
+export interface IncidentTimeline {
+  incidentId: string;
+  scope: string;
+  connectionIds: string[];
+  startedAt: number;
+  lastEventAt: number;
+  entries: IncidentTimelineEntry[];
+  sequence: string[];
+  matchedPatterns: string[];
+  sequenceMatches: IncidentSequenceMatch[];
+  recovery: {
+    status: IncidentRecoveryStatus;
+    openSignals: string[];
+    unknownSignals: string[];
+    recoveredAt: number | null;
+  };
+}

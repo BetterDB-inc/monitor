@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { formatValue } from '../lib/formatters';
 import { formatRelatedCount } from './AnomalyDashboard';
+import { dateRangeFromParams } from '../components/ui/date-range';
 
 describe('formatRelatedCount', () => {
   it('marks a member list the API cut short', () => {
@@ -24,5 +25,23 @@ describe('formatValue', () => {
 
   it('writes larger replication gaps like the replication panel', () => {
     expect(formatValue(8 * 1024 ** 2, 'replication_divergence')).toBe('8.00 MB');
+  });
+});
+
+describe('dateRangeFromParams', () => {
+  it('reads the range from the URL', () => {
+    expect(dateRangeFromParams('1000', '2000')).toEqual({
+      from: new Date(1000),
+      to: new Date(2000),
+    });
+  });
+
+  it('clears the range once start or end leaves the URL', () => {
+    expect(dateRangeFromParams(null, null)).toBeUndefined();
+    expect(dateRangeFromParams('1000', null)).toBeUndefined();
+  });
+
+  it('ignores a malformed range', () => {
+    expect(dateRangeFromParams('soon', '2000')).toBeUndefined();
   });
 });

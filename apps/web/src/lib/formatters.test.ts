@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatExpiresIn, formatTimeAgo, formatTtlSeconds } from './formatters';
+import { formatDuration, formatExpiresIn, formatTimeAgo, formatTtlSeconds } from './formatters';
 
 describe('formatTtlSeconds', () => {
   it('formats sub-minute as seconds', () => {
@@ -47,5 +47,15 @@ describe('formatExpiresIn', () => {
     const now = 1_000_000_000_000;
     expect(formatExpiresIn(now + 18 * 3600_000, now)).toBe('Expires in 18h');
     expect(formatExpiresIn(now + 2 * 86400_000, now)).toBe('Expires in 2d');
+  });
+});
+
+describe('formatDuration', () => {
+  it('uses the two largest units', () => {
+    expect(formatDuration(-5)).toBe('0s');
+    expect(formatDuration(45_000)).toBe('45s');
+    expect(formatDuration(125_000)).toBe('2m 5s');
+    expect(formatDuration(3 * 3600_000 + 60_000)).toBe('3h 1m');
+    expect(formatDuration(26 * 3600_000)).toBe('1d 2h');
   });
 });

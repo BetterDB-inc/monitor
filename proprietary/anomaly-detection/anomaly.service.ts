@@ -402,6 +402,16 @@ interface LegacyReplicaSlotEvent {
   message: string;
 }
 
+interface CachedFiring {
+  event: AnomalyEvent | null;
+  expiresAt: number;
+}
+
+interface IncidentCutoffs {
+  anchored: Set<string>;
+  earlier: Map<string, number>;
+}
+
 interface TrackedResyncEvent {
   id: string;
   addr: string | null;
@@ -410,6 +420,11 @@ interface TrackedResyncEvent {
 
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
+const NEXT_FIRING_CONCURRENCY = 8;
+const NEXT_FIRING_PAGE_SIZE = 100;
+const NEXT_FIRING_MAX_PAGES = 5;
+const NEXT_FIRING_MISS_TTL_MS = 60_000;
+const NEXT_FIRING_CACHE_SIZE = 2_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7351,6 +7366,7 @@ export class AnomalyService
 
   private incidentRecoveryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, true);
   private incidentHistoryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, false);
+  private nextFiringCache = new Map<string, CachedFiring>();
 
   private probeRecovery(
     signal: Parameters<RecoveryProbe>[0],
@@ -7629,28 +7645,118 @@ export class AnomalyService
     limit = 50,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const from = Math.max(
       startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
+    const tailEnd =
+      endTime !== undefined && endTime + maxSpanMs < now ? endTime + maxSpanMs : undefined;
     const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
-      from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
-      endTime,
+      from - maxSpanMs,
+      tailEnd === undefined ? undefined : endTime,
+      { tailEnd },
     );
-    return this.incidentTimelineBuilder
-      .build(
-        events,
-        Date.now(),
-        this.incidentHistoryProbe,
-        boundaries,
-        new Map(),
-        Number.NEGATIVE_INFINITY,
-        this.incidentEventsDroppedSpans,
-      )
-      .filter((t) => t.lastEventAt >= from)
+    const next =
+      tailEnd === undefined
+        ? []
+        : await this.nextFiringsAfter(
+            this.unresolvedSignals(events.filter((e) => e.timestamp >= from)),
+            tailEnd,
+          );
+    return this.buildIncidents([...events, ...next], boundaries)
+      .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
       .reverse()
       .slice(0, limit);
+  }
+
+  private unresolvedSignals(events: AnomalyEvent[]): AnomalyEvent[] {
+    const latest = new Map<string, AnomalyEvent>();
+    for (const event of events) {
+      if (!event.connectionId) continue;
+      const key = signalKey(event);
+      const seen = latest.get(key);
+      if (!seen || event.timestamp > seen.timestamp) latest.set(key, event);
+    }
+    return [...latest.values()].filter((e) => !(e.resolved && typeof e.resolvedAt === 'number'));
+  }
+
+  private buildIncidents(
+    events: AnomalyEvent[],
+    boundaries: StoredIncidentBoundary[],
+  ): IncidentTimeline[] {
+    return this.incidentTimelineBuilder.build(
+      events,
+      Date.now(),
+      this.incidentHistoryProbe,
+      boundaries,
+      new Map(),
+      Number.NEGATIVE_INFINITY,
+      this.incidentEventsDroppedSpans,
+    );
+  }
+
+  private async loadIncidentWindow(
+    startedAt: number,
+    connectionId: string | undefined,
+  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[]; windowEnd: number }> {
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const windowEnd = startedAt + 2 * maxSpanMs;
+    const history = await this.loadIncidentHistory(connectionId, startedAt - maxSpanMs, windowEnd, {
+      eventsFrom: (boundaries) => {
+        const cutoffs = this.incidentCutoffs(boundaries, startedAt);
+        const scopes = new Set(boundaries.map((b) => b.scopeId));
+        return Math.min(
+          startedAt,
+          ...[...scopes].map((scope) => this.cutoffOf(cutoffs, scope, startedAt)),
+        );
+      },
+    });
+    const cutoffs = this.incidentCutoffs(history.boundaries, startedAt);
+    return {
+      events: history.events.filter(
+        (e) => e.timestamp >= this.cutoffOf(cutoffs, this.incidentScopeOf(e), startedAt),
+      ),
+      boundaries: history.boundaries,
+      windowEnd,
+    };
+  }
+
+  private incidentCutoffs(
+    boundaries: StoredIncidentBoundary[],
+    startedAt: number,
+  ): IncidentCutoffs {
+    const reach = startedAt - 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    const anchored = new Set<string>();
+    const earlier = new Map<string, number>();
+    for (const b of boundaries) {
+      if (b.startedAt === startedAt) anchored.add(b.scopeId);
+      else if (b.startedAt >= reach && b.startedAt < startedAt) {
+        earlier.set(b.scopeId, Math.max(earlier.get(b.scopeId) ?? b.startedAt, b.startedAt));
+      }
+    }
+    return { anchored, earlier };
+  }
+
+  private cutoffOf({ anchored, earlier }: IncidentCutoffs, scope: string, startedAt: number): number {
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const previous = earlier.get(scope);
+    if (anchored.has(scope)) return previous ?? startedAt - maxSpanMs;
+    return previous !== undefined && previous >= startedAt - maxSpanMs ? previous : startedAt;
+  }
+
+  private incidentScopeOf(event: AnomalyEvent): string {
+    if (event.scopeId !== undefined) return event.scopeId;
+    return event.connectionId ? this.correlationScopeOf(event.connectionId) : '';
+  }
+
+  private earliestIncidentLoad(boundaries: StoredIncidentBoundary[], loadFrom: number): number {
+    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    return boundaries
+      .map((b) => b.startedAt)
+      .filter((at) => at >= reach)
+      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
   }
 
   async getIncidentTimeline(
@@ -7668,88 +7774,109 @@ export class AnomalyService
       );
       return timelines.find((t) => t.incidentId === incidentId) ?? null;
     }
-    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
-    const windowEnd = startedAt + 2 * maxSpanMs;
-    const anchors = await this.readIncidentBoundaries(connectionId, startedAt, startedAt);
-    const { events, boundaries } = await this.loadIncidentHistory(
+    const { events, boundaries, windowEnd } = await this.loadIncidentWindow(
+      startedAt,
       connectionId,
-      anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
-      windowEnd,
     );
     const find = (all: AnomalyEvent[]) =>
-      this.incidentTimelineBuilder
-        .build(
-          all,
-          Date.now(),
-          this.incidentHistoryProbe,
-          boundaries,
-          new Map(),
-          Number.NEGATIVE_INFINITY,
-          this.incidentEventsDroppedSpans,
-        )
-        .find((t) => t.incidentId === incidentId) ?? null;
+      this.buildIncidents(all, boundaries).find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
-    const signals = new Map<string, { connectionId: string; metricType: MetricType }>();
-    for (const entry of draft.entries) {
-      signals.set(`${entry.connectionId}\u0000${entry.metricType}`, {
-        connectionId: entry.connectionId,
-        metricType: entry.metricType,
-      });
-    }
-    const later = await Promise.all(
-      [...signals.values()].map((signal) =>
-        this.nextFiring(signal.connectionId, signal.metricType, windowEnd),
-      ),
+    if (windowEnd >= Date.now()) return draft;
+    const ids = new Set(draft.entries.map((e) => e.anomalyId));
+    const next = await this.nextFiringsAfter(
+      this.unresolvedSignals(events.filter((e) => ids.has(e.id))),
+      windowEnd,
     );
-    const next = later.filter((e): e is AnomalyEvent => e !== null);
     return next.length > 0 ? find([...events, ...next]) : draft;
   }
 
-  private async nextFiring(
-    connectionId: string,
-    metricType: MetricType,
-    after: number,
-  ): Promise<AnomalyEvent | null> {
-    const [stored] = await this.storage.getAnomalyEvents({
-      startTime: after + 1,
-      metricType,
-      connectionId,
-      order: 'asc',
-      limit: 1,
+  private async nextFiringsAfter(signals: AnomalyEvent[], after: number): Promise<AnomalyEvent[]> {
+    const recent = new Map<string, AnomalyEvent>();
+    for (const e of this.recentAnomalies) {
+      if (e.timestamp <= after) continue;
+      const key = signalKey(e);
+      const seen = recent.get(key);
+      if (!seen || e.timestamp < seen.timestamp) recent.set(key, e);
+    }
+    const later: AnomalyEvent[] = [];
+    for (let i = 0; i < signals.length; i += NEXT_FIRING_CONCURRENCY) {
+      const batch = await Promise.all(
+        signals.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
+          const stored = await this.nextFiring(signal, after);
+          const live = recent.get(signalKey(signal)) ?? null;
+          if (!stored || !live) return stored ?? live;
+          return live.timestamp < stored.timestamp ? live : stored;
+        }),
+      );
+      later.push(...batch.filter((e): e is AnomalyEvent => e !== null));
+    }
+    return later;
+  }
+
+  private async nextFiring(signal: AnomalyEvent, after: number): Promise<AnomalyEvent | null> {
+    const key = signalKey(signal);
+    const cacheKey = `${after}\u0000${key}`;
+    const now = Date.now();
+    const cached = this.nextFiringCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) return cached.event;
+    let event: AnomalyEvent | null = null;
+    let cursor: AnomalyEventCursor | undefined;
+    for (let page = 0; page < NEXT_FIRING_MAX_PAGES && !event; page++) {
+      const rows = await this.storage.getAnomalyEvents({
+        startTime: after + 1,
+        metricType: signal.metricType,
+        connectionId: signal.connectionId,
+        order: 'asc',
+        limit: NEXT_FIRING_PAGE_SIZE,
+        after: cursor,
+      });
+      event =
+        rows.map((row) => this.storedToAnomalyEvent(row)).find((e) => signalKey(e) === key) ?? null;
+      if (rows.length < NEXT_FIRING_PAGE_SIZE) break;
+      const last = rows[rows.length - 1];
+      cursor = { timestamp: last.timestamp, id: last.id };
+    }
+    this.nextFiringCache.delete(cacheKey);
+    this.nextFiringCache.set(cacheKey, {
+      event,
+      expiresAt: event ? Infinity : now + NEXT_FIRING_MISS_TTL_MS,
     });
-    const candidates = [
-      ...(stored ? [this.storedToAnomalyEvent(stored)] : []),
-      ...this.recentAnomalies.filter(
-        (e) =>
-          e.timestamp > after && e.metricType === metricType && e.connectionId === connectionId,
-      ),
-    ];
-    return candidates.reduce<AnomalyEvent | null>(
-      (first, e) => (first === null || e.timestamp < first.timestamp ? e : first),
-      null,
-    );
+    if (this.nextFiringCache.size > NEXT_FIRING_CACHE_SIZE) {
+      this.nextFiringCache.delete(this.nextFiringCache.keys().next().value!);
+    }
+    return event;
   }
 
   private async loadIncidentHistory(
     connectionId: string | undefined,
     loadFrom: number,
     endTime: number | undefined,
+    {
+      tailEnd,
+      eventsFrom = (boundaries) => this.earliestIncidentLoad(boundaries, loadFrom),
+    }: {
+      tailEnd?: number;
+      eventsFrom?: (boundaries: StoredIncidentBoundary[]) => number;
+    } = {},
   ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
-    const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, endTime);
-    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    const earliest = boundaries
-      .map((b) => b.startedAt)
-      .filter((at) => at >= reach)
-      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
-    const events = await this.loadIncidentEvents(connectionId, earliest, endTime);
+    const boundaryEnd = tailEnd ?? endTime;
+    const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, boundaryEnd);
+    const earliest = eventsFrom(boundaries);
+    const [inRange, tail] = await Promise.all([
+      this.loadIncidentEvents(connectionId, earliest, endTime),
+      tailEnd !== undefined && endTime !== undefined
+        ? this.loadIncidentEvents(connectionId, endTime + 1, tailEnd)
+        : Promise.resolve([]),
+    ]);
+    const events = [...new Map([...inRange, ...tail].map((e) => [e.id, e])).values()];
     if (!connectionId) return { events, boundaries };
     const scope = this.correlationScopeOf(connectionId);
     const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
       (id): id is string => id !== undefined && id !== scope,
     );
     if (earlierScopes.length === 0) return { events, boundaries };
-    const earlier = await this.readBoundariesOf(earlierScopes, loadFrom, endTime);
+    const earlier = await this.readBoundariesOf(earlierScopes, loadFrom, boundaryEnd);
     return { events, boundaries: [...boundaries, ...earlier] };
   }
 
@@ -9660,7 +9787,7 @@ export class AnomalyService
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
         oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
         const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
-        for (const connectionId of new Set(timeline.connectionIds)) {
+        for (const connectionId of timeline.connectionIds.length > 0 ? timeline.connectionIds : ['']) {
           const counts = byConnection.get(connectionId) ?? new Map();
           for (const pattern of patterns) {
             const label = `${pattern}\u0000${status}`;
