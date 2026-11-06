@@ -12946,6 +12946,18 @@ describe('AnomalyService', () => {
       expect(loadEnd).toBeLessThan(end + 2 * 60 * MIN);
     });
 
+    it('looks up the next firing of open signals after a past range load ends', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      (service as any).recentAnomalies.push(anomaly({ id: 'old', timestamp: end - 10 * MIN }));
+      const load = jest.spyOn(service as any, 'loadIncidentHistory');
+      const next = jest.spyOn(service as any, 'nextFiring');
+
+      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+      expect(next).toHaveBeenCalledWith('conn-1', MetricType.CONNECTIONS, load.mock.calls[0][2]);
+    });
+
     it('reuses a recent incident list for the same connection and start', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: now - 2 * MIN }));

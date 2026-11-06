@@ -55,6 +55,7 @@ import {
   POINT_IN_TIME_QUIET_MS,
   RESOLVER_BACKED_METRICS,
   RecoveryProbe,
+  IncidentTimelineEntry,
   incidentStartOf,
   signalKey,
   mergeRuleSteps,
@@ -7680,7 +7681,15 @@ export class AnomalyService
       connectionId,
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
       loadEnd,
-    ).then(({ events, boundaries }) => this.buildIncidents(events, boundaries));
+    ).then(async ({ events, boundaries }) => {
+      const draft = this.buildIncidents(events, boundaries);
+      if (loadEnd === undefined) return draft;
+      const next = await this.nextFiringsAfter(
+        draft.flatMap((t) => t.entries),
+        loadEnd,
+      );
+      return next.length > 0 ? this.buildIncidents([...events, ...next], boundaries) : draft;
+    });
     const entry = { at: now, timelines };
     this.incidentListCache.set(key, entry);
     if (this.incidentListCache.size > MAX_INCIDENT_LIST_CACHE_ENTRIES) {
@@ -7770,8 +7779,16 @@ export class AnomalyService
       this.buildIncidents(all, boundaries).find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
+    const next = await this.nextFiringsAfter(draft.entries, windowEnd);
+    return next.length > 0 ? find([...events, ...next]) : draft;
+  }
+
+  private async nextFiringsAfter(
+    entries: IncidentTimelineEntry[],
+    after: number,
+  ): Promise<AnomalyEvent[]> {
     const signals = new Map<string, { connectionId: string; metricType: MetricType }>();
-    for (const entry of draft.entries) {
+    for (const entry of entries) {
       if (entry.recoveryState === 'recovered') continue;
       signals.set(`${entry.connectionId}\u0000${entry.metricType}`, {
         connectionId: entry.connectionId,
@@ -7780,11 +7797,10 @@ export class AnomalyService
     }
     const later = await Promise.all(
       [...signals.values()].map((signal) =>
-        this.nextFiring(signal.connectionId, signal.metricType, windowEnd),
+        this.nextFiring(signal.connectionId, signal.metricType, after),
       ),
     );
-    const next = later.filter((e): e is AnomalyEvent => e !== null);
-    return next.length > 0 ? find([...events, ...next]) : draft;
+    return later.filter((e): e is AnomalyEvent => e !== null);
   }
 
   private async nextFiring(
