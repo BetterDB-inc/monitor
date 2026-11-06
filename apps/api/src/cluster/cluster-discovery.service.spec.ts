@@ -437,6 +437,16 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('drops and disconnects an evicted node client, so the next call opens a new one', async () => {
+      const first = await service.getNodeConnection('node2-id-def456', 'test-connection');
+
+      service.evictNodeClient(first);
+
+      expect(first.disconnect).toHaveBeenCalled();
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(await service.getNodeConnection('node2-id-def456', 'test-connection')).not.toBe(first);
+    });
+
     it('connects to an IPv6 node on the port after the last colon', async () => {
       mockDbClient.getClusterNodes.mockResolvedValueOnce([
         { ...mockClusterNodes[0], address: 'fd00::1:6380@16380' },

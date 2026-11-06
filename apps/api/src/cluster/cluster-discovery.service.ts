@@ -509,6 +509,19 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     await Promise.allSettled(owned.map(([, connection]) => this.closeNodeClient(connection.client)));
   }
 
+  /**
+   * Drop and disconnect a node client a caller gave up waiting on. Node
+   * clients have no command timeout, so on a socket that went silent the
+   * queued commands would otherwise wait for TCP to give up; disconnecting
+   * rejects them now, and the next getNodeConnection opens a fresh client.
+   */
+  evictNodeClient(client: Valkey): void {
+    for (const [key, connection] of this.discoveredNodes) {
+      if (connection.client === client) this.discoveredNodes.delete(key);
+    }
+    client.disconnect();
+  }
+
   async retainAddressConnections(connectionId: string, addrs: ReadonlySet<string>): Promise<void> {
     const prefix = `addr:${connectionId}:`;
     const dropped = [...this.discoveredNodes].filter(

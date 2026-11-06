@@ -6,7 +6,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
-  let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock };
+  let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock; evictNodeClient: jest.Mock };
   let mockConnectionRegistry: { get: jest.Mock; getDefaultId: jest.Mock; list: jest.Mock; getConfig: jest.Mock };
   let mockClient: { call: jest.Mock; info: jest.Mock; slowlog: jest.Mock; status: string };
 
@@ -107,6 +107,7 @@ used_cpu_user:20.3\r
     mockDiscoveryService = {
       discoverNodes: jest.fn().mockResolvedValue(mockNodes),
       getNodeConnection: jest.fn().mockResolvedValue(mockClient),
+      evictNodeClient: jest.fn(),
     };
 
     mockConnectionRegistry = {
@@ -730,35 +731,53 @@ used_cpu_user:20.3\r
       }
     });
 
-    it('does not queue more slot stats behind a primary that has not answered the last ones', async () => {
+    it('drops the client of a primary that did not answer, so the next call reconnects', async () => {
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
           { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
           { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
         ]);
-        let release: (value: unknown) => void = () => undefined;
-        const stuck = jest.fn(() => new Promise((resolve) => (release = resolve)));
-        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
-          call: nodeId === 'p1' ? jest.fn().mockResolvedValue([[1, ['key-count', 50]]]) : stuck,
-        }));
+        const stuckClient = { call: jest.fn(() => new Promise(() => undefined)) };
+        const freshClient = { call: jest.fn().mockResolvedValue([[8192, ['key-count', 7]]]) };
+        let p2Client: { call: jest.Mock } = stuckClient;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) =>
+          nodeId === 'p1' ? { call: jest.fn().mockResolvedValue([[1, ['key-count', 50]]]) } : p2Client,
+        );
+        mockDiscoveryService.evictNodeClient.mockImplementation(() => {
+          p2Client = freshClient;
+        });
 
         const first = service.getClusterSlotStatsResult('key-count', 10);
         await jest.advanceTimersByTimeAsync(5_000);
-        await first;
-        expect(stuck).toHaveBeenCalledTimes(1);
+        expect((await first).failedNodes).toEqual(['10.0.0.3:6379']);
+        expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(stuckClient);
 
+        // The stall cleared with the eviction: the next call asks the primary again.
         const second = await service.getClusterSlotStatsResult('key-count', 10);
-        expect(stuck).toHaveBeenCalledTimes(1);
-        expect(second.failedNodes).toEqual(['10.0.0.3:6379']);
+        expect(freshClient.call).toHaveBeenCalledTimes(1);
+        expect(second.failedNodes).toEqual([]);
+        expect(Object.keys(second.stats).sort()).toEqual(['1', '8192']);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
 
-        // Once the stuck reply arrives, the next scrape asks the primary again.
-        release([[8192, ['key-count', 7]]]);
-        await jest.advanceTimersByTimeAsync(0);
-        stuck.mockResolvedValue([[8192, ['key-count', 7]]]);
-        const third = await service.getClusterSlotStatsResult('key-count', 10);
-        expect(stuck).toHaveBeenCalledTimes(2);
-        expect(third.failedNodes).toEqual([]);
+    it('keeps a primary out while it has not even handed over a client', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        ]);
+        mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
+
+        const first = service.getSlotMigrations();
+        await jest.advanceTimersByTimeAsync(5_000);
+        await first;
+        await service.getSlotMigrations();
+
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(1);
+        expect(mockDiscoveryService.evictNodeClient).not.toHaveBeenCalled();
       } finally {
         jest.useRealTimers();
       }
