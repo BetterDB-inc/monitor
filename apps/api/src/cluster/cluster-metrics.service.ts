@@ -572,7 +572,9 @@ export class ClusterMetricsService {
             timeoutMessage,
           );
         } catch (error) {
-          this.unreachableUntil.set(stalledKey, Date.now() + UNREACHABLE_NODE_BACKOFF_MS);
+          // A connect cut off by a shortened budget says nothing about the node.
+          const cutShort = !fullTimeout && error instanceof Error && error.message === timeoutMessage;
+          if (!cutShort) this.unreachableUntil.set(stalledKey, Date.now() + UNREACHABLE_NODE_BACKOFF_MS);
           throw error;
         }
         this.unreachableUntil.delete(stalledKey);

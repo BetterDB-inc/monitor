@@ -955,6 +955,21 @@ used_cpu_user:20.3\r
       expect(slow.call).toHaveBeenCalledTimes(1);
     });
 
+    it('does not back off a primary whose connect was cut off by a shortened budget', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockImplementationOnce(() => new Promise(() => undefined));
+      mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 40);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue([[1, ['key-count', 5]]]) });
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 40);
+
+      expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(2);
+      expect(result.failedNodes).toEqual([]);
+    });
+
     it('rejects ordering by cpu-usec while no primary reports it', async () => {
       // cluster-slot-stats-enabled no: replies carry key-count only.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
