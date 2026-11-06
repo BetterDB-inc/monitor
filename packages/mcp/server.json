@@ -7,12 +7,12 @@
     "source": "github",
     "subfolder": "packages/mcp"
   },
-  "version": "1.5.1",
+  "version": "1.6.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@betterdb/mcp",
-      "version": "1.5.1",
+      "version": "1.6.0",
       "transport": {
         "type": "stdio"
       },
@@ -86,14 +86,14 @@
           "name": "BETTERDB_INSTANCE_ID"
         },
         {
-          "description": "MCP token for the local monitor used after --autostart or start_monitor; BETTERDB_TOKEN is never sent to it",
+          "description": "MCP token for the local monitor used after --autostart or start_monitor; BETTERDB_TOKEN is kept only when BETTERDB_URL already points at that monitor",
           "isRequired": false,
           "format": "string",
           "isSecret": true,
           "name": "BETTERDB_LOCAL_TOKEN"
         },
         {
-          "description": "Set to false, 0, no, off or an empty string to stop posting tool usage events to the monitor",
+          "description": "Set to false, 0, no or off to stop posting tool usage events to the monitor",
           "isRequired": false,
           "format": "string",
           "isSecret": false,

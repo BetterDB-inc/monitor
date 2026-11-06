@@ -5,20 +5,28 @@ All notable changes to `@betterdb/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.1] - Unreleased
+## [1.6.0] - Unreleased
 
 ### Changed
 
 - `start_monitor` and `stop_monitor` are registered only with `--autostart` or
-  the new `--monitor-tools` flag.
+  the new `--monitor-tools` flag. Add `--monitor-tools` to keep them without
+  `--autostart`.
+
+### Added
+
+- `BETTERDB_LOCAL_TOKEN`: token for the local monitor used after
+  `--autostart` or `start_monitor`.
 
 ### Fixed
 
-- Switching to a local monitor with `start_monitor` or `--autostart` no longer
-  sends the configured `BETTERDB_TOKEN` to it. Set the new
-  `BETTERDB_LOCAL_TOKEN` when the local monitor needs a token.
-- `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no`, `off` and an
-  empty string, not only `false`.
+- Switching to a local monitor no longer sends `BETTERDB_TOKEN` to it, unless
+  `BETTERDB_URL` already pointed at that monitor, and no longer passes it to
+  the spawned monitor process.
+- Switching to a local monitor clears the selected instance and flushes
+  pending telemetry to the previous monitor first.
+- `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no` and `off`,
+  not only `false`.
 
 ## [1.4.0] - 2026-07-28
 

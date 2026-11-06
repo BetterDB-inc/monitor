@@ -66,5 +66,5 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Check @betterdb/mcp versions match across package, server.json and the Claude plugin
-        run: node scripts/check-mcp-versions.mjs
+      - name: Check @betterdb/mcp versions and that the plugin pin is published
+        run: node scripts/check-mcp-versions.mjs --check-published

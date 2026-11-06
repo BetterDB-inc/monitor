@@ -27,7 +27,7 @@ function flush(): Promise<void> {
     });
 }
 
-const OFF_VALUES = new Set(['', 'false', '0', 'no', 'off']);
+const OFF_VALUES = new Set(['false', '0', 'no', 'off']);
 
 export function isTelemetryDisabled(value: string | undefined): boolean {
   return value !== undefined && OFF_VALUES.has(value.trim().toLowerCase());
@@ -49,6 +49,10 @@ export function trackToolCall(event: Omit<TelemetryEvent, 'timestamp'>): void {
   if (buffer.length >= MAX_BUFFER_SIZE) {
     flush();
   }
+}
+
+export function flushTelemetry(): Promise<void> {
+  return flush();
 }
 
 export async function stopTelemetry(): Promise<void> {

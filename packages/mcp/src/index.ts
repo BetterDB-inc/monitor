@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
-import { initTelemetry, trackToolCall, stopTelemetry } from './telemetry.js';
+import { initTelemetry, trackToolCall, stopTelemetry, flushTelemetry } from './telemetry.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -59,9 +59,31 @@ let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
 let detectedPrefix: string | null = null;
 const API_PREFIXES = ['/api', ''];
 
-function useLocalMonitor(url: string): void {
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+function isSameLocalMonitor(a: string, b: string): boolean {
+  try {
+    const left = new URL(a);
+    const right = new URL(b);
+    return (
+      LOOPBACK_HOSTS.has(left.hostname) &&
+      LOOPBACK_HOSTS.has(right.hostname) &&
+      left.protocol === right.protocol &&
+      left.port === right.port
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function useLocalMonitor(url: string): Promise<void> {
+  const sameMonitor = isSameLocalMonitor(BETTERDB_URL, url);
+  await flushTelemetry();
   BETTERDB_URL = url;
-  BETTERDB_TOKEN = process.env.BETTERDB_LOCAL_TOKEN || undefined;
+  BETTERDB_TOKEN = process.env.BETTERDB_LOCAL_TOKEN || (sameMonitor ? BETTERDB_TOKEN : undefined);
+  if (!sameMonitor) {
+    activeInstanceId = null;
+  }
   process.env.BETTERDB_URL = url;
   if (BETTERDB_TOKEN) {
     process.env.BETTERDB_TOKEN = BETTERDB_TOKEN;
@@ -910,7 +932,7 @@ if (MONITOR_TOOLS) {
         try {
           const { startMonitor } = await import('./autostart.js');
           const result = await startMonitor({ persist: true, port, storage });
-          useLocalMonitor(result.url);
+          await useLocalMonitor(result.url);
           const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
           return {
             content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
@@ -2186,7 +2208,7 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    useLocalMonitor(result.url);
+    await useLocalMonitor(result.url);
   }
 
   initTelemetry(apiRequest);

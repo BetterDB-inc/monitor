@@ -94,7 +94,11 @@ export async function startMonitor(opts: {
 
   // Build env — filter out undefined values from process.env
   const env: Record<string, string> = {
-    ...Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== undefined)) as Record<string, string>,
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([k, v]) => v !== undefined && k !== 'BETTERDB_TOKEN' && k !== 'BETTERDB_LOCAL_TOKEN',
+      ),
+    ) as Record<string, string>,
     PORT: String(opts.port),
     STORAGE_TYPE: opts.storage,
     NODE_ENV: 'production',

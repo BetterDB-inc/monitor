@@ -1,7 +1,7 @@
 {
   "name": "betterdb",
   "displayName": "BetterDB",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Valkey and Redis observability from BetterDB Monitor: health, slowlog, latency, memory, hot keys, anomalies and cluster state",
   "author": {
     "name": "BetterDB Inc.",
@@ -30,12 +30,14 @@
       "type": "string",
       "title": "MCP token",
       "description": "Token from Settings → MCP Tokens in BetterDB. Leave empty for a local monitor without auth",
-      "sensitive": true
+      "sensitive": true,
+      "default": ""
     },
     "betterdb_instance_id": {
       "type": "string",
       "title": "Instance ID",
-      "description": "Instance to use at the start of each session, for monitors with several instances. Leave empty to pick one with select_instance"
+      "description": "Instance to use at the start of each session, for monitors with several instances. Leave empty to pick one with select_instance",
+      "default": ""
     },
     "telemetry": {
       "type": "boolean",
