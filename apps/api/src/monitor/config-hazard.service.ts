@@ -138,7 +138,9 @@ export class ConfigHazardService {
       if (fsync.finding !== null) {
         findings.push(fsync.finding);
       }
-    } else {
+    } else if (appendonly !== null) {
+      // Only an explicit AOF-off read resets the everysec trend. A null read is
+      // filtered or transient and must not wipe a rising streak.
       this.delayedFsyncTrend.delete(connectionId);
     }
 

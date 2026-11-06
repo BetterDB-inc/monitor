@@ -465,6 +465,51 @@ describe('ConfigHazardService', () => {
       expect(third[0].id).toBe('appendfsync-everysec-backlog');
     });
 
+    it('keeps the everysec rising streak across a probe where appendonly reads null', async () => {
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 1 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 3 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+
+      // A filtered appendonly read skips the AOF checks but must not reset the
+      // trend the everysec escalation depends on.
+      const base = client.getConfigValue.getMockImplementation()!;
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'appendonly') return Promise.resolve(null);
+        return base(param);
+      });
+      const filtered = await service.probeHazards('conn-1');
+      expect(filtered.complete).toBe(false);
+
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 6 });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(1);
+      expect(findings[0].id).toBe('appendfsync-everysec-backlog');
+    });
+
+    it('resets the everysec rising streak when AOF is turned off', async () => {
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 1 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 3 });
+      await service.getHazards('conn-1');
+      now += 61_000;
+
+      const base = client.getConfigValue.getMockImplementation()!;
+      client.getConfigValue.mockImplementation((param: string) => {
+        if (param === 'appendonly') return Promise.resolve('no');
+        return base(param);
+      });
+      await service.getHazards('conn-1');
+      now += 61_000;
+
+      setupFsyncClient({ appendfsync: 'everysec', delayed: 6 });
+      const findings = await service.getHazards('conn-1');
+      expect(findings).toHaveLength(0);
+    });
+
     it('reports both the ACL hazard and the appendfsync advisory together', async () => {
       setupFsyncClient();
       client.call.mockImplementation((cmd: string) => {
