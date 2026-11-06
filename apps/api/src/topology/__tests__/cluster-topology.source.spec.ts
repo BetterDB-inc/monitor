@@ -77,18 +77,21 @@ describe('ClusterTopologySource', () => {
       .mockResolvedValueOnce(['10.0.0.1']);
 
     expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
-    await expect(source.discover(single as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
     expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
   });
 
-  it('treats a seed as an alias after two alias verdicts in a row, and as one node again at once', async () => {
+  it('changes a seed between alias and one node only after two verdicts in a row', async () => {
     const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
     source.resolveHost = jest.fn()
       .mockResolvedValueOnce(['10.0.0.1', '10.0.0.2'])
       .mockResolvedValueOnce(['10.0.0.1', '10.0.0.2'])
+      .mockResolvedValueOnce(['10.0.0.1'])
       .mockResolvedValueOnce(['10.0.0.1']);
 
     await expect(source.discover(single as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(single as never, 10_000))).toEqual(['n1', 'n2']);
+    // A rollout leaves one pod behind the name for a sync: myself stays.
     expect(ids(await source.discover(single as never, 10_000))).toEqual(['n1', 'n2']);
     expect(ids(await source.discover(single as never, 10_000))).toEqual(['n2']);
   });
