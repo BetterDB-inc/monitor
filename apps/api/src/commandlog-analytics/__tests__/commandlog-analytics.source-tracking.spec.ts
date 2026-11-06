@@ -24,6 +24,7 @@ describe('CommandLogAnalyticsService source tracking', () => {
     const client = {
       getCapabilities: () => ({ hasCommandLog: true }),
       getServingEndpoint: () => endpoint,
+      getInfo: jest.fn().mockRejectedValue(new Error('NOPERM')),
       getCommandLog: jest.fn(async (_count: number, type: CommandLogType) => (type === 'slow' ? slow : [])),
     };
     const service = new CommandLogAnalyticsService(

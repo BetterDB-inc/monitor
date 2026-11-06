@@ -26,6 +26,7 @@ describe('SlowLogAnalyticsService source tracking', () => {
   let onRead: () => void;
   let onInfo: () => void;
   let generation: number;
+  let infoError: Error | null;
 
   const ctx = () => ({
     connectionId: 'seed',
@@ -43,6 +44,7 @@ describe('SlowLogAnalyticsService source tracking', () => {
       getInfo: jest.fn(async () => {
         const reply = runId;
         onInfo();
+        if (infoError) throw infoError;
         if (reply === null) throw new Error('NOPERM');
         return { server: { run_id: reply } };
       }),
@@ -52,6 +54,7 @@ describe('SlowLogAnalyticsService source tracking', () => {
 
   beforeEach(() => {
     runId = null;
+    infoError = null;
     onRead = () => undefined;
     onInfo = () => undefined;
     generation = 1;
@@ -220,6 +223,22 @@ describe('SlowLogAnalyticsService source tracking', () => {
 
     const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
     expect(stored.filter((e) => !e.sourceRunId).map((e) => e.id).sort()).toEqual([0, 1]);
+  });
+
+  it('skips the poll when INFO fails for a reason other than being refused', async () => {
+    endpoint = { host: '10.0.0.1', port: 6379 };
+    served = entries([0, 1], 1000);
+    infoError = new Error('Command timed out');
+    await poll();
+    expect(await repo.getSlowLogEntries({ connectionId: 'seed' })).toEqual([]);
+
+    // The next poll reads the run id and stores the entries once, under it.
+    infoError = null;
+    runId = 'run-a';
+    await poll();
+    const stored = await repo.getSlowLogEntries({ connectionId: 'seed', limit: 100 });
+    expect(stored.map((e) => e.id).sort()).toEqual([0, 1]);
+    expect(stored.every((e) => e.sourceRunId === 'run-a')).toBe(true);
   });
 
   it('skips the poll when the connection reconnects while INFO is pending', async () => {
