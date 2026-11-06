@@ -463,6 +463,42 @@ describe('PrometheusService slot stats', () => {
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
   });
 
+  it('drops the kept series of a primary that keeps failing once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
+        stats: { '1': slot(50), '9000': slot(40) },
+        failedNodes: [],
+        failedSlotRanges: [],
+      });
+      await runSlotStats(harness);
+      const failing = { stats: { '1': slot(51) }, failedNodes: ['10.0.0.3:6379'], failedSlotRanges: [[8192, 16383]] };
+      clusterMetrics.getClusterSlotStatsResult.mockResolvedValue(failing);
+
+      now += stalenessMs;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="9000"`);
+
+      now += 1;
+      await runSlotStats(harness);
+      const text = await harness.service.getMetrics();
+      expect(text).not.toContain(`slot="9000"`);
+      expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 51`);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('bounds the cluster-wide fan-out by what is left of the INFO pass', async () => {
     const harness = buildService();
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
@@ -474,12 +510,15 @@ describe('PrometheusService slot stats', () => {
     const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
     service.clusterMetricsService = clusterMetrics;
 
-    service.passDeadlines.set('conn-1', Date.now() + 1_000);
+    service.passDeadlines.set('conn-1', Date.now() + 3_000);
     await runSlotStats(harness);
     const [, , , timeoutMs] = clusterMetrics.getClusterSlotStatsResult.mock.calls[0];
-    expect(timeoutMs).toBeGreaterThan(0);
-    expect(timeoutMs).toBeLessThanOrEqual(1_000);
+    expect(timeoutMs).toBeGreaterThan(1_000);
+    expect(timeoutMs).toBeLessThanOrEqual(3_000);
 
+    // Under a second left: not worth starting, the last series stay.
+    service.passDeadlines.set('conn-1', Date.now() + 500);
+    await runSlotStats(harness);
     service.passDeadlines.set('conn-1', Date.now() - 1);
     await runSlotStats(harness);
     expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);

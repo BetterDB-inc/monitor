@@ -95,6 +95,8 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+// Least of the pass left for the slot-stats fan-out to start at all.
+const SLOT_STATS_MIN_BUDGET_MS = 1_000;
 
 const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
   POLL_STALE_METRIC,
@@ -118,6 +120,8 @@ interface ConnectionMetricState {
   rdbStopsWrites: { value: boolean | null; fetchedAt: number } | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  /** When each exported slot was last answered for, so a failing owner's series age out. */
+  clusterSlotSeenAt: Map<string, number>;
   // Key-size metric labels (per-connection). Per-key and keysize-bucket label
   // tuples are stored JSON-encoded so a single set tracks the full tuple
   // (key names may contain any delimiter character).
@@ -632,6 +636,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         rdbStopsWrites: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        clusterSlotSeenAt: new Map(),
         // Key-size metric labels
         currentKeyPatternLabels: new Set(),
         currentKeyDetailLabels: new Set(),
@@ -2660,7 +2665,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // The fan-out must finish inside this pass, or a later pass retires the
         // epoch and every primary's answer is thrown away.
         const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - Date.now();
-        if (remainingMs <= 0) {
+        // Too little left for a node round trip: keep last pass's series rather
+        // than expire every primary on a deadline it never had a chance to meet.
+        if (remainingMs < SLOT_STATS_MIN_BUDGET_MS) {
           return;
         }
         result = await this.clusterMetricsService.getClusterSlotStatsResult(
@@ -2682,8 +2689,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       const newSlotLabels = new Set<string>();
+      const now = Date.now();
       for (const [slot, stats] of Object.entries(slotStats)) {
         newSlotLabels.add(slot);
+        state.clusterSlotSeenAt.set(slot, now);
         this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
         this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
         this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
@@ -2691,13 +2700,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       // A primary that did not answer is missing from this result; keep the
-      // series its slots exported last time instead of dropping them.
+      // series its slots exported last time instead of dropping them, until
+      // they are older than the staleness bound.
       for (const staleSlot of state.currentClusterSlotLabels) {
         if (newSlotLabels.has(staleSlot)) continue;
-        if (inSlotRanges(Number(staleSlot), failedSlotRanges)) {
+        const seenAt = state.clusterSlotSeenAt.get(staleSlot) ?? 0;
+        if (inSlotRanges(Number(staleSlot), failedSlotRanges) && now - seenAt <= this.stalenessMs) {
           newSlotLabels.add(staleSlot);
         } else {
           this.removeSlotSeries(connLabel, staleSlot);
+          state.clusterSlotSeenAt.delete(staleSlot);
         }
       }
 
@@ -2720,6 +2732,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.removeSlotSeries(connLabel, slot);
     }
     state.currentClusterSlotLabels = new Set();
+    state.clusterSlotSeenAt.clear();
   }
 
   private removeSlotSeries(connLabel: string, slot: string): void {
