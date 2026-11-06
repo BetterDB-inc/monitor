@@ -27,8 +27,14 @@ function flush(): Promise<void> {
     });
 }
 
+const OFF_VALUES = new Set(['', 'false', '0', 'no', 'off']);
+
+export function isTelemetryDisabled(value: string | undefined): boolean {
+  return value !== undefined && OFF_VALUES.has(value.trim().toLowerCase());
+}
+
 export function initTelemetry(apiFn: ApiRequestFn): void {
-  if (process.env.BETTERDB_TELEMETRY === 'false') {
+  if (isTelemetryDisabled(process.env.BETTERDB_TELEMETRY)) {
     disabled = true;
     return;
   }

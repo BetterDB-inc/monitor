@@ -13,13 +13,16 @@ Claude Code asks for these settings when the plugin is enabled:
 
 - **BetterDB URL**: the address of your BetterDB Monitor. Defaults to `http://localhost:3001`.
 - **MCP token**: generated in BetterDB under **Settings → MCP Tokens**. It is stored in your system credential store, not in `settings.json`. Leave it empty for a local monitor that does not require auth.
+- **Instance ID**: optional. For a monitor with several instances, the instance Claude starts each session on. Leave it empty to choose one with `select_instance`.
 - **Usage telemetry**: on by default. Turn it off to stop the server posting usage events to your monitor.
 
 You need Node.js 20 or later and a running BetterDB Monitor. To run one locally, see the [monitor README](https://github.com/BetterDB-inc/monitor#readme).
 
 ## What it runs
 
-The plugin starts one local MCP server over stdio: the [`@betterdb/mcp`](https://www.npmjs.com/package/@betterdb/mcp) package from npm, pinned to an exact version and launched with `npx`. The server's source is in [`packages/mcp`](https://github.com/BetterDB-inc/monitor/tree/master/packages/mcp).
+The plugin starts one local MCP server over stdio: the [`@betterdb/mcp`](https://www.npmjs.com/package/@betterdb/mcp) package from npm, launched with `npx`. The package itself is pinned to an exact version; its dependencies (`@modelcontextprotocol/sdk` and `zod`) resolve within their published semver ranges. The server's source is in [`packages/mcp`](https://github.com/BetterDB-inc/monitor/tree/master/packages/mcp).
+
+The plugin does not start a BetterDB Monitor or any other process. The server's `start_monitor` and `stop_monitor` tools are left off.
 
 ## What it sends and fetches
 

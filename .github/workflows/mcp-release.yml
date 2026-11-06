@@ -73,6 +73,11 @@ jobs:
             echo "version=${GITHUB_REF_NAME#mcp-v}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check committed versions match the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/check-mcp-versions.mjs --expect "$VERSION"
+
       - name: Update package.json version
         env:
           VERSION: ${{ steps.version.outputs.version }}

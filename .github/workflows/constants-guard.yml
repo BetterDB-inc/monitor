@@ -49,3 +49,22 @@ jobs:
 
       - name: Check Dockerfile.aiven is generated from Dockerfile
         run: node scripts/generate-dockerfile-aiven.mjs --check
+
+  mcp-versions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check @betterdb/mcp versions match across package, server.json and the Claude plugin
+        run: node scripts/check-mcp-versions.mjs

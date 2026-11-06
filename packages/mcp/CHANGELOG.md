@@ -5,6 +5,20 @@ All notable changes to `@betterdb/mcp` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - Unreleased
+
+### Changed
+
+- `start_monitor` and `stop_monitor` are registered only with `--autostart` or
+  the new `--monitor-tools` flag.
+
+### Fixed
+
+- Switching to a local monitor with `start_monitor` or `--autostart` no longer
+  sends the configured `BETTERDB_TOKEN` to it.
+- `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no`, `off` and an
+  empty string, not only `false`.
+
 ## [1.4.0] - 2026-07-28
 
 ### Added

@@ -7,12 +7,12 @@
     "source": "github",
     "subfolder": "packages/mcp"
   },
-  "version": "1.5.0",
+  "version": "1.5.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@betterdb/mcp",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "transport": {
         "type": "stdio"
       },
@@ -50,6 +50,13 @@
         },
         {
           "type": "named",
+          "name": "--monitor-tools",
+          "description": "Register the start_monitor and stop_monitor tools (always on with --autostart)",
+          "format": "boolean",
+          "isRequired": false
+        },
+        {
+          "type": "named",
           "name": "--stop",
           "description": "Stop a previously persisted monitor process and exit",
           "format": "boolean",
@@ -77,6 +84,13 @@
           "format": "string",
           "isSecret": false,
           "name": "BETTERDB_INSTANCE_ID"
+        },
+        {
+          "description": "Set to false, 0, no, off or an empty string to stop posting tool usage events to the monitor",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "BETTERDB_TELEMETRY"
         }
       ]
     }

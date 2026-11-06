@@ -16,6 +16,7 @@ const args = process.argv.slice(2);
 const AUTOSTART = args.includes('--autostart');
 const PERSIST = args.includes('--persist');
 const STOP = args.includes('--stop');
+const MONITOR_TOOLS = AUTOSTART || args.includes('--monitor-tools');
 
 function getArgValue(flag: string, fallback: string): string {
   const i = args.indexOf(flag);
@@ -48,7 +49,7 @@ if (STOP) {
 }
 
 let BETTERDB_URL = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
-const BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
+let BETTERDB_TOKEN = process.env.BETTERDB_TOKEN;
 const BETTERDB_INSTANCE_ID = process.env.BETTERDB_INSTANCE_ID || null;
 
 let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
@@ -57,6 +58,14 @@ let activeInstanceId: string | null = BETTERDB_INSTANCE_ID;
 // Probe once on first request, then cache the result.
 let detectedPrefix: string | null = null;
 const API_PREFIXES = ['/api', ''];
+
+function useLocalMonitor(url: string): void {
+  BETTERDB_URL = url;
+  BETTERDB_TOKEN = undefined;
+  process.env.BETTERDB_URL = url;
+  delete process.env.BETTERDB_TOKEN;
+  detectedPrefix = null;
+}
 
 async function rawFetch(prefix: string, path: string): Promise<Response> {
   const url = `${BETTERDB_URL}${prefix}${path}`;
@@ -875,47 +884,47 @@ server.tool(
 
 // --- Monitor lifecycle tools ---
 
-server.tool(
-  'start_monitor',
-  'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
-  {
-    port: z
-      .number()
-      .int()
-      .min(1)
-      .max(65535)
-      .default(3001)
-      .describe('Port for the monitor API (default 3001)'),
-    storage: z
-      .enum(['sqlite', 'memory'])
-      .default('sqlite')
-      .describe('Storage backend (default sqlite)'),
-  },
-  async ({ port, storage }) =>
-    withTelemetry('start_monitor', async () => {
-      try {
-        const { startMonitor } = await import('./autostart.js');
-        const result = await startMonitor({ persist: true, port, storage });
-        BETTERDB_URL = result.url;
-        process.env.BETTERDB_URL = result.url;
-        detectedPrefix = null;
-        const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
-        return {
-          content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'start_monitor',
+    'Start the BetterDB monitor as a persistent background process. If already running, returns the existing URL. The monitor persists across MCP sessions and must be stopped explicitly with stop_monitor.',
+    {
+      port: z
+        .number()
+        .int()
+        .min(1)
+        .max(65535)
+        .default(3001)
+        .describe('Port for the monitor API (default 3001)'),
+      storage: z
+        .enum(['sqlite', 'memory'])
+        .default('sqlite')
+        .describe('Storage backend (default sqlite)'),
+    },
+    async ({ port, storage }) =>
+      withTelemetry('start_monitor', async () => {
+        try {
+          const { startMonitor } = await import('./autostart.js');
+          const result = await startMonitor({ persist: true, port, storage });
+          useLocalMonitor(result.url);
+          const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+          return {
+            content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to start monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }),
+  );
+}
 
 const CACHE_NAME_DESC =
   "Cache name as registered in __betterdb:caches (e.g. 'betterdb_scache_prod').";
@@ -1611,31 +1620,33 @@ function formatProposalText(data: {
   };
 }
 
-server.tool(
-  'stop_monitor',
-  'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
-  {},
-  async () =>
-    withTelemetry('stop_monitor', async () => {
-      try {
-        const { stopMonitor } = await import('./autostart.js');
-        const result = await stopMonitor();
-        return {
-          content: [{ type: 'text' as const, text: result.message }],
-        };
-      } catch (err) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }),
-);
+if (MONITOR_TOOLS) {
+  server.tool(
+    'stop_monitor',
+    'Stop a persistent BetterDB monitor process that was previously started with start_monitor or --autostart --persist.',
+    {},
+    async () =>
+      withTelemetry('stop_monitor', async () => {
+        try {
+          const { stopMonitor } = await import('./autostart.js');
+          const result = await stopMonitor();
+          return {
+            content: [{ type: 'text' as const, text: result.message }],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Failed to stop monitor: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      }),
+  );
+}
 
 // --- Memory tools ---
 server.tool(
@@ -2171,10 +2182,7 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    // Always update URL/prefix to target the monitor (whether freshly started or already running)
-    BETTERDB_URL = result.url;
-    process.env.BETTERDB_URL = result.url;
-    detectedPrefix = null;
+    useLocalMonitor(result.url);
   }
 
   initTelemetry(apiRequest);

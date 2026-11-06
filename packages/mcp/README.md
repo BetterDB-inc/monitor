@@ -51,7 +51,7 @@ claude plugin marketplace add BetterDB-inc/monitor
 claude plugin install betterdb@betterdb
 ```
 
-For other clients, or to configure Claude Code by hand, add to your MCP client config (e.g. Claude Code or OpenAI Codex):
+For other clients such as OpenAI Codex, or to configure Claude Code by hand, add to your MCP client config:
 
 ```json
 {
@@ -59,7 +59,7 @@ For other clients, or to configure Claude Code by hand, add to your MCP client c
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp"],
+      "args": ["-y", "@betterdb/mcp@1.5.1"],
       "env": {
         "BETTERDB_URL": "https://<your-workspace>.app.betterdb.com",
         "BETTERDB_TOKEN": "<your-token>"
@@ -77,7 +77,7 @@ For local development with an existing monitor (token not required):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp"],
+      "args": ["-y", "@betterdb/mcp@1.5.1"],
       "env": {
         "BETTERDB_URL": "http://localhost:3001"
       }
@@ -94,7 +94,7 @@ For zero-config local development (auto-starts and manages a monitor process):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp", "--autostart", "--persist"]
+      "args": ["-y", "@betterdb/mcp@1.5.1", "--autostart", "--persist"]
     }
   }
 }
@@ -121,12 +121,14 @@ Once connected, your AI assistant can query your databases directly:
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
+| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no`, `off` or an empty string to stop posting tool usage events (tool name, success, duration, error) to the monitor |
 
 ### CLI Arguments
 
 | Argument | Default | Description |
 |---|---|---|
-| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup |
+| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup. Also registers `start_monitor` and `stop_monitor` |
+| `--monitor-tools` | — | Register `start_monitor` and `stop_monitor` without auto-starting a monitor |
 | `--persist` | — | Keep the monitor running after the MCP server exits (requires `--autostart`) |
 | `--port <number>` | `3001` | Port for the auto-started monitor API |
 | `--storage <type>` | `sqlite` | Storage backend: `sqlite` or `memory` |
@@ -202,6 +204,8 @@ For AI components (semantic caches, agent caches, agent-memory stores, retrieval
 | `set_default_connection` | Set a connection as the active default |
 
 ### Monitor Lifecycle Tools
+
+Registered only with `--autostart` or `--monitor-tools`. They run `npx --yes @betterdb/monitor` as a background process, and after `start_monitor` the server talks to that local monitor without sending `BETTERDB_TOKEN`.
 
 | Tool | Description |
 |---|---|
