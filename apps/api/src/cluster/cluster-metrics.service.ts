@@ -24,6 +24,13 @@ export type SlotStatsOrder = 'key-count' | 'cpu-usec';
 
 /** How long one node may take to answer a fan-out command before it is left out. */
 export const NODE_COMMAND_TIMEOUT_MS = 5_000;
+// After a primary's announced address could not be reached, slot stats skip it
+// for this long and go straight to the fallback, instead of waiting out the
+// connect timeout on every call (an SSH tunnel or NAT never reaches it).
+const UNREACHABLE_NODE_BACKOFF_MS = 30_000;
+// Part of a slot-stats budget kept back for the fallback to the connection's
+// own node, so it still fits when every primary used its full timeout.
+const SLOT_STATS_FALLBACK_RESERVE_MS = 1_000;
 
 /** How many SLOTSRANGE reads one node may have in flight at once. */
 const SLOT_RANGE_BATCH_SIZE = 16;
@@ -170,6 +177,8 @@ export class ClusterMetricsService {
   // stacking another batch behind them on every scrape. Evicting the socket
   // rejects them, so the guard only outlives a fan-out that never got a client.
   private readonly stalledNodes: Map<string, Promise<void>> = new Map();
+  // Node socket key -> until when its announced address counts as unreachable.
+  private readonly unreachableUntil: Map<string, number> = new Map();
 
   constructor(
     private readonly discoveryService: ClusterDiscoveryService,
@@ -200,6 +209,10 @@ export class ClusterMetricsService {
    * keep the node out until the work settles on its own.
    */
   private markNodeStalled(key: string, work: Promise<unknown>, client?: Valkey): void {
+    if (client) {
+      this.discoveryService.evictNodeClient(client);
+      return;
+    }
     const settled: Promise<void> = work.then(
       () => undefined,
       () => undefined,
@@ -207,10 +220,6 @@ export class ClusterMetricsService {
       if (this.stalledNodes.get(key) === settled) this.stalledNodes.delete(key);
     });
     this.stalledNodes.set(key, settled);
-    if (client) {
-      this.discoveryService.evictNodeClient(client);
-      this.stalledNodes.delete(key);
-    }
   }
 
   private clearNodeError(nodeId: string, operation: string): void {
@@ -538,20 +547,35 @@ export class ClusterMetricsService {
       (node) => node.role === 'master' && node.slots.length > 0,
     );
     const primaries = owners.filter((node) => node.healthy);
+    const budgetEnd = Date.now() + timeoutMs;
+    const nodeTimeoutMs = timeoutMs - Math.min(SLOT_STATS_FALLBACK_RESERVE_MS, Math.floor(timeoutMs / 4));
+    // A budget cut short by the caller (what is left of a Prometheus pass) can
+    // expire on a healthy node; only a full timeout drops that node's socket.
+    const fullTimeout = timeoutMs >= NODE_COMMAND_TIMEOUT_MS;
     // Ask for each owned range rather than the node's top N: during a slot move
     // a node still reports the slot it is handing off, which would take one of
     // the N places and push an owned slot out. The merge ranks them instead.
     const results = await Promise.allSettled(
       primaries.map(async (node) => {
-        const deadline = Date.now() + timeoutMs;
-        const timeoutMessage = `${node.address} did not answer within ${timeoutMs}ms`;
+        const deadline = Date.now() + nodeTimeoutMs;
+        const timeoutMessage = `${node.address} did not answer within ${nodeTimeoutMs}ms`;
         const stalledKey = this.stalledNodeKey(node, connectionId);
         this.assertNodeNotStalled(node, stalledKey);
-        const client = await withTimeout(
-          this.discoveryService.getNodeConnection(node.id, connectionId),
-          timeoutMs,
-          timeoutMessage,
-        );
+        if ((this.unreachableUntil.get(stalledKey) ?? 0) > Date.now()) {
+          throw new Error(`${node.address} could not be reached on a recent attempt`);
+        }
+        let client: Valkey;
+        try {
+          client = await withTimeout(
+            this.discoveryService.getNodeConnection(node.id, connectionId),
+            nodeTimeoutMs,
+            timeoutMessage,
+          );
+        } catch (error) {
+          this.unreachableUntil.set(stalledKey, Date.now() + UNREACHABLE_NODE_BACKOFF_MS);
+          throw error;
+        }
+        this.unreachableUntil.delete(stalledKey);
         // Replies on one connection arrive in order, so once the deadline passes
         // the ranges still unanswered are failed; the answered ones are kept.
         const answers: (PromiseSettledResult<unknown> | undefined)[] = new Array(node.slots.length);
@@ -569,7 +593,9 @@ export class ClusterMetricsService {
             expired = err;
           });
         }
-        if (expired !== undefined) this.markNodeStalled(stalledKey, Promise.all(issued), client);
+        if (expired !== undefined) {
+          this.markNodeStalled(stalledKey, Promise.all(issued), fullTimeout ? client : undefined);
+        }
         const perRange: PromiseSettledResult<unknown>[] = Array.from(
           answers,
           (answer) => answer ?? { status: 'rejected', reason: expired },
@@ -628,10 +654,11 @@ export class ClusterMetricsService {
       // report that node's slots and leave the other primaries as failed.
       // Its own error is the one to report: a NOPERM or "not supported" here
       // says more than a primary's timeout on an address it cannot reach.
+      const fallbackTimeoutMs = Math.max(timeoutMs - nodeTimeoutMs, budgetEnd - Date.now());
       const stats = await withTimeout(
         this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
-        timeoutMs,
-        `The connection did not answer CLUSTER SLOT-STATS within ${timeoutMs}ms`,
+        fallbackTimeoutMs,
+        `The connection did not answer CLUSTER SLOT-STATS within ${fallbackTimeoutMs}ms`,
       );
       const self = owners.find((node) => node.flags?.includes('myself'));
       return {
@@ -678,16 +705,28 @@ export class ClusterMetricsService {
       return Promise.reject(error);
     }
     let settled = false;
+    let timedOut = false;
     let client: Valkey | undefined;
     const work = this.discoveryService
       .getNodeConnection(node.id, connectionId)
-      .then((connected) => run((client = connected)))
+      .then((connected) => {
+        // Connected only after the caller gave up: nothing waits for commands
+        // sent now, and a silent node would hold them, and the guard, forever.
+        if (timedOut) {
+          this.discoveryService.evictNodeClient(connected);
+          throw new Error(`${node.address} connected after the ${timeoutMs}ms deadline`);
+        }
+        return run((client = connected));
+      })
       .finally(() => {
         settled = true;
       });
     return withTimeout(work, timeoutMs, `${node.address} did not answer within ${timeoutMs}ms`).catch(
       (error: unknown) => {
-        if (!settled) this.markNodeStalled(key, work, client);
+        if (!settled) {
+          timedOut = true;
+          this.markNodeStalled(key, work, client);
+        }
         throw error;
       },
     );

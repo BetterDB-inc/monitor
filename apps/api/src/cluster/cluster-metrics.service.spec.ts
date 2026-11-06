@@ -880,6 +880,33 @@ used_cpu_user:20.3\r
       }
     });
 
+    it('drops a client that arrives after the deadline instead of sending it commands', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', flags: ['master'], role: 'master', healthy: true, slots: [[0, 16383]] },
+        ]);
+        const late = { call: jest.fn() };
+        mockDiscoveryService.getNodeConnection.mockImplementation(
+          () => new Promise((resolve) => setTimeout(() => resolve(late), 7_000)),
+        );
+
+        const first = service.getSlotMigrations();
+        await jest.advanceTimersByTimeAsync(5_000);
+        await first;
+        await jest.advanceTimersByTimeAsync(2_000);
+
+        expect(late.call).not.toHaveBeenCalled();
+        expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(late);
+        // The node is let back in once that client is gone.
+        mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue('') });
+        await service.getSlotMigrations();
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(2);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('falls back to the connection\'s own node when no primary can be reached directly', async () => {
       // Behind an SSH tunnel the announced addresses are unreachable.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
@@ -912,6 +939,22 @@ used_cpu_user:20.3\r
       await expect(service.getClusterSlotStats('key-count', 10)).rejects.toThrow('not supported');
     });
 
+    it('does not drop the socket of a primary that missed a deadline the caller cut short', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+      ]);
+      const slow = { call: jest.fn(() => new Promise(() => undefined)) };
+      mockDiscoveryService.getNodeConnection.mockResolvedValue(slow);
+      mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 40);
+
+      expect(mockDiscoveryService.evictNodeClient).not.toHaveBeenCalled();
+      // Its commands are still queued, so the next call does not stack more.
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 40);
+      expect(slow.call).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects ordering by cpu-usec while no primary reports it', async () => {
       // cluster-slot-stats-enabled no: replies carry key-count only.
       mockDiscoveryService.discoverNodes.mockResolvedValue([
@@ -941,15 +984,25 @@ used_cpu_user:20.3\r
       );
       const p2Warnings = () => warn.mock.calls.filter(([message]) => String(message).includes('10.0.0.3')).length;
 
+      let now = Date.now();
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const p2Attempts = () =>
+        mockDiscoveryService.getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === 'p2').length;
+
       await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
       await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
       expect(p2Warnings()).toBe(1);
+      // Unreachable on its announced address: skipped until the backoff ends.
+      expect(p2Attempts()).toBe(1);
 
+      now += 31_000;
       p2Up = true;
       await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+      expect(p2Attempts()).toBe(2);
       p2Up = false;
       await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
       expect(p2Warnings()).toBe(2);
+      clock.mockRestore();
       warn.mockRestore();
     });
   });
