@@ -5693,7 +5693,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * Move the slow/command log tables to their run-id keys without blocking
    * writers on a large table: the widened unique key is built CONCURRENTLY and
    * attached as a constraint, and only then are the narrower constraints (which
-   * would reject the same id from another process) dropped. Rows with a run id
+   * would reject the same id from another process) dropped. A table without any
+   * unique key is deduplicated on the new key first. Rows with a run id
    * also get a partial unique index on (id, run id), so one process read through
    * two addresses is stored once; rows duplicated that way are collapsed first.
    * Only this schema's constraints are considered.
@@ -5735,6 +5736,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       for (const { table, constraint, columns } of tables) {
         let existing = (await client.query(uniqueConstraints, [table, columns])).rows;
         if (!existing.some((row) => row.covers)) {
+          // Any unique key these tables had is narrower than the new one, so
+          // only a table with none at all (created before the first) can hold
+          // rows the new key rejects; keep the first copy of each.
+          if (existing.length === 0) {
+            await client.query(
+              `DELETE FROM ${table} a USING ${table} b
+               WHERE a.pk > b.pk AND ${columns.map((column) => `a.${column} = b.${column}`).join(' AND ')}`,
+            );
+          }
           const built = await this.ensureIndexConcurrently(client, constraint, table, columns.join(', '), {
             unique: true,
           });

@@ -106,4 +106,40 @@ describePostgres('slow log key migration — postgres', () => {
       await adapter.close();
     }
   });
+
+  it('collapses duplicates in a legacy table without a unique key before keying it', async () => {
+    const keyless = `${legacySchema}_keyless`;
+    try {
+      await adminPool.query(`CREATE SCHEMA ${keyless}`);
+      await adminPool.query(`
+        CREATE TABLE ${keyless}.slow_log_entries (
+          pk SERIAL PRIMARY KEY,
+          slowlog_id BIGINT NOT NULL,
+          timestamp BIGINT NOT NULL,
+          duration BIGINT NOT NULL,
+          command TEXT[] NOT NULL DEFAULT '{}',
+          client_address TEXT,
+          client_name TEXT,
+          captured_at BIGINT NOT NULL,
+          source_host TEXT NOT NULL,
+          source_port INTEGER NOT NULL,
+          connection_id TEXT NOT NULL DEFAULT 'env-default'
+        );
+        INSERT INTO ${keyless}.slow_log_entries (slowlog_id, timestamp, duration, captured_at, source_host, source_port, connection_id)
+        VALUES (1, 100, 10, 1, '10.0.0.1', 6379, 'c1'), (1, 999, 10, 1, '10.0.0.1', 6379, 'c1'),
+               (2, 101, 10, 1, '10.0.0.1', 6379, 'c1');
+      `);
+
+      const adapter = new PostgresAdapter({ connectionString: DSN, schema: keyless });
+      try {
+        await adapter.initialize();
+        const rows = await adapter.getSlowLogEntries({ connectionId: 'c1', limit: 10 });
+        expect(rows.map((r) => r.timestamp).sort()).toEqual([100, 101]);
+      } finally {
+        await adapter.close();
+      }
+    } finally {
+      await dropSchema(adminPool, keyless);
+    }
+  });
 });
