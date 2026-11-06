@@ -667,42 +667,47 @@ export class ClusterMetricsService {
     // preferring the source's EXPORT view so the entry does not flip between polls.
     const atomicJobs = new Map<string, SlotMigration>();
 
-    const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
-      try {
-        const nodesString = (await client.call('CLUSTER', 'NODES')) as string;
-        for (const line of nodesString.trim().split('\n')) {
-          const parts = line.split(' ');
-          if (parts.length < 8) continue;
-          const [nodeId, address] = parts;
-          for (const slotRange of parts.slice(8)) {
-            const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
-            const target = migrating && findNode(migrating[2]);
-            if (migrating && target) {
-              addLegacy({
-                slot: parseInt(migrating[1], 10),
-                sourceNodeId: nodeId,
-                sourceAddress: address,
-                targetNodeId: target.id,
-                targetAddress: target.address,
-                state: 'migrating',
-                keysRemaining: undefined, // Can't get this without node connection
-              });
-            }
+    const addLegacyMarkers = (nodesString: string) => {
+      for (const line of nodesString.trim().split('\n')) {
+        const parts = line.split(' ');
+        if (parts.length < 8) continue;
+        const [nodeId, address] = parts;
+        for (const slotRange of parts.slice(8)) {
+          const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
+          const target = migrating && findNode(migrating[2]);
+          if (migrating && target) {
+            addLegacy({
+              slot: parseInt(migrating[1], 10),
+              sourceNodeId: nodeId,
+              sourceAddress: address,
+              targetNodeId: target.id,
+              targetAddress: target.address,
+              state: 'migrating',
+              keysRemaining: undefined, // Can't get this without node connection
+            });
+          }
 
-            const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
-            const source = importing && findNode(importing[2]);
-            if (importing && source) {
-              addLegacy({
-                slot: parseInt(importing[1], 10),
-                sourceNodeId: source.id,
-                sourceAddress: source.address,
-                targetNodeId: nodeId,
-                targetAddress: address,
-                state: 'importing',
-              });
-            }
+          const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
+          const source = importing && findNode(importing[2]);
+          if (importing && source) {
+            addLegacy({
+              slot: parseInt(importing[1], 10),
+              sourceNodeId: source.id,
+              sourceAddress: source.address,
+              targetNodeId: nodeId,
+              targetAddress: address,
+              state: 'importing',
+            });
           }
         }
+      }
+    };
+    let nodesRead = 0;
+
+    const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
+      try {
+        addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
+        nodesRead++;
       } catch (error) {
         this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
       }
@@ -715,7 +720,7 @@ export class ClusterMetricsService {
         // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
         const errorKey = `getslotmigrations-${primary.id}-${message}`;
         if (!/unknown (sub)?command/i.test(message) && !this.loggedErrors.has(errorKey)) {
-          this.loggedErrors.add(errorKey);
+          this.addLoggedError(errorKey);
           this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
         }
         return;
@@ -749,6 +754,28 @@ export class ClusterMetricsService {
         }),
       ),
     );
+
+    // No primary could be read directly, as behind an SSH tunnel or NAT: the
+    // connection's own node still shows its own legacy markers.
+    if (primaries.length > 0 && nodesRead === 0) {
+      const errorKey = `slotmigrations-${connectionId ?? ''}`;
+      if (!this.loggedErrors.has(errorKey)) {
+        this.logger.warn(
+          'Slot migration check could not read any primary directly; reading the connection\'s own node instead',
+        );
+        this.addLoggedError(errorKey);
+      }
+      try {
+        const client = this.connectionRegistry.get(connectionId).getClient();
+        addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
+      } catch (error) {
+        this.logger.error(
+          `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
+        );
+      }
+    } else {
+      this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
+    }
 
     return [...legacy.values(), ...atomicJobs.values()];
   }

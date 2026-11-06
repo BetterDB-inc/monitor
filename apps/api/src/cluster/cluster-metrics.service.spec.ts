@@ -565,6 +565,26 @@ used_cpu_user:20.3\r
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('NOPERM'));
     });
 
+    it("reads the connection's own node when no primary can be reached directly, and warns once", async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+      mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      mockClient.call.mockImplementation(async (cmd: string, sub: string) =>
+        cmd === 'CLUSTER' && sub === 'NODES'
+          ? 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n'
+          : null,
+      );
+      const warn = jest.spyOn((service as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
+
+      const migrations = await service.getSlotMigrations('conn-1');
+      await service.getSlotMigrations('conn-1');
+
+      expect(migrations).toEqual([
+        expect.objectContaining({ slot: 5461, sourceNodeId: 'abc123node1', targetNodeId: 'def456node2', state: 'migrating' }),
+      ]);
+      expect(mockConnectionRegistry.get).toHaveBeenCalledWith('conn-1');
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
     it('should handle errors gracefully', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Connection failed'));
 
