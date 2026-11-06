@@ -16,7 +16,8 @@ let signalHandlersRegistered = false;
 function terminate(pid: number | undefined): void {
   if (pid === undefined) return;
   if (isWindows) {
-    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    spawnSync(taskkill, ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
     return;
   }
   try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
