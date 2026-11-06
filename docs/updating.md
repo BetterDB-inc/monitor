@@ -173,6 +173,12 @@ minutes for it; an install upgraded with `--reuse-values` keeps the old 150
 seconds, so upgrade with `--reset-then-reuse-values` or set
 `startupProbe.failureThreshold` (e.g. `--set startupProbe.failureThreshold=120`).
 
+- **First poll after updating**: entries stored before the update carry no
+  `run_id`, so the entries still in each server's log (at most 128 per log
+  type) are stored once more under that server's `run_id`, and history can
+  show them twice. This happens once. Resuming from the old rows instead
+  could skip entries for good on a seed that fronts several nodes, whose old
+  rows mix the log IDs of different nodes.
 - **Rolling updates**: until every replica runs the new version, the old
   replicas fail to store slow and command log entries, because their inserts
   name the dropped key. The new replicas resume from what is stored, so

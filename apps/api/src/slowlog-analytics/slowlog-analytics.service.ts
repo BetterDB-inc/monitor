@@ -79,9 +79,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
       // Initialize lastSeenId from storage if not already set
       if (!this.lastSeenIds.has(ctx.connectionId)) {
-        const legacy = await this.logSources.legacySource(ctx, read);
-        let lastId = await this.storage.getLatestSlowLogId(ctx.connectionId, source);
-        if (lastId === null && legacy) lastId = await this.storage.getLatestSlowLogId(ctx.connectionId, legacy);
+        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId, source);
         this.lastSeenIds.set(ctx.connectionId, lastId);
         this.logger.debug(`Initialized lastSeenId for ${ctx.connectionName}: ${lastId}`);
       }

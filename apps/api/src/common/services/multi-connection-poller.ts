@@ -41,7 +41,6 @@ export class LogSourceTracker {
   // than a refusal means the source is unknown for that poll, not that it moved
   // to address tracking.
   private readonly withRunId = new Set<string>();
-  private readonly legacyChecked = new Set<string>();
 
   /**
    * `hasRunIdHistory` tells whether the connection's stored entries carry a run
@@ -104,31 +103,9 @@ export class LogSourceTracker {
     return after !== null && after.key === before.key && after.generation === before.generation;
   }
 
-  /**
-   * Entries stored before log sources were tracked carry no run id and the
-   * connection's configured address. On the first cursor lookup for a
-   * connection, while it has no run-id entries yet (the first poll after the
-   * upgrade), returns that legacy source so the poll resumes after those
-   * entries instead of storing the current log again. Later lookups get null:
-   * a source with nothing stored is then a new process or node, and starts
-   * from its first entry.
-   */
-  async legacySource(ctx: ConnectionContext, read: LogSourceRead): Promise<LogSource | null> {
-    if (this.legacyChecked.has(ctx.connectionId)) return null;
-    this.legacyChecked.add(ctx.connectionId);
-    const legacy = { host: ctx.host, port: ctx.port };
-    if (read.key === logSourceKey(legacy)) return null;
-    try {
-      return (await this.hasRunIdHistory(ctx.connectionId)) ? null : legacy;
-    } catch {
-      return null;
-    }
-  }
-
   forget(connectionId: string): void {
     this.tracked.delete(connectionId);
     this.withRunId.delete(connectionId);
-    this.legacyChecked.delete(connectionId);
   }
 }
 
