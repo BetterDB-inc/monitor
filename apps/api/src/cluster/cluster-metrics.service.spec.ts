@@ -594,6 +594,28 @@ used_cpu_user:20.3\r
       expect(warn).toHaveBeenCalledTimes(1);
     });
 
+    it("reads atomic migration jobs through the connection's own node when no primary can be reached directly", async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+      mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      mockClient.call.mockImplementation(async (cmd: string, sub: string) => {
+        if (cmd !== 'CLUSTER') return null;
+        if (sub === 'NODES') return 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460\n';
+        if (sub === 'GETSLOTMIGRATIONS') {
+          return [[
+            'name', 'job-1', 'operation', 'EXPORT', 'slot_ranges', '0-1365',
+            'target_node', 'fff789node3', 'source_node', 'abc123node1', 'state', 'snapshotting',
+          ]];
+        }
+        return null;
+      });
+
+      const migrations = await service.getSlotMigrations('conn-1');
+
+      expect(migrations).toEqual([
+        expect.objectContaining({ slotRange: '0-1365', sourceNodeId: 'abc123node1', targetNodeId: 'fff789node3', state: 'migrating' }),
+      ]);
+    });
+
     it('should handle errors gracefully', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Connection failed'));
 

@@ -786,7 +786,7 @@ export class ClusterMetricsService {
     );
 
     // No primary could be read directly, as behind an SSH tunnel or NAT: the
-    // connection's own node still shows its own legacy markers.
+    // connection's own node still shows its own markers and migration jobs.
     if (primaries.length > 0 && nodesRead === 0) {
       const errorKey = `slotmigrations-${connectionId ?? ''}`;
       if (!this.loggedErrors.has(errorKey)) {
@@ -795,9 +795,11 @@ export class ClusterMetricsService {
         );
         this.addLoggedError(errorKey);
       }
+      // Ask it the same way as a primary, so atomic migrations it is part of
+      // (GETSLOTMIGRATIONS) show up as well as legacy markers.
+      const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        const client = this.connectionRegistry.get(connectionId).getClient();
-        addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
+        await readNode(self, this.connectionRegistry.get(connectionId).getClient());
       } catch (error) {
         this.logger.error(
           `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
