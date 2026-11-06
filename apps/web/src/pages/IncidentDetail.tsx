@@ -10,6 +10,7 @@ import { QueryErrorState } from '../components/QueryErrorState';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import { IncidentTimelineView } from '../components/anomalies/incidents/IncidentTimelineView';
 import {
+  dateRangeFromParams,
   dateRangeQuery,
   isNotFoundError,
 } from '../components/anomalies/incidents/incident-summary';
@@ -29,8 +30,10 @@ export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
   const [searchParams] = useSearchParams();
   const { currentConnection } = useConnection();
-  const startParam = searchParams.get('start');
-  const startTime = startParam && !isNaN(Number(startParam)) ? Number(startParam) : undefined;
+  const startTime = dateRangeFromParams(
+    searchParams.get('start'),
+    searchParams.get('end'),
+  )?.from.getTime();
   const {
     data: incident,
     error,
@@ -45,7 +48,10 @@ export function IncidentDetail() {
   });
   const notFound = isNotFoundError(error);
   const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));
-  const backTo = `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
+  const fromOverview = searchParams.get('from') === 'overview';
+  const backTo = fromOverview
+    ? `/anomalies${range ? `?${range}` : ''}`
+    : `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
 
   return (
     <div className="space-y-6">
@@ -54,7 +60,7 @@ export function IncidentDetail() {
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="w-4 h-4" />
-        Back to incidents
+        {fromOverview ? 'Back to overview' : 'Back to incidents'}
       </ConnectionLink>
       {incident ? (
         <>

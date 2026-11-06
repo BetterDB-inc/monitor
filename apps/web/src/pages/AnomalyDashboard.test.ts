@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { formatValue } from '../lib/formatters';
-import { dateRangeFromParams, formatRelatedCount } from './AnomalyDashboard';
+import { formatRelatedCount } from './AnomalyDashboard';
+import { dateRangeFromParams } from '../components/anomalies/incidents/incident-summary';
 
 describe('formatRelatedCount', () => {
   it('marks a member list the API cut short', () => {

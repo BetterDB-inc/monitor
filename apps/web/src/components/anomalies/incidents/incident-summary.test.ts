@@ -60,13 +60,24 @@ describe('incident summary helpers', () => {
   });
 
   it('only counts an incident as ongoing while its duration runs to now', () => {
-    const active = (recoveredAt: number | null) =>
-      incident({
-        recovery: { status: 'active', openSignals: [], unknownSignals: [], recoveredAt },
-      });
-    expect(isDurationOngoing(active(null))).toBe(true);
-    expect(isDurationOngoing(active(T0 + 120_000))).toBe(false);
+    const withStatus = (status: 'active' | 'recovered', recoveredAt: number | null) =>
+      incident({ recovery: { status, openSignals: [], unknownSignals: [], recoveredAt } });
+    expect(isDurationOngoing(withStatus('active', null))).toBe(true);
+    expect(isDurationOngoing(withStatus('active', T0 + 120_000))).toBe(true);
+    expect(isDurationOngoing(withStatus('recovered', T0 + 120_000))).toBe(false);
     expect(isDurationOngoing(incident())).toBe(false);
+  });
+
+  it('keeps the duration running while an incident is still active', () => {
+    const active = incident({
+      recovery: {
+        status: 'active',
+        openSignals: [],
+        unknownSignals: [],
+        recoveredAt: T0 + 120_000,
+      },
+    });
+    expect(incidentDurationMs(active, T0 + 300_000)).toBe(300_000);
   });
 
   it('titles an incident by its patterns, or else its first signal', () => {

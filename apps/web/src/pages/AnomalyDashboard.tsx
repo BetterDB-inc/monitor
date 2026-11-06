@@ -26,7 +26,10 @@ import {
 } from '../components/anomalies/anomaly-display';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
-import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
+import {
+  dateRangeFromParams,
+  dateRangeQuery,
+} from '../components/anomalies/incidents/incident-summary';
 import { GroupIncidentLink } from '../components/anomalies/incidents/GroupIncidentLink';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
@@ -75,6 +78,7 @@ interface CorrelatedGroup {
   severity: 'info' | 'warning' | 'critical';
   anomalies: AnomalyEvent[];
   truncated?: boolean;
+  incidentId?: string;
 }
 
 interface AnomalySummary {
@@ -92,16 +96,6 @@ interface MetricBaselineBuffer {
   mean: number;
   stdDev: number;
   isReady: boolean;
-}
-
-export function dateRangeFromParams(
-  start: string | null,
-  end: string | null,
-): DateRange | undefined {
-  if (!start || !end) return undefined;
-  const from = new Date(Number(start));
-  const to = new Date(Number(end));
-  return isNaN(from.getTime()) || isNaN(to.getTime()) ? undefined : { from, to };
 }
 
 export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
@@ -162,6 +156,9 @@ export function AnomalyDashboard() {
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const rangeQuery = dateRangeQuery(startTime, endTime);
   const rangeKey = `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`;
+  const sameConnection = (previousKey: string | number | undefined) =>
+    typeof previousKey === 'string' && previousKey.startsWith(`${currentConnection?.id ?? ''}:`);
+  const overviewLinkQuery = [rangeQuery, 'from=overview'].filter(Boolean).join('&');
 
   const changeDateRange = (range: DateRange | undefined) => {
     setSearchParams(
@@ -185,6 +182,7 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
+    keepPreviousData: sameConnection,
   });
 
   const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
@@ -192,6 +190,7 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
+    keepPreviousData: sameConnection,
   });
 
   // Data-loss banner must surface active incidents regardless of the chosen
@@ -233,6 +232,7 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
+    keepPreviousData: sameConnection,
   });
 
   const {
@@ -577,9 +577,8 @@ export function AnomalyDashboard() {
                           </div>
 
                           <GroupIncidentLink
-                            connectionId={currentConnection?.id}
-                            anomalies={group.anomalies}
-                            linkQuery={rangeQuery}
+                            incidentId={group.incidentId}
+                            linkQuery={overviewLinkQuery}
                           />
 
                           {/* Related Anomalies */}

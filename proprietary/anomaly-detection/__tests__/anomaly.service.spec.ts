@@ -11264,98 +11264,6 @@ describe('AnomalyService', () => {
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
     });
 
-    it('finds the incident holding most of a group, then the newest', async () => {
-      const t = Date.now() - 20 * MIN;
-      const rows = ['a', 'b', 'c'].map((id, i) => ({
-        ...anomaly({ id, timestamp: t + i * MIN }),
-        anomalyType: 'spike',
-      }));
-      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
-        order === 'asc' ? [] : rows,
-      );
-      storage.getIncidentBoundaries.mockResolvedValue([
-        { scopeId: 'conn-1', startedAt: t, anomalyId: 'a' },
-        { scopeId: 'conn-1', startedAt: t + MIN, anomalyId: 'b' },
-      ]);
-      const [newer, older] = await service.getIncidentTimelines('conn-1');
-
-      const lookup = (ids: string[]) =>
-        service.findIncidentIdForAnomalies(ids, t, t + 2 * MIN, 'conn-1');
-
-      await expect(lookup(['a', 'b', 'c'])).resolves.toBe(newer.incidentId);
-      await expect(lookup(['a', 'b'])).resolves.toBe(newer.incidentId);
-      await expect(lookup(['a'])).resolves.toBe(older.incidentId);
-      await expect(lookup(['missing'])).resolves.toBeNull();
-      await expect(
-        service.getIncidentTimeline((await lookup(['a', 'b', 'c']))!, 'conn-1'),
-      ).resolves.toMatchObject({ incidentId: newer.incidentId });
-    });
-
-    it('returns only an incident anchored where the detail page will look', async () => {
-      const t = Date.now() - 20 * MIN;
-      const timeline = (incidentId: string, ids: string[]) => ({
-        incidentId,
-        startedAt: Number(incidentId.split('-')[0]),
-        entries: ids.map((anomalyId) => ({ anomalyId })),
-      });
-      const anchoredAt = `${t}-${'a'.repeat(16)}`;
-      const elsewhere = `${t + MIN}-${'b'.repeat(16)}`;
-      const build = jest
-        .spyOn(service as any, 'buildIncidents')
-        .mockReturnValueOnce([timeline(anchoredAt, ['a', 'b'])])
-        .mockReturnValueOnce([timeline(elsewhere, ['a', 'b']), timeline(anchoredAt, ['a'])]);
-      storage.getAnomalyEvents.mockResolvedValue([]);
-      storage.getIncidentBoundaries.mockResolvedValue([]);
-
-      await expect(
-        service.findIncidentIdForAnomalies(['a', 'b'], t, t + MIN, 'conn-1'),
-      ).resolves.toBe(anchoredAt);
-      build.mockRestore();
-    });
-
-    it('reuses the events it already loaded for the anchored window', async () => {
-      const t = Date.now() - 20 * MIN;
-      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
-        order === 'asc' ? [] : [{ ...anomaly({ id: 'a', timestamp: t }), anomalyType: 'spike' }],
-      );
-      storage.getIncidentBoundaries.mockResolvedValue([]);
-      const load = jest.spyOn(service as any, 'loadIncidentEvents');
-
-      await expect(
-        service.findIncidentIdForAnomalies(['a'], t, t, 'conn-1'),
-      ).resolves.not.toBeNull();
-      expect(load).toHaveBeenCalledTimes(1);
-      load.mockRestore();
-    });
-
-    it('bounds an incident lookup to the incident lookback window', async () => {
-      const now = Date.now();
-      storage.getAnomalyEvents.mockResolvedValue([]);
-      storage.getIncidentBoundaries.mockResolvedValue([]);
-
-      await expect(
-        service.findIncidentIdForAnomalies(['a'], 0, now + 365 * 24 * 60 * MIN, 'conn-1'),
-      ).resolves.toBeNull();
-
-      const loadedFrom = Math.min(
-        ...storage.getAnomalyEvents.mock.calls.map(([q]: any) => q.startTime),
-      );
-      const loadedTo = Math.max(
-        ...storage.getAnomalyEvents.mock.calls.map(([q]: any) => q.endTime ?? 0),
-      );
-      expect(loadedFrom).toBeGreaterThan(now - 31 * 24 * 60 * MIN);
-      expect(loadedTo).toBeLessThan(now + 24 * 60 * MIN);
-    });
-
-    it('skips the incident lookup for a window entirely outside the lookback', async () => {
-      storage.getAnomalyEvents.mockClear();
-
-      await expect(
-        service.findIncidentIdForAnomalies(['a'], 0, 1_000, 'conn-1'),
-      ).resolves.toBeNull();
-      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
-    });
-
     it('keeps a live incident on its stored start once its first events age out', async () => {
       const now = Date.now();
       const startedAt = now - 62 * MIN;
@@ -12472,7 +12380,7 @@ describe('AnomalyService', () => {
         after ? [row(4999), row(5000)] : Array.from({ length: 5000 }, (_, i) => row(i)),
       );
 
-      const { events } = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(5001);
       expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(5001);
@@ -12490,7 +12398,7 @@ describe('AnomalyService', () => {
         })),
       );
 
-      const { events } = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(10);
       expect(events).toHaveLength(50_000);
@@ -12548,6 +12456,7 @@ describe('AnomalyService', () => {
           metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
           connectionId: 'conn-1',
           anomalyIds: ['c', 'm'],
+          incidentId: '100-abc',
         },
       ]);
       storage.getCorrelatedGroupMembers.mockResolvedValue([
@@ -12576,6 +12485,7 @@ describe('AnomalyService', () => {
       );
 
       expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
+      expect(group.incidentId).toBe('100-abc');
       expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(
         ['grp-seq'],
         ['c', 'm'],
@@ -12914,6 +12824,26 @@ describe('AnomalyService', () => {
         }),
         'conn-1',
       );
+    });
+
+    it('stores the id of the incident a sequence group came from', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      const [incident] = (service as any).liveIncidents;
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({ incidentId: incident.incidentId }),
+        'conn-1',
+      );
+      expect((service as any).recentGroups.at(-1).incidentId).toBe(incident.incidentId);
     });
 
     it('includes memory-only events older than the cache TTL in history', async () => {

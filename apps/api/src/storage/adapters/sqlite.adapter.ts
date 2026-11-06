@@ -736,6 +736,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!groupColumns.some((col) => col.name === 'scope_id')) {
       this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN scope_id TEXT').run();
     }
+    if (!groupColumns.some((col) => col.name === 'incident_id')) {
+      this.db.prepare('ALTER TABLE correlated_anomaly_groups ADD COLUMN incident_id TEXT').run();
+    }
     const eventColumns = this.db.prepare('PRAGMA table_info(anomaly_events)').all() as {
       name: string;
     }[];
@@ -3067,14 +3070,15 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        source_host, source_port, connection_id, anomaly_ids, scope_id, incident_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(correlation_id) DO UPDATE SET
         diagnosis = excluded.diagnosis,
         recommendations = excluded.recommendations,
         anomaly_count = excluded.anomaly_count,
         anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
-        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id)
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id),
+        incident_id = COALESCE(correlated_anomaly_groups.incident_id, excluded.incident_id)
     `);
 
     stmt.run(
@@ -3091,6 +3095,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       connectionId,
       group.anomalyIds ? JSON.stringify(group.anomalyIds) : null,
       group.scopeId ?? null,
+      group.incidentId ?? null,
     );
 
     return group.correlationId;

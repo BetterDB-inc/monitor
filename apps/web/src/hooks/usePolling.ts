@@ -12,6 +12,7 @@ interface UsePollingOptions<T> {
   refetchKey?: string | number;
   /** Query key — provide explicitly to share cache across components. */
   queryKey?: readonly unknown[];
+  keepPreviousData?: (previousRefetchKey: string | number | undefined) => boolean;
 }
 
 let keyCounter = 0;
@@ -23,6 +24,7 @@ export function usePolling<T>({
   enabled = true,
   refetchKey,
   queryKey,
+  keepPreviousData,
 }: UsePollingOptions<T>) {
   const { showUpgradePrompt } = useUpgradePrompt();
   const queryClient = useQueryClient();
@@ -53,6 +55,14 @@ export function usePolling<T>({
       }
     },
     enabled,
+    meta: { refetchKey },
+    placeholderData: keepPreviousData
+      ? (previous, previousQuery) =>
+          previousQuery &&
+          keepPreviousData(previousQuery.meta?.refetchKey as string | number | undefined)
+            ? previous
+            : undefined
+      : undefined,
     refetchInterval:
       typeof interval === 'function'
         ? (query) => interval(query.state.data, query.state.error)

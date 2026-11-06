@@ -129,6 +129,17 @@ describe('IncidentDetail', () => {
     );
   });
 
+  it('goes back to the overview when the user came from a group', () => {
+    polling.state = { data: incident(), error: null, loading: false, lastUpdated: new Date() };
+
+    renderAt('/anomalies/incidents/123-abc?start=100&end=200&from=overview');
+
+    expect(screen.getByRole('link', { name: /Back to overview/ })).toHaveAttribute(
+      'href',
+      '/anomalies?start=100&end=200',
+    );
+  });
+
   it('keeps a loaded incident when a later poll cannot find it', () => {
     polling.state = {
       data: incident({ matchedPatterns: ['backlog_exhaustion'] }),

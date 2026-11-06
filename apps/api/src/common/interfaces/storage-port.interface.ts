@@ -224,6 +224,7 @@ export interface StoredCorrelatedGroup {
   connectionId?: string;
   anomalyIds?: string[];
   scopeId?: string;
+  incidentId?: string;
 }
 
 export interface AnomalyEventCursor {

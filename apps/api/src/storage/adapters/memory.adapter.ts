@@ -850,7 +850,8 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
     if (existing >= 0) {
       const scopeId = this.correlatedGroups[existing].scopeId ?? group.scopeId;
-      this.correlatedGroups[existing] = { ...group, connectionId, scopeId };
+      const incidentId = this.correlatedGroups[existing].incidentId ?? group.incidentId;
+      this.correlatedGroups[existing] = { ...group, connectionId, scopeId, incidentId };
     } else {
       this.correlatedGroups.push({ ...group, connectionId });
     }

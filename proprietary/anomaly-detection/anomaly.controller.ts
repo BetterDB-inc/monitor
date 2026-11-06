@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  Body,
   Controller,
   Get,
   Post,
@@ -12,7 +11,6 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ApiHeader } from '@nestjs/swagger';
-import { ArrayMaxSize, ArrayMinSize, IsInt, IsString } from 'class-validator';
 import { AnomalyService } from './anomaly.service';
 import { IncidentTimeline } from './incident-timeline';
 import {
@@ -26,7 +24,6 @@ import {
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
-import { AllowMembers } from '../../apps/api/src/auth/guards/roles.decorator';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
 
 function parseTimeRange(
@@ -42,20 +39,6 @@ function parseTimeRange(
 }
 
 const MAX_INCIDENT_LIMIT = 1000;
-const MAX_LOOKUP_ANOMALY_IDS = 500;
-
-export class IncidentLookupDto {
-  @IsString({ each: true })
-  @ArrayMinSize(1)
-  @ArrayMaxSize(MAX_LOOKUP_ANOMALY_IDS)
-  anomalyIds!: string[];
-
-  @IsInt()
-  startTime!: number;
-
-  @IsInt()
-  endTime!: number;
-}
 
 function parseLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -217,29 +200,6 @@ export class AnomalyController {
       parsedEndTime,
       parseLimit(limit, 50),
     );
-  }
-
-  @Post('incidents/lookup')
-  @HttpCode(HttpStatus.OK)
-  @AllowMembers()
-  @UseGuards(LicenseGuard)
-  @RequiresFeature(Feature.ANOMALY_DETECTION)
-  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
-  async lookupIncident(
-    @Body() body: IncidentLookupDto,
-    @ConnectionId() connectionId?: string,
-  ): Promise<{ incidentId: string }> {
-    if (body.startTime > body.endTime) {
-      throw new BadRequestException('startTime must not be after endTime');
-    }
-    const incidentId = await this.anomalyService.findIncidentIdForAnomalies(
-      body.anomalyIds,
-      body.startTime,
-      body.endTime,
-      connectionId,
-    );
-    if (!incidentId) throw new NotFoundException('No incident holds these anomalies');
-    return { incidentId };
   }
 
   @Get('incidents/:incidentId')

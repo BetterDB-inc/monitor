@@ -1,5 +1,5 @@
-import { BadRequestException, NotFoundException, ValidationPipe } from '@nestjs/common';
-import { AnomalyController, IncidentLookupDto } from '../anomaly.controller';
+import { BadRequestException } from '@nestjs/common';
+import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 
 jest.mock('@proprietary/licenses', () => ({
@@ -99,61 +99,5 @@ describe('AnomalyController incident limit', () => {
     await controller.getIncidents('c1');
 
     expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([10, 50]);
-  });
-});
-
-describe('AnomalyController incident lookup', () => {
-  const service = { findIncidentIdForAnomalies: jest.fn() };
-  const controller = new AnomalyController(service as unknown as AnomalyService);
-  const pipe = new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true });
-  const validate = (body: unknown) =>
-    pipe.transform(body, { type: 'body', metatype: IncidentLookupDto });
-
-  beforeEach(() => jest.clearAllMocks());
-
-  it('looks up the incident holding the anomalies', async () => {
-    service.findIncidentIdForAnomalies.mockResolvedValue('100-abc');
-    const body = await validate({ anomalyIds: ['a', 'b'], startTime: 1000, endTime: 2000 });
-
-    await expect(controller.lookupIncident(body, 'c1')).resolves.toEqual({
-      incidentId: '100-abc',
-    });
-    expect(service.findIncidentIdForAnomalies).toHaveBeenCalledWith(['a', 'b'], 1000, 2000, 'c1');
-  });
-
-  it('accepts the full 500 ids in the body', async () => {
-    const anomalyIds = Array.from({ length: 500 }, (_, i) => `a${i}`);
-    await expect(validate({ anomalyIds, startTime: 1000, endTime: 2000 })).resolves.toMatchObject({
-      anomalyIds,
-    });
-  });
-
-  it('returns 404 when no incident holds them', async () => {
-    service.findIncidentIdForAnomalies.mockResolvedValue(null);
-
-    await expect(
-      controller.lookupIncident({ anomalyIds: ['a'], startTime: 1000, endTime: 2000 }, 'c1'),
-    ).rejects.toBeInstanceOf(NotFoundException);
-  });
-
-  it('rejects a start after the end', async () => {
-    await expect(
-      controller.lookupIncident({ anomalyIds: ['a'], startTime: 2000, endTime: 1000 }, 'c1'),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    expect(service.findIncidentIdForAnomalies).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['no ids', { startTime: 1000, endTime: 2000 }],
-    ['an empty id list', { anomalyIds: [], startTime: 1000, endTime: 2000 }],
-    [
-      'too many ids',
-      { anomalyIds: Array.from({ length: 501 }, (_, i) => `a${i}`), startTime: 1000, endTime: 2000 },
-    ],
-    ['a non-string id', { anomalyIds: [1], startTime: 1000, endTime: 2000 }],
-    ['no start', { anomalyIds: ['a'], endTime: 2000 }],
-    ['no end', { anomalyIds: ['a'], startTime: 1000 }],
-  ])('rejects %s', async (_case, body) => {
-    await expect(validate(body)).rejects.toBeInstanceOf(BadRequestException);
   });
 });

@@ -470,17 +470,6 @@ export const metricsApi = {
     );
   },
 
-  lookupIncident: (
-    params: { anomalyIds: string[]; startTime: number; endTime: number },
-    signal?: AbortSignal,
-  ) => {
-    return fetchApi<{ incidentId: string }>('/anomaly/incidents/lookup', {
-      method: 'POST',
-      body: JSON.stringify(params),
-      signal,
-    });
-  },
-
   getIncident: (incidentId: string, startTime?: number, signal?: AbortSignal) => {
     const query = startTime !== undefined ? `?startTime=${startTime}` : '';
     return fetchApi<IncidentTimeline>(

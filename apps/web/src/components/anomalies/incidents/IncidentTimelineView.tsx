@@ -12,7 +12,6 @@ import {
 import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import {
-  connectionCount,
   incidentDurationMs,
   incidentTitle,
   isDurationOngoing,
@@ -63,18 +62,22 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
   const entries = orderedEntries(incident);
   const namePattern = incident.sequenceMatches.length > 1;
-  const stepsOf = new Map<string, string[]>();
-  for (const match of incident.sequenceMatches) {
+  const entryById = new Map(incident.entries.map((entry) => [entry.anomalyId, entry]));
+  const stepsOf = new Map<string, { key: string; label: string }[]>();
+  incident.sequenceMatches.forEach((match, matchIndex) => {
     match.anomalyIds.forEach((id, i) => {
       const step = match.steps?.[i] ?? null;
       const label = step === null ? 'Supporting signal' : `Step ${step}`;
       const tags = stepsOf.get(id) ?? [];
-      tags.push(namePattern ? `${patternLabel(match.pattern)}: ${label}` : label);
+      tags.push({
+        key: `${matchIndex}:${i}`,
+        label: namePattern ? `${patternLabel(match.pattern)}: ${label}` : label,
+      });
       stepsOf.set(id, tags);
     });
-  }
+  });
   const duration = formatDuration(incidentDurationMs(incident, now));
-  const connections = connectionCount(incident);
+  const connections = incident.connectionIds.length;
   const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
   const eventTime = spansDays ? formatDateTime : formatTime;
   const title = incidentTitle(incident);
@@ -117,7 +120,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
             <p className="text-sm text-muted-foreground">{match.diagnosis}</p>
             <ol className="space-y-1 text-sm">
               {match.anomalyIds.map((id, i) => {
-                const entry = incident.entries.find((e) => e.anomalyId === id);
+                const entry = entryById.get(id);
                 const step = match.steps?.[i] ?? null;
                 return (
                   <li key={id} className="flex gap-2">
@@ -174,10 +177,10 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                     </span>
                     {steps.map((tag) => (
                       <span
-                        key={tag}
+                        key={tag.key}
                         className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary"
                       >
-                        {tag}
+                        {tag.label}
                       </span>
                     ))}
                     {entry.nodeAddr && (

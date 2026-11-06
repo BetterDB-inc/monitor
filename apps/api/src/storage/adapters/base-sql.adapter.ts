@@ -236,6 +236,7 @@ export class RowMappers {
       connectionId: row.connection_id,
       anomalyIds: row.anomaly_ids ? this.dialect.fromArray(row.anomaly_ids) : undefined,
       scopeId: row.scope_id ?? undefined,
+      incidentId: row.incident_id ?? undefined,
     };
   }
 
