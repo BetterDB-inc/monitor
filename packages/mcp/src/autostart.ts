@@ -37,8 +37,9 @@ export function monitorEnv(
   const inherited: Record<string, string> = {};
   const overrides: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (value === undefined || MCP_ENV.has(key)) continue;
-    if (key.startsWith(MONITOR_ENV_PREFIX)) {
+    const upperKey = key.toUpperCase();
+    if (value === undefined || MCP_ENV.has(upperKey)) continue;
+    if (upperKey.startsWith(MONITOR_ENV_PREFIX)) {
       const name = key.slice(MONITOR_ENV_PREFIX.length);
       if (name && !RESERVED_MONITOR_ENV.has(name)) overrides[name] = value;
     } else {
