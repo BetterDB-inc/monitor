@@ -20,51 +20,32 @@ function registerEphemeralHandlers(): void {
   process.once('SIGINT', () => { ephemeralChild?.kill(); process.exit(0); });
 }
 
-const INHERITED_ENV = new Set([
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'SHELL',
-  'TMPDIR',
-  'TEMP',
-  'TMP',
-  'LANG',
-  'TZ',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'NO_PROXY',
-  'SYSTEMROOT',
-  'WINDIR',
-  'COMSPEC',
-  'PATHEXT',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'USERPROFILE',
-  'PROGRAMDATA',
-  'PROGRAMFILES',
+const MCP_ENV = new Set([
+  'BETTERDB_URL',
+  'BETTERDB_TOKEN',
+  'BETTERDB_LOCAL_TOKEN',
+  'BETTERDB_INSTANCE_ID',
+  'BETTERDB_MCP_TELEMETRY',
 ]);
-const INHERITED_ENV_PREFIXES = ['LC_', 'NODE_', 'NPM_CONFIG_'];
 const MONITOR_ENV_PREFIX = 'BETTERDB_MONITOR_';
+const RESERVED_MONITOR_ENV = new Set(['PORT', 'STORAGE_TYPE']);
 
-function isInheritedEnv(upperKey: string): boolean {
-  return (
-    INHERITED_ENV.has(upperKey) ||
-    INHERITED_ENV_PREFIXES.some((prefix) => upperKey.startsWith(prefix))
-  );
-}
-
-export function monitorEnv(source: NodeJS.ProcessEnv): Record<string, string> {
-  const env: Record<string, string> = {};
+export function monitorEnv(
+  source: NodeJS.ProcessEnv,
+  defaults: Record<string, string>,
+): Record<string, string> {
+  const inherited: Record<string, string> = {};
+  const overrides: Record<string, string> = {};
   for (const [key, value] of Object.entries(source)) {
-    if (value === undefined) continue;
-    if (key.startsWith(MONITOR_ENV_PREFIX) && key.length > MONITOR_ENV_PREFIX.length) {
-      env[key.slice(MONITOR_ENV_PREFIX.length)] = value;
-    } else if (isInheritedEnv(key.toUpperCase())) {
-      env[key] ??= value;
+    if (value === undefined || MCP_ENV.has(key)) continue;
+    if (key.startsWith(MONITOR_ENV_PREFIX)) {
+      const name = key.slice(MONITOR_ENV_PREFIX.length);
+      if (name && !RESERVED_MONITOR_ENV.has(name)) overrides[name] = value;
+    } else {
+      inherited[key] = value;
     }
   }
-  return env;
+  return { ...inherited, ...defaults, ...overrides };
 }
 
 async function checkHealth(port: number): Promise<boolean> {
@@ -139,8 +120,7 @@ export async function startMonitor(opts: {
     }
   }
 
-  const env: Record<string, string> = {
-    ...monitorEnv(process.env),
+  const defaults: Record<string, string> = {
     PORT: String(opts.port),
     STORAGE_TYPE: opts.storage,
     NODE_ENV: 'production',
@@ -149,8 +129,10 @@ export async function startMonitor(opts: {
   if (opts.storage === 'sqlite') {
     const dataDir = path.join(BETTERDB_DIR, 'data');
     fs.mkdirSync(dataDir, { recursive: true });
-    env.STORAGE_SQLITE_FILEPATH = path.join(dataDir, 'audit.db');
+    defaults.STORAGE_SQLITE_FILEPATH = path.join(dataDir, 'audit.db');
   }
+
+  const env = monitorEnv(process.env, defaults);
 
   let child: ChildProcess;
 

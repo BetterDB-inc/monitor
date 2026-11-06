@@ -122,14 +122,15 @@ Once connected, your AI assistant can query your databases directly:
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
 | `BETTERDB_LOCAL_TOKEN` | — | Token for a local monitor started with `start_monitor` while `BETTERDB_URL` points at a different monitor. Without it, that local monitor gets no token. With `--autostart`, `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` apply to the started monitor |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
-| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to stop posting tool usage events (tool name, success, duration, error) to the monitor. Each event goes to the monitor the call was made against |
-| `BETTERDB_MONITOR_<NAME>` | — | Passed to a monitor started with `--autostart` or `start_monitor` as `<NAME>`, for example `BETTERDB_MONITOR_BETTERDB_TELEMETRY=false`. Other variables are not passed, apart from system ones such as `PATH`, `HOME`, `NODE_*` and `npm_config_*` |
+| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to turn off telemetry: the MCP server's tool usage events (tool name, success, duration, error), and a monitor started with `--autostart` or `start_monitor`. Each usage event goes to the monitor the call was made against |
+| `BETTERDB_MCP_TELEMETRY` | — | Same values as `BETTERDB_TELEMETRY`, for the MCP server's usage events only. Takes precedence over `BETTERDB_TELEMETRY` when set |
+| `BETTERDB_MONITOR_<NAME>` | — | Passed to a monitor started with `--autostart` or `start_monitor` as `<NAME>`, overriding the inherited value. `PORT` and `STORAGE_TYPE` come from `--port` and `--storage` instead |
 
 ### CLI Arguments
 
 | Argument | Default | Description |
 |---|---|---|
-| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup |
+| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup. It inherits the MCP server's environment, except `BETTERDB_URL`, `BETTERDB_TOKEN`, `BETTERDB_LOCAL_TOKEN`, `BETTERDB_INSTANCE_ID` and `BETTERDB_MCP_TELEMETRY` |
 | `--no-monitor-tools` | — | Do not register `start_monitor` and `stop_monitor` |
 | `--persist` | — | Keep the monitor running after the MCP server exits (requires `--autostart`) |
 | `--port <number>` | `3001` | Port for the auto-started monitor API |

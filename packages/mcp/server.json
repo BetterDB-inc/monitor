@@ -86,14 +86,21 @@
           "name": "BETTERDB_INSTANCE_ID"
         },
         {
-          "description": "MCP token for the local monitor used after --autostart or start_monitor; BETTERDB_TOKEN is kept only when BETTERDB_URL already points at that monitor",
+          "description": "Token for a local monitor started with start_monitor while BETTERDB_URL points at a different monitor; without it that monitor gets no token. --autostart uses BETTERDB_TOKEN",
           "isRequired": false,
           "format": "string",
           "isSecret": true,
           "name": "BETTERDB_LOCAL_TOKEN"
         },
         {
-          "description": "Set to false, 0, no or off to stop posting tool usage events to the monitor",
+          "description": "Set to false, 0, no or off to stop posting tool usage events to the monitor. Overrides BETTERDB_TELEMETRY for the MCP server only",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "BETTERDB_MCP_TELEMETRY"
+        },
+        {
+          "description": "Set to false, 0, no or off to turn off telemetry for both the MCP server (unless BETTERDB_MCP_TELEMETRY is set) and a monitor it starts",
           "isRequired": false,
           "format": "string",
           "isSecret": false,

@@ -2,6 +2,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { TTL_SECONDS_MAX, TTL_SECONDS_MIN } from './constants.js';
@@ -12,6 +13,7 @@ import {
   flushTelemetry,
   type TelemetryEvent,
 } from './telemetry.js';
+import type { MonitorTarget } from './monitor-target.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version: string };
@@ -54,12 +56,6 @@ if (STOP) {
   process.exit(0);
 }
 
-interface MonitorTarget {
-  url: string;
-  token: string | undefined;
-  prefix: string | null;
-}
-
 interface Session {
   target: MonitorTarget;
   instanceId: string | null;
@@ -93,13 +89,13 @@ function isSameMonitor(a: string, b: string): boolean {
   return key !== null && key === monitorKey(b);
 }
 
-function useAutostartedMonitor(url: string): void {
+function useMonitor(url: string): void {
   target = { url, token: target.token, prefix: null };
 }
 
 function useStartedMonitor(url: string): void {
   if (isSameMonitor(target.url, url)) {
-    target = { url, token: target.token, prefix: null };
+    useMonitor(url);
     return;
   }
   void flushTelemetry(target);
@@ -108,12 +104,11 @@ function useStartedMonitor(url: string): void {
   activeInstanceId = null;
 }
 
-function restoreSessionAfterStop(): boolean {
-  if (!sessionBeforeLocalMonitor) return false;
+function restoreSessionAfterStop(): void {
+  if (!sessionBeforeLocalMonitor) return;
   target = sessionBeforeLocalMonitor.target;
   activeInstanceId = sessionBeforeLocalMonitor.instanceId;
   sessionBeforeLocalMonitor = null;
-  return true;
 }
 
 function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
@@ -166,8 +161,10 @@ function sendTelemetry(to: MonitorTarget, events: TelemetryEvent[]): Promise<unk
   return requestTo(to, 'POST', '/mcp/telemetry', { events }, 5_000);
 }
 
+const callTargets = new AsyncLocalStorage<MonitorTarget>();
+
 async function apiRequest(method: string, path: string, body?: unknown): Promise<unknown> {
-  return requestTo(target, method, path, body);
+  return requestTo(callTargets.getStore() ?? target, method, path, body);
 }
 
 async function requestTo(
@@ -295,13 +292,17 @@ function resolveInstanceId(overrideId?: string): string {
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
-async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): Promise<ToolResult> {
+async function withTelemetry(
+  toolName: string,
+  fn: () => Promise<ToolResult>,
+  credit: 'call' | 'switched' = 'call',
+): Promise<ToolResult> {
   const callTarget = target;
   const start = Date.now();
   let success = true;
   let error: string | undefined;
   try {
-    const result = await fn();
+    const result = await callTargets.run(callTarget, fn);
     if (result.isError) {
       success = false;
       error = result.content[0]?.text?.slice(0, 200);
@@ -312,7 +313,8 @@ async function withTelemetry(toolName: string, fn: () => Promise<ToolResult>): P
     error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     throw err;
   } finally {
-    trackToolCall(callTarget, { toolName, success, durationMs: Date.now() - start, error });
+    const creditTarget = credit === 'switched' ? target : callTarget;
+    trackToolCall(creditTarget, { toolName, success, durationMs: Date.now() - start, error });
   }
 }
 
@@ -364,6 +366,17 @@ server.tool(
       const found = data.instances.find((inst) => inst.id === instanceId);
       if (!found) {
         return instanceNotFoundResult(instanceId);
+      }
+      if (target !== callTargets.getStore()) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'The monitor changed while selecting the instance. Call list_instances again.',
+            },
+          ],
+          isError: true,
+        };
       }
       activeInstanceId = instanceId;
       return {
@@ -984,7 +997,7 @@ if (MONITOR_TOOLS) {
             isError: true,
           };
         }
-      }),
+      }, 'switched'),
   );
 }
 
@@ -1691,11 +1704,13 @@ if (MONITOR_TOOLS) {
       withTelemetry('stop_monitor', async () => {
         try {
           const { stopMonitor } = await import('./autostart.js');
-          if (sessionBeforeLocalMonitor) {
+          const switchBack = sessionBeforeLocalMonitor !== null;
+          if (switchBack) {
             await flushTelemetry(target);
           }
           const result = await stopMonitor();
-          const text = result.stopped && restoreSessionAfterStop()
+          restoreSessionAfterStop();
+          const text = switchBack
             ? `${result.message} Switched back to ${target.url}.`
             : result.message;
           return {
@@ -1712,7 +1727,7 @@ if (MONITOR_TOOLS) {
             isError: true,
           };
         }
-      }),
+      }, 'switched'),
   );
 }
 
@@ -2250,7 +2265,7 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    useAutostartedMonitor(result.url);
+    useMonitor(result.url);
   }
 
   initTelemetry(sendTelemetry);

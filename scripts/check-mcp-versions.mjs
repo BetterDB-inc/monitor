@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sourceFiles } from './lib/source-files.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readText = (path) => readFileSync(join(repoRoot, path), 'utf8');
@@ -22,31 +23,34 @@ const SCANNED_DIRS = [
   { dir: 'docs', extensions: ['.md'] },
   { dir: 'apps/web/src', extensions: ['.ts', '.tsx'] },
 ];
-const SKIPPED_DIRS = new Set(['node_modules', 'dist', 'build', 'coverage']);
-
-function walk(dir, extensions, found = []) {
-  for (const name of readdirSync(join(repoRoot, dir))) {
-    const path = join(dir, name);
-    if (statSync(join(repoRoot, path)).isDirectory()) {
-      if (!SKIPPED_DIRS.has(name)) walk(path, extensions, found);
-    } else if (extensions.some((extension) => name.endsWith(extension))) {
-      found.push(path);
-    }
+function argValue(flag) {
+  const index = process.argv.indexOf(flag);
+  if (index === -1) return undefined;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) {
+    console.error(`${flag} needs a value`);
+    process.exit(1);
   }
-  return found;
+  return value;
+}
+
+function pinOf(mcpJson) {
+  const arg = mcpJson.mcpServers.betterdb.args.find((value) => value.startsWith(PACKAGE));
+  return { arg, pin: arg?.startsWith(`${PACKAGE}@`) ? arg.slice(PACKAGE.length + 1) : undefined };
+}
+
+function readAtRef(ref, path) {
+  try {
+    return execFileSync('git', ['show', `${ref}:${path}`], { cwd: repoRoot, encoding: 'utf8', stdio: 'pipe' });
+  } catch {
+    return undefined;
+  }
 }
 
 const problems = [];
 
-const expectIndex = process.argv.indexOf('--expect');
-let packageExpected;
-if (expectIndex !== -1) {
-  packageExpected = process.argv[expectIndex + 1];
-  if (!packageExpected || packageExpected.startsWith('--')) {
-    console.error('--expect needs a version');
-    process.exit(1);
-  }
-}
+let packageExpected = argValue('--expect');
+const baseRef = argValue('--base');
 
 const packageVersion = readJson('packages/mcp/package.json').version;
 const server = readJson('packages/mcp/server.json');
@@ -62,19 +66,33 @@ for (const [where, version] of packageGroup) {
   }
 }
 
-const pluginArgs = readJson('packages/mcp/claude-plugin/.mcp.json').mcpServers.betterdb.args;
-const pluginArg = pluginArgs.find((arg) => arg.startsWith(PACKAGE));
-const pluginPin = pluginArg?.startsWith(`${PACKAGE}@`) ? pluginArg.slice(PACKAGE.length + 1) : undefined;
+const PLUGIN_MCP = 'packages/mcp/claude-plugin/.mcp.json';
+const PLUGIN_MANIFEST = 'packages/mcp/claude-plugin/.claude-plugin/plugin.json';
+const { arg: pluginArg, pin: pluginPin } = pinOf(readJson(PLUGIN_MCP));
 if (!pluginPin || !EXACT_VERSION.test(pluginPin)) {
   problems.push(
     `packages/mcp/claude-plugin/.mcp.json launches ${pluginArg ?? 'no package'}, expected an exact ${PACKAGE} version`,
   );
 }
 
+if (baseRef) {
+  const baseMcp = readAtRef(baseRef, PLUGIN_MCP);
+  const baseManifest = readAtRef(baseRef, PLUGIN_MANIFEST);
+  if (baseMcp && baseManifest) {
+    const basePin = pinOf(JSON.parse(baseMcp)).pin;
+    const baseVersion = JSON.parse(baseManifest).version;
+    if (basePin !== pluginPin && baseVersion === readJson(PLUGIN_MANIFEST).version) {
+      problems.push(
+        `${PLUGIN_MCP} pin moved from ${basePin} to ${pluginPin} but ${PLUGIN_MANIFEST} version is still ${baseVersion}`,
+      );
+    }
+  }
+}
+
 const files = [
   ...SCANNED_FILES,
-  ...SCANNED_DIRS.flatMap(({ dir, extensions }) => walk(dir, extensions)),
-].map((path) => relative(repoRoot, join(repoRoot, path)));
+  ...SCANNED_DIRS.flatMap(({ dir, extensions }) => sourceFiles(join(repoRoot, dir), extensions)),
+].map((path) => relative(repoRoot, resolve(repoRoot, path)));
 
 for (const file of files) {
   const text = readText(file);
@@ -95,9 +113,14 @@ for (const file of files) {
 
 if (process.argv.includes('--check-published') && pluginPin) {
   try {
-    execFileSync('npm', ['view', `${PACKAGE}@${pluginPin}`, 'version'], { stdio: 'pipe' });
-  } catch {
-    problems.push(`${PACKAGE}@${pluginPin} is pinned by the plugin but is not published on npm`);
+    execFileSync('npm', ['view', `${PACKAGE}@${pluginPin}`, 'version', '--json'], { stdio: 'pipe' });
+  } catch (error) {
+    const output = `${error.stdout ?? ''}${error.stderr ?? ''}`;
+    problems.push(
+      output.includes('E404')
+        ? `${PACKAGE}@${pluginPin} is pinned by the plugin but is not published on npm`
+        : `could not check ${PACKAGE}@${pluginPin} on npm: ${output.trim() || error.message}`,
+    );
   }
 }
 

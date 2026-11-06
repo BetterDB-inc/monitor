@@ -16,7 +16,7 @@ Claude Code asks for these settings when the plugin is enabled:
 - **Instance ID**: optional. For a monitor with several instances, the instance Claude starts each session on. Leave it empty to choose one with `select_instance`.
 - **Usage telemetry**: on by default. Turn it off to stop the server posting usage events to your monitor.
 
-You need Node.js 20 or later and a running BetterDB Monitor. To run one locally, see the [monitor README](https://github.com/BetterDB-inc/monitor#readme).
+You need Node.js 20 or later and a running BetterDB Monitor. On native Windows (not WSL), Claude Code can't launch `npx` directly; if the server fails to connect, add it by hand with `claude mcp add betterdb -- cmd /c npx -y @betterdb/mcp@1.6.0 --no-monitor-tools` instead of using the plugin. To run one locally, see the [monitor README](https://github.com/BetterDB-inc/monitor#readme).
 
 ## What it runs
 

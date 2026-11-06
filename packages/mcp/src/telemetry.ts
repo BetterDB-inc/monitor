@@ -1,3 +1,5 @@
+import type { MonitorTarget } from './monitor-target.js';
+
 export interface TelemetryEvent {
   toolName: string;
   success: boolean;
@@ -6,17 +8,17 @@ export interface TelemetryEvent {
   error?: string;
 }
 
-type SendFn<T> = (target: T, events: TelemetryEvent[]) => Promise<unknown>;
+type SendFn = (target: MonitorTarget, events: TelemetryEvent[]) => Promise<unknown>;
 
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_BUFFER_SIZE = 50;
 
-const buffers = new Map<unknown, TelemetryEvent[]>();
+const buffers = new Map<MonitorTarget, TelemetryEvent[]>();
 let flushTimer: ReturnType<typeof setInterval> | null = null;
-let sendFn: SendFn<unknown> | null = null;
+let sendFn: SendFn | null = null;
 let disabled = false;
 
-export function flushTelemetry(target: unknown): Promise<void> {
+export function flushTelemetry(target: MonitorTarget): Promise<void> {
   const events = buffers.get(target);
   buffers.delete(target);
   if (!events || events.length === 0 || !sendFn) return Promise.resolve();
@@ -35,17 +37,22 @@ export function isTelemetryDisabled(value: string | undefined): boolean {
   return value !== undefined && OFF_VALUES.has(value.trim().toLowerCase());
 }
 
-export function initTelemetry<T>(send: SendFn<T>): void {
-  if (isTelemetryDisabled(process.env.BETTERDB_TELEMETRY)) {
+function telemetrySetting(): string | undefined {
+  const own = process.env.BETTERDB_MCP_TELEMETRY;
+  return own !== undefined && own.trim() !== '' ? own : process.env.BETTERDB_TELEMETRY;
+}
+
+export function initTelemetry(send: SendFn): void {
+  if (isTelemetryDisabled(telemetrySetting())) {
     disabled = true;
     return;
   }
-  sendFn = send as SendFn<unknown>;
+  sendFn = send;
   flushTimer = setInterval(flushAll, FLUSH_INTERVAL_MS);
   flushTimer.unref();
 }
 
-export function trackToolCall(target: unknown, event: Omit<TelemetryEvent, 'timestamp'>): void {
+export function trackToolCall(target: MonitorTarget, event: Omit<TelemetryEvent, 'timestamp'>): void {
   if (disabled) return;
   const events = buffers.get(target) ?? [];
   events.push({ ...event, timestamp: Date.now() });
