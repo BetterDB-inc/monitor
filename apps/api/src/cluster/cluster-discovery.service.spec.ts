@@ -436,6 +436,16 @@ describe('ClusterDiscoveryService', () => {
         'Invalid node address'
       );
     });
+
+    it('connects to an IPv6 node on the port after the last colon', async () => {
+      mockDbClient.getClusterNodes.mockResolvedValueOnce([
+        { ...mockClusterNodes[0], address: 'fd00::1:6380@16380' },
+      ]);
+
+      await service.getNodeConnection(mockClusterNodes[0].id, 'test-connection');
+
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(expect.objectContaining({ host: 'fd00::1', port: 6380 }));
+    });
   });
 
   describe('getNodeConnection TLS', () => {

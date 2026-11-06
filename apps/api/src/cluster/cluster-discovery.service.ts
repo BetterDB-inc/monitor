@@ -4,6 +4,7 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
+import { parseNodeAddress } from '../topology/membership-diff';
 
 export interface DiscoveredNode {
   id: string;
@@ -206,14 +207,13 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     const reused = await this.reuseNodeClient(key);
     if (reused) return reused;
 
-    // Cluster node addresses include bus port: "host:port@busport"
-    // We only need the client port, so split on '@' first
-    const [host, portStr] = node.address.split('@')[0].split(':');
-    const port = parseInt(portStr, 10);
-
-    if (!host || isNaN(port)) {
+    // Cluster node addresses include bus port: "host:port@busport", and an
+    // IPv6 host has colons of its own, so the port is after the last one.
+    const parsed = parseNodeAddress(node.address);
+    if (!parsed) {
       throw new Error(`Invalid node address: ${node.address}`);
     }
+    const { host, port } = parsed;
 
     const primaryClient = this.connectionRegistry.get(ownerId).getClient();
     return this.openNodeClient(key, node, host, port, ownerId, {
