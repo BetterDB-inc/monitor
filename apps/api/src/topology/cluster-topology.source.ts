@@ -8,6 +8,10 @@ import { addressKey, desiredFromDiscovery, seedIsAlias } from './membership-diff
 import type { TopologyDiscovery, TopologySource } from './topology-source';
 
 const RESOLVE_TIMEOUT_MS = 2_000;
+/** Syncs of `myself` remembered for a seed that matches no node. */
+const RECENT_ANSWERS = 10;
+/** Syncs in a row one node must answer before a change of `myself` is a move. */
+const SETTLED_ANSWERS = 3;
 
 /**
  * Addresses a seed host resolves to; an IP literal resolves to itself. A failed
@@ -44,10 +48,11 @@ export class ClusterTopologySource implements TopologySource {
    * disagree with it, so one stale CLUSTER NODES reply (after a pod IP change)
    * cannot register a single node's seed as its own child, and a Service whose
    * DNS answer shrinks to one pod for a sync (a rollout) does not retire `myself`.
+   * `answered` holds the recent `myself` ids, oldest first.
    */
   private readonly aliasState = new Map<
     string,
-    { address: string; alias: boolean; last: boolean; answered: ReadonlySet<string> }
+    { address: string; alias: boolean; last: boolean; answered: readonly string[] }
   >();
 
   constructor(private readonly discovery: ClusterDiscoveryService) {}
@@ -76,23 +81,33 @@ export class ClusterTopologySource implements TopologySource {
     // what is registered: `myself` already a member means the seed was an alias.
     const myself = nodes.find((n) => n.flags.includes('myself'));
     const initial = myself !== undefined && registeredNodeIds?.has(myself.id) === true;
-    const answered = new Set(prior?.answered);
-    if (myself) answered.add(myself.id);
+    const answered = [...(prior?.answered ?? []), ...(myself ? [myself.id] : [])].slice(-RECENT_ANSWERS);
     const matched = seedIsAlias(seed, seedAddresses, nodes);
     let verdict: boolean;
     let alias: boolean;
+    let undecided = false;
     if (matched === null) {
-      // No node announces the seed's address. A VIP lands discovery on a
-      // different node from sync to sync; one node behind NAT or a port mapping
-      // always answers as itself. A second node answering is proof, not a
-      // stale reply, so it applies at once.
-      verdict = initial || answered.size > 1;
-      alias = verdict;
+      // No node announces the seed's address. A VIP lands discovery on an
+      // arbitrary node each sync, so a node that answered before answers again
+      // after another one did. One node behind NAT or a port mapping answers as
+      // itself, and after a failover or replacement as the new node, for good.
+      const current = answered[answered.length - 1];
+      const previous = answered[answered.length - 2];
+      const settled = (count: number) =>
+        answered.length >= count && answered.slice(-count).every((id) => id === current);
+      const returned = previous !== undefined && current !== previous && answered.slice(0, -2).includes(current);
+      const wasAlias = prior ? prior.alias : initial;
+      alias = returned || (wasAlias && !settled(RECENT_ANSWERS));
+      verdict = alias;
+      // A change of `myself` not seen to return yet is either; leave membership
+      // as it is until the new node has answered a few syncs in a row.
+      undecided = !alias && new Set(answered.slice(-SETTLED_ANSWERS)).size > 1;
     } else {
       verdict = matched;
       alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;
     }
     this.aliasState.set(seed.id, { address, alias, last: verdict, answered });
+    if (undecided) return null;
     const desired = desiredFromDiscovery(seed, nodes, { seedIsAlias: alias });
     // A first verdict that disagrees with the starting point is not trusted
     // yet. Where it decides whether `myself` is a child, leave membership as it

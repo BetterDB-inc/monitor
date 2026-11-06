@@ -57,21 +57,39 @@ describe('ClusterTopologySource', () => {
     expect((await discoverWith(['10.0.0.1', 'fd00::1']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
   });
 
-  it('keeps every answering node once a seed that matches no node lands on a second one (a Service VIP)', async () => {
-    const landedOnN2 = [
-      { ...nodes[0], flags: ['slave'] },
-      { ...nodes[1], flags: ['myself', 'master'] },
-    ];
-    const discovery = { discoverNodesIsolated: jest.fn().mockResolvedValueOnce(nodes).mockResolvedValue(landedOnN2) };
-    const source = new ClusterTopologySource(discovery as never);
+  const landedOnN2 = [
+    { ...nodes[0], flags: ['slave'] },
+    { ...nodes[1], flags: ['myself', 'master'] },
+  ];
+  const vip = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+  const unmatchedSource = (...answers: (typeof nodes)[]) => {
+    const discoverNodesIsolated = jest.fn();
+    for (const answer of answers) discoverNodesIsolated.mockResolvedValueOnce(answer);
+    const source = new ClusterTopologySource({ discoverNodesIsolated } as never);
     source.resolveHost = jest.fn().mockResolvedValue(['10.96.0.10']);
-    const vip = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+    return source;
+  };
 
-    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
-    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
-    // Landing on n1 again does not undo it.
-    discovery.discoverNodesIsolated.mockResolvedValue(nodes);
-    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  it('keeps every answering node once a seed that matches no node lands on a node again (a Service VIP)', async () => {
+    const source = unmatchedSource(nodes, landedOnN2, nodes, landedOnN2);
+
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+    // Another node answered: a VIP or a moved endpoint, so membership waits.
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+  });
+
+  it('follows a seed that matches no node to the node it moved to (a failover behind NAT)', async () => {
+    const source = unmatchedSource(nodes, nodes, landedOnN2, landedOnN2, landedOnN2, landedOnN2);
+
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    // n2 has answered three syncs in a row: the seed is n2 now, n1 a child.
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1']);
   });
 
   it('drops myself for a seed that matches no node while the same node keeps answering (NAT, a port mapping)', async () => {

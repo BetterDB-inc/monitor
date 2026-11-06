@@ -56,9 +56,15 @@ cannot register a single node twice, and a rollout that leaves one pod behind
 the name for a sync does not retire the node that answered.
 
 When no node announces the seed's address, as with a ClusterIP Service, a load
-balancer VIP, NAT or a port mapping, the address alone cannot tell. The seed
-is then treated as one node until a sync is answered by a second node; from
-then on it fronts several nodes and every node is registered.
+balancer VIP, NAT or a port mapping, the address alone cannot tell, so the
+monitor watches which node answers each sync. A VIP lands on an arbitrary node,
+so a node that answered before soon answers again after another one did; the
+seed then fronts several nodes and every node is registered. One node behind
+NAT keeps answering as itself, and after a failover or replacement as the new
+node: once that node has answered three syncs in a row, it is the seed's node.
+Membership is left as it is while that is still unclear. A seed treated as
+fronting several nodes goes back to one node after ten syncs in a row are
+answered by the same node.
 
 Slow log and command log entries collected through such a seed are stored
 against the node that served them, not the seed's hostname, so history stays
