@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `--no-monitor-tools` flag: don't register `start_monitor` and
   `stop_monitor`.
-- `BETTERDB_LOCAL_TOKEN`: token for a local monitor started with
-  `start_monitor` while `BETTERDB_URL` points at a different monitor.
-- `BETTERDB_MCP_TELEMETRY`: turns the MCP server's usage events on or off
-  without affecting a monitor it starts. Takes precedence over
-  `BETTERDB_TELEMETRY`.
+- `BETTERDB_LOCAL_TOKEN`: token for a monitor started with `--autostart` or
+  `start_monitor` when `BETTERDB_URL` is set to a different monitor.
+- `BETTERDB_MCP_TELEMETRY`: turns off the MCP server's usage events without
+  affecting a monitor it starts. Usage events are off if it or
+  `BETTERDB_TELEMETRY` is off.
 - `BETTERDB_MONITOR_<NAME>` variables are passed to the started monitor as
   `<NAME>`.
 
@@ -24,12 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The monitor started by `--autostart` or `start_monitor` no longer inherits
   `BETTERDB_URL`, `BETTERDB_TOKEN`, `BETTERDB_LOCAL_TOKEN`,
   `BETTERDB_INSTANCE_ID` or `BETTERDB_MCP_TELEMETRY`.
-- `start_monitor` from a session pointed at a different monitor no longer
-  sends `BETTERDB_TOKEN` to the local monitor, and clears the selected
-  instance. `stop_monitor` switches back to the previous monitor, token and
-  instance.
-- `--autostart` keeps `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` for the
-  started monitor.
+- A monitor started with `--autostart` or `start_monitor` gets
+  `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` only when `BETTERDB_URL` is
+  unset or points at it. `stop_monitor` switches back to the previous
+  monitor, token and instance.
+- `--autostart` and `start_monitor` work on native Windows with Node 20.12.2
+  and later.
 - Tool calls and their usage events go to the monitor the call started on,
   also when the session switches monitors during the call.
 - `BETTERDB_TELEMETRY` now also turns telemetry off for `0`, `no` and `off`,

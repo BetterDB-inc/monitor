@@ -11,6 +11,7 @@ import {
   trackToolCall,
   stopTelemetry,
   flushTelemetry,
+  moveTelemetry,
   type TelemetryEvent,
 } from './telemetry.js';
 import type { MonitorTarget } from './monitor-target.js';
@@ -61,15 +62,6 @@ interface Session {
   instanceId: string | null;
 }
 
-let target: MonitorTarget = {
-  url: (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, ''),
-  token: process.env.BETTERDB_TOKEN,
-  prefix: null,
-};
-
-let activeInstanceId: string | null = process.env.BETTERDB_INSTANCE_ID || null;
-let sessionBeforeLocalMonitor: Session | null = null;
-
 const API_PREFIXES = ['/api', ''];
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
@@ -89,26 +81,42 @@ function isSameMonitor(a: string, b: string): boolean {
   return key !== null && key === monitorKey(b);
 }
 
-function useMonitor(url: string): void {
-  target = { url, token: target.token, prefix: null };
+function isConfiguredMonitor(url: string): boolean {
+  const configured = process.env.BETTERDB_URL;
+  return !configured || isSameMonitor(url, configured);
 }
 
-function useStartedMonitor(url: string): void {
-  if (isSameMonitor(target.url, url)) {
-    useMonitor(url);
-    return;
+function tokenFor(url: string): string | undefined {
+  return isConfiguredMonitor(url)
+    ? process.env.BETTERDB_TOKEN
+    : process.env.BETTERDB_LOCAL_TOKEN || undefined;
+}
+
+function instanceFor(url: string): string | null {
+  return isConfiguredMonitor(url) ? process.env.BETTERDB_INSTANCE_ID || null : null;
+}
+
+const configuredUrl = (process.env.BETTERDB_URL || 'http://localhost:3001').replace(/\/+$/, '');
+let target: MonitorTarget = { url: configuredUrl, token: tokenFor(configuredUrl), prefix: null };
+let activeInstanceId: string | null = instanceFor(configuredUrl);
+let sessionBeforeLocalMonitor: Session | null = null;
+
+function switchTo(url: string, remember: boolean): void {
+  if (isSameMonitor(target.url, url)) return;
+  if (remember) {
+    sessionBeforeLocalMonitor ??= { target, instanceId: activeInstanceId };
   }
-  void flushTelemetry(target);
-  sessionBeforeLocalMonitor ??= { target, instanceId: activeInstanceId };
-  target = { url, token: process.env.BETTERDB_LOCAL_TOKEN || undefined, prefix: null };
-  activeInstanceId = null;
+  target = { url, token: tokenFor(url), prefix: null };
+  activeInstanceId = instanceFor(url);
 }
 
-function restoreSessionAfterStop(): void {
-  if (!sessionBeforeLocalMonitor) return;
+function restoreSessionAfterStop(): MonitorTarget | null {
+  if (!sessionBeforeLocalMonitor) return null;
+  const stopped = target;
   target = sessionBeforeLocalMonitor.target;
   activeInstanceId = sessionBeforeLocalMonitor.instanceId;
   sessionBeforeLocalMonitor = null;
+  return stopped;
 }
 
 function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
@@ -122,10 +130,15 @@ function authHeaders(to: MonitorTarget, json: boolean): Record<string, string> {
   return headers;
 }
 
-async function rawFetch(to: MonitorTarget, prefix: string, path: string): Promise<Response> {
+async function rawFetch(
+  to: MonitorTarget,
+  prefix: string,
+  path: string,
+  timeoutMs: number,
+): Promise<Response> {
   return fetch(`${to.url}${prefix}${path}`, {
     headers: authHeaders(to, true),
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -134,10 +147,10 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
-async function detectPrefix(to: MonitorTarget): Promise<string> {
+async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
   for (const prefix of API_PREFIXES) {
     try {
-      const res = await rawFetch(to, prefix, '/mcp/instances');
+      const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
       if (res.ok && isJsonResponse(res)) {
         return prefix;
       }
@@ -175,7 +188,7 @@ async function requestTo(
   timeoutMs = 30_000,
 ): Promise<unknown> {
   if (to.prefix === null) {
-    to.prefix = await detectPrefix(to);
+    to.prefix = await detectPrefix(to, timeoutMs);
   }
   const res = await fetch(`${to.url}${to.prefix}${path}`, {
     method,
@@ -329,6 +342,7 @@ server.tool(
   {},
   async () =>
     withTelemetry('list_instances', async () => {
+      const selectedId = activeInstanceId;
       const data = (await apiFetch('/mcp/instances')) as {
         instances: Array<{
           id: string;
@@ -339,7 +353,7 @@ server.tool(
         }>;
       };
       const lines = data.instances.map((inst) => {
-        const active = inst.id === activeInstanceId ? ' [ACTIVE]' : '';
+        const active = inst.id === selectedId ? ' [ACTIVE]' : '';
         const status = inst.isConnected ? 'connected' : 'disconnected';
         return `${inst.id} - ${inst.name} (${status})${inst.isDefault ? ' [default]' : ''}${active}`;
       });
@@ -981,7 +995,7 @@ if (MONITOR_TOOLS) {
         try {
           const { startMonitor } = await import('./autostart.js');
           const result = await startMonitor({ persist: true, port, storage });
-          useStartedMonitor(result.url);
+          switchTo(result.url, true);
           const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
           return {
             content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
@@ -1704,15 +1718,15 @@ if (MONITOR_TOOLS) {
       withTelemetry('stop_monitor', async () => {
         try {
           const { stopMonitor } = await import('./autostart.js');
-          const switchBack = sessionBeforeLocalMonitor !== null;
-          if (switchBack) {
-            await flushTelemetry(target);
-          }
           const result = await stopMonitor();
-          restoreSessionAfterStop();
-          const text = switchBack
-            ? `${result.message} Switched back to ${target.url}.`
-            : result.message;
+          const stopped = restoreSessionAfterStop();
+          let text = result.message;
+          if (stopped) {
+            moveTelemetry(stopped, target);
+            text += ` Switched back to ${target.url}.`;
+          } else if (result.url && isSameMonitor(target.url, result.url)) {
+            text += ` This session still points at ${target.url}, which is no longer running. Call start_monitor before using other tools.`;
+          }
           return {
             content: [{ type: 'text' as const, text }],
           };
@@ -2265,7 +2279,7 @@ try {
       port: MONITOR_PORT,
       storage: MONITOR_STORAGE,
     });
-    useMonitor(result.url);
+    switchTo(result.url, false);
   }
 
   initTelemetry(sendTelemetry);

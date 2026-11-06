@@ -4,23 +4,23 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sourceFiles } from './lib/source-files.mjs';
+import { lineAt, sourceFiles } from './lib/source-files.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readText = (path) => readFileSync(join(repoRoot, path), 'utf8');
 const readJson = (path) => JSON.parse(readText(path));
-const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 
 const PACKAGE = '@betterdb/mcp';
-const EXACT_VERSION = /^\d+\.\d+\.\d+(-[\w.]+)?$/;
-const PIN_PATTERN = /@betterdb\/mcp@([^\s"'`)\]},]*)/g;
+const SEMVER = String.raw`\d+\.\d+\.\d+(?:-\w+(?:\.\w+)*)?`;
+const EXACT_VERSION = new RegExp(`^${SEMVER}$`);
+const PIN_PATTERN = new RegExp(String.raw`@betterdb\/mcp@(${SEMVER}(?![\w.-]\w)|[^\s"'\x60)\]},]*)`, 'g');
 const UNPINNED_PATTERNS = [
-  /npx(?:\s+(?:-y|--yes))?\s+@betterdb\/mcp(?![@\w/-])/g,
+  /\b(?:npx|bunx|dlx|exec)(?:[ \t]+-{1,2}[\w-]+)*(?:[ \t]+|=)@betterdb\/mcp(?![@\w/-])/g,
   /["']@betterdb\/mcp["']/g,
 ];
 const SCANNED_FILES = ['README.md', 'packages/mcp/README.md', 'packages/mcp/claude-plugin/README.md'];
 const SCANNED_DIRS = [
-  { dir: 'docs', extensions: ['.md'] },
+  { dir: 'docs', extensions: ['.md', '.mdx'] },
   { dir: 'apps/web/src', extensions: ['.ts', '.tsx'] },
 ];
 function argValue(flag) {
@@ -37,6 +37,15 @@ function argValue(flag) {
 function pinOf(mcpJson) {
   const arg = mcpJson.mcpServers.betterdb.args.find((value) => value.startsWith(PACKAGE));
   return { arg, pin: arg?.startsWith(`${PACKAGE}@`) ? arg.slice(PACKAGE.length + 1) : undefined };
+}
+
+function changedSince(ref, path) {
+  return execFileSync('git', ['diff', '--name-only', ref, '--', path], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+    .split('\n')
+    .filter(Boolean);
 }
 
 function readAtRef(ref, path) {
@@ -67,7 +76,8 @@ for (const [where, version] of packageGroup) {
 }
 
 const PLUGIN_MCP = 'packages/mcp/claude-plugin/.mcp.json';
-const PLUGIN_MANIFEST = 'packages/mcp/claude-plugin/.claude-plugin/plugin.json';
+const PLUGIN_DIR = 'packages/mcp/claude-plugin';
+const PLUGIN_MANIFEST = `${PLUGIN_DIR}/.claude-plugin/plugin.json`;
 const { arg: pluginArg, pin: pluginPin } = pinOf(readJson(PLUGIN_MCP));
 if (!pluginPin || !EXACT_VERSION.test(pluginPin)) {
   problems.push(
@@ -76,14 +86,13 @@ if (!pluginPin || !EXACT_VERSION.test(pluginPin)) {
 }
 
 if (baseRef) {
-  const baseMcp = readAtRef(baseRef, PLUGIN_MCP);
   const baseManifest = readAtRef(baseRef, PLUGIN_MANIFEST);
-  if (baseMcp && baseManifest) {
-    const basePin = pinOf(JSON.parse(baseMcp)).pin;
+  if (baseManifest) {
     const baseVersion = JSON.parse(baseManifest).version;
-    if (basePin !== pluginPin && baseVersion === readJson(PLUGIN_MANIFEST).version) {
+    const changed = changedSince(baseRef, PLUGIN_DIR);
+    if (changed.length > 0 && baseVersion === readJson(PLUGIN_MANIFEST).version) {
       problems.push(
-        `${PLUGIN_MCP} pin moved from ${basePin} to ${pluginPin} but ${PLUGIN_MANIFEST} version is still ${baseVersion}`,
+        `${PLUGIN_DIR} changed (${changed.join(', ')}) but ${PLUGIN_MANIFEST} version is still ${baseVersion}`,
       );
     }
   }
@@ -97,7 +106,7 @@ const files = [
 for (const file of files) {
   const text = readText(file);
   for (const match of text.matchAll(PIN_PATTERN)) {
-    const where = `${file}:${lineOf(text, match.index)}`;
+    const where = `${file}:${lineAt(text, match.index)}`;
     if (!EXACT_VERSION.test(match[1])) {
       problems.push(`${where} pins ${PACKAGE}@${match[1]}, expected an exact version`);
     } else if (match[1] !== pluginPin) {
@@ -106,7 +115,7 @@ for (const file of files) {
   }
   for (const pattern of UNPINNED_PATTERNS) {
     for (const match of text.matchAll(pattern)) {
-      problems.push(`${file}:${lineOf(text, match.index)} launches ${PACKAGE} without a version`);
+      problems.push(`${file}:${lineAt(text, match.index)} launches ${PACKAGE} without a version`);
     }
   }
 }

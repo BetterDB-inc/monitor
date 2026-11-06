@@ -42,7 +42,7 @@
     "telemetry": {
       "type": "boolean",
       "title": "Usage telemetry",
-      "description": "Send tool usage events (tool name, success, duration, error) to your BetterDB Monitor",
+      "description": "Send tool usage events (tool name, success, duration, up to 200 characters of error text) to your BetterDB Monitor, which relays them to BetterDB when its own telemetry is on",
       "default": true
     }
   }

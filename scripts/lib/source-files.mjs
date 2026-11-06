@@ -28,3 +28,7 @@ export function sourceFiles(dir, extensions, found = []) {
   }
   return found;
 }
+
+export function lineAt(source, offset) {
+  return source.slice(0, offset).split('\n').length;
+}

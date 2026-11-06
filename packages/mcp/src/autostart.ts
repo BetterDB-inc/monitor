@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const isWindows = process.platform === 'win32';
+const npxCmd = isWindows ? 'npx.cmd' : 'npx';
 
 export const BETTERDB_DIR = path.join(os.homedir(), '.betterdb');
 export const PID_FILE = path.join(BETTERDB_DIR, 'monitor.pid');
@@ -144,6 +145,7 @@ export async function startMonitor(opts: {
       env,
       stdio: 'ignore',
       detached: true,
+      shell: isWindows,
     });
     child.unref();
     if (!child.pid) {
@@ -164,6 +166,7 @@ export async function startMonitor(opts: {
     child = spawn(npxCmd, ['--yes', '@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
+      shell: isWindows,
     });
 
     if (child.stderr) {
@@ -183,14 +186,25 @@ export async function startMonitor(opts: {
   return { url, alreadyRunning: false };
 }
 
-export async function stopMonitor(): Promise<{ stopped: boolean; message: string }> {
+function readPidPort(file: string): number | null {
+  try {
+    const port = Number(fs.readFileSync(file, 'utf8').trim().split(':')[1]);
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function stopMonitor(): Promise<{ stopped: boolean; message: string; url?: string }> {
   if (!fs.existsSync(PID_FILE)) {
     return { stopped: false, message: 'No persisted monitor found.' };
   }
   const pid = readValidPid(PID_FILE);
+  const port = readPidPort(PID_FILE);
+  const url = port === null ? undefined : `http://localhost:${port}`;
   if (pid === null) {
     try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
-    return { stopped: true, message: 'Removed corrupted PID file.' };
+    return { stopped: true, message: 'Removed corrupted PID file.', url };
   }
   let wasRunning = false;
   try {
@@ -212,6 +226,6 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
 
   try { fs.unlinkSync(PID_FILE); } catch { /* already removed */ }
   return wasRunning
-    ? { stopped: true, message: `Stopped monitor (PID ${pid}).` }
-    : { stopped: true, message: `Removed stale PID file (process ${pid} was not running).` };
+    ? { stopped: true, message: `Stopped monitor (PID ${pid}).`, url }
+    : { stopped: true, message: `Removed stale PID file (process ${pid} was not running).`, url };
 }

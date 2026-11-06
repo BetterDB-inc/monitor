@@ -120,10 +120,10 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
-| `BETTERDB_LOCAL_TOKEN` | — | Token for a local monitor started with `start_monitor` while `BETTERDB_URL` points at a different monitor. Without it, that local monitor gets no token. With `--autostart`, `BETTERDB_TOKEN` and `BETTERDB_INSTANCE_ID` apply to the started monitor |
+| `BETTERDB_LOCAL_TOKEN` | — | Token for a monitor started with `--autostart` or `start_monitor` when `BETTERDB_URL` is set to a different monitor. Without it, that monitor gets no token. `BETTERDB_TOKEN` is used when `BETTERDB_URL` is unset or points at the started monitor |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
-| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to turn off telemetry: the MCP server's tool usage events (tool name, success, duration, error), and a monitor started with `--autostart` or `start_monitor`. Each usage event goes to the monitor the call was made against |
-| `BETTERDB_MCP_TELEMETRY` | — | Same values as `BETTERDB_TELEMETRY`, for the MCP server's usage events only. Takes precedence over `BETTERDB_TELEMETRY` when set |
+| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to turn off telemetry: the MCP server's tool usage events, and a monitor started with `--autostart` or `start_monitor`. Usage events (tool name, success, duration, up to 200 characters of error text) go to the monitor the call was made against, which relays them to BetterDB when its own telemetry is on |
+| `BETTERDB_MCP_TELEMETRY` | — | Same values as `BETTERDB_TELEMETRY`, for the MCP server's usage events only. Usage events are off if either variable is off; neither turns them back on |
 | `BETTERDB_MONITOR_<NAME>` | — | Passed to a monitor started with `--autostart` or `start_monitor` as `<NAME>`, overriding the inherited value. `PORT` and `STORAGE_TYPE` come from `--port` and `--storage` instead |
 
 ### CLI Arguments
@@ -208,7 +208,7 @@ For AI components (semantic caches, agent caches, agent-memory stores, retrieval
 
 ### Monitor Lifecycle Tools
 
-Registered unless `--no-monitor-tools` is set. `start_monitor` runs `npx --yes @betterdb/monitor` as a background process and switches the session to it. If `BETTERDB_URL` pointed at a different monitor, `BETTERDB_TOKEN` is not sent to the local one and the selected instance is cleared; set `BETTERDB_LOCAL_TOKEN` if the local monitor needs a token, for example for write tools. `stop_monitor` switches back to the previous monitor, token and instance.
+Registered unless `--no-monitor-tools` is set. `start_monitor` runs `npx --yes @betterdb/monitor` as a background process and switches the session to it. The token for a monitor the server switches to (with `--autostart` or `start_monitor`) is `BETTERDB_TOKEN` when `BETTERDB_URL` is unset or points at that monitor (`localhost`, `127.0.0.1` and `::1` count as the same host), and `BETTERDB_LOCAL_TOKEN` otherwise. The selected instance follows the same rule with `BETTERDB_INSTANCE_ID`. `stop_monitor` switches back to the previous monitor, token and instance.
 
 | Tool | Description |
 |---|---|

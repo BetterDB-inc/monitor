@@ -37,13 +37,11 @@ export function isTelemetryDisabled(value: string | undefined): boolean {
   return value !== undefined && OFF_VALUES.has(value.trim().toLowerCase());
 }
 
-function telemetrySetting(): string | undefined {
-  const own = process.env.BETTERDB_MCP_TELEMETRY;
-  return own !== undefined && own.trim() !== '' ? own : process.env.BETTERDB_TELEMETRY;
-}
-
 export function initTelemetry(send: SendFn): void {
-  if (isTelemetryDisabled(telemetrySetting())) {
+  if (
+    isTelemetryDisabled(process.env.BETTERDB_TELEMETRY) ||
+    isTelemetryDisabled(process.env.BETTERDB_MCP_TELEMETRY)
+  ) {
     disabled = true;
     return;
   }
@@ -60,6 +58,13 @@ export function trackToolCall(target: MonitorTarget, event: Omit<TelemetryEvent,
   if (events.length >= MAX_BUFFER_SIZE) {
     flushTelemetry(target);
   }
+}
+
+export function moveTelemetry(from: MonitorTarget, to: MonitorTarget): void {
+  const events = buffers.get(from);
+  if (!events) return;
+  buffers.delete(from);
+  buffers.set(to, [...(buffers.get(to) ?? []), ...events]);
 }
 
 export async function stopTelemetry(): Promise<void> {

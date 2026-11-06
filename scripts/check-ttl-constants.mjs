@@ -23,7 +23,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sourceFiles } from './lib/source-files.mjs';
+import { lineAt, sourceFiles } from './lib/source-files.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -168,10 +168,6 @@ function isDeclarationLine(line) {
  */
 function isCommentLine(line) {
   return /^(?:\/\/|\/\*|\*|#)/.test(line);
-}
-
-function lineAt(source, offset) {
-  return source.slice(0, offset).split('\n').length;
 }
 
 function textAt(lines, line) {
