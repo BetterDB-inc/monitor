@@ -8,10 +8,19 @@
   "plugins": [
     {
       "name": "betterdb",
-      "source": "./packages/mcp/claude-plugin",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/BetterDB-inc/monitor.git",
+        "path": "packages/mcp/claude-plugin",
+        "ref": "master"
+      },
       "description": "Valkey and Redis observability from BetterDB Monitor",
       "category": "monitoring",
-      "tags": ["valkey", "redis", "observability"]
+      "tags": [
+        "valkey",
+        "redis",
+        "observability"
+      ]
     }
   ]
 }

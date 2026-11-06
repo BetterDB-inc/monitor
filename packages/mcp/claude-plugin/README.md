@@ -5,7 +5,7 @@ Gives Claude direct access to your Valkey and Redis databases through [BetterDB 
 ## Install
 
 ```bash
-claude plugin marketplace add BetterDB-inc/monitor
+claude plugin marketplace add https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.claude-plugin/marketplace.json
 claude plugin install betterdb@betterdb
 ```
 

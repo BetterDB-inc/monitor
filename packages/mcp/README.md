@@ -47,7 +47,7 @@ In BetterDB, go to **Settings → MCP Tokens** and generate a new token.
 In Claude Code, install the BetterDB plugin and enter your URL and token when prompted:
 
 ```bash
-claude plugin marketplace add BetterDB-inc/monitor
+claude plugin marketplace add https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.claude-plugin/marketplace.json
 claude plugin install betterdb@betterdb
 ```
 
