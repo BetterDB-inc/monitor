@@ -41,7 +41,7 @@ export function monitorEnv(
     if (value === undefined || MCP_ENV.has(upperKey)) continue;
     if (upperKey.startsWith(MONITOR_ENV_PREFIX)) {
       const name = key.slice(MONITOR_ENV_PREFIX.length);
-      if (name && !RESERVED_MONITOR_ENV.has(name)) overrides[name] = value;
+      if (name && !RESERVED_MONITOR_ENV.has(name.toUpperCase())) overrides[name] = value;
     } else {
       inherited[key] = value;
     }
