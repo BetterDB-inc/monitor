@@ -3842,12 +3842,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     >,
   ): void {
     for (const [connectionId, entries] of byConnection) {
-      const connLabel = this.getConnectionLabel(connectionId);
+      const connLabel = this.incidentConnectionLabel(connectionId);
       if (connLabel === null) {
         continue;
       }
       const state = this.getConnectionState(connectionId);
-      state.signalConnLabel = connLabel;
+      if (connectionId !== '') state.signalConnLabel = connLabel;
       const currentLabels = new Set<string>();
       for (const entry of entries) {
         currentLabels.add(JSON.stringify([entry.pattern, entry.status]));
@@ -3859,11 +3859,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       if (byConnection.has(connectionId) || state.currentIncidentLabels.size === 0) {
         continue;
       }
-      const connLabel = this.getConnectionLabel(connectionId);
+      const connLabel = this.incidentConnectionLabel(connectionId);
       if (connLabel !== null) {
         this.removeStaleIncidentLabels(connLabel, state, new Set());
       }
     }
+  }
+
+  private incidentConnectionLabel(connectionId: string): string | null {
+    return connectionId === '' ? '' : this.getConnectionLabel(connectionId);
   }
 
   private removeStaleIncidentLabels(

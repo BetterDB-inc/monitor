@@ -3077,8 +3077,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         recommendations = excluded.recommendations,
         anomaly_count = excluded.anomaly_count,
         anomaly_ids = COALESCE(excluded.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
-        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id),
-        incident_id = COALESCE(correlated_anomaly_groups.incident_id, excluded.incident_id)
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, excluded.scope_id)
     `);
 
     stmt.run(

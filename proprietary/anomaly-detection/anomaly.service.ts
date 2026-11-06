@@ -410,6 +410,9 @@ interface TrackedResyncEvent {
 
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
+const INCIDENT_LIST_CACHE_MS = 30_000;
+const MAX_INCIDENT_LIST_CACHE_ENTRIES = 50;
+const DAY_MS = 24 * 60 * 60_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -478,6 +481,9 @@ export class AnomalyService
     getSequenceRules,
   );
   private liveIncidents: IncidentTimeline[] = [];
+  private liveIncidentByAnomaly = new Map<string, IncidentTimeline>();
+  private incidentBoundariesReady = false;
+  private incidentListCache = new Map<string, { at: number; timelines: Promise<IncidentTimeline[]> }>();
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
   private incidentBoundarySeed: Promise<boolean> | null = null;
@@ -7126,10 +7132,10 @@ export class AnomalyService
       this.correlationTicking = true;
       this.scopeSeeds = this.seedsByClusterKey();
       try {
-        await this.correlateAnomalies();
         await this.tickIncidentTimelines().catch((err) => {
           this.logger.error('Failed to build incident timelines:', err);
         });
+        await this.correlateAnomalies();
       } finally {
         this.scopeSeeds = null;
         this.correlationTicking = false;
@@ -7532,9 +7538,15 @@ export class AnomalyService
         now - windowMs,
         this.incidentEventsDroppedSpans,
       );
+      this.liveIncidentByAnomaly = new Map(
+        this.liveIncidents.flatMap((incident) =>
+          incident.entries.map((entry) => [entry.anomalyId, incident] as const),
+        ),
+      );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;
     }
+    this.incidentBoundariesReady = boundariesSeeded;
     if (boundariesSeeded) await this.storeIncidentBoundaries(now - windowMs);
     else this.incidentBoundarySeed = null;
     if (!seeded) {
@@ -7570,7 +7582,7 @@ export class AnomalyService
           diagnosis: match.diagnosis,
           recommendations: match.recommendations,
           severity: match.severity,
-          incidentId: incident.incidentId,
+          ...(boundariesSeeded ? { incidentId: incident.incidentId } : {}),
         });
         if (!recorded) {
           anomalies.forEach((a) =>
@@ -7631,19 +7643,43 @@ export class AnomalyService
     limit = 50,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
+    const bucket = (at: number) => Math.floor(at / INCIDENT_LIST_CACHE_MS) * INCIDENT_LIST_CACHE_MS;
     const from = Math.max(
-      startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
-      now - MAX_INCIDENT_LOOKBACK_MS,
+      startTime ?? bucket((endTime ?? now) - DAY_MS),
+      bucket(now - MAX_INCIDENT_LOOKBACK_MS),
     );
-    const { events, boundaries } = await this.loadIncidentHistory(
-      connectionId,
-      from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
-      endTime,
-    );
-    return this.buildIncidents(events, boundaries)
-      .filter((t) => t.lastEventAt >= from)
+    const timelines = await this.incidentsSince(connectionId, from, now);
+    return timelines
+      .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
       .reverse()
       .slice(0, limit);
+  }
+
+  private incidentsSince(
+    connectionId: string | undefined,
+    from: number,
+    now: number,
+  ): Promise<IncidentTimeline[]> {
+    for (const [key, entry] of this.incidentListCache) {
+      if (now - entry.at >= INCIDENT_LIST_CACHE_MS) this.incidentListCache.delete(key);
+    }
+    const key = `${connectionId ?? ''}\u0000${from}`;
+    const cached = this.incidentListCache.get(key);
+    if (cached) return cached.timelines;
+    const timelines = this.loadIncidentHistory(
+      connectionId,
+      from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
+      undefined,
+    ).then(({ events, boundaries }) => this.buildIncidents(events, boundaries));
+    const entry = { at: now, timelines };
+    this.incidentListCache.set(key, entry);
+    if (this.incidentListCache.size > MAX_INCIDENT_LIST_CACHE_ENTRIES) {
+      this.incidentListCache.delete(this.incidentListCache.keys().next().value!);
+    }
+    timelines.catch(() => {
+      if (this.incidentListCache.get(key) === entry) this.incidentListCache.delete(key);
+    });
+    return timelines;
   }
 
   private buildIncidents(
@@ -7667,13 +7703,38 @@ export class AnomalyService
   ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[]; windowEnd: number }> {
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const windowEnd = startedAt + 2 * maxSpanMs;
-    const anchors = await this.readIncidentBoundaries(connectionId, startedAt, startedAt);
-    const history = await this.loadIncidentHistory(
-      connectionId,
-      anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
+    const history = await this.loadIncidentHistory(connectionId, startedAt - maxSpanMs, windowEnd);
+    if (history.boundaries.some((b) => b.startedAt === startedAt)) return { ...history, windowEnd };
+    const boundaries = this.boundariesFrom(history.boundaries, startedAt);
+    const earliest = this.earliestIncidentLoad(boundaries, startedAt);
+    return {
+      events: history.events.filter((e) => e.timestamp >= earliest),
+      boundaries,
       windowEnd,
+    };
+  }
+
+  private boundariesFrom(
+    boundaries: StoredIncidentBoundary[],
+    from: number,
+  ): StoredIncidentBoundary[] {
+    const latestBefore = new Map<string, number>();
+    for (const b of boundaries) {
+      if (b.startedAt < from && b.startedAt > (latestBefore.get(b.scopeId) ?? -Infinity)) {
+        latestBefore.set(b.scopeId, b.startedAt);
+      }
+    }
+    return boundaries.filter(
+      (b) => b.startedAt >= from || latestBefore.get(b.scopeId) === b.startedAt,
     );
-    return { ...history, windowEnd };
+  }
+
+  private earliestIncidentLoad(boundaries: StoredIncidentBoundary[], loadFrom: number): number {
+    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    return boundaries
+      .map((b) => b.startedAt)
+      .filter((at) => at >= reach)
+      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
   }
 
   async getIncidentTimeline(
@@ -7701,6 +7762,7 @@ export class AnomalyService
     if (!draft) return null;
     const signals = new Map<string, { connectionId: string; metricType: MetricType }>();
     for (const entry of draft.entries) {
+      if (entry.recoveryState === 'recovered') continue;
       signals.set(`${entry.connectionId}\u0000${entry.metricType}`, {
         connectionId: entry.connectionId,
         metricType: entry.metricType,
@@ -7746,11 +7808,7 @@ export class AnomalyService
     endTime: number | undefined,
   ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
     const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, endTime);
-    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    const earliest = boundaries
-      .map((b) => b.startedAt)
-      .filter((at) => at >= reach)
-      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
+    const earliest = this.earliestIncidentLoad(boundaries, loadFrom);
     const events = await this.loadIncidentEvents(connectionId, earliest, endTime);
     if (!connectionId) return { events, boundaries };
     const scope = this.correlationScopeOf(connectionId);
@@ -7860,6 +7918,15 @@ export class AnomalyService
     ];
   }
 
+  private liveIncidentIdOf(anomalies: AnomalyEvent[]): string | undefined {
+    if (!this.incidentBoundariesReady) return undefined;
+    for (const anomaly of anomalies) {
+      const incident = this.liveIncidentByAnomaly.get(anomaly.id);
+      if (incident) return incident.incidentId;
+    }
+    return undefined;
+  }
+
   private async correlateAnomalies(): Promise<void> {
     try {
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
@@ -7873,6 +7940,8 @@ export class AnomalyService
       );
 
       for (const group of newGroups) {
+        const incidentId = this.liveIncidentIdOf(group.anomalies);
+        if (incidentId) group.incidentId = incidentId;
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
           timestamp: group.timestamp,
@@ -7885,6 +7954,7 @@ export class AnomalyService
           sourceHost: this.configService.get('database.host'),
           sourcePort: this.configService.get('database.port'),
           scopeId: group.anomalies[0]?.scopeId,
+          ...(incidentId ? { incidentId } : {}),
         };
 
         // Get connectionId from first anomaly in group (all should have same connectionId)
@@ -9670,7 +9740,8 @@ export class AnomalyService
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
         oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
         const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
-        for (const connectionId of new Set(timeline.connectionIds)) {
+        const connectionIds = timeline.connectionIds.length > 0 ? timeline.connectionIds : [''];
+        for (const connectionId of new Set(connectionIds)) {
           const counts = byConnection.get(connectionId) ?? new Map();
           for (const pattern of patterns) {
             const label = `${pattern}\u0000${status}`;

@@ -127,6 +127,7 @@ export const METRIC_LABELS: Record<string, string> = {
   retry_amplification: 'Retry Amplification',
   error_replies: 'Error Replies',
   replication_divergence: 'Replication Divergence',
+  sentinel_loop_stall: 'Sentinel Loop Stall',
 };
 
 export function formatTime(ts: number): string {
@@ -143,24 +144,4 @@ export function patternLabel(pattern: string): string {
 
 export function metricLabel(metricType: string): string {
   return METRIC_LABELS[metricType] ?? metricType;
-}
-
-export function formatDuration(ms: number): string {
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m`;
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
-}
-
-export function formatDateTime(ts: number): string {
-  return new Date(ts).toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
 }

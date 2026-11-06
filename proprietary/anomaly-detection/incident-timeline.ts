@@ -21,7 +21,7 @@ export interface IncidentTimelineEntry {
 export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
 
 type SignalRecovery =
-  | { state: 'recovered'; at: number | null }
+  | { state: 'recovered'; at: number }
   | { state: 'open' }
   | { state: 'unknown' };
 
@@ -605,9 +605,10 @@ export class IncidentTimelineBuilder {
       const key = signalKey(event);
       const entry = toTimelineEntry(event);
       if (lastBySignal.get(key) !== event) {
-        return event.resolved
-          ? { ...entry, recoveredAt: event.resolvedAt ?? null, recoveryState: 'recovered' }
-          : { ...entry, recoveryState: 'recurred' };
+        if (!event.resolved) return { ...entry, recoveryState: 'recurred' };
+        return typeof event.resolvedAt === 'number'
+          ? { ...entry, recoveredAt: event.resolvedAt, recoveryState: 'recovered' }
+          : { ...entry, recoveryState: 'unknown' };
       }
       const recovery = recoveryBySignal.get(key)!;
       return recovery.state === 'recovered'
@@ -662,15 +663,12 @@ export class IncidentTimelineBuilder {
     const openSignals: MetricType[] = [];
     const unknownSignals: MetricType[] = [];
     let recoveredAt: number | null = null;
-    let recoveryTimeKnown = true;
     for (const [key, recovery] of recoveryBySignal) {
       const metricType = lastBySignal.get(key)!.metricType;
       if (recovery.state === 'open') {
         if (!openSignals.includes(metricType)) openSignals.push(metricType);
       } else if (recovery.state === 'unknown') {
         if (!unknownSignals.includes(metricType)) unknownSignals.push(metricType);
-      } else if (recovery.at === null) {
-        recoveryTimeKnown = false;
       } else if (recoveredAt === null || recovery.at > recoveredAt) {
         recoveredAt = recovery.at;
       }
@@ -694,9 +692,7 @@ export class IncidentTimelineBuilder {
         openSignals,
         unknownSignals,
         recoveredAt:
-          openSignals.length === 0 && unknownSignals.length === 0 && recoveryTimeKnown
-            ? recoveredAt
-            : null,
+          openSignals.length === 0 && unknownSignals.length === 0 ? recoveredAt : null,
       },
     };
   }
@@ -708,7 +704,11 @@ export class IncidentTimelineBuilder {
     now: number,
     probe: RecoveryProbe,
   ): SignalRecovery {
-    if (event.resolved) return { state: 'recovered', at: event.resolvedAt ?? null };
+    if (event.resolved) {
+      return typeof event.resolvedAt === 'number'
+        ? { state: 'recovered', at: event.resolvedAt }
+        : { state: 'unknown' };
+    }
     if (now - event.timestamp < this.opts.settleMs) return { state: 'open' };
     const at = probe({
       connectionId: event.connectionId ?? '',

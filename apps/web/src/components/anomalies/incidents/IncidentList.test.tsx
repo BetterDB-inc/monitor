@@ -27,18 +27,24 @@ describe('IncidentList', () => {
     expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
   });
 
-  it('says when the list is capped and keeps the date range on links', () => {
-    renderList([incident({ incidentId: 'a' }), incident({ incidentId: 'b' })], {
-      limit: 2,
-      linkQuery: 'start=1&end=2',
-    });
+  it('says when more incidents came back than the limit and keeps the date range on links', () => {
+    renderList(
+      [incident({ incidentId: 'a' }), incident({ incidentId: 'b' }), incident({ incidentId: 'c' })],
+      { limit: 2, linkQuery: 'start=1&end=2' },
+    );
     expect(
       screen.getByText('Showing the newest 2 incidents. Narrow the time range to see older ones.'),
     ).toBeInTheDocument();
+    expect(screen.getAllByRole('link')).toHaveLength(2);
     expect(screen.getAllByRole('link')[0]).toHaveAttribute(
       'href',
       '/anomalies/incidents/a?start=1&end=2',
     );
+  });
+
+  it('shows no cap notice when exactly the limit came back', () => {
+    renderList([incident({ incidentId: 'a' }), incident({ incidentId: 'b' })], { limit: 2 });
+    expect(screen.queryByText(/Showing the newest/)).not.toBeInTheDocument();
   });
 
   it('lists pattern, scope, duration and status, linking to the detail view', () => {

@@ -5,8 +5,6 @@ import {
   incidentDurationMs,
   incidentPath,
   incidentTitle,
-  isDurationOngoing,
-  orderedEntries,
 } from './incident-summary';
 
 describe('incident summary helpers', () => {
@@ -38,34 +36,12 @@ describe('incident summary helpers', () => {
     expect(incidentDurationMs(unknown, T0 + 300_000)).toBe(60_000);
   });
 
-  it('keeps the server order for events with equal timestamps', () => {
-    const ordered = orderedEntries(
-      incident({
-        entries: [
-          entry({ anomalyId: 'late', timestamp: T0 + 5 }),
-          entry({ anomalyId: 'second', timestamp: T0 }),
-          entry({ anomalyId: 'third', timestamp: T0 }),
-        ],
-      }),
-    );
-    expect(ordered.map((e) => e.anomalyId)).toEqual(['second', 'third', 'late']);
-  });
-
   it('encodes the incident id in its path and keeps the date range', () => {
     expect(incidentPath('1-a/b')).toBe('/anomalies/incidents/1-a%2Fb');
     expect(incidentPath('1-a', dateRangeQuery(100, 200))).toBe(
       '/anomalies/incidents/1-a?start=100&end=200',
     );
     expect(dateRangeQuery(100, undefined)).toBe('');
-  });
-
-  it('only counts an incident as ongoing while its duration runs to now', () => {
-    const withStatus = (status: 'active' | 'recovered', recoveredAt: number | null) =>
-      incident({ recovery: { status, openSignals: [], unknownSignals: [], recoveredAt } });
-    expect(isDurationOngoing(withStatus('active', null))).toBe(true);
-    expect(isDurationOngoing(withStatus('active', T0 + 120_000))).toBe(true);
-    expect(isDurationOngoing(withStatus('recovered', T0 + 120_000))).toBe(false);
-    expect(isDurationOngoing(incident())).toBe(false);
   });
 
   it('keeps the duration running while an incident is still active', () => {
@@ -89,8 +65,8 @@ describe('incident summary helpers', () => {
       incidentTitle(
         incident({
           entries: [
-            entry({ anomalyId: 'b', metricType: 'memory_used', timestamp: T0 + 5 }),
             entry({ anomalyId: 'a', metricType: 'connections', timestamp: T0 }),
+            entry({ anomalyId: 'b', metricType: 'memory_used', timestamp: T0 + 5 }),
           ],
         }),
       ),

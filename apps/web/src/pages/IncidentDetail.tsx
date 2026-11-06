@@ -38,7 +38,6 @@ export function IncidentDetail() {
     data: incident,
     error,
     loading,
-    lastUpdated,
     refresh,
   } = usePolling<IncidentTimeline>({
     fetcher: (signal) => metricsApi.getIncident(incidentId, startTime, signal),
@@ -79,10 +78,7 @@ export function IncidentDetail() {
               </div>
             </IncidentNotice>
           )}
-          <IncidentTimelineView
-            incident={incident}
-            now={lastUpdated?.getTime() ?? incident.lastEventAt}
-          />
+          <IncidentTimelineView incident={incident} />
         </>
       ) : notFound ? (
         <EmptyState

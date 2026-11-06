@@ -17,32 +17,20 @@ export function isIncidentOpen(incident: IncidentTimeline): boolean {
   return OPEN_STATUSES.has(incident.recovery.status);
 }
 
-function settledRecoveryAt(incident: IncidentTimeline): number | null {
-  return incident.recovery.status === 'recovered' ? incident.recovery.recoveredAt : null;
-}
-
-export function isDurationOngoing(incident: IncidentTimeline): boolean {
-  return settledRecoveryAt(incident) === null && isIncidentOpen(incident);
-}
-
 export function incidentDurationMs(incident: IncidentTimeline, now: number): number {
-  const recoveredAt = settledRecoveryAt(incident);
-  if (recoveredAt !== null) return recoveredAt - incident.startedAt;
-  return (isIncidentOpen(incident) ? now : incident.lastEventAt) - incident.startedAt;
+  if (isIncidentOpen(incident)) return now - incident.startedAt;
+  const end =
+    incident.recovery.status === 'recovered'
+      ? (incident.recovery.recoveredAt ?? incident.lastEventAt)
+      : incident.lastEventAt;
+  return end - incident.startedAt;
 }
 
 export function incidentTitle(incident: IncidentTimeline): string {
   if (incident.matchedPatterns.length > 0)
     return [...new Set(incident.matchedPatterns)].map(patternLabel).join(', ');
-  const first = orderedEntries(incident)[0];
+  const first = incident.entries[0];
   return first ? metricLabel(first.metricType) : 'Incident';
-}
-
-export function orderedEntries(incident: IncidentTimeline): IncidentTimeline['entries'] {
-  return incident.entries
-    .map((entry, index) => ({ entry, index }))
-    .sort((a, b) => a.entry.timestamp - b.entry.timestamp || a.index - b.index)
-    .map(({ entry }) => entry);
 }
 
 export function dateRangeQuery(

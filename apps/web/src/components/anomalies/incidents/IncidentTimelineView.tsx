@@ -1,26 +1,16 @@
 import { CheckCircle2, CircleDashed, CircleDot, Repeat } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import type { IncidentTimeline, IncidentTimelineEntry } from '../../../types/anomaly';
-import {
-  SEVERITY_CONFIG,
-  formatDateTime,
-  formatDuration,
-  formatTime,
-  metricLabel,
-  patternLabel,
-} from '../anomaly-display';
+import { SEVERITY_CONFIG, formatTime, metricLabel, patternLabel } from '../anomaly-display';
+import { formatDateTime, formatDuration } from '../../../lib/formatters';
+import { useNow } from '../../../hooks/useNow';
 import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
-import {
-  incidentDurationMs,
-  incidentTitle,
-  isDurationOngoing,
-  orderedEntries,
-} from './incident-summary';
+import { incidentDurationMs, incidentTitle, isIncidentOpen } from './incident-summary';
 
 interface IncidentTimelineViewProps {
   incident: IncidentTimeline;
-  now: number;
+  now?: number;
 }
 
 function sameDay(a: number, b: number): boolean {
@@ -33,10 +23,10 @@ function recoveryTime(firedAt: number, recoveredAt: number): string {
 
 function recoveryText(entry: IncidentTimelineEntry): string {
   switch (entry.recoveryState) {
-    case 'recovered':
-      return entry.recoveredAt === null
-        ? 'Back to baseline (time not recorded)'
-        : `Back to baseline at ${recoveryTime(entry.timestamp, entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
+    case 'recovered': {
+      const recoveredAt = entry.recoveredAt ?? entry.timestamp;
+      return `Back to baseline at ${recoveryTime(entry.timestamp, recoveredAt)} (after ${formatDuration(recoveredAt - entry.timestamp)})`;
+    }
     case 'recurred':
       return 'Fired again later';
     case 'unknown':
@@ -60,7 +50,8 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
 }
 
 export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
-  const entries = orderedEntries(incident);
+  const ticking = useNow(now === undefined && isIncidentOpen(incident));
+  const entries = incident.entries;
   const namePattern = incident.sequenceMatches.length > 1;
   const entryById = new Map(incident.entries.map((entry) => [entry.anomalyId, entry]));
   const stepsOf = new Map<string, { key: string; label: string }[]>();
@@ -76,7 +67,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       stepsOf.set(id, tags);
     });
   });
-  const duration = formatDuration(incidentDurationMs(incident, now));
+  const duration = formatDuration(incidentDurationMs(incident, now ?? ticking));
   const connections = incident.connectionIds.length;
   const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
   const eventTime = spansDays ? formatDateTime : formatTime;
@@ -90,7 +81,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       </div>
       <p className="text-sm text-muted-foreground">
         Started {formatDateTime(incident.startedAt)} ·{' '}
-        {isDurationOngoing(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
+        {isIncidentOpen(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
         event{incident.entries.length === 1 ? '' : 's'}
         {connections > 0 && ` across ${connections} connection${connections === 1 ? '' : 's'}`}
       </p>

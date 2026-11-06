@@ -3,18 +3,19 @@ import { Siren } from 'lucide-react';
 import { EmptyState } from '../../ui/empty-state';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import type { IncidentTimeline } from '../../../types/anomaly';
-import { formatDateTime, formatDuration } from '../anomaly-display';
+import { formatDateTime, formatDuration } from '../../../lib/formatters';
+import { useNow } from '../../../hooks/useNow';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import {
   incidentDurationMs,
   incidentPath,
   incidentTitle,
-  isDurationOngoing,
+  isIncidentOpen,
 } from './incident-summary';
 
 interface IncidentListProps {
   incidents: IncidentTimeline[] | undefined;
-  now: number;
+  now?: number;
   loading?: boolean;
   limit?: number;
   linkQuery?: string;
@@ -29,6 +30,8 @@ function scopeLabel(incident: IncidentTimeline): string {
 }
 
 export function IncidentList({ incidents, now, loading, limit, linkQuery }: IncidentListProps) {
+  const ticking = useNow(now === undefined && !!incidents?.some(isIncidentOpen));
+  const currentTime = now ?? ticking;
   if (!incidents && loading) {
     return <p className="text-sm text-muted-foreground">Loading incidents…</p>;
   }
@@ -45,7 +48,7 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
 
   return (
     <div className="space-y-3">
-      {limit !== undefined && incidents.length >= limit && (
+      {limit !== undefined && incidents.length > limit && (
         <p className="text-sm text-muted-foreground">
           Showing the newest {limit} incidents. Narrow the time range to see older ones.
         </p>
@@ -61,8 +64,8 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
           </TableRow>
         </TableHeader>
         <TableBody>
-          {incidents.map((incident) => {
-            const duration = formatDuration(incidentDurationMs(incident, now));
+          {incidents.slice(0, limit).map((incident) => {
+            const duration = formatDuration(incidentDurationMs(incident, currentTime));
             return (
               <TableRow key={incident.incidentId}>
                 <TableCell>
@@ -81,7 +84,7 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
                 </TableCell>
                 <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
                 <TableCell className="text-sm">
-                  {isDurationOngoing(incident) ? `${duration} so far` : duration}
+                  {isIncidentOpen(incident) ? `${duration} so far` : duration}
                 </TableCell>
                 <TableCell>
                   <IncidentStatusBadge status={incident.recovery.status} />

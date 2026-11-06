@@ -7,7 +7,12 @@ vi.mock('./useUpgradePrompt', () => ({ useUpgradePrompt: () => ({ showUpgradePro
 
 import { usePolling } from './usePolling';
 
-function renderPolling(keepPreviousData?: (previousKey: string | number | undefined) => boolean) {
+interface Props {
+  refetchKey: string;
+  keepPreviousDataFor?: string;
+}
+
+function renderPolling(initialProps: Props) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -18,27 +23,41 @@ function renderPolling(keepPreviousData?: (previousKey: string | number | undefi
     .mockResolvedValueOnce('first')
     .mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
   const hook = renderHook(
-    ({ refetchKey }: { refetchKey: string }) =>
-      usePolling<string>({ fetcher, interval: () => false, refetchKey, keepPreviousData }),
-    { wrapper, initialProps: { refetchKey: 'conn-1:1' } },
+    ({ refetchKey, keepPreviousDataFor }: Props) =>
+      usePolling<string>({ fetcher, interval: () => false, refetchKey, keepPreviousDataFor }),
+    { wrapper, initialProps },
   );
   return { ...hook, release: (value: string) => release(value) };
 }
 
 describe('usePolling', () => {
-  it('keeps the previous data while a new key loads when asked to', async () => {
-    const { result, rerender, release } = renderPolling((key) => key === 'conn-1:1');
+  it('keeps the previous data while a new key loads for the same connection', async () => {
+    const { result, rerender, release } = renderPolling({
+      refetchKey: 'conn-1:1',
+      keepPreviousDataFor: 'conn-1',
+    });
     await waitFor(() => expect(result.current.data).toBe('first'));
 
-    rerender({ refetchKey: 'conn-1:2' });
+    rerender({ refetchKey: 'conn-1:2', keepPreviousDataFor: 'conn-1' });
     expect(result.current.data).toBe('first');
 
     release('second');
     await waitFor(() => expect(result.current.data).toBe('second'));
   });
 
+  it('starts empty when the connection changes', async () => {
+    const { result, rerender } = renderPolling({
+      refetchKey: 'conn-1:1',
+      keepPreviousDataFor: 'conn-1',
+    });
+    await waitFor(() => expect(result.current.data).toBe('first'));
+
+    rerender({ refetchKey: 'conn-2:1', keepPreviousDataFor: 'conn-2' });
+    expect(result.current.data).toBeNull();
+  });
+
   it('starts empty on a new key by default', async () => {
-    const { result, rerender } = renderPolling();
+    const { result, rerender } = renderPolling({ refetchKey: 'conn-1:1' });
     await waitFor(() => expect(result.current.data).toBe('first'));
 
     rerender({ refetchKey: 'conn-1:2' });

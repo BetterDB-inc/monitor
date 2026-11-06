@@ -5,15 +5,15 @@ import { entry, incident, T0 } from './incident-fixtures';
 import type { IncidentTimeline } from '../../../types/anomaly';
 
 describe('IncidentTimelineView', () => {
-  it('renders events with equal timestamps in server order', () => {
+  it('renders events in server order', () => {
     render(
       <IncidentTimelineView
         now={T0}
         incident={incident({
           entries: [
-            entry({ anomalyId: 'b', timestamp: T0 + 1000, message: 'Last' }),
             entry({ anomalyId: 'c', timestamp: T0, message: 'First' }),
             entry({ anomalyId: 'a', timestamp: T0, message: 'Second' }),
+            entry({ anomalyId: 'b', timestamp: T0 + 1000, message: 'Last' }),
           ],
         })}
       />,
@@ -220,19 +220,6 @@ describe('IncidentTimelineView', () => {
       day: 'numeric',
     });
     expect(screen.getByText(new RegExp(`Back to baseline at ${nextDay}`))).toBeInTheDocument();
-  });
-
-  it('shows a recovery without a recorded time', () => {
-    render(
-      <IncidentTimelineView
-        now={T0}
-        incident={incident({
-          entries: [entry({ anomalyId: 'a', recoveredAt: null, recoveryState: 'recovered' })],
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Back to baseline (time not recorded)')).toBeInTheDocument();
   });
 
   it('tolerates a sequence match without step numbers', () => {

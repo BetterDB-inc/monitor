@@ -53,10 +53,9 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(await storage.getCorrelatedGroups({ patterns: [] })).toEqual([]);
     });
 
-    it('keeps the incident id a group was first saved with', async () => {
+    it('stores the incident id with the group', async () => {
       const id = randomUUID();
       await storage.saveCorrelatedGroup({ ...group(id, 4000), incidentId: '4000-abc' }, CONN);
-      await storage.saveCorrelatedGroup({ ...group(id, 4000), incidentId: '4000-def' }, CONN);
 
       const rows = await storage.getCorrelatedGroups({ startTime: 4000 });
 

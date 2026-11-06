@@ -3172,8 +3172,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         recommendations = EXCLUDED.recommendations,
         anomaly_count = EXCLUDED.anomaly_count,
         anomaly_ids = COALESCE(EXCLUDED.anomaly_ids, correlated_anomaly_groups.anomaly_ids),
-        scope_id = COALESCE(correlated_anomaly_groups.scope_id, EXCLUDED.scope_id),
-        incident_id = COALESCE(correlated_anomaly_groups.incident_id, EXCLUDED.incident_id)`,
+        scope_id = COALESCE(correlated_anomaly_groups.scope_id, EXCLUDED.scope_id)`,
       [
         group.correlationId,
         group.timestamp,

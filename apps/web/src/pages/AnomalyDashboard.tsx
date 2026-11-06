@@ -156,8 +156,6 @@ export function AnomalyDashboard() {
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const rangeQuery = dateRangeQuery(startTime, endTime);
   const rangeKey = `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`;
-  const sameConnection = (previousKey: string | number | undefined) =>
-    typeof previousKey === 'string' && previousKey.startsWith(`${currentConnection?.id ?? ''}:`);
   const overviewLinkQuery = [rangeQuery, 'from=overview'].filter(Boolean).join('&');
 
   const changeDateRange = (range: DateRange | undefined) => {
@@ -182,7 +180,7 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
-    keepPreviousData: sameConnection,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
@@ -190,7 +188,7 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
-    keepPreviousData: sameConnection,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   // Data-loss banner must surface active incidents regardless of the chosen
@@ -232,17 +230,16 @@ export function AnomalyDashboard() {
     interval: 5000,
     enabled: overviewOpen,
     refetchKey: rangeKey,
-    keepPreviousData: sameConnection,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   const {
     data: incidents,
     error: incidentsError,
     loading: incidentsLoading,
-    lastUpdated: incidentsUpdated,
   } = usePolling<IncidentTimeline[]>({
     fetcher: (signal) =>
-      metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }, signal),
+      metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT + 1 }, signal),
     interval: INCIDENT_POLL_MS,
     enabled: tab === 'incidents',
     refetchKey: rangeKey,
@@ -365,7 +362,6 @@ export function AnomalyDashboard() {
                   )}
                   <IncidentList
                     incidents={incidents ?? undefined}
-                    now={incidentsUpdated?.getTime() ?? 0}
                     loading={incidentsLoading}
                     limit={INCIDENT_LIST_LIMIT}
                     linkQuery={rangeQuery}
