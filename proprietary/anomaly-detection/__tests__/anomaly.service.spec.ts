@@ -12862,9 +12862,53 @@ describe('AnomalyService', () => {
 
       await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
 
-      const [, loadFrom, loadEnd] = load.mock.calls[0] as [string, number, number];
+      const [, loadFrom, loadEnd, options] = load.mock.calls[0] as [string, number, number, any];
       expect(loadFrom).toBe(end - 90 * MIN);
-      expect(loadEnd).toBe(end + 30 * MIN);
+      expect(loadEnd).toBe(end);
+      expect(options.tailEnd).toBe(end + 30 * MIN);
+    });
+
+    it('loads the events after a past range apart from the range itself', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+
+      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+      const windows = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => [
+        q.startTime,
+        q.endTime,
+      ]);
+      expect(windows).toContainEqual([end - 90 * MIN, end]);
+      expect(windows).toContainEqual([end + 1, end + 30 * MIN]);
+    });
+
+    it('opens an incident split at max span when another scope has an earlier boundary', async () => {
+      const now = Date.now();
+      const t0 = now - 4 * 60 * MIN;
+      for (let i = 0; i <= 25; i++) {
+        (service as any).recentAnomalies.push(
+          anomaly({
+            id: `s2-${i}`,
+            timestamp: t0 + i * 2 * MIN,
+            connectionId: 'conn-2',
+            scopeId: 's2',
+          }),
+        );
+      }
+      const [later] = (await service.getIncidentTimelines(undefined, t0 - MIN)).filter(
+        (t) => t.scope === 's2',
+      );
+      expect(later.startedAt).toBeGreaterThan(t0);
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 's1-a', timestamp: later.startedAt - 20 * MIN, scopeId: 's1' }),
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 's1', startedAt: later.startedAt - 20 * MIN, anomalyId: 's1-a' },
+      ]);
+
+      const incident = await service.getIncidentTimeline(later.incidentId);
+
+      expect(incident?.incidentId).toBe(later.incidentId);
     });
 
     it('looks up the next firing of a recovered signal when opening an incident', async () => {
@@ -12893,7 +12937,51 @@ describe('AnomalyService', () => {
 
       await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
 
-      expect(next).toHaveBeenCalledWith('conn-1', MetricType.CONNECTIONS, load.mock.calls[0][2]);
+      expect(next).toHaveBeenCalledWith('conn-1', MetricType.CONNECTIONS, (load.mock.calls[0][3] as any).tailEnd);
+    });
+
+    it('skips resolved, unscoped and pre-range signals when looking up later firings', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'before', timestamp: end - 70 * MIN, metricType: MetricType.MEMORY_USED }),
+        anomaly({
+          id: 'done',
+          timestamp: end - 10 * MIN,
+          resolved: true,
+          resolvedAt: end - 5 * MIN,
+        }),
+        anomaly({ id: 'loose', timestamp: end - 8 * MIN, connectionId: undefined }),
+      );
+      const next = jest.spyOn(service as any, 'nextFiring');
+
+      await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it('looks up at most eight later firings at a time', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      for (let i = 0; i < 20; i++) {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+        );
+      }
+      let inFlight = 0;
+      let peak = 0;
+      const next = jest.spyOn(service as any, 'nextFiring').mockImplementation(async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight--;
+        return null;
+      });
+
+      await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+      expect(next).toHaveBeenCalledTimes(20);
+      expect(peak).toBe(8);
     });
 
     it('reads incident boundaries once when opening an incident', async () => {
