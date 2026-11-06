@@ -112,4 +112,30 @@ describe('IncidentList', () => {
       vi.useRealTimers();
     }
   });
+
+  it('runs one clock for every open incident', () => {
+    vi.useFakeTimers();
+    const intervals = vi.spyOn(globalThis, 'setInterval');
+    try {
+      const open = {
+        status: 'active' as const,
+        openSignals: [],
+        unknownSignals: [],
+        recoveredAt: null,
+      };
+      renderList(
+        [
+          incident({ incidentId: 'a', recovery: open }),
+          incident({ incidentId: 'b', recovery: open }),
+          incident({ incidentId: 'c', recovery: open }),
+        ],
+        { now: undefined },
+      );
+
+      expect(intervals).toHaveBeenCalledTimes(1);
+    } finally {
+      intervals.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });

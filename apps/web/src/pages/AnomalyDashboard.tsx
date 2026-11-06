@@ -320,7 +320,11 @@ export function AnomalyDashboard() {
           <h1 className="text-3xl font-bold">Anomaly Detection</h1>
           <p className="text-muted-foreground">Real-time monitoring across all metrics</p>
         </div>
-        <DateRangePicker value={dateRange} onChange={changeDateRange} placeholder="Last 24 hours" />
+        <DateRangePicker
+          value={dateRange}
+          onChange={changeDateRange}
+          placeholder="Past 24 hours (default)"
+        />
       </div>
 
       <Tabs value={tab} onValueChange={setTab}>

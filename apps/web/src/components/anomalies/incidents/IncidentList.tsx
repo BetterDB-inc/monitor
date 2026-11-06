@@ -5,8 +5,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import type { IncidentTimeline } from '../../../types/anomaly';
 import { formatDateTime } from '../../../lib/formatters';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
-import { LiveDuration } from './LiveDuration';
-import { incidentPath, incidentTitle } from './incident-summary';
+import { LiveClock, LiveDuration } from './LiveDuration';
+import { incidentPath, incidentTitle, isIncidentOpen } from './incident-summary';
 
 interface IncidentListProps {
   incidents: IncidentTimeline[] | undefined;
@@ -46,44 +46,46 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
           Showing the newest {limit} incidents. Narrow the time range to see older ones.
         </p>
       )}
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Incident</TableHead>
-            <TableHead>Scope</TableHead>
-            <TableHead>Started</TableHead>
-            <TableHead>Duration</TableHead>
-            <TableHead>Status</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {incidents.slice(0, limit).map((incident) => (
-            <TableRow key={incident.incidentId}>
-              <TableCell>
-                <ConnectionLink
-                  to={incidentPath(incident.incidentId, linkQuery)}
-                  className="font-medium hover:underline"
-                >
-                  {incidentTitle(incident)}
-                </ConnectionLink>
-                <p className="text-xs text-muted-foreground">
-                  {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
-                </p>
-              </TableCell>
-              <TableCell className="text-sm text-muted-foreground">
-                {scopeLabel(incident)}
-              </TableCell>
-              <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
-              <TableCell className="text-sm">
-                <LiveDuration incident={incident} now={now} />
-              </TableCell>
-              <TableCell>
-                <IncidentStatusBadge status={incident.recovery.status} />
-              </TableCell>
+      <LiveClock enabled={now === undefined && incidents.some(isIncidentOpen)}>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Incident</TableHead>
+              <TableHead>Scope</TableHead>
+              <TableHead>Started</TableHead>
+              <TableHead>Duration</TableHead>
+              <TableHead>Status</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {incidents.slice(0, limit).map((incident) => (
+              <TableRow key={incident.incidentId}>
+                <TableCell>
+                  <ConnectionLink
+                    to={incidentPath(incident.incidentId, linkQuery)}
+                    className="font-medium hover:underline"
+                  >
+                    {incidentTitle(incident)}
+                  </ConnectionLink>
+                  <p className="text-xs text-muted-foreground">
+                    {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
+                  </p>
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {scopeLabel(incident)}
+                </TableCell>
+                <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
+                <TableCell className="text-sm">
+                  <LiveDuration incident={incident} now={now} />
+                </TableCell>
+                <TableCell>
+                  <IncidentStatusBadge status={incident.recovery.status} />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </LiveClock>
     </div>
   );
 }
