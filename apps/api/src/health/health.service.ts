@@ -451,12 +451,17 @@ export class HealthService extends MultiConnectionPoller implements OnModuleInit
       const targetId = connectionId || this.connectionRegistry.getDefaultId();
       if (targetId) {
         try {
-          detailed.configHazards = await this.configHazardService.getHazards(targetId);
+          const probe = await this.configHazardService.probeHazards(targetId);
+          detailed.configHazards = probe.findings;
+          if (!probe.complete) {
+            detailed.configHazardsUnavailable = true;
+          }
         } catch (err) {
           this.logger.debug(
             `Config-hazard probe failed for ${targetId}: ${err instanceof Error ? err.message : err}`,
           );
           detailed.configHazards = [];
+          detailed.configHazardsUnavailable = true;
         }
       }
     }

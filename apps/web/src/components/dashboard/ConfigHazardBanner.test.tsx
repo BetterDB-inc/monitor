@@ -36,6 +36,17 @@ describe('ConfigHazardBanner', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('shows an incomplete-check notice when the probe did not finish', () => {
+    render(<ConfigHazardBanner hazards={[]} unavailable />);
+    expect(screen.getByText('Config hazards could not be fully checked')).toBeInTheDocument();
+  });
+
+  it('shows the incomplete-check notice alongside partial findings', () => {
+    render(<ConfigHazardBanner hazards={[hazard]} unavailable />);
+    expect(screen.getByText('Config hazards could not be fully checked')).toBeInTheDocument();
+    expect(screen.getByText('Hazardous server configuration')).toBeInTheDocument();
+  });
+
   it('presents an unverified finding as a verification notice, not a confirmed hazard', () => {
     render(<ConfigHazardBanner hazards={[unverified]} />);
     expect(screen.getByText('Configuration could not be verified')).toBeInTheDocument();

@@ -33,15 +33,30 @@ const STATUS_PRESENTATION: Record<
  * the banner clears when the configuration is fixed and the next health poll
  * confirms it.
  */
-export function ConfigHazardBanner({ hazards }: { hazards: ConfigHazardFinding[] | undefined }) {
+export function ConfigHazardBanner({
+  hazards,
+  unavailable,
+}: {
+  hazards: ConfigHazardFinding[] | undefined;
+  unavailable?: boolean;
+}) {
   const active = hazards ?? [];
 
-  if (active.length === 0) {
+  if (active.length === 0 && !unavailable) {
     return null;
   }
 
   return (
     <div className="space-y-2">
+      {unavailable && (
+        <Alert className="border-muted-foreground/40">
+          <ShieldQuestion className="w-4 h-4 text-muted-foreground" />
+          <AlertTitle>Config hazards could not be fully checked</AlertTitle>
+          <AlertDescription>
+            <p>Some configuration reads failed. Findings below may be incomplete.</p>
+          </AlertDescription>
+        </Alert>
+      )}
       {active.map((finding) => {
         const presentation = STATUS_PRESENTATION[finding.status];
         const IconComponent = presentation.icon;
