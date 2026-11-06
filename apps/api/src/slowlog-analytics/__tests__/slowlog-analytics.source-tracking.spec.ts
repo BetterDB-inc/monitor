@@ -233,6 +233,8 @@ describe('SlowLogAnalyticsService source tracking', () => {
       entries([5], 3000).map((e) => ({ ...e, capturedAt: 1, sourceHost: '10.0.0.1', sourcePort: 6379, sourceRunId: 'run-a', connectionId: 'seed' })),
       'seed',
     );
+    // INFO now fails without refusing (a refusal tracks by address regardless).
+    infoError = new Error('Command timed out');
     served = entries([0, 1, 2], 1000);
     await poll();
 

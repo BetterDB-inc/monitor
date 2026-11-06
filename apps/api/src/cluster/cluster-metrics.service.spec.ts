@@ -454,9 +454,9 @@ used_cpu_user:20.3\r
 
   describe('getSlotMigrations', () => {
     const primaries = [
-      { id: 'abc123node1', address: '192.168.1.10:6379', role: 'master' as const, healthy: true, slots: [[0, 5460]] },
-      { id: 'def456node2', address: '192.168.1.11:6379', role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
-      { id: 'fff789node3', address: '192.168.1.12:6379', role: 'master' as const, healthy: true, slots: [] },
+      { id: 'abc123node1', address: '192.168.1.10:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[0, 5460]] },
+      { id: 'def456node2', address: '192.168.1.11:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [[5461, 10922]] },
+      { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [] },
     ];
 
     function nodeClients(byNode: Record<string, { nodes?: string; jobs?: unknown; jobsError?: Error }>) {
