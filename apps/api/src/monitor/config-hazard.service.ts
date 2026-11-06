@@ -278,10 +278,12 @@ export class ConfigHazardService {
     }
 
     let latencyEvents: string[] = [];
+    let clockUntrusted = false;
     try {
       const serverSeconds = await this.readServerTimeSeconds(connectionId, client);
       if (serverSeconds === null) {
         latencyReadFailed = true;
+        clockUntrusted = true;
       }
       const nowSeconds = serverSeconds ?? Math.floor(Date.now() / 1000);
       const raw = await client.call('LATENCY', ['LATEST']);
@@ -319,10 +321,14 @@ export class ConfigHazardService {
       latencyEvents,
     });
     // A confirmed hazard cannot be downgraded by a missing symptom, so only a
-    // non-hazard verdict built on a failed read is incomplete.
+    // non-hazard verdict built on a failed read is incomplete. The exception is
+    // a failed TIME read: spike freshness was then judged on the monitor clock,
+    // which can raise a hazard as wrongly as it can miss one.
     const symptomReadFailed =
       infoReadFailed || (appendfsync === 'always' && latencyReadFailed);
-    const unread = symptomReadFailed && finding?.status !== 'hazard';
+    const unread =
+      (symptomReadFailed && finding?.status !== 'hazard') ||
+      (appendfsync === 'always' && clockUntrusted);
     return { finding, unread };
   }
 

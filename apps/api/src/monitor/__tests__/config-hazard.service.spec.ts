@@ -368,6 +368,21 @@ describe('ConfigHazardService', () => {
       expect(result.complete).toBe(false);
     });
 
+    it('does not cache a hazard raised on the monitor clock when TIME fails', async () => {
+      setupFsyncClient({ latency: [['aof-fsync-always', 1_700_000_000, 12, 40]] });
+      const base = client.call.getMockImplementation()!;
+      client.call.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === 'TIME') return Promise.reject(new Error('NOPERM'));
+        return base(cmd, args);
+      });
+      const first = await service.probeHazards('conn-1');
+      expect(first.findings.map((f) => f.status)).toEqual(['hazard']);
+      expect(first.complete).toBe(false);
+
+      await service.probeHazards('conn-1');
+      expect(appendonlyProbeCount()).toBe(2);
+    });
+
     it('does not cache when INFO persistence fails under always', async () => {
       setupFsyncClient();
       const base = client.call.getMockImplementation()!;
