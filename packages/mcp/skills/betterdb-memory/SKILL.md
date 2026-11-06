@@ -16,11 +16,10 @@ Report peak, current, bytes per key, fragmentation, and the forecast. The MEMORY
 3. From `get_memory` stats, report `total.allocated`, `peak.allocated`, `keys.count`, `keys.bytes-per-key`, `dataset.percentage`, and `fragmentation`.
 4. From the forecast, report `currentValue`, `ceiling`, `trendDirection`, `growthPercent`, `windowMs`, and `timeToLimitHuman`.
 5. State whether a purge or a restart is the relevant next step from the allocator fields, not from the ratio alone. `fragmentation` is total resident memory divided by allocated memory. `fragmentation.bytes` also counts resident memory outside the allocator, such as client buffers. `MEMORY PURGE` reclaims only allocator-held pages.
-   - Recommend a purge or a restart only when `allocator-fragmentation.bytes` is greater than 0 and `peak.allocated` is above `total.allocated`. That is the allocator still holding the high-water mark.
-   - Use `rss-overhead.bytes` to explain resident memory that is not the allocator. A large ratio with `allocator-fragmentation.bytes` at 0 is overhead, not a purge candidate.
+   - Recommend a purge or a restart only when `allocator-fragmentation.ratio` is above 1.1 and `allocator-fragmentation.bytes` is above both 10% of `total.allocated` and 50 MB. Smaller values are normal allocator slack on a healthy instance. When `peak.allocated` is also above `total.allocated`, say the allocator is still holding pages from the high-water mark.
+   - Use `rss-overhead.bytes` to explain resident memory that is not the allocator. A large `fragmentation` with `allocator-fragmentation` below those thresholds is overhead, not a purge candidate.
    - A ratio below 1 can mean the process is swapped. It does not show that the peak was released. Do not recommend a purge from a low ratio.
-   - If `allocator-fragmentation.bytes` is absent, do not recommend a purge from the ratio.
-   - `rdb_changes_since_last_save` of 0 (see `betterdb-durability`) means that peak is not new writes waiting to be saved.
+   - If the `allocator-fragmentation` fields are absent, do not recommend a purge from `fragmentation`.
 
 ## Forecast reading rules
 
@@ -32,5 +31,5 @@ Report peak, current, bytes per key, fragmentation, and the forecast. The MEMORY
 ## Common mistakes
 
 - Pasting the doctor letter ("Sam, I detected a few issues…") as the diagnosis.
-- Recommending `MEMORY PURGE` from `fragmentation` or `fragmentation.bytes` alone. Those include resident memory outside the allocator. Use `allocator-fragmentation.bytes`.
+- Recommending `MEMORY PURGE` from `fragmentation` or `fragmentation.bytes` alone. Those include resident memory outside the allocator. Use the `allocator-fragmentation` thresholds above.
 - Putting the ops forecast in the memory answer.
