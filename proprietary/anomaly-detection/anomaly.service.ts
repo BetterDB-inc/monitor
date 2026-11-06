@@ -411,6 +411,13 @@ interface TrackedResyncEvent {
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
+
+interface LoadedIncidentEvents {
+  events: AnomalyEvent[];
+  from: number;
+  to: number | undefined;
+  complete: boolean;
+}
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const CORRELATION_ID_CHUNK_SIZE = 500;
@@ -7638,16 +7645,7 @@ export class AnomalyService
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
       endTime,
     );
-    return this.incidentTimelineBuilder
-      .build(
-        events,
-        Date.now(),
-        this.incidentHistoryProbe,
-        boundaries,
-        new Map(),
-        Number.NEGATIVE_INFINITY,
-        this.incidentEventsDroppedSpans,
-      )
+    return this.buildIncidents(events, boundaries)
       .filter((t) => t.lastEventAt >= from)
       .reverse()
       .slice(0, limit);
@@ -7664,21 +7662,24 @@ export class AnomalyService
     const from = Math.max(startTime, now - MAX_INCIDENT_LOOKBACK_MS);
     const to = Math.min(endTime, now);
     if (to < from) return null;
-    const { events, boundaries } = await this.loadIncidentHistory(
+    const history = await this.loadIncidentHistory(
       connectionId,
       from - maxSpanMs,
-      to + maxSpanMs,
+      to + 2 * maxSpanMs,
     );
     const wanted = new Set(anomalyIds);
-    const candidate = this.mostHeldIncident(this.buildIncidents(events, boundaries), wanted);
+    const candidate = this.mostHeldIncident(
+      this.buildIncidents(history.events, history.boundaries),
+      wanted,
+    );
     if (!candidate) return null;
     const startedAt = incidentStartOf(candidate.incidentId);
     if (startedAt === null) return candidate.incidentId;
-    const window = await this.loadIncidentWindow(startedAt, connectionId);
-    return (
-      this.mostHeldIncident(this.buildIncidents(window.events, window.boundaries), wanted)
-        ?.incidentId ?? null
+    const window = await this.loadIncidentWindow(startedAt, connectionId, history.loaded);
+    const anchored = this.buildIncidents(window.events, window.boundaries).filter(
+      (t) => incidentStartOf(t.incidentId) === startedAt,
     );
+    return this.mostHeldIncident(anchored, wanted)?.incidentId ?? null;
   }
 
   private mostHeldIncident(
@@ -7718,6 +7719,7 @@ export class AnomalyService
   private async loadIncidentWindow(
     startedAt: number,
     connectionId: string | undefined,
+    reuse?: LoadedIncidentEvents,
   ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[]; windowEnd: number }> {
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const windowEnd = startedAt + 2 * maxSpanMs;
@@ -7726,6 +7728,7 @@ export class AnomalyService
       connectionId,
       anchors.some((b) => b.startedAt === startedAt) ? startedAt - maxSpanMs : startedAt,
       windowEnd,
+      reuse,
     );
     return { ...history, windowEnd };
   }
@@ -7798,22 +7801,52 @@ export class AnomalyService
     connectionId: string | undefined,
     loadFrom: number,
     endTime: number | undefined,
-  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
+    reuse?: LoadedIncidentEvents,
+  ): Promise<{
+    events: AnomalyEvent[];
+    boundaries: StoredIncidentBoundary[];
+    loaded: LoadedIncidentEvents;
+  }> {
     const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, endTime);
     const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
     const earliest = boundaries
       .map((b) => b.startedAt)
       .filter((at) => at >= reach)
       .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
-    const events = await this.loadIncidentEvents(connectionId, earliest, endTime);
-    if (!connectionId) return { events, boundaries };
+    const loaded = this.coversRange(reuse, earliest, endTime)
+      ? {
+          events: reuse.events.filter(
+            (e) => e.timestamp >= earliest && (endTime === undefined || e.timestamp <= endTime),
+          ),
+          from: earliest,
+          to: endTime,
+          complete: true,
+        }
+      : await this.loadIncidentEvents(connectionId, earliest, endTime);
+    const { events } = loaded;
+    if (!connectionId) return { events, boundaries, loaded };
     const scope = this.correlationScopeOf(connectionId);
     const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
       (id): id is string => id !== undefined && id !== scope,
     );
-    if (earlierScopes.length === 0) return { events, boundaries };
+    if (earlierScopes.length === 0) return { events, boundaries, loaded };
     const earlier = await this.readBoundariesOf(earlierScopes, loadFrom, endTime);
-    return { events, boundaries: [...boundaries, ...earlier] };
+    return { events, boundaries: [...boundaries, ...earlier], loaded };
+  }
+
+  private coversRange(
+    loaded: LoadedIncidentEvents | undefined,
+    from: number,
+    to: number | undefined,
+  ): loaded is LoadedIncidentEvents {
+    return (
+      loaded !== undefined &&
+      loaded.complete &&
+      loaded.from <= from &&
+      to !== undefined &&
+      loaded.to !== undefined &&
+      to <= loaded.to
+    );
   }
 
   private async readIncidentBoundaries(
@@ -7845,7 +7878,7 @@ export class AnomalyService
     connectionId: string | undefined,
     loadFrom: number,
     endTime: number | undefined,
-  ): Promise<AnomalyEvent[]> {
+  ): Promise<LoadedIncidentEvents> {
     const scope = connectionId ? this.scopeFilter(connectionId) : undefined;
     const stored = await this.storedAnomaliesInRange(scope, loadFrom, endTime);
     const members = new Set(scope?.connectionIds);
@@ -7857,7 +7890,12 @@ export class AnomalyService
           e.scopeId === scope.id ||
           (e.connectionId !== undefined && members.has(e.connectionId))),
     );
-    return [...new Map([...cached, ...stored].map((e) => [e.id, e])).values()];
+    return {
+      events: [...new Map([...cached, ...stored].map((e) => [e.id, e])).values()],
+      from: loadFrom,
+      to: endTime,
+      complete: stored.length < MAX_SCANNED_CALLER_EVENTS,
+    };
   }
 
   private scopeFilter(connectionId: string): AnomalyScopeFilter {

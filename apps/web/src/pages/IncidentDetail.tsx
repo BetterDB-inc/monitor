@@ -29,6 +29,8 @@ export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
   const [searchParams] = useSearchParams();
   const { currentConnection } = useConnection();
+  const startParam = searchParams.get('start');
+  const startTime = startParam && !isNaN(Number(startParam)) ? Number(startParam) : undefined;
   const {
     data: incident,
     error,
@@ -36,10 +38,10 @@ export function IncidentDetail() {
     lastUpdated,
     refresh,
   } = usePolling<IncidentTimeline>({
-    fetcher: (signal) => metricsApi.getIncident(incidentId, signal),
+    fetcher: (signal) => metricsApi.getIncident(incidentId, startTime, signal),
     interval: pollInterval,
     shouldRetry: (retryError) => !isNotFoundError(retryError),
-    refetchKey: `${currentConnection?.id ?? ''}:${incidentId}`,
+    refetchKey: `${currentConnection?.id ?? ''}:${incidentId}:${startTime ?? ''}`,
   });
   const notFound = isNotFoundError(error);
   const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));

@@ -12,6 +12,10 @@ export function isNotFoundError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
 }
 
+export function connectionCount(incident: IncidentTimeline): number {
+  return incident.connectionIds.filter((id) => id !== '').length;
+}
+
 export function isIncidentOpen(incident: IncidentTimeline): boolean {
   return OPEN_STATUSES.has(incident.recovery.status);
 }

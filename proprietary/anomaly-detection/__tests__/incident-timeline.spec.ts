@@ -609,6 +609,24 @@ describe('IncidentTimelineBuilder', () => {
       expect(cluster.connectionIds).toEqual(['node-1', 'node-2']);
     });
 
+    it('leaves events without a connection out of the connection list', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ connectionId: '', scopeId: 'cluster-x' }),
+          event({
+            connectionId: 'node-1',
+            scopeId: 'cluster-x',
+            metricType: MetricType.CONNECTIONS,
+            timestamp: T0 + 1000,
+          }),
+        ],
+        T0 + MIN,
+        neverRecovers,
+      );
+
+      expect(incident.connectionIds).toEqual(['node-1']);
+    });
+
     it('derives a stable incident id from the scope and first anomaly', () => {
       const first = event();
       const build = () =>

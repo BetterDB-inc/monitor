@@ -6,6 +6,7 @@ import type { IncidentTimeline } from '../../../types/anomaly';
 import { formatDateTime, formatDuration } from '../anomaly-display';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import {
+  connectionCount,
   incidentDurationMs,
   incidentPath,
   incidentTitle,
@@ -22,8 +23,8 @@ interface IncidentListProps {
 
 function scopeLabel(incident: IncidentTimeline): string {
   const nodes = new Set(incident.entries.map((e) => e.nodeAddr).filter((n): n is string => !!n));
-  const connections = incident.connectionIds.length;
-  const parts = [`${connections} connection${connections === 1 ? '' : 's'}`];
+  const connections = connectionCount(incident);
+  const parts = connections > 0 ? [`${connections} connection${connections === 1 ? '' : 's'}`] : [];
   if (nodes.size > 0) parts.push(`${nodes.size} node${nodes.size === 1 ? '' : 's'}`);
   return parts.join(' · ');
 }

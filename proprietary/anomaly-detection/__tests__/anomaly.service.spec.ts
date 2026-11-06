@@ -11291,6 +11291,43 @@ describe('AnomalyService', () => {
       ).resolves.toMatchObject({ incidentId: newer.incidentId });
     });
 
+    it('returns only an incident anchored where the detail page will look', async () => {
+      const t = Date.now() - 20 * MIN;
+      const timeline = (incidentId: string, ids: string[]) => ({
+        incidentId,
+        startedAt: Number(incidentId.split('-')[0]),
+        entries: ids.map((anomalyId) => ({ anomalyId })),
+      });
+      const anchoredAt = `${t}-${'a'.repeat(16)}`;
+      const elsewhere = `${t + MIN}-${'b'.repeat(16)}`;
+      const build = jest
+        .spyOn(service as any, 'buildIncidents')
+        .mockReturnValueOnce([timeline(anchoredAt, ['a', 'b'])])
+        .mockReturnValueOnce([timeline(elsewhere, ['a', 'b']), timeline(anchoredAt, ['a'])]);
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      storage.getIncidentBoundaries.mockResolvedValue([]);
+
+      await expect(
+        service.findIncidentIdForAnomalies(['a', 'b'], t, t + MIN, 'conn-1'),
+      ).resolves.toBe(anchoredAt);
+      build.mockRestore();
+    });
+
+    it('reuses the events it already loaded for the anchored window', async () => {
+      const t = Date.now() - 20 * MIN;
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : [{ ...anomaly({ id: 'a', timestamp: t }), anomalyType: 'spike' }],
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([]);
+      const load = jest.spyOn(service as any, 'loadIncidentEvents');
+
+      await expect(
+        service.findIncidentIdForAnomalies(['a'], t, t, 'conn-1'),
+      ).resolves.not.toBeNull();
+      expect(load).toHaveBeenCalledTimes(1);
+      load.mockRestore();
+    });
+
     it('bounds an incident lookup to the incident lookback window', async () => {
       const now = Date.now();
       storage.getAnomalyEvents.mockResolvedValue([]);
@@ -12435,7 +12472,7 @@ describe('AnomalyService', () => {
         after ? [row(4999), row(5000)] : Array.from({ length: 5000 }, (_, i) => row(i)),
       );
 
-      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+      const { events } = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(5001);
       expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(5001);
@@ -12453,7 +12490,7 @@ describe('AnomalyService', () => {
         })),
       );
 
-      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+      const { events } = await (service as any).loadIncidentEvents('conn-1', t, undefined);
 
       expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(10);
       expect(events).toHaveLength(50_000);

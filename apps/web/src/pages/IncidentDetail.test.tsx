@@ -24,7 +24,7 @@ const polling: {
 } = { state: { data: null, error: null, loading: true, lastUpdated: null }, refresh: vi.fn() };
 
 vi.mock('../api/metrics', () => ({
-  metricsApi: { getIncident: (id: string) => getIncident(id) },
+  metricsApi: { getIncident: (id: string, startTime?: number) => getIncident(id, startTime) },
 }));
 
 vi.mock('../hooks/useConnection', () => ({
@@ -67,8 +67,15 @@ describe('IncidentDetail', () => {
     renderAt('/anomalies/incidents/123-abc');
 
     await polling.fetcher?.();
-    expect(getIncident).toHaveBeenCalledWith('123-abc');
+    expect(getIncident).toHaveBeenCalledWith('123-abc', undefined);
     expect(screen.getByText('Loading incident…')).toBeInTheDocument();
+  });
+
+  it('passes the incident start from the URL', async () => {
+    renderAt('/anomalies/incidents/123-abc?start=1000&end=2000');
+
+    await polling.fetcher?.();
+    expect(getIncident).toHaveBeenCalledWith('123-abc', 1000);
   });
 
   it('stops polling only on a 404 and slows down for settled incidents and errors', () => {

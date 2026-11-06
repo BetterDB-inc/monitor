@@ -12,6 +12,7 @@ import {
 import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import {
+  connectionCount,
   incidentDurationMs,
   incidentTitle,
   isDurationOngoing,
@@ -73,6 +74,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
     });
   }
   const duration = formatDuration(incidentDurationMs(incident, now));
+  const connections = connectionCount(incident);
   const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
   const eventTime = spansDays ? formatDateTime : formatTime;
   const title = incidentTitle(incident);
@@ -86,8 +88,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       <p className="text-sm text-muted-foreground">
         Started {formatDateTime(incident.startedAt)} ·{' '}
         {isDurationOngoing(incident) ? `${duration} so far` : duration} · {incident.entries.length}{' '}
-        event{incident.entries.length === 1 ? '' : 's'} across {incident.connectionIds.length}{' '}
-        connection{incident.connectionIds.length === 1 ? '' : 's'}
+        event{incident.entries.length === 1 ? '' : 's'}
+        {connections > 0 && ` across ${connections} connection${connections === 1 ? '' : 's'}`}
       </p>
 
       {incident.recovery.status === 'degraded' && (

@@ -26,7 +26,7 @@ export function GroupIncidentLink({ connectionId, anomalies, linkQuery }: GroupI
     enabled: ids.length > 0,
     retry: false,
     staleTime: LOOKUP_REFRESH_MS,
-    refetchInterval: LOOKUP_REFRESH_MS,
+    refetchInterval: (query) => (isNotFoundError(query.state.error) ? false : LOOKUP_REFRESH_MS),
   });
 
   if (!data || isNotFoundError(error)) return null;

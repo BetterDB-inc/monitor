@@ -682,7 +682,7 @@ export class IncidentTimelineBuilder {
     return {
       incidentId: incidentIdFor(scope, start?.anomalyId ?? events[0].id, anchoredAt),
       scope,
-      connectionIds: [...new Set(entries.map((e) => e.connectionId))],
+      connectionIds: [...new Set(entries.map((e) => e.connectionId))].filter((id) => id !== ''),
       startedAt: Math.min(anchoredAt, events[0].timestamp),
       lastEventAt,
       entries,

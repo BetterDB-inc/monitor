@@ -481,10 +481,13 @@ export const metricsApi = {
     });
   },
 
-  getIncident: (incidentId: string, signal?: AbortSignal) =>
-    fetchApi<IncidentTimeline>(`/anomaly/incidents/${encodeURIComponent(incidentId)}`, {
-      signal,
-    }),
+  getIncident: (incidentId: string, startTime?: number, signal?: AbortSignal) => {
+    const query = startTime !== undefined ? `?startTime=${startTime}` : '';
+    return fetchApi<IncidentTimeline>(
+      `/anomaly/incidents/${encodeURIComponent(incidentId)}${query}`,
+      { signal },
+    );
+  },
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {

@@ -21,7 +21,6 @@ import { formatValue } from '../lib/formatters';
 import {
   SEVERITY_CONFIG,
   PATTERN_CONFIG,
-  METRIC_LABELS,
   formatTime,
   metricLabel,
 } from '../components/anomalies/anomaly-display';
@@ -162,6 +161,7 @@ export function AnomalyDashboard() {
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const rangeQuery = dateRangeQuery(startTime, endTime);
+  const rangeKey = `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`;
 
   const changeDateRange = (range: DateRange | undefined) => {
     setSearchParams(
@@ -184,14 +184,14 @@ export function AnomalyDashboard() {
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
     enabled: overviewOpen,
-    refetchKey: currentConnection?.id,
+    refetchKey: rangeKey,
   });
 
   const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
     enabled: overviewOpen,
-    refetchKey: currentConnection?.id,
+    refetchKey: rangeKey,
   });
 
   // Data-loss banner must surface active incidents regardless of the chosen
@@ -232,7 +232,7 @@ export function AnomalyDashboard() {
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
     enabled: overviewOpen,
-    refetchKey: currentConnection?.id,
+    refetchKey: rangeKey,
   });
 
   const {
@@ -245,7 +245,7 @@ export function AnomalyDashboard() {
       metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }, signal),
     interval: INCIDENT_POLL_MS,
     enabled: tab === 'incidents',
-    refetchKey: `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`,
+    refetchKey: rangeKey,
   });
 
   const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
@@ -301,7 +301,7 @@ export function AnomalyDashboard() {
   const metricsData = useMemo(() => {
     if (!summary?.byMetric) return [];
     return Object.entries(summary.byMetric)
-      .map(([metric, count]) => ({ metric: METRIC_LABELS[metric] || metric, count }))
+      .map(([metric, count]) => ({ metric: metricLabel(metric), count }))
       .sort((a, b) => (b.count as number) - (a.count as number))
       .slice(0, 8);
   }, [summary]);
@@ -598,7 +598,7 @@ export function AnomalyDashboard() {
                                       <TrendingDown className="w-4 h-4 text-primary" />
                                     )}
                                     <span className="font-medium">
-                                      {METRIC_LABELS[anomaly.metricType] || anomaly.metricType}
+                                      {metricLabel(anomaly.metricType)}
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-4 text-muted-foreground">
@@ -731,9 +731,7 @@ export function AnomalyDashboard() {
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
                   {buffers.map((buffer) => (
                     <div key={buffer.metricType} className="p-2 bg-muted/30 rounded">
-                      <p className="font-medium truncate">
-                        {METRIC_LABELS[buffer.metricType] || buffer.metricType}
-                      </p>
+                      <p className="font-medium truncate">{metricLabel(buffer.metricType)}</p>
                       <p className="text-muted-foreground">
                         μ: {formatValue(buffer.mean, buffer.metricType)}
                       </p>
