@@ -7648,7 +7648,16 @@ export class AnomalyService
       startTime ?? bucket((endTime ?? now) - DAY_MS),
       bucket(now - MAX_INCIDENT_LOOKBACK_MS),
     );
-    const timelines = await this.incidentsSince(connectionId, from, now);
+    const loadEnd =
+      endTime === undefined
+        ? undefined
+        : bucket(endTime + 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs) + INCIDENT_LIST_CACHE_MS;
+    const timelines = await this.incidentsSince(
+      connectionId,
+      from,
+      loadEnd !== undefined && loadEnd < now ? loadEnd : undefined,
+      now,
+    );
     return timelines
       .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
       .reverse()
@@ -7658,18 +7667,19 @@ export class AnomalyService
   private incidentsSince(
     connectionId: string | undefined,
     from: number,
+    loadEnd: number | undefined,
     now: number,
   ): Promise<IncidentTimeline[]> {
     for (const [key, entry] of this.incidentListCache) {
       if (now - entry.at >= INCIDENT_LIST_CACHE_MS) this.incidentListCache.delete(key);
     }
-    const key = `${connectionId ?? ''}\u0000${from}`;
+    const key = `${connectionId ?? ''}\u0000${from}\u0000${loadEnd ?? ''}`;
     const cached = this.incidentListCache.get(key);
     if (cached) return cached.timelines;
     const timelines = this.loadIncidentHistory(
       connectionId,
       from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
-      undefined,
+      loadEnd,
     ).then(({ events, boundaries }) => this.buildIncidents(events, boundaries));
     const entry = { at: now, timelines };
     this.incidentListCache.set(key, entry);
