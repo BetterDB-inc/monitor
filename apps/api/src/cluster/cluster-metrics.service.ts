@@ -461,7 +461,8 @@ export class ClusterMetricsService {
   /**
    * Cluster-wide CLUSTER SLOT-STATS. The command only covers the slots of the
    * node that answers, so asking the connection's own socket shows one shard;
-   * ask every healthy slot-owning primary instead.
+   * ask every healthy slot-owning primary instead. When none of them can be
+   * reached directly, fall back to the connection's own node.
    */
   async getClusterSlotStats(
     orderBy: SlotStatsOrder = 'key-count',
@@ -568,8 +569,26 @@ export class ClusterMetricsService {
       }
     }
     if (primaries.length > 0 && perNode.length === 0) {
+      // No primary answered on the address it announces, as behind an SSH
+      // tunnel or NAT. The connection's own socket still reaches one node, so
+      // report that node's slots and leave the other primaries as failed.
       const first = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-      throw first?.reason instanceof Error ? first.reason : new Error(String(first?.reason));
+      let stats: SlotStats;
+      try {
+        stats = await withTimeout(
+          this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
+          timeoutMs,
+          `The connection did not answer CLUSTER SLOT-STATS within ${timeoutMs}ms`,
+        );
+      } catch {
+        throw first?.reason instanceof Error ? first.reason : new Error(String(first?.reason));
+      }
+      const self = owners.find((node) => node.flags?.includes('myself'));
+      return {
+        stats,
+        failedNodes: failedNodes.filter((address) => address !== self?.address),
+        failedSlotRanges: self ? failedSlotRanges.filter((range) => !self.slots.includes(range)) : failedSlotRanges,
+      };
     }
     return {
       stats: mergeSlotStats(perNode, orderBy, validLimit),

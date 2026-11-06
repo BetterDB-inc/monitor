@@ -783,11 +783,34 @@ used_cpu_user:20.3\r
       }
     });
 
-    it('fails only when no primary answered', async () => {
+    it('falls back to the connection\'s own node when no primary can be reached directly', async () => {
+      // Behind an SSH tunnel the announced addresses are unreachable.
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]], flags: ['myself', 'master'] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]], flags: ['master'] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      const getClusterSlotStats = jest.fn().mockResolvedValue({ '1': { key_count: 50 } });
+      mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats });
+
+      const result = await service.getClusterSlotStatsResult('cpu-usec', 10, 'conn-1');
+
+      expect(getClusterSlotStats).toHaveBeenCalledWith('cpu-usec', 10);
+      expect(mockConnectionRegistry.get).toHaveBeenCalledWith('conn-1');
+      expect(result.stats).toEqual({ '1': { key_count: 50 } });
+      expect(result.failedNodes).toEqual(['10.0.0.3:6379']);
+      expect(result.failedSlotRanges).toEqual([[8192, 16383]]);
+    });
+
+    it('fails only when neither a primary nor the connection answered', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockRejectedValue(new Error('boom')) });
+      mockConnectionRegistry.get.mockReturnValue({
+        getClient: jest.fn(),
+        getClusterSlotStats: jest.fn().mockRejectedValue(new Error('also down')),
+      });
 
       await expect(service.getClusterSlotStats('key-count', 10)).rejects.toThrow('boom');
     });
