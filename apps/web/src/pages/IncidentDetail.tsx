@@ -47,10 +47,7 @@ export function IncidentDetail() {
   });
   const notFound = isNotFoundError(error);
   const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));
-  const fromOverview = searchParams.get('from') === 'overview';
-  const backTo = fromOverview
-    ? `/anomalies${range ? `?${range}` : ''}`
-    : `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
+  const backTo = `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
 
   return (
     <div className="space-y-6">
@@ -59,7 +56,7 @@ export function IncidentDetail() {
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="w-4 h-4" />
-        {fromOverview ? 'Back to overview' : 'Back to incidents'}
+        Back to incidents
       </ConnectionLink>
       {incident ? (
         <>

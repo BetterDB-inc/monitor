@@ -210,7 +210,6 @@ export interface CorrelatedAnomalyGroup {
   recommendations: string[];
   severity: AnomalySeverity;
   truncated?: boolean;
-  incidentId?: string;
 }
 
 export interface MetricSample {

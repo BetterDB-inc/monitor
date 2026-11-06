@@ -1785,7 +1785,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_incident_boundaries_started_at ON incident_boundaries(started_at);
 
       ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS scope_id TEXT;
-      ALTER TABLE correlated_anomaly_groups ADD COLUMN IF NOT EXISTS incident_id TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS scope_id TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_correlated_groups_timestamp ON correlated_anomaly_groups(timestamp DESC);
@@ -3165,8 +3164,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `INSERT INTO correlated_anomaly_groups (
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids, scope_id, incident_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        source_host, source_port, connection_id, anomaly_ids, scope_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (correlation_id) DO UPDATE SET
         diagnosis = EXCLUDED.diagnosis,
         recommendations = EXCLUDED.recommendations,
@@ -3187,7 +3186,6 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connectionId,
         group.anomalyIds ?? null,
         group.scopeId ?? null,
-        group.incidentId ?? null,
       ],
     );
 
@@ -3249,7 +3247,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       `SELECT
         correlation_id, timestamp, pattern, severity,
         diagnosis, recommendations, anomaly_count, metric_types,
-        source_host, source_port, connection_id, anomaly_ids, scope_id, incident_id
+        source_host, source_port, connection_id, anomaly_ids, scope_id
       FROM correlated_anomaly_groups
       ${whereClause}
       ORDER BY timestamp DESC, correlation_id DESC

@@ -30,7 +30,6 @@ import {
   dateRangeFromParams,
   dateRangeQuery,
 } from '../components/anomalies/incidents/incident-summary';
-import { GroupIncidentLink } from '../components/anomalies/incidents/GroupIncidentLink';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
@@ -78,7 +77,6 @@ interface CorrelatedGroup {
   severity: 'info' | 'warning' | 'critical';
   anomalies: AnomalyEvent[];
   truncated?: boolean;
-  incidentId?: string;
 }
 
 interface AnomalySummary {
@@ -156,7 +154,6 @@ export function AnomalyDashboard() {
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const rangeQuery = dateRangeQuery(startTime, endTime);
   const rangeKey = `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`;
-  const overviewLinkQuery = [rangeQuery, 'from=overview'].filter(Boolean).join('&');
 
   const changeDateRange = (range: DateRange | undefined) => {
     setSearchParams(
@@ -337,6 +334,11 @@ export function AnomalyDashboard() {
           <Card>
             <CardHeader>
               <CardTitle className="text-lg">Incidents</CardTitle>
+              {startTime === undefined && (
+                <p className="text-sm text-muted-foreground">
+                  Last 24 hours. Pick a date range to see older incidents.
+                </p>
+              )}
             </CardHeader>
             <CardContent>
               {incidentsError && !incidents ? (
@@ -571,11 +573,6 @@ export function AnomalyDashboard() {
                             <h4 className="text-sm font-semibold mb-2">Diagnosis</h4>
                             <p className="text-sm text-muted-foreground">{group.diagnosis}</p>
                           </div>
-
-                          <GroupIncidentLink
-                            incidentId={group.incidentId}
-                            linkQuery={overviewLinkQuery}
-                          />
 
                           {/* Related Anomalies */}
                           <div>

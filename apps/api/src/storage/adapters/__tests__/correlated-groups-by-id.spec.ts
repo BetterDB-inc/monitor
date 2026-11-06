@@ -53,15 +53,6 @@ describe.each<[string, AdapterFactory]>(adapters)(
       expect(await storage.getCorrelatedGroups({ patterns: [] })).toEqual([]);
     });
 
-    it('stores the incident id with the group', async () => {
-      const id = randomUUID();
-      await storage.saveCorrelatedGroup({ ...group(id, 4000), incidentId: '4000-abc' }, CONN);
-
-      const rows = await storage.getCorrelatedGroups({ startTime: 4000 });
-
-      expect(rows.find((g) => g.correlationId === id)?.incidentId).toBe('4000-abc');
-    });
-
     it('breaks timestamp ties by correlation id', async () => {
       const [low, high] = [randomUUID(), randomUUID()].sort();
       await storage.saveCorrelatedGroup(group(low, 9000), CONN);

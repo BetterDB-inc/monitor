@@ -411,9 +411,6 @@ interface TrackedResyncEvent {
 
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
-const INCIDENT_LIST_CACHE_MS = 30_000;
-const MAX_INCIDENT_LIST_CACHE_ENTRIES = 50;
-const DAY_MS = 24 * 60 * 60_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -482,9 +479,6 @@ export class AnomalyService
     getSequenceRules,
   );
   private liveIncidents: IncidentTimeline[] = [];
-  private liveIncidentByAnomaly = new Map<string, IncidentTimeline>();
-  private incidentBoundariesReady = false;
-  private incidentListCache = new Map<string, { at: number; timelines: Promise<IncidentTimeline[]> }>();
   private readonly sequenceGroupedAnomalies = new Map<string, number>();
   private sequenceDedupeSeed: Promise<boolean> | null = null;
   private incidentBoundarySeed: Promise<boolean> | null = null;
@@ -7133,10 +7127,10 @@ export class AnomalyService
       this.correlationTicking = true;
       this.scopeSeeds = this.seedsByClusterKey();
       try {
+        await this.correlateAnomalies();
         await this.tickIncidentTimelines().catch((err) => {
           this.logger.error('Failed to build incident timelines:', err);
         });
-        await this.correlateAnomalies();
       } finally {
         this.scopeSeeds = null;
         this.correlationTicking = false;
@@ -7539,15 +7533,9 @@ export class AnomalyService
         now - windowMs,
         this.incidentEventsDroppedSpans,
       );
-      this.liveIncidentByAnomaly = new Map(
-        this.liveIncidents.flatMap((incident) =>
-          incident.entries.map((entry) => [entry.anomalyId, incident] as const),
-        ),
-      );
       this.incidentsBuiltAt = now;
       this.incidentsDirty = false;
     }
-    this.incidentBoundariesReady = boundariesSeeded;
     if (boundariesSeeded) await this.storeIncidentBoundaries(now - windowMs);
     else this.incidentBoundarySeed = null;
     if (!seeded) {
@@ -7583,7 +7571,6 @@ export class AnomalyService
           diagnosis: match.diagnosis,
           recommendations: match.recommendations,
           severity: match.severity,
-          ...(boundariesSeeded ? { incidentId: incident.incidentId } : {}),
         });
         if (!recorded) {
           anomalies.forEach((a) =>
@@ -7612,7 +7599,6 @@ export class AnomalyService
             sourcePort: this.configService.get('database.port'),
             anomalyIds: group.anomalies.map((a) => a.id),
             scopeId: group.anomalies[0]?.scopeId,
-            incidentId: group.incidentId,
           },
           connectionId,
         );
@@ -7644,61 +7630,32 @@ export class AnomalyService
     limit = 50,
   ): Promise<IncidentTimeline[]> {
     const now = Date.now();
-    const bucket = (at: number) => Math.floor(at / INCIDENT_LIST_CACHE_MS) * INCIDENT_LIST_CACHE_MS;
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const from = Math.max(
-      startTime ?? bucket((endTime ?? now) - DAY_MS),
-      bucket(now - MAX_INCIDENT_LOOKBACK_MS),
+      startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
+      now - MAX_INCIDENT_LOOKBACK_MS,
     );
     const loadEnd =
-      endTime === undefined
-        ? undefined
-        : bucket(endTime + 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs) + INCIDENT_LIST_CACHE_MS;
-    const timelines = await this.incidentsSince(
+      endTime !== undefined && endTime + maxSpanMs < now ? endTime + maxSpanMs : undefined;
+    const { events, boundaries } = await this.loadIncidentHistory(
       connectionId,
-      from,
-      loadEnd !== undefined && loadEnd < now ? loadEnd : undefined,
-      now,
+      from - maxSpanMs,
+      loadEnd,
     );
+    const draft = this.buildIncidents(events, boundaries);
+    const next =
+      loadEnd === undefined
+        ? []
+        : await this.nextFiringsAfter(
+            draft.flatMap((t) => t.entries),
+            loadEnd,
+          );
+    const timelines =
+      next.length > 0 ? this.buildIncidents([...events, ...next], boundaries) : draft;
     return timelines
       .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
       .reverse()
       .slice(0, limit);
-  }
-
-  private incidentsSince(
-    connectionId: string | undefined,
-    from: number,
-    loadEnd: number | undefined,
-    now: number,
-  ): Promise<IncidentTimeline[]> {
-    for (const [key, entry] of this.incidentListCache) {
-      if (now - entry.at >= INCIDENT_LIST_CACHE_MS) this.incidentListCache.delete(key);
-    }
-    const key = `${connectionId ?? ''}\u0000${from}\u0000${loadEnd ?? ''}`;
-    const cached = this.incidentListCache.get(key);
-    if (cached) return cached.timelines;
-    const timelines = this.loadIncidentHistory(
-      connectionId,
-      from - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs,
-      loadEnd,
-    ).then(async ({ events, boundaries }) => {
-      const draft = this.buildIncidents(events, boundaries);
-      if (loadEnd === undefined) return draft;
-      const next = await this.nextFiringsAfter(
-        draft.flatMap((t) => t.entries),
-        loadEnd,
-      );
-      return next.length > 0 ? this.buildIncidents([...events, ...next], boundaries) : draft;
-    });
-    const entry = { at: now, timelines };
-    this.incidentListCache.set(key, entry);
-    if (this.incidentListCache.size > MAX_INCIDENT_LIST_CACHE_ENTRIES) {
-      this.incidentListCache.delete(this.incidentListCache.keys().next().value!);
-    }
-    timelines.catch(() => {
-      if (this.incidentListCache.get(key) === entry) this.incidentListCache.delete(key);
-    });
-    return timelines;
   }
 
   private buildIncidents(
@@ -7789,7 +7746,6 @@ export class AnomalyService
   ): Promise<AnomalyEvent[]> {
     const signals = new Map<string, { connectionId: string; metricType: MetricType }>();
     for (const entry of entries) {
-      if (entry.recoveryState === 'recovered') continue;
       signals.set(`${entry.connectionId}\u0000${entry.metricType}`, {
         connectionId: entry.connectionId,
         metricType: entry.metricType,
@@ -7944,15 +7900,6 @@ export class AnomalyService
     ];
   }
 
-  private liveIncidentIdOf(anomalies: AnomalyEvent[]): string | undefined {
-    if (!this.incidentBoundariesReady) return undefined;
-    for (const anomaly of anomalies) {
-      const incident = this.liveIncidentByAnomaly.get(anomaly.id);
-      if (incident) return incident.incidentId;
-    }
-    return undefined;
-  }
-
   private async correlateAnomalies(): Promise<void> {
     try {
       const uncorrelated = this.recentAnomalies.filter((a) => !a.correlationId && !a.resolved);
@@ -7966,8 +7913,6 @@ export class AnomalyService
       );
 
       for (const group of newGroups) {
-        const incidentId = this.liveIncidentIdOf(group.anomalies);
-        if (incidentId) group.incidentId = incidentId;
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
           timestamp: group.timestamp,
@@ -7980,7 +7925,6 @@ export class AnomalyService
           sourceHost: this.configService.get('database.host'),
           sourcePort: this.configService.get('database.port'),
           scopeId: group.anomalies[0]?.scopeId,
-          ...(incidentId ? { incidentId } : {}),
         };
 
         // Get connectionId from first anomaly in group (all should have same connectionId)
@@ -8218,7 +8162,6 @@ export class AnomalyService
         recommendations: s.recommendations,
         anomalies: ordered.filter((a) => a.correlationId === s.correlationId || ids.has(a.id)),
         ...(truncated.has(s.correlationId) ? { truncated: true } : {}),
-        ...(s.incidentId ? { incidentId: s.incidentId } : {}),
       };
     });
   }
