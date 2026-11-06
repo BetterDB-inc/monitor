@@ -88,6 +88,7 @@ export type {
 } from '@betterdb/shared';
 import type { InvitationRepository } from './invitation-repository.interface';
 import type { ActivityRepository } from './activity-repository.interface';
+import type { LogCaptureGapRepository } from './log-capture-gap-repository.interface';
 import type {
   AppSettings,
   AuditQueryOptions,
@@ -972,4 +973,6 @@ export interface StoragePort {
   getInvitationRepository(): InvitationRepository;
 
   getActivityRepository(): ActivityRepository;
+
+  getLogCaptureGapRepository(): LogCaptureGapRepository;
 }

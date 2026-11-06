@@ -11,6 +11,7 @@ import { AuditModule } from './audit/audit.module';
 import { ClientAnalyticsModule } from './client-analytics/client-analytics.module';
 import { SlowLogAnalyticsModule } from './slowlog-analytics/slowlog-analytics.module';
 import { CommandLogAnalyticsModule } from './commandlog-analytics/commandlog-analytics.module';
+import { LogCaptureModule } from './log-capture/log-capture.module';
 import { LatencyAnalyticsModule } from './latency-analytics/latency-analytics.module';
 import { MemoryAnalyticsModule } from './memory-analytics/memory-analytics.module';
 import { PrometheusModule } from './prometheus/prometheus.module';
@@ -228,6 +229,7 @@ const baseImports = [
   ClientAnalyticsModule,
   SlowLogAnalyticsModule,
   CommandLogAnalyticsModule,
+  LogCaptureModule,
   LatencyAnalyticsModule,
   MemoryAnalyticsModule,
   PrometheusModule,
