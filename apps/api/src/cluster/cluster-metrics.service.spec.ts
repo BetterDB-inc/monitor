@@ -7,7 +7,14 @@ import { ConnectionRegistry } from '../connections/connection-registry.service';
 describe('ClusterMetricsService', () => {
   let service: ClusterMetricsService;
   let mockDiscoveryService: { discoverNodes: jest.Mock; getNodeConnection: jest.Mock; evictNodeClient: jest.Mock };
-  let mockConnectionRegistry: { get: jest.Mock; getDefaultId: jest.Mock; list: jest.Mock; getConfig: jest.Mock };
+  let mockConnectionRegistry: {
+    get: jest.Mock;
+    getDefaultId: jest.Mock;
+    list: jest.Mock;
+    getConfig: jest.Mock;
+    listMembers: jest.Mock;
+    findConfigByHostPort: jest.Mock;
+  };
   let mockClient: { call: jest.Mock; info: jest.Mock; slowlog: jest.Mock; status: string };
 
   const mockNodes = [
@@ -117,6 +124,8 @@ used_cpu_user:20.3\r
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
       list: jest.fn().mockReturnValue([]),
       getConfig: jest.fn().mockReturnValue({ id: 'test-connection' }),
+      listMembers: jest.fn().mockReturnValue([]),
+      findConfigByHostPort: jest.fn().mockReturnValue(null),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -595,13 +604,50 @@ used_cpu_user:20.3\r
   });
 
   describe('usesClusterWideSlotStats', () => {
-    it('is true for a seed or a plain cluster connection, false for an auto-registered node child', () => {
-      mockConnectionRegistry.getConfig.mockImplementation((id: string) =>
-        id === 'child' ? { id, membership: { seedId: 'seed', origin: 'auto', source: 'cluster' } } : { id },
+    const memberOf = (seedId: string) => ({ seedId, nodeId: 'n', origin: 'auto', source: 'cluster' });
+
+    it('is false for a node registered under a seed', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'child', membership: memberOf('seed') });
+      await expect(service.usesClusterWideSlotStats('child')).resolves.toBe(false);
+    });
+
+    it('is true for a seed with active members, without asking discovery', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'seed' });
+      mockConnectionRegistry.listMembers.mockReturnValue([{ id: 'child', membership: memberOf('seed') }]);
+      await expect(service.usesClusterWideSlotStats('seed')).resolves.toBe(true);
+      expect(mockDiscoveryService.discoverNodes).not.toHaveBeenCalled();
+    });
+
+    it('is true for the only registered connection of a cluster', async () => {
+      mockConnectionRegistry.findConfigByHostPort.mockImplementation((host: string) =>
+        host === '192.168.1.10' ? { id: 'test-connection' } : null,
       );
-      expect(service.usesClusterWideSlotStats('seed')).toBe(true);
-      expect(service.usesClusterWideSlotStats('child')).toBe(false);
-      expect(service.usesClusterWideSlotStats()).toBe(true);
+      await expect(service.usesClusterWideSlotStats()).resolves.toBe(true);
+      expect(mockDiscoveryService.discoverNodes).toHaveBeenCalledWith('test-connection');
+    });
+
+    it('is false for each of several cluster nodes registered one by one', async () => {
+      mockConnectionRegistry.findConfigByHostPort.mockImplementation((host: string) =>
+        host === '192.168.1.10' ? { id: 'node-a' } : { id: 'node-b' },
+      );
+      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
+      await expect(service.usesClusterWideSlotStats('node-b')).resolves.toBe(false);
+    });
+
+    it('matches another registered node by the hostname it announces', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { ...mockNodes[0], flags: ['myself', 'master'] },
+        { ...mockNodes[1], hostname: 'node-2.example', flags: ['slave'] },
+      ]);
+      mockConnectionRegistry.findConfigByHostPort.mockImplementation((host: string) =>
+        host === 'node-2.example' ? { id: 'node-b' } : null,
+      );
+      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
+    });
+
+    it('keeps its own node when discovery fails', async () => {
+      mockDiscoveryService.discoverNodes.mockRejectedValue(new Error('down'));
+      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
     });
   });
 

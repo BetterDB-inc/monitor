@@ -16,6 +16,7 @@ import { withTimeout } from '../common/utils/with-timeout';
 import { parseCommandStatsSection } from '../metrics/commandstats-parser';
 import { isAmbiguousCommand, isReadCommand, isWriteCommand, sumWriteCalls } from './write-commands';
 import { isReplicaRole } from '../database/parsers/replication-info.parser';
+import { parseNodeAddress } from '../topology/membership-diff';
 
 const MAX_KEYS_TO_CHECK_IN_SLOT = 10000;
 
@@ -473,13 +474,42 @@ export class ClusterMetricsService {
   }
 
   /**
-   * Whether a connection should report cluster-wide slot stats. An
-   * auto-registered node child stands for one node and keeps that node's own
-   * slots; seeds and other cluster connections get the cluster-wide view.
+   * Whether a connection should report cluster-wide slot stats. Only one
+   * connection per cluster may, or a sum across connections counts every slot
+   * once per connection:
+   * - a node registered under a seed (auto-registered or adopted) stands for
+   *   that node and keeps its own slots;
+   * - a seed with active members reports the whole cluster;
+   * - any other cluster connection reports the whole cluster only when no
+   *   other registered connection is one of the nodes its discovery lists.
+   *   Nodes registered one by one each keep their own node's slots, which
+   *   together cover the cluster once.
    */
-  usesClusterWideSlotStats(connectionId?: string): boolean {
+  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean> {
     const id = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
-    return !(id && this.connectionRegistry.getConfig(id)?.membership);
+    if (!id) return true;
+    if (this.connectionRegistry.getConfig(id)?.membership) return false;
+    if (this.connectionRegistry.listMembers(id).some((member) => member.membership?.retiredAt === undefined)) {
+      return true;
+    }
+    let nodes: DiscoveredNode[];
+    try {
+      nodes = await this.discoveryService.discoverNodes(id);
+    } catch {
+      return false;
+    }
+    const registeredElsewhere = (host: string, port: number) => {
+      const owner = this.connectionRegistry.findConfigByHostPort(host, port);
+      return owner !== null && owner.id !== id;
+    };
+    return !nodes.some((node) => {
+      const parsed = parseNodeAddress(node.address);
+      if (!parsed) return false;
+      return (
+        registeredElsewhere(parsed.host, parsed.port) ||
+        (node.hostname !== undefined && registeredElsewhere(node.hostname, parsed.port))
+      );
+    });
   }
 
   /** Like getClusterSlotStats, plus the primaries that did not answer. */

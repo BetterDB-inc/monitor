@@ -166,8 +166,9 @@ export class MetricsService {
     if (!capabilities.hasClusterSlotStats) {
       throw new Error('CLUSTER SLOT-STATS not supported on this database version');
     }
-    // The connection's own socket only sees the slots of the node it landed on.
-    if (capabilities.clusterEnabled && this.clusterMetrics?.usesClusterWideSlotStats(connectionId)) {
+    // The connection's own socket only sees the slots of the node it landed on;
+    // one connection per cluster reports them all.
+    if (capabilities.clusterEnabled && this.clusterMetrics && (await this.clusterMetrics.usesClusterWideSlotStats(connectionId))) {
       const { stats, failedNodes } = await this.clusterMetrics.getClusterSlotStatsResult(orderBy, limit, connectionId);
       return { stats, failedNodes };
     }

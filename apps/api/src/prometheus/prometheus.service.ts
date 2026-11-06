@@ -2646,7 +2646,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       let result: ClusterSlotStatsResult;
-      if (client.getCapabilities().clusterEnabled && this.clusterMetricsService?.usesClusterWideSlotStats(connectionId)) {
+      if (
+        client.getCapabilities().clusterEnabled &&
+        this.clusterMetricsService &&
+        (await this.clusterMetricsService.usesClusterWideSlotStats(connectionId))
+      ) {
         // The fan-out must finish inside this pass, or a later pass retires the
         // epoch and every primary's answer is thrown away.
         const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - Date.now();
