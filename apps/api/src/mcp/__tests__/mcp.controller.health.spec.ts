@@ -57,6 +57,14 @@ describe('McpController getHealth', () => {
     expect(configHazards.probeHazards).toHaveBeenCalledWith('conn-1');
   });
 
+  it('returns an empty configHazards for a complete clean probe', async () => {
+    configHazards.probeHazards.mockResolvedValue({ findings: [], complete: true });
+    const controller = build(true);
+    const result = await controller.getHealth('conn-1');
+    expect(result.configHazards).toEqual([]);
+    expect(result).not.toHaveProperty('configHazardsUnavailable');
+  });
+
   it('returns the plain summary when the hazard service is not wired', async () => {
     const controller = build(false);
     const result = await controller.getHealth('conn-1');

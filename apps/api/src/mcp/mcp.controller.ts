@@ -441,12 +441,10 @@ export class McpController {
       if (this.configHazardService) {
         try {
           const probe = await this.configHazardService.probeHazards(id);
-          if (probe.complete) {
+          if (probe.complete || probe.findings.length > 0) {
             result.configHazards = probe.findings;
-          } else {
-            if (probe.findings.length > 0) {
-              result.configHazards = probe.findings;
-            }
+          }
+          if (!probe.complete) {
             result.configHazardsUnavailable = true;
           }
         } catch (err) {
