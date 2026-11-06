@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, CircleDashed, CircleDot, Repeat } from 'lucide-react';
+import { CheckCircle2, CircleDashed, CircleDot, Repeat } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import type { IncidentTimeline, IncidentTimelineEntry } from '../../../types/anomaly';
 import {
@@ -9,6 +9,7 @@ import {
   metricLabel,
   patternLabel,
 } from '../anomaly-display';
+import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import {
   incidentDurationMs,
@@ -22,18 +23,20 @@ interface IncidentTimelineViewProps {
   now: number;
 }
 
+function sameDay(a: number, b: number): boolean {
+  return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
 function recoveryTime(firedAt: number, recoveredAt: number): string {
-  return new Date(firedAt).toDateString() === new Date(recoveredAt).toDateString()
-    ? formatTime(recoveredAt)
-    : formatDateTime(recoveredAt);
+  return sameDay(firedAt, recoveredAt) ? formatTime(recoveredAt) : formatDateTime(recoveredAt);
 }
 
 function recoveryText(entry: IncidentTimelineEntry): string {
   switch (entry.recoveryState) {
-    case 'recovered':
-      return entry.recoveredAt === null
-        ? 'Back to baseline'
-        : `Back to baseline at ${recoveryTime(entry.timestamp, entry.recoveredAt)} (after ${formatDuration(entry.recoveredAt - entry.timestamp)})`;
+    case 'recovered': {
+      const recoveredAt = entry.recoveredAt!;
+      return `Back to baseline at ${recoveryTime(entry.timestamp, recoveredAt)} (after ${formatDuration(recoveredAt - entry.timestamp)})`;
+    }
     case 'recurred':
       return 'Fired again later';
     case 'unknown':
@@ -62,7 +65,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
   const stepsOf = new Map<string, string[]>();
   for (const match of incident.sequenceMatches) {
     match.anomalyIds.forEach((id, i) => {
-      const step = match.steps[i] ?? null;
+      const step = match.steps?.[i] ?? null;
       const label = step === null ? 'Supporting signal' : `Step ${step}`;
       const tags = stepsOf.get(id) ?? [];
       tags.push(namePattern ? `${patternLabel(match.pattern)}: ${label}` : label);
@@ -70,6 +73,8 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
     });
   }
   const duration = formatDuration(incidentDurationMs(incident, now));
+  const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
+  const eventTime = spansDays ? formatDateTime : formatTime;
   const title = incidentTitle(incident);
 
   return (
@@ -86,23 +91,15 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       </p>
 
       {incident.recovery.status === 'degraded' && (
-        <div
+        <IncidentNotice
           role="alert"
-          className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4"
+          title="Recovery debt: the cluster has not returned to its pre-incident state"
         >
-          <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
-          <div className="space-y-1">
-            <p className="font-semibold">
-              Recovery debt: the cluster has not returned to its pre-incident state
-            </p>
-            <p className="text-sm text-muted-foreground">
-              No new anomalies have fired, but{' '}
-              {incident.recovery.openSignals.length > 0
-                ? `${incident.recovery.openSignals.map(metricLabel).join(', ')} ${incident.recovery.openSignals.length === 1 ? 'is' : 'are'} still away from baseline.`
-                : 'some signals are still away from baseline.'}
-            </p>
-          </div>
-        </div>
+          No new anomalies have fired, but{' '}
+          {incident.recovery.openSignals.length > 0
+            ? `${incident.recovery.openSignals.map(metricLabel).join(', ')} ${incident.recovery.openSignals.length === 1 ? 'is' : 'are'} still away from baseline.`
+            : 'some signals are still away from baseline.'}
+        </IncidentNotice>
       )}
 
       {incident.sequenceMatches.map((match) => (
@@ -120,7 +117,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
             <ol className="space-y-1 text-sm">
               {match.anomalyIds.map((id, i) => {
                 const entry = incident.entries.find((e) => e.anomalyId === id);
-                const step = match.steps[i];
+                const step = match.steps?.[i] ?? null;
                 return (
                   <li key={id} className="flex gap-2">
                     <span className="font-mono text-primary">
@@ -166,7 +163,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                   />
                   <div className="flex flex-wrap items-center gap-2 text-sm">
                     <span className="font-mono text-muted-foreground">
-                      {formatTime(entry.timestamp)}
+                      {eventTime(entry.timestamp)}
                     </span>
                     <span className="font-semibold">{metricLabel(entry.metricType)}</span>
                     <span

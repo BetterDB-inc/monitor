@@ -23,7 +23,7 @@ export function incidentDurationMs(incident: IncidentTimeline, now: number): num
 
 export function incidentTitle(incident: IncidentTimeline): string {
   if (incident.matchedPatterns.length > 0)
-    return incident.matchedPatterns.map(patternLabel).join(', ');
+    return [...new Set(incident.matchedPatterns)].map(patternLabel).join(', ');
   const first = orderedEntries(incident)[0];
   return first ? metricLabel(first.metricType) : 'Incident';
 }
@@ -33,37 +33,6 @@ export function orderedEntries(incident: IncidentTimeline): IncidentTimeline['en
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => a.entry.timestamp - b.entry.timestamp || a.index - b.index)
     .map(({ entry }) => entry);
-}
-
-export function incidentsByAnomaly(
-  incidents: IncidentTimeline[] | null | undefined,
-): Map<string, IncidentTimeline> {
-  const byAnomaly = new Map<string, IncidentTimeline>();
-  for (const incident of incidents ?? []) {
-    for (const entry of incident.entries) {
-      if (!byAnomaly.has(entry.anomalyId)) byAnomaly.set(entry.anomalyId, incident);
-    }
-  }
-  return byAnomaly;
-}
-
-export function findIncidentForAnomalies(
-  byAnomaly: Map<string, IncidentTimeline>,
-  anomalyIds: string[],
-): IncidentTimeline | undefined {
-  const hits = new Map<IncidentTimeline, number>();
-  for (const id of anomalyIds) {
-    const incident = byAnomaly.get(id);
-    if (incident) hits.set(incident, (hits.get(incident) ?? 0) + 1);
-  }
-  let best: IncidentTimeline | undefined;
-  for (const [incident, count] of hits) {
-    const bestCount = best ? hits.get(best)! : 0;
-    if (count > bestCount || (count === bestCount && incident.startedAt > best!.startedAt)) {
-      best = incident;
-    }
-  }
-  return best;
 }
 
 export function dateRangeQuery(

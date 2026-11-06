@@ -6,6 +6,10 @@ import { ApiError } from '../api/client';
 import type { IncidentTimeline } from '../types/anomaly';
 
 const getIncident = vi.fn();
+type Interval =
+  | number
+  | ((data: IncidentTimeline | undefined, error: Error | null) => number | false);
+
 const polling: {
   state: {
     data: IncidentTimeline | null;
@@ -14,7 +18,8 @@ const polling: {
     lastUpdated: Date | null;
   };
   fetcher?: () => Promise<unknown>;
-  interval?: number | ((data: IncidentTimeline | undefined) => number | false);
+  interval?: Interval;
+  shouldRetry?: (error: Error) => boolean;
 } = { state: { data: null, error: null, loading: true, lastUpdated: null } };
 
 vi.mock('../api/metrics', () => ({
@@ -28,11 +33,13 @@ vi.mock('../hooks/useConnection', () => ({
 vi.mock('../hooks/usePolling', () => ({
   usePolling: (options: {
     fetcher: () => Promise<unknown>;
-    interval?: number | ((data: IncidentTimeline | undefined) => number | false);
+    interval?: Interval;
+    shouldRetry?: (error: Error) => boolean;
   }) => {
     polling.fetcher = options.fetcher;
     polling.interval = options.interval;
-    return polling.state;
+    polling.shouldRetry = options.shouldRetry;
+    return { ...polling.state, refresh: vi.fn() };
   },
 }));
 
@@ -62,19 +69,26 @@ describe('IncidentDetail', () => {
     expect(screen.getByText('Loading incident…')).toBeInTheDocument();
   });
 
-  it('polls a recovered incident less often', () => {
+  it('stops polling on an error or once the incident reaches a final state', () => {
     renderAt('/anomalies/incidents/123-abc');
 
-    const interval = polling.interval as (data: IncidentTimeline | undefined) => number;
-    expect(interval(undefined)).toBe(15_000);
-    expect(
-      interval(
-        incident({
-          recovery: { status: 'active', openSignals: [], unknownSignals: [], recoveredAt: null },
-        }),
-      ),
-    ).toBe(15_000);
-    expect(interval(incident())).toBe(60_000);
+    const interval = polling.interval as Exclude<Interval, number>;
+    const withStatus = (status: IncidentTimeline['recovery']['status']) =>
+      incident({ recovery: { status, openSignals: [], unknownSignals: [], recoveredAt: null } });
+    expect(interval(undefined, null)).toBe(15_000);
+    expect(interval(withStatus('active'), null)).toBe(15_000);
+    expect(interval(withStatus('degraded'), null)).toBe(15_000);
+    expect(interval(incident(), null)).toBe(false);
+    expect(interval(withStatus('unknown'), null)).toBe(false);
+    expect(interval(withStatus('active'), new ApiError('Not found', 404))).toBe(false);
+    expect(interval(undefined, new ApiError('Storage unavailable', 500))).toBe(false);
+  });
+
+  it('does not retry a 404', () => {
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(polling.shouldRetry?.(new ApiError('Not found', 404))).toBe(false);
+    expect(polling.shouldRetry?.(new ApiError('Storage unavailable', 500))).toBe(true);
   });
 
   it('renders the incident and links back to the list', () => {

@@ -2,10 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { entry, incident, T0 } from './incident-fixtures';
 import {
   dateRangeQuery,
-  findIncidentForAnomalies,
   incidentDurationMs,
   incidentPath,
-  incidentsByAnomaly,
   incidentTitle,
   isDurationOngoing,
   orderedEntries,
@@ -53,33 +51,6 @@ describe('incident summary helpers', () => {
     expect(ordered.map((e) => e.anomalyId)).toEqual(['second', 'third', 'late']);
   });
 
-  it('finds the incident holding any of a group anomalies', () => {
-    const target = incident({ incidentId: 'b', entries: [entry({ anomalyId: 'x' })] });
-    expect(findIncidentForAnomalies(incidentsByAnomaly([incident(), target]), ['y', 'x'])).toBe(
-      target,
-    );
-    expect(findIncidentForAnomalies(incidentsByAnomaly([incident()]), ['z'])).toBeUndefined();
-    expect(findIncidentForAnomalies(incidentsByAnomaly(null), ['x'])).toBeUndefined();
-  });
-
-  it('links a group spanning incidents to the one holding most of it, then the newest', () => {
-    const older = incident({
-      incidentId: 'older',
-      startedAt: T0,
-      entries: [entry({ anomalyId: 'a' })],
-    });
-    const newer = incident({
-      incidentId: 'newer',
-      startedAt: T0 + 600_000,
-      entries: [entry({ anomalyId: 'b' }), entry({ anomalyId: 'c' })],
-    });
-    const byAnomaly = incidentsByAnomaly([older, newer]);
-
-    expect(findIncidentForAnomalies(byAnomaly, ['a', 'b', 'c'])).toBe(newer);
-    expect(findIncidentForAnomalies(byAnomaly, ['a', 'b'])).toBe(newer);
-    expect(findIncidentForAnomalies(byAnomaly, ['a'])).toBe(older);
-  });
-
   it('encodes the incident id in its path and keeps the date range', () => {
     expect(incidentPath('1-a/b')).toBe('/anomalies/incidents/1-a%2Fb');
     expect(incidentPath('1-a', dateRangeQuery(100, 200))).toBe(
@@ -100,6 +71,9 @@ describe('incident summary helpers', () => {
 
   it('titles an incident by its patterns, or else its first signal', () => {
     expect(incidentTitle(incident({ matchedPatterns: ['retry_storm'] }))).toBe('Retry Storm');
+    expect(
+      incidentTitle(incident({ matchedPatterns: ['retry_storm', 'split_brain', 'retry_storm'] })),
+    ).toBe('Retry Storm, Split Brain');
     expect(
       incidentTitle(
         incident({

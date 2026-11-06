@@ -39,6 +39,7 @@ function parseTimeRange(
 }
 
 const MAX_INCIDENT_LIMIT = 1000;
+const MAX_LOOKUP_ANOMALY_IDS = 500;
 
 function parseLimit(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -200,6 +201,36 @@ export class AnomalyController {
       parsedEndTime,
       parseLimit(limit, 50),
     );
+  }
+
+  @Get('incidents/lookup')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async lookupIncident(
+    @ConnectionId() connectionId?: string,
+    @Query('anomalyIds') anomalyIds?: string,
+    @Query('startTime') startTime?: string,
+    @Query('endTime') endTime?: string,
+  ): Promise<{ incidentId: string }> {
+    const ids = (anomalyIds ?? '').split(',').filter((id) => id !== '');
+    if (ids.length === 0 || ids.length > MAX_LOOKUP_ANOMALY_IDS) {
+      throw new BadRequestException(
+        `anomalyIds must list between 1 and ${MAX_LOOKUP_ANOMALY_IDS} ids`,
+      );
+    }
+    const { parsedStartTime, parsedEndTime } = parseTimeRange(startTime, endTime);
+    if (parsedStartTime === undefined || parsedEndTime === undefined) {
+      throw new BadRequestException('startTime and endTime are required');
+    }
+    const incidentId = await this.anomalyService.findIncidentIdForAnomalies(
+      ids,
+      parsedStartTime,
+      parsedEndTime,
+      connectionId,
+    );
+    if (!incidentId) throw new NotFoundException('No incident holds these anomalies');
+    return { incidentId };
   }
 
   @Get('incidents/:incidentId')

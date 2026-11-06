@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import { IncidentTimelineView } from './IncidentTimelineView';
 import { entry, incident, T0 } from './incident-fixtures';
+import type { IncidentTimeline } from '../../../types/anomaly';
 
 describe('IncidentTimelineView', () => {
   it('renders events with equal timestamps in server order', () => {
@@ -219,6 +220,49 @@ describe('IncidentTimelineView', () => {
       day: 'numeric',
     });
     expect(screen.getByText(new RegExp(`Back to baseline at ${nextDay}`))).toBeInTheDocument();
+  });
+
+  it('tolerates a sequence match without step numbers', () => {
+    const match = {
+      pattern: 'retry_storm',
+      anomalyIds: ['a1'],
+      diagnosis: 'Clients are retrying slow commands',
+      recommendations: [],
+      severity: 'warning' as const,
+    };
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          matchedPatterns: ['retry_storm'],
+          sequenceMatches: [match as unknown as IncidentTimeline['sequenceMatches'][number]],
+        })}
+      />,
+    );
+
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+    expect(screen.getByText('Supporting signal')).toBeInTheDocument();
+  });
+
+  it('dates event times when an incident crosses midnight', () => {
+    const lateEvening = new Date(2026, 10, 5, 23, 55).getTime();
+    const afterMidnight = new Date(2026, 10, 6, 0, 5).getTime();
+    render(
+      <IncidentTimelineView
+        now={afterMidnight}
+        incident={incident({
+          startedAt: lateEvening,
+          entries: [
+            entry({ anomalyId: 'a', timestamp: lateEvening }),
+            entry({ anomalyId: 'b', timestamp: afterMidnight }),
+          ],
+        })}
+      />,
+    );
+
+    const nextDay = new Date(afterMidnight).toLocaleString([], { month: 'short', day: 'numeric' });
+    const [, second] = screen.getAllByTestId('incident-entry');
+    expect(within(second).getByText(new RegExp(nextDay))).toBeInTheDocument();
   });
 
   it('calls out recovery debt on a degraded incident', () => {

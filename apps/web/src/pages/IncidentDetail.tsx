@@ -1,18 +1,24 @@
 import { useParams, useSearchParams } from 'react-router-dom';
 import { ConnectionLink } from '../components/ConnectionLink';
-import { AlertTriangle, ArrowLeft, SearchX } from 'lucide-react';
+import { ArrowLeft, SearchX } from 'lucide-react';
 import { metricsApi } from '../api/metrics';
 import { ApiError } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
 import { QueryErrorState } from '../components/QueryErrorState';
+import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import { IncidentTimelineView } from '../components/anomalies/incidents/IncidentTimelineView';
 import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
-import type { IncidentTimeline } from '../types/anomaly';
+import type { IncidentRecoveryStatus, IncidentTimeline } from '../types/anomaly';
 
-const OPEN_INCIDENT_POLL_MS = 15_000;
-const RECOVERED_INCIDENT_POLL_MS = 60_000;
+const INCIDENT_POLL_MS = 15_000;
+const TERMINAL_STATUSES: ReadonlySet<IncidentRecoveryStatus> = new Set(['recovered', 'unknown']);
+
+function isNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
 
 export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
@@ -23,13 +29,17 @@ export function IncidentDetail() {
     error,
     loading,
     lastUpdated,
+    refresh,
   } = usePolling<IncidentTimeline>({
     fetcher: (signal) => metricsApi.getIncident(incidentId, signal),
-    interval: (latest) =>
-      latest?.recovery.status === 'recovered' ? RECOVERED_INCIDENT_POLL_MS : OPEN_INCIDENT_POLL_MS,
+    interval: (latest, latestError) =>
+      latestError || (latest && TERMINAL_STATUSES.has(latest.recovery.status))
+        ? false
+        : INCIDENT_POLL_MS,
+    shouldRetry: (retryError) => !isNotFound(retryError),
     refetchKey: `${currentConnection?.id ?? ''}:${incidentId}`,
   });
-  const notFound = error instanceof ApiError && error.status === 404;
+  const notFound = isNotFound(error);
   const range = dateRangeQuery(searchParams.get('start'), searchParams.get('end'));
   const backTo = `/anomalies?tab=incidents${range ? `&${range}` : ''}`;
 
@@ -44,28 +54,20 @@ export function IncidentDetail() {
       </ConnectionLink>
       {incident ? (
         <>
-          {error && !notFound && (
-            <div
-              role="status"
-              className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4 text-sm"
-            >
-              <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
-              <p>
-                Could not refresh the incident: {error.message}. Showing the last timeline loaded.
-              </p>
-            </div>
-          )}
-          {notFound && (
-            <div
-              role="status"
-              className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4 text-sm"
-            >
-              <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
-              <p>
-                This incident can no longer be found. Its events may have been regrouped into
-                another incident. Showing the last timeline loaded.
-              </p>
-            </div>
+          {error && (
+            <IncidentNotice>
+              <div className="flex flex-wrap items-center gap-3">
+                <p>
+                  {notFound
+                    ? 'This incident can no longer be found. Its events may have been regrouped into another incident.'
+                    : `Could not refresh the incident: ${error.message}.`}{' '}
+                  Showing the last timeline loaded.
+                </p>
+                <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                  Try again
+                </Button>
+              </div>
+            </IncidentNotice>
           )}
           <IncidentTimelineView
             incident={incident}

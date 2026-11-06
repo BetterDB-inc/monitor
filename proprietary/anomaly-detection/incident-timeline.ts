@@ -298,13 +298,6 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
   };
 }
 
-function entryRecovery(at: number | null | undefined | 'recurred'): IncidentEntryRecovery {
-  if (at === 'recurred') return 'recurred';
-  if (at === null) return 'open';
-  if (at === undefined) return 'unknown';
-  return 'recovered';
-}
-
 function byEventOrder(a: AnomalyEvent, b: AnomalyEvent): number {
   const unstamped = Number.MAX_SAFE_INTEGER;
   return (
@@ -605,15 +598,17 @@ export class IncidentTimelineBuilder {
 
     const entries: IncidentTimelineEntry[] = events.map((event) => {
       const key = signalKey(event);
-      const recoveredAt =
-        lastBySignal.get(key) === event
-          ? recoveredAtBySignal.get(key)
-          : (this.recoveredAtIfResolved(event) ?? 'recurred');
-      return {
-        ...toTimelineEntry(event),
-        recoveredAt: typeof recoveredAt === 'number' ? recoveredAt : null,
-        recoveryState: entryRecovery(recoveredAt),
-      };
+      const entry = toTimelineEntry(event);
+      if (lastBySignal.get(key) !== event) {
+        const resolvedAt = this.recoveredAtIfResolved(event);
+        return resolvedAt === null
+          ? { ...entry, recoveryState: 'recurred' }
+          : { ...entry, recoveredAt: resolvedAt, recoveryState: 'recovered' };
+      }
+      const at = recoveredAtBySignal.get(key);
+      if (at === undefined) return { ...entry, recoveryState: 'unknown' };
+      if (at === null) return { ...entry, recoveryState: 'open' };
+      return { ...entry, recoveredAt: at, recoveryState: 'recovered' };
     });
 
     const sequence: MetricType[] = [];

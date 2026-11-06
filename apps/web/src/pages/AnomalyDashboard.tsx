@@ -23,16 +23,13 @@ import {
   PATTERN_CONFIG,
   METRIC_LABELS,
   formatTime,
+  metricLabel,
 } from '../components/anomalies/anomaly-display';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { ConnectionLink } from '../components/ConnectionLink';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
-import {
-  dateRangeQuery,
-  findIncidentForAnomalies,
-  incidentPath,
-  incidentsByAnomaly,
-} from '../components/anomalies/incidents/incident-summary';
+import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
+import { GroupIncidentLink } from '../components/anomalies/incidents/GroupIncidentLink';
+import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
 import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
@@ -137,7 +134,7 @@ export function AnomalyDashboard() {
     setCaptureContext({
       connectionId: currentConnection.id,
       metricType: anomaly.metricType,
-      metricLabel: METRIC_LABELS[anomaly.metricType] ?? anomaly.metricType,
+      metricLabel: metricLabel(anomaly.metricType),
       anomalyType: anomaly.anomalyType,
       source,
     });
@@ -239,10 +236,9 @@ export function AnomalyDashboard() {
     fetcher: (signal) =>
       metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT }, signal),
     interval: INCIDENT_POLL_MS,
-    enabled: tab === 'incidents' || expandedGroups.size > 0,
+    enabled: tab === 'incidents',
     refetchKey: `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`,
   });
-  const incidentByAnomaly = useMemo(() => incidentsByAnomaly(incidents), [incidents]);
 
   const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
     ReplicaDivergenceHistory[]
@@ -350,10 +346,12 @@ export function AnomalyDashboard() {
               ) : (
                 <>
                   {incidentsError && (
-                    <p role="status" className="mb-3 text-sm text-yellow-600">
-                      Could not refresh incidents: {incidentsError.message}. Showing the last list
-                      loaded.
-                    </p>
+                    <div className="mb-3">
+                      <IncidentNotice>
+                        Could not refresh incidents: {incidentsError.message}. Showing the last list
+                        loaded.
+                      </IncidentNotice>
+                    </div>
                   )}
                   <IncidentList
                     incidents={incidents ?? undefined}
@@ -518,10 +516,6 @@ export function AnomalyDashboard() {
                   const config = SEVERITY_CONFIG[group.severity];
                   const patternConfig = PATTERN_CONFIG[group.pattern] || PATTERN_CONFIG.unknown;
                   const PatternIcon = patternConfig.icon;
-                  const incident = findIncidentForAnomalies(
-                    incidentByAnomaly,
-                    group.anomalies.map((a) => a.id),
-                  );
 
                   return (
                     <div
@@ -572,14 +566,11 @@ export function AnomalyDashboard() {
                             <p className="text-sm text-muted-foreground">{group.diagnosis}</p>
                           </div>
 
-                          {incident && (
-                            <ConnectionLink
-                              to={incidentPath(incident.incidentId, rangeQuery)}
-                              className="inline-flex text-sm font-medium text-primary hover:underline"
-                            >
-                              View incident timeline
-                            </ConnectionLink>
-                          )}
+                          <GroupIncidentLink
+                            connectionId={currentConnection?.id}
+                            anomalies={group.anomalies}
+                            linkQuery={rangeQuery}
+                          />
 
                           {/* Related Anomalies */}
                           <div>

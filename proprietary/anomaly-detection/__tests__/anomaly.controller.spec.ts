@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { AnomalyController } from '../anomaly.controller';
 import { AnomalyService } from '../anomaly.service';
 
@@ -99,5 +99,42 @@ describe('AnomalyController incident limit', () => {
     await controller.getIncidents('c1');
 
     expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([10, 50]);
+  });
+});
+
+describe('AnomalyController incident lookup', () => {
+  const service = { findIncidentIdForAnomalies: jest.fn() };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('looks up the incident holding the anomalies', async () => {
+    service.findIncidentIdForAnomalies.mockResolvedValue('100-abc');
+
+    await expect(controller.lookupIncident('c1', 'a,b', '1000', '2000')).resolves.toEqual({
+      incidentId: '100-abc',
+    });
+    expect(service.findIncidentIdForAnomalies).toHaveBeenCalledWith(['a', 'b'], 1000, 2000, 'c1');
+  });
+
+  it('returns 404 when no incident holds them', async () => {
+    service.findIncidentIdForAnomalies.mockResolvedValue(null);
+
+    await expect(controller.lookupIncident('c1', 'a', '1000', '2000')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it.each([
+    ['no ids', undefined, '1000', '2000'],
+    ['an empty id list', ',', '1000', '2000'],
+    ['too many ids', Array.from({ length: 501 }, (_, i) => `a${i}`).join(','), '1000', '2000'],
+    ['no start', 'a', undefined, '2000'],
+    ['no end', 'a', '1000', undefined],
+  ])('rejects %s', async (_case, ids, start, end) => {
+    await expect(controller.lookupIncident('c1', ids, start, end)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(service.findIncidentIdForAnomalies).not.toHaveBeenCalled();
   });
 });

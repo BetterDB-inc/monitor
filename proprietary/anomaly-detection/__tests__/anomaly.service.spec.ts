@@ -11264,6 +11264,30 @@ describe('AnomalyService', () => {
       expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
     });
 
+    it('finds the incident holding most of a group, then the newest', async () => {
+      const t = Date.now() - 20 * MIN;
+      const rows = ['a', 'b', 'c'].map((id, i) => ({
+        ...anomaly({ id, timestamp: t + i * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t, anomalyId: 'a' },
+        { scopeId: 'conn-1', startedAt: t + MIN, anomalyId: 'b' },
+      ]);
+      const [newer, older] = await service.getIncidentTimelines('conn-1');
+
+      const lookup = (ids: string[]) =>
+        service.findIncidentIdForAnomalies(ids, t, t + 2 * MIN, 'conn-1');
+
+      await expect(lookup(['a', 'b', 'c'])).resolves.toBe(newer.incidentId);
+      await expect(lookup(['a', 'b'])).resolves.toBe(newer.incidentId);
+      await expect(lookup(['a'])).resolves.toBe(older.incidentId);
+      await expect(lookup(['missing'])).resolves.toBeNull();
+    });
+
     it('keeps a live incident on its stored start once its first events age out', async () => {
       const now = Date.now();
       const startedAt = now - 62 * MIN;

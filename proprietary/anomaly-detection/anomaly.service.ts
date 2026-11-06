@@ -7653,6 +7653,42 @@ export class AnomalyService
       .slice(0, limit);
   }
 
+  async findIncidentIdForAnomalies(
+    anomalyIds: string[],
+    startTime: number,
+    endTime: number,
+    connectionId?: string,
+  ): Promise<string | null> {
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const { events, boundaries } = await this.loadIncidentHistory(
+      connectionId,
+      startTime - maxSpanMs,
+      endTime + maxSpanMs,
+    );
+    const wanted = new Set(anomalyIds);
+    let best: { incidentId: string; hits: number; startedAt: number } | null = null;
+    for (const timeline of this.incidentTimelineBuilder.build(
+      events,
+      Date.now(),
+      this.incidentHistoryProbe,
+      boundaries,
+      new Map(),
+      Number.NEGATIVE_INFINITY,
+      this.incidentEventsDroppedSpans,
+    )) {
+      const hits = timeline.entries.filter((e) => wanted.has(e.anomalyId)).length;
+      if (
+        hits > 0 &&
+        (!best ||
+          hits > best.hits ||
+          (hits === best.hits && timeline.startedAt > best.startedAt))
+      ) {
+        best = { incidentId: timeline.incidentId, hits, startedAt: timeline.startedAt };
+      }
+    }
+    return best?.incidentId ?? null;
+  }
+
   async getIncidentTimeline(
     incidentId: string,
     connectionId?: string,
