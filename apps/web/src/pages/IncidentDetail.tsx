@@ -85,7 +85,17 @@ export function IncidentDetail() {
       ) : (
         <QueryErrorState
           error={error}
-          fallback={<EmptyState title="Could not load the incident" description={error?.message} />}
+          fallback={
+            <EmptyState
+              title="Could not load the incident"
+              description={error?.message}
+              action={
+                <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                  Try again
+                </Button>
+              }
+            />
+          }
         />
       )}
     </div>

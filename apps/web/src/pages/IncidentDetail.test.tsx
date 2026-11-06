@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { incident } from '../components/anomalies/incidents/incident-fixtures';
 import { ApiError } from '../api/client';
@@ -20,7 +20,8 @@ const polling: {
   fetcher?: () => Promise<unknown>;
   interval?: Interval;
   shouldRetry?: (error: Error) => boolean;
-} = { state: { data: null, error: null, loading: true, lastUpdated: null } };
+  refresh: ReturnType<typeof vi.fn>;
+} = { state: { data: null, error: null, loading: true, lastUpdated: null }, refresh: vi.fn() };
 
 vi.mock('../api/metrics', () => ({
   metricsApi: { getIncident: (id: string) => getIncident(id) },
@@ -39,7 +40,7 @@ vi.mock('../hooks/usePolling', () => ({
     polling.fetcher = options.fetcher;
     polling.interval = options.interval;
     polling.shouldRetry = options.shouldRetry;
-    return { ...polling.state, refresh: vi.fn() };
+    return { ...polling.state, refresh: polling.refresh };
   },
 }));
 
@@ -58,6 +59,7 @@ function renderAt(path: string) {
 describe('IncidentDetail', () => {
   beforeEach(() => {
     getIncident.mockReset();
+    polling.refresh.mockReset();
     polling.state = { data: null, error: null, loading: true, lastUpdated: null };
   });
 
@@ -185,5 +187,7 @@ describe('IncidentDetail', () => {
 
     expect(screen.getByText('Could not load the incident')).toBeInTheDocument();
     expect(screen.getByText('Storage unavailable')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(polling.refresh).toHaveBeenCalledTimes(1);
   });
 });
