@@ -165,10 +165,16 @@ export class ConfigHazardService {
 
     // A null appendonly or cluster-enabled read is a filtered/empty CONFIG GET,
     // not a completed probe. AOF checks are skipped when appendonly is missing,
-    // and the CRC verdict is unverified when cluster mode is missing. Caching
-    // either case would pin a false clean for a full TTL. Keep findings already
-    // collected and re-probe next poll.
-    const configStateUnknown = appendonly === null || clusterEnabled === null;
+    // and the CRC verdict is unverified when cluster mode is missing.
+    // cluster-crc-enabled null on a cluster is the same ambiguity: getConfigValue
+    // returns null both for a build that predates the setting and for a filtered
+    // read, and the evaluator reports no finding either way. Caching that as
+    // clean would hide a disabled CRC. Keep findings already collected and
+    // re-probe next poll.
+    const crcUnreadable =
+      clusterEnabled === 'yes' && clusterCrcEnabled === null;
+    const configStateUnknown =
+      appendonly === null || clusterEnabled === null || crcUnreadable;
     return { findings, cacheable: !configStateUnknown };
   }
 

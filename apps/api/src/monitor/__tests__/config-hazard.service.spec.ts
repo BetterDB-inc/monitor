@@ -139,6 +139,23 @@ describe('ConfigHazardService', () => {
     expect(appendonlyProbeCount()).toBe(2);
   });
 
+  it('does not cache a cluster probe when cluster-crc-enabled reads null', async () => {
+    // Null is both "setting absent on an old build" and "CONFIG GET filtered".
+    // The evaluator reports no finding, so caching would look like a clean CRC.
+    client.getConfigValue.mockImplementation((param: string) => {
+      if (param === 'appendonly') return Promise.resolve('no');
+      if (param === 'cluster-enabled') return Promise.resolve('yes');
+      if (param === 'cluster-crc-enabled') return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    const first = await service.probeHazards('conn-1');
+    expect(first.complete).toBe(false);
+    expect(first.findings).toHaveLength(0);
+
+    await service.probeHazards('conn-1');
+    expect(appendonlyProbeCount()).toBe(2);
+  });
+
   it('does not cache an incomplete probe when the cluster CRC read fails', async () => {
     client.getConfigValue.mockImplementation((param: string) => {
       if (param === 'appendonly') return Promise.resolve('yes');
