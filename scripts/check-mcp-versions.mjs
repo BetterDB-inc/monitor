@@ -21,12 +21,17 @@ const plugin = readJson('packages/mcp/claude-plugin/.claude-plugin/plugin.json')
 const pluginMcp = readJson('packages/mcp/claude-plugin/.mcp.json');
 const pinnedArg = pluginMcp.mcpServers.betterdb.args.find((arg) => arg.startsWith('@betterdb/mcp@'));
 
+const readmePins = [...readFileSync(join(repoRoot, 'packages/mcp/README.md'), 'utf8').matchAll(
+  /"@betterdb\/mcp(?:@([^"]*))?"/g,
+)].map((match, index) => [`packages/mcp/README.md example ${index + 1} @betterdb/mcp pin`, match[1]]);
+
 const found = [
   ['packages/mcp/package.json version', readJson('packages/mcp/package.json').version],
   ['packages/mcp/server.json version', server.version],
   ['packages/mcp/server.json packages[0].version', server.packages[0].version],
   ['packages/mcp/claude-plugin/.claude-plugin/plugin.json version', plugin.version],
   ['packages/mcp/claude-plugin/.mcp.json @betterdb/mcp pin', pinnedArg?.slice('@betterdb/mcp@'.length)],
+  ...readmePins,
 ];
 
 const mismatches = found.filter(([, version]) => version !== expected);
