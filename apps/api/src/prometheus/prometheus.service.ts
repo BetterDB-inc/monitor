@@ -2643,6 +2643,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.clearSlotSeries(connLabel, state);
       return;
     }
+    // Its seed exports the whole cluster, this node's slots included; a second
+    // copy here would count them twice in any sum across connections.
+    if (client.getCapabilities().clusterEnabled && this.clusterMetricsService?.coveredBySeed(connectionId)) {
+      this.clearSlotSeries(connLabel, state);
+      return;
+    }
 
     try {
       let result: ClusterSlotStatsResult;

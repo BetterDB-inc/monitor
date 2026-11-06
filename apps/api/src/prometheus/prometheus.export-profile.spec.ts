@@ -429,7 +429,7 @@ describe('PrometheusService slot stats', () => {
   it('keeps the slot series of a primary that did not answer, and prunes on a complete poll', async () => {
     const harness = buildService();
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
-    const clusterMetrics = { getClusterSlotStatsResult: jest.fn(), usesClusterWideSlotStats: jest.fn(() => true) };
+    const clusterMetrics = { getClusterSlotStatsResult: jest.fn(), usesClusterWideSlotStats: jest.fn(() => true), coveredBySeed: jest.fn(() => false) };
     (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
 
     clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce({
@@ -469,6 +469,7 @@ describe('PrometheusService slot stats', () => {
     const clusterMetrics = {
       getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: {}, failedNodes: [], failedSlotRanges: [] }),
       usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
     };
     const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
     service.clusterMetricsService = clusterMetrics;
@@ -484,10 +485,31 @@ describe('PrometheusService slot stats', () => {
     expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a node child on its own node slot stats', async () => {
+  it('exports no slot series for a member whose seed reports the whole cluster', async () => {
     const harness = buildService();
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
-    const clusterMetrics = { getClusterSlotStatsResult: jest.fn(), usesClusterWideSlotStats: jest.fn(() => false) };
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn(() => false),
+      coveredBySeed: jest.fn(() => true),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+
+    await runSlotStats(harness);
+
+    expect(clusterMetrics.coveredBySeed).toHaveBeenCalledWith('conn-1');
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+    expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_slot_keys{');
+  });
+
+  it('keeps a node registered on its own on its own node slot stats', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn(),
+      usesClusterWideSlotStats: jest.fn(() => false),
+      coveredBySeed: jest.fn(() => false),
+    };
     (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
 
     await runSlotStats(harness);

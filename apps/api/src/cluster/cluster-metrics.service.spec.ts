@@ -667,6 +667,15 @@ used_cpu_user:20.3\r
       await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
     });
 
+    it('counts an active member of a registered seed as covered by that seed', () => {
+      mockConnectionRegistry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: id === 'retired' ? { ...memberOf('seed'), retiredAt: 1 } : memberOf('seed') },
+      );
+      expect(service.coveredBySeed('child')).toBe(true);
+      expect(service.coveredBySeed('retired')).toBe(false);
+      expect(service.coveredBySeed('seed')).toBe(false);
+    });
+
     it('keeps its own node when discovery fails', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValue(new Error('down'));
       await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
@@ -890,17 +899,58 @@ used_cpu_user:20.3\r
       expect(result.failedSlotRanges).toEqual([[8192, 16383]]);
     });
 
-    it('fails only when neither a primary nor the connection answered', async () => {
+    it('fails with the connection\'s own error when neither a primary nor the connection answered', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockRejectedValue(new Error('boom')) });
       mockConnectionRegistry.get.mockReturnValue({
         getClient: jest.fn(),
-        getClusterSlotStats: jest.fn().mockRejectedValue(new Error('also down')),
+        getClusterSlotStats: jest.fn().mockRejectedValue(new Error('CLUSTER SLOT-STATS not supported')),
       });
 
-      await expect(service.getClusterSlotStats('key-count', 10)).rejects.toThrow('boom');
+      await expect(service.getClusterSlotStats('key-count', 10)).rejects.toThrow('not supported');
+    });
+
+    it('rejects ordering by cpu-usec while no primary reports it', async () => {
+      // cluster-slot-stats-enabled no: replies carry key-count only.
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
+      });
+
+      await expect(service.getClusterSlotStatsResult('cpu-usec', 10, 'conn-1')).rejects.toThrow(
+        'cluster-slot-stats-enabled',
+      );
+      await expect(service.getClusterSlotStatsResult('key-count', 10, 'conn-1')).resolves.toBeDefined();
+    });
+
+    it('warns once about a primary that keeps failing, and again after it recovered', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+      ]);
+      let p2Up = false;
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) =>
+        nodeId === 'p2' && !p2Up
+          ? Promise.reject(new Error('connect ETIMEDOUT'))
+          : { call: jest.fn().mockResolvedValue([[1, ['key-count', 5]]]) },
+      );
+      const p2Warnings = () => warn.mock.calls.filter(([message]) => String(message).includes('10.0.0.3')).length;
+
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+      expect(p2Warnings()).toBe(1);
+
+      p2Up = true;
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+      p2Up = false;
+      await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+      expect(p2Warnings()).toBe(2);
+      warn.mockRestore();
     });
   });
 });

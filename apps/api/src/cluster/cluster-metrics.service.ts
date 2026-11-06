@@ -478,12 +478,13 @@ export class ClusterMetricsService {
    * connection per cluster may, or a sum across connections counts every slot
    * once per connection:
    * - a node registered under a seed (auto-registered or adopted) stands for
-   *   that node and keeps its own slots;
+   *   that node and keeps its own slots; its seed already exports them, so
+   *   Prometheus skips it (see coveredBySeed);
    * - a seed with active members reports the whole cluster;
    * - any other cluster connection reports the whole cluster only when no
    *   other registered connection is one of the nodes its discovery lists.
-   *   Nodes registered one by one each keep their own node's slots, which
-   *   together cover the cluster once.
+   *   Nodes registered one by one each keep their own node's slots. A replica
+   *   reports its primary's slots, so registering both counts that shard twice.
    */
   async usesClusterWideSlotStats(connectionId?: string): Promise<boolean> {
     const id = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
@@ -510,6 +511,19 @@ export class ClusterMetricsService {
         (node.hostname !== undefined && registeredElsewhere(node.hostname, parsed.port))
       );
     });
+  }
+
+  /**
+   * Whether a connection is an active member of a registered seed. That seed
+   * reports cluster-wide slot stats, which already include this node's slots.
+   */
+  coveredBySeed(connectionId: string): boolean {
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    return (
+      membership !== undefined &&
+      membership.retiredAt === undefined &&
+      this.connectionRegistry.getConfig(membership.seedId) !== null
+    );
   }
 
   /** Like getClusterSlotStats, plus the primaries that did not answer. */
@@ -582,43 +596,61 @@ export class ClusterMetricsService {
     const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
     for (const [i, result] of results.entries()) {
       const node = primaries[i];
+      // Each scrape and dashboard poll lands here, so log a failing node once
+      // until it answers again.
+      const errorKey = `slotstats-${connectionId ?? ''}-${node.id}`;
+      const warnOnce = (message: string) => {
+        if (this.loggedErrors.has(errorKey)) return;
+        this.addLoggedError(errorKey);
+        this.logger.warn(message);
+      };
       if (result.status === 'rejected') {
         failedNodes.push(node.address);
         failedSlotRanges.push(...node.slots);
-        this.logger.warn(`Failed to fetch slot stats from ${node.address}: ${result.reason}`);
+        warnOnce(`Failed to fetch slot stats from ${node.address}: ${result.reason}`);
         continue;
       }
       perNode.push(result.value.stats);
       if (result.value.failedRanges.length > 0) {
         failedNodes.push(node.address);
         failedSlotRanges.push(...result.value.failedRanges);
-        this.logger.warn(
+        warnOnce(
           `Failed to fetch slot stats for ${result.value.failedRanges.length} of ${node.slots.length} ` +
             `slot ranges from ${node.address}: ${result.value.reason}`,
         );
+      } else {
+        this.loggedErrors.delete(errorKey);
       }
     }
     if (primaries.length > 0 && perNode.length === 0) {
       // No primary answered on the address it announces, as behind an SSH
       // tunnel or NAT. The connection's own socket still reaches one node, so
       // report that node's slots and leave the other primaries as failed.
-      const first = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-      let stats: SlotStats;
-      try {
-        stats = await withTimeout(
-          this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
-          timeoutMs,
-          `The connection did not answer CLUSTER SLOT-STATS within ${timeoutMs}ms`,
-        );
-      } catch {
-        throw first?.reason instanceof Error ? first.reason : new Error(String(first?.reason));
-      }
+      // Its own error is the one to report: a NOPERM or "not supported" here
+      // says more than a primary's timeout on an address it cannot reach.
+      const stats = await withTimeout(
+        this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
+        timeoutMs,
+        `The connection did not answer CLUSTER SLOT-STATS within ${timeoutMs}ms`,
+      );
       const self = owners.find((node) => node.flags?.includes('myself'));
       return {
         stats,
         failedNodes: failedNodes.filter((address) => address !== self?.address),
         failedSlotRanges: self ? failedSlotRanges.filter((range) => !self.slots.includes(range)) : failedSlotRanges,
       };
+    }
+    // Valkey leaves cpu-usec out of every reply while cluster-slot-stats-enabled
+    // is off, so ranking on it would return arbitrary slots. ORDERBY cpu-usec
+    // on one node rejects the same way.
+    if (
+      orderBy === 'cpu-usec' &&
+      perNode.some((stats) => Object.keys(stats).length > 0) &&
+      !perNode.some((stats) => Object.values(stats).some((slot) => slot.cpu_usec !== undefined))
+    ) {
+      throw new Error(
+        'Unrecognized sort metric for ORDERBY: cpu-usec is only reported while cluster-slot-stats-enabled is yes.',
+      );
     }
     return {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
