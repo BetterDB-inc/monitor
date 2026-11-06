@@ -57,8 +57,33 @@ describe('ClusterTopologySource', () => {
     expect((await discoverWith(['10.0.0.1', 'fd00::1']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
   });
 
-  it('keeps myself when the seed resolves to no cluster node (a Service VIP or load balancer)', async () => {
-    expect((await discoverWith(['10.96.0.10']))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  it('keeps every answering node once a seed that matches no node lands on a second one (a Service VIP)', async () => {
+    const landedOnN2 = [
+      { ...nodes[0], flags: ['slave'] },
+      { ...nodes[1], flags: ['myself', 'master'] },
+    ];
+    const discovery = { discoverNodesIsolated: jest.fn().mockResolvedValueOnce(nodes).mockResolvedValue(landedOnN2) };
+    const source = new ClusterTopologySource(discovery as never);
+    source.resolveHost = jest.fn().mockResolvedValue(['10.96.0.10']);
+    const vip = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+
+    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
+    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+    // Landing on n1 again does not undo it.
+    discovery.discoverNodesIsolated.mockResolvedValue(nodes);
+    expect((await source.discover(vip as never, 10_000))?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
+  });
+
+  it('drops myself for a seed that matches no node while the same node keeps answering (NAT, a port mapping)', async () => {
+    expect((await discoverWith(['203.0.113.5']))?.nodes.map((n) => n.nodeId)).toEqual(['n2']);
+  });
+
+  it('keeps myself after a restart for a seed that matches no node when myself is already a member', async () => {
+    const source = new ClusterTopologySource({ discoverNodesIsolated: jest.fn().mockResolvedValue(nodes) } as never);
+    source.resolveHost = jest.fn().mockResolvedValue(['10.96.0.10']);
+    const vip = { ...seed, host: 'valkey.ns.svc.cluster.local', port: 6379 };
+    const result = await source.discover(vip as never, 10_000, new Set(['n1', 'n2']));
+    expect(result?.nodes.map((n) => n.nodeId)).toEqual(['n1', 'n2']);
   });
 
   it('leaves membership unchanged when the seed host does not resolve', async () => {

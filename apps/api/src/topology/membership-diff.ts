@@ -68,11 +68,6 @@ export interface DiscoveryOptions {
   seedIsAlias?: boolean;
 }
 
-function isLoopback(address: string): boolean {
-  const lower = address.toLowerCase();
-  return lower === 'localhost' || lower === '::1' || lower.startsWith('127.') || lower.startsWith('::ffff:127.');
-}
-
 /**
  * Whether the seed host is an alias rather than one node. It is one node when
  * the seed host or its resolved addresses match, on the seed port, exactly the
@@ -80,10 +75,9 @@ function isLoopback(address: string): boolean {
  * name for one node. When they match several nodes (a Kubernetes headless
  * Service, round-robin DNS), each discovery lands on an arbitrary node and
  * `myself` is not the seed.
- * When they match none, only a DNS name that resolves off loopback counts as
- * an alias (a ClusterIP Service or load balancer VIP). An IP literal or a
- * loopback seed that matches no node is one node reached through NAT, a port
- * mapping or a tunnel, so `myself` is still the seed.
+ * When they match none, the addresses cannot tell (a ClusterIP Service or load
+ * balancer VIP, or one node behind NAT, a port mapping or a tunnel), so this
+ * returns null and the caller decides from which nodes answered over time.
  * An announced hostname is not enough on its own: any node can announce a name
  * that a Service in front of several nodes also answers to.
  */
@@ -91,15 +85,13 @@ export function seedIsAlias(
   seed: { host: string; port: number },
   seedAddresses: string[],
   nodes: DiscoveredNode[],
-): boolean {
+): boolean | null {
   const seedHosts = new Set([seed.host, ...seedAddresses].map((address) => address.toLowerCase()));
   const matched = nodes.filter((node) => {
     const parsed = parseNodeAddress(node.address);
     return parsed !== null && parsed.port === seed.port && seedHosts.has(parsed.host.toLowerCase());
   });
-  if (matched.length === 0) {
-    return isIP(seed.host) === 0 && ![seed.host, ...seedAddresses].some(isLoopback);
-  }
+  if (matched.length === 0) return null;
   return !(matched.length === 1 && matched[0].flags.includes('myself'));
 }
 

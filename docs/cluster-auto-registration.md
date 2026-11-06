@@ -55,6 +55,11 @@ and a single node only when two syncs in a row agree, so one stale answer
 cannot register a single node twice, and a rollout that leaves one pod behind
 the name for a sync does not retire the node that answered.
 
+When no node announces the seed's address, as with a ClusterIP Service, a load
+balancer VIP, NAT or a port mapping, the address alone cannot tell. The seed
+is then treated as one node until a sync is answered by a second node; from
+then on it fronts several nodes and every node is registered.
+
 Slow log and command log entries collected through such a seed are stored
 against the node that served them, not the seed's hostname, so history stays
 complete and attributable when the seed moves between nodes.

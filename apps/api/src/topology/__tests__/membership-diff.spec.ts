@@ -88,29 +88,29 @@ describe('seedIsAlias', () => {
     ['resolves to the answering node only', ['10.0.0.1'], false],
     ['is dual-stack for the answering node', ['10.0.0.1', 'fd00::1'], false],
     ['resolves to several nodes', ['10.0.0.1', '10.0.0.2'], true],
-    ['resolves to no node', ['10.96.0.10'], true],
     ['resolves to another node only', ['10.0.0.2'], true],
   ])('a seed that %s', (_label, addresses, expected) => {
     expect(seedIsAlias(seed, addresses as string[], nodes)).toBe(expected);
   });
 
   it.each([
+    ['a Service VIP', { host: 'seed.example', port: 6379 }, ['10.96.0.10']],
     ['an IP literal reached through NAT', { host: '192.168.5.5', port: 6379 }, ['192.168.5.5']],
     ['an IP literal on a mapped port', { host: '10.0.0.1', port: 7001 }, ['10.0.0.1']],
     ['localhost on a forwarded port', { host: 'localhost', port: 7001 }, ['127.0.0.1', '::1']],
-    ['a name that resolves to loopback', { host: 'tunnel.local', port: 6379 }, ['127.0.0.1']],
-  ])('treats %s that matches no node as one node', (_label, single, addresses) => {
-    expect(seedIsAlias(single, addresses, nodes)).toBe(false);
+    ['a name on a mapped port', { host: 'node1.example.com', port: 16379 }, ['203.0.113.5']],
+  ])('leaves %s that matches no node undecided', (_label, unmatched, addresses) => {
+    expect(seedIsAlias(unmatched, addresses, nodes)).toBeNull();
   });
 
   it('ignores addresses on another port', () => {
-    expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBe(true);
+    expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBeNull();
   });
 
   it('does not take an announced hostname alone as the seed being one node', () => {
     // A Service VIP that matches no node address, and the answering node announces the seed name.
     const named = [{ ...node('a', '10.0.0.1:6379@16379', ['myself', 'master']), hostname: 'SEED.example' }];
-    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBe(true);
+    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBeNull();
   });
 
   it('matches a node whose address is the seed host itself', () => {

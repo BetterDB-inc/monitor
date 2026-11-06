@@ -45,7 +45,10 @@ export class ClusterTopologySource implements TopologySource {
    * cannot register a single node's seed as its own child, and a Service whose
    * DNS answer shrinks to one pod for a sync (a rollout) does not retire `myself`.
    */
-  private readonly aliasState = new Map<string, { address: string; alias: boolean; last: boolean }>();
+  private readonly aliasState = new Map<
+    string,
+    { address: string; alias: boolean; last: boolean; answered: ReadonlySet<string> }
+  >();
 
   constructor(private readonly discovery: ClusterDiscoveryService) {}
 
@@ -67,20 +70,34 @@ export class ClusterTopologySource implements TopologySource {
     // leave membership as it is for this sync rather than guess.
     if (seedAddresses.length === 0) return null;
     const address = addressKey(seed.host, seed.port);
-    const verdict = seedIsAlias(seed, seedAddresses, nodes);
     const known = this.aliasState.get(seed.id);
     const prior = known?.address === address ? known : undefined;
     // With nothing remembered (a new seed, or a restarted monitor), start from
     // what is registered: `myself` already a member means the seed was an alias.
     const myself = nodes.find((n) => n.flags.includes('myself'));
     const initial = myself !== undefined && registeredNodeIds?.has(myself.id) === true;
-    const alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;
-    this.aliasState.set(seed.id, { address, alias, last: verdict });
+    const answered = new Set(prior?.answered);
+    if (myself) answered.add(myself.id);
+    const matched = seedIsAlias(seed, seedAddresses, nodes);
+    let verdict: boolean;
+    let alias: boolean;
+    if (matched === null) {
+      // No node announces the seed's address. A VIP lands discovery on a
+      // different node from sync to sync; one node behind NAT or a port mapping
+      // always answers as itself. A second node answering is proof, not a
+      // stale reply, so it applies at once.
+      verdict = initial || answered.size > 1;
+      alias = verdict;
+    } else {
+      verdict = matched;
+      alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;
+    }
+    this.aliasState.set(seed.id, { address, alias, last: verdict, answered });
     const desired = desiredFromDiscovery(seed, nodes, { seedIsAlias: alias });
     // A first verdict that disagrees with the starting point is not trusted
     // yet. Where it decides whether `myself` is a child, leave membership as it
     // is for this sync rather than add that node or retire it.
-    if (!prior && verdict !== initial && desiredFromDiscovery(seed, nodes, { seedIsAlias: verdict }).length !== desired.length) {
+    if (!prior && verdict !== alias && desiredFromDiscovery(seed, nodes, { seedIsAlias: verdict }).length !== desired.length) {
       return null;
     }
     return { nodes: desired, unknownGroups: [] };
