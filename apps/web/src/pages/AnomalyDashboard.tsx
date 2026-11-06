@@ -95,6 +95,16 @@ interface MetricBaselineBuffer {
   isReady: boolean;
 }
 
+export function dateRangeFromParams(
+  start: string | null,
+  end: string | null,
+): DateRange | undefined {
+  if (!start || !end) return undefined;
+  const from = new Date(Number(start));
+  const to = new Date(Number(end));
+  return isNaN(from.getTime()) || isNaN(to.getTime()) ? undefined : { from, to };
+}
+
 export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
   return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
 }
@@ -142,24 +152,18 @@ export function AnomalyDashboard() {
     setCaptureModalOpen(true);
   }
 
-  // Time filter — initialise from URL ?start=&end= (epoch ms)
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
-    const s = searchParams.get('start');
-    const e = searchParams.get('end');
-    if (s && e) {
-      const from = new Date(Number(s));
-      const to = new Date(Number(e));
-      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
-    }
-    return undefined;
-  });
+  const startParam = searchParams.get('start');
+  const endParam = searchParams.get('end');
+  const dateRange = useMemo(
+    () => dateRangeFromParams(startParam, endParam),
+    [startParam, endParam],
+  );
 
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
   const rangeQuery = dateRangeQuery(startTime, endTime);
 
   const changeDateRange = (range: DateRange | undefined) => {
-    setDateRange(range);
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
