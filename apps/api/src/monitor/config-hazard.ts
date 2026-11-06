@@ -82,7 +82,7 @@ export interface ClusterCrcHazardInput {
    * filter CONFIG GET), so null here means "cluster mode unknown", not "off".
    */
   clusterEnabled: string | null;
-  /** Value of `CONFIG GET cluster-crc-enabled` (`yes`/`no`), or null when the build predates valkey#4201. */
+  /** Value of `CONFIG GET cluster-crc-enabled` (`yes`/`no`), or null on a build without valkey#4201 (unmerged as of Valkey 9). */
   clusterCrcEnabled: string | null;
 }
 
@@ -122,7 +122,7 @@ export function evaluateClusterCrcHazard(input: ClusterCrcHazardInput): ConfigHa
   if (input.clusterEnabled !== 'yes') {
     return null;
   }
-  // A null value means the parameter is unknown to this build (pre-#4201), so
+  // A null value means the parameter is unknown to this build (no #4201), so
   // there is nothing to advise. Only an explicit `no` is a hazard.
   if (input.clusterCrcEnabled !== 'no') {
     return null;
