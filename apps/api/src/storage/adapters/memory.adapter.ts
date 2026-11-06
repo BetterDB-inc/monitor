@@ -109,6 +109,8 @@ import {
   type ClientStatsGroup,
 } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
+import { MaintenanceWindowMemoryRepository } from './repositories/maintenance-window.memory.repository';
+import type { MaintenanceWindowRepository } from '../../common/interfaces/maintenance-window-repository.interface';
 import { SlowLogMemoryRepository } from './repositories/slowlog.memory.repository';
 import { InvitationMemoryRepository } from './repositories/invitation.memory.repository';
 import type { InvitationRepository } from '../../common/interfaces/invitation-repository.interface';
@@ -173,6 +175,7 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   private settings: AppSettings | null = null;
   private readonly MAX_DELIVERIES_PER_WEBHOOK = 1000;
   private readonly webhookRepo = new WebhookMemoryRepository(this.MAX_DELIVERIES_PER_WEBHOOK);
+  private readonly maintenanceWindowRepo = new MaintenanceWindowMemoryRepository();
   private readonly slowlogRepo = new SlowLogMemoryRepository();
   private readonly invitationRepo = new InvitationMemoryRepository();
   private readonly activityRepo = new ActivityMemoryRepository();
@@ -1179,6 +1182,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     connectionId?: string,
   ): Promise<WebhookDelivery[]> {
     return this.webhookRepo.getRetriableDeliveries(limit, connectionId);
+  }
+
+  async getDeliveriesForEventsSince(events: WebhookEventType[], since: number): Promise<WebhookDelivery[]> {
+    return this.webhookRepo.getDeliveriesForEventsSince(events, since);
   }
 
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -2768,6 +2775,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
       }
     }
     return pruned;
+  }
+
+  getMaintenanceWindowRepository(): MaintenanceWindowRepository {
+    return this.maintenanceWindowRepo;
   }
 
   getInvitationRepository(): InvitationRepository {

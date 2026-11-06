@@ -57,6 +57,9 @@ export function WebhookDeliveries({ webhook, onClose }: WebhookDeliveriesProps) 
       failed: 'destructive',
       retrying: 'warning',
       pending: 'secondary',
+      dead_letter: 'destructive',
+      // Not sent: a maintenance window covered the event (reason in the response column).
+      suppressed: 'secondary',
     };
 
     return <Badge variant={variants[status] || 'secondary'}>{status}</Badge>;

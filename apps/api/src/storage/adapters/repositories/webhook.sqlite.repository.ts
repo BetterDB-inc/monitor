@@ -327,6 +327,23 @@ export class WebhookSqliteRepository {
     return rows.map((row) => this.mappers.mapDeliveryRow(row));
   }
 
+  async getDeliveriesForEventsSince(
+    events: WebhookEventType[],
+    since: number,
+  ): Promise<WebhookDelivery[]> {
+    if (events.length === 0) return [];
+    const placeholders = events.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM webhook_deliveries
+         WHERE event_type IN (${placeholders}) AND created_at >= ?
+         ORDER BY created_at ASC
+         LIMIT 10000`,
+      )
+      .all(...events, since) as unknown[];
+    return rows.map((row) => this.mappers.mapDeliveryRow(row));
+  }
+
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     if (connectionId) {
       return chunkedSqliteDelete(this.db, 'webhook_deliveries', 'created_at < ? AND connection_id = ?', [

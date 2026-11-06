@@ -169,6 +169,18 @@ export class WebhookMemoryRepository {
       .map((d) => ({ ...d }));
   }
 
+  async getDeliveriesForEventsSince(
+    events: WebhookEventType[],
+    since: number,
+  ): Promise<WebhookDelivery[]> {
+    const wanted = new Set(events);
+    return Array.from(this.deliveries.values())
+      .filter((d) => wanted.has(d.eventType) && d.createdAt >= since)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, 10000)
+      .map((d) => ({ ...d }));
+  }
+
   async pruneOldDeliveries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
     const before = this.deliveries.size;
     Array.from(this.deliveries.entries())
