@@ -103,6 +103,14 @@ describe('seedIsAlias', () => {
     expect(seedIsAlias(unmatched, addresses, nodes)).toBeNull();
   });
 
+  it('ignores a failed or handshaking node left behind on the seed address', () => {
+    const single = { host: 'valkey-0.svc', port: 6379 };
+    for (const flags of [['master', 'fail'], ['master', 'noaddr'], ['handshake']]) {
+      const withGhost = [node('a', '10.0.0.1:6379@16379', ['myself', 'master']), node('old', '10.0.0.1:6379@16379', flags)];
+      expect(seedIsAlias(single, ['10.0.0.1'], withGhost)).toBe(false);
+    }
+  });
+
   it('ignores addresses on another port', () => {
     expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBeNull();
   });

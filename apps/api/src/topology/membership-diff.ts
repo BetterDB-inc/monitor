@@ -1,4 +1,3 @@
-import { isIP } from 'node:net';
 import type { TopologyKind, TopologyMembership, TopologyRole } from '@betterdb/shared';
 import type { DiscoveredNode } from '../cluster/cluster-discovery.service';
 
@@ -68,6 +67,8 @@ export interface DiscoveryOptions {
   seedIsAlias?: boolean;
 }
 
+const GHOST_FLAGS = ['fail', 'noaddr', 'handshake'];
+
 /**
  * Whether the seed host is an alias rather than one node. It is one node when
  * the seed host or its resolved addresses match, on the seed port, exactly the
@@ -88,6 +89,9 @@ export function seedIsAlias(
 ): boolean | null {
   const seedHosts = new Set([seed.host, ...seedAddresses].map((address) => address.toLowerCase()));
   const matched = nodes.filter((node) => {
+    // A failed node or a handshake left behind on a reused IP is not a node
+    // the seed reaches; only `myself` counts whatever its flags.
+    if (!node.flags.includes('myself') && node.flags.some((flag) => GHOST_FLAGS.includes(flag))) return false;
     const parsed = parseNodeAddress(node.address);
     return parsed !== null && parsed.port === seed.port && seedHosts.has(parsed.host.toLowerCase());
   });
