@@ -94,5 +94,16 @@ describe('prom-otel-bridge', () => {
       };
       expect(collectDataPoints(metric)).toEqual([{ value: 1, attributes: { a: 'ok', c: 2 } }]);
     });
+
+    it('leaves out empty label values, which Prometheus reads as absent', () => {
+      const metric: PromMetricJson = {
+        name: 'betterdb_anomaly_by_severity',
+        type: 'gauge',
+        values: [{ value: 2, labels: { connection: '', severity: 'critical' } }],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        { value: 2, attributes: { severity: 'critical' } },
+      ]);
+    });
   });
 });

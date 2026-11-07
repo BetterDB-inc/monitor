@@ -94,6 +94,12 @@ function toAttributes(
     return attributes;
   }
   for (const [key, value] of Object.entries(labels)) {
+    // Prometheus reads an empty label value as the label being absent (the
+    // connection-less anomaly series rely on this), so OTLP leaves it out too
+    // rather than sending it as a real attribute value.
+    if (value === '') {
+      continue;
+    }
     if (typeof value === 'string' || typeof value === 'number') {
       attributes[key] = value;
     }
