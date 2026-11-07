@@ -102,7 +102,15 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
 ]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
-const FANOUT_STATES = ['checked', 'unreachable', 'skipped'] as const;
+const FANOUT_STATES = [
+  ['checked', 'checked'],
+  ['unreachable', 'unreachable'],
+  ['auth_failed', 'authFailed'],
+  ['skipped', 'skipped'],
+  ['not_dialed', 'notDialed'],
+] as const;
+
+type FanoutCounts = Record<(typeof FANOUT_STATES)[number][1], number>;
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -1216,7 +1224,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     this.anomalyFanoutPrimaries = this.createGauge(
       'anomaly_fanout_primaries',
-      'Primaries the anomaly fan-out checked, could not reach, or skipped past its cap in the latest cycle',
+      'Primaries the anomaly fan-out checked, could not reach, was refused by, skipped past its cap, or does not dial, in the latest cycle',
       ['state'],
     );
     this.incidentActive = this.createGauge(
@@ -3846,27 +3854,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   /**
    * Latest per-node fan-out outcome of a connection. `null` removes the series:
    * the connection has no other primaries to reach (standalone, replica,
-   * external). A cluster or Sentinel connection that checked nothing keeps
-   * three zero series, so an uncovered topology is visible rather than absent.
+   * external), or its coverage went stale because it is no longer polled. A
+   * cluster or Sentinel connection keeps one series per state, so a topology
+   * it does not dial shows up under `not_dialed` rather than as absent.
    */
-  updateFanoutCoverage(
-    connectionId: string,
-    coverage: { checked: number; unreachable: number; skipped: number } | null,
-  ): void {
+  updateFanoutCoverage(connectionId: string, coverage: FanoutCounts | null): void {
     const connLabel = this.getConnectionLabel(connectionId);
     if (connLabel === null) {
       return;
     }
     if (coverage === null) {
-      for (const fanoutState of FANOUT_STATES) {
+      for (const [fanoutState] of FANOUT_STATES) {
         this.anomalyFanoutPrimaries.remove(connLabel, fanoutState);
       }
       return;
     }
     const state = this.getConnectionState(connectionId);
     state.signalConnLabel = connLabel;
-    for (const fanoutState of FANOUT_STATES) {
-      this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[fanoutState]);
+    for (const [fanoutState, key] of FANOUT_STATES) {
+      this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[key]);
     }
   }
 

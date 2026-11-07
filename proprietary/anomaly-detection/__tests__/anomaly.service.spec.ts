@@ -14419,63 +14419,122 @@ describe('AnomalyService', () => {
 
       describe('Sentinel targets', () => {
         const masters = [{ name: 'alpha', ip: '10.0.1.5', port: 6379, runid: 'r', flags: ['master'], fields: {} }];
+        const credentials = () =>
+          (service as any).connectionRegistry.sentinelDataNodeCredentials as jest.Mock;
+        const config = (value: object | null) => {
+          (service as any).connectionRegistry.getConfig = jest.fn().mockReturnValue(value);
+        };
 
         beforeEach(() => {
           (service as any).sentinelMastersSnapshot.set('conn-1', masters);
         });
 
         it('fans out when the connection has data-node credentials', () => {
-          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest
-            .fn()
-            .mockReturnValue({ username: 'app', password: 'secret' });
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
 
           expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
             scope: { targets: [{ addr: NODE, host: '10.0.1.5', port: 6379 }], members: new Set([NODE]) },
-            empty: null,
+            gap: null,
           });
         });
 
         it('does not send the Sentinel credentials to the primaries it reports', () => {
-          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue(null);
+          credentials().mockReturnValue(null);
 
           expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
             scope: { targets: [], members: new Set() },
-            empty: 'no_sentinel_credentials',
+            gap: { reason: 'no_sentinel_credentials', notDialed: 1 },
           });
         });
 
         it('reports the topology as unknown until SENTINEL MASTERS has been read', () => {
-          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest
-            .fn()
-            .mockReturnValue({ username: 'app', password: 'secret' });
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
           (service as any).sentinelMastersSnapshot.delete('conn-1');
 
           expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
             scope: null,
-            empty: 'topology_unknown',
+            gap: { reason: 'topology_unknown', notDialed: 0 },
           });
         });
 
-        it('names the tunnel, not the credentials, on an SSH-tunnelled Sentinel', () => {
-          (service as any).connectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue(null);
-          (service as any).connectionRegistry.getConfig = jest
-            .fn()
-            .mockReturnValue({ sshTunnel: { enabled: true } });
+        it('reports the topology as unreadable once SENTINEL MASTERS fails', async () => {
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
+          (dbClient as any).getSentinelMasters = jest.fn().mockRejectedValue(new Error('NOPERM'));
+
+          await (service as any).detectSentinelDrift(mockCtx, T0, { redis_mode: 'sentinel' });
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'topology_unreadable',
+            notDialed: 0,
+          });
+        });
+
+        it.each([
+          ['an SSH tunnel', { sshTunnel: { enabled: true } }, 'ssh_tunnel'],
+          ['the agent', { host: 'agent' }, 'agent_connection'],
+        ])('names %s, not the credentials, and does not log a fix', (_case, value, reason) => {
+          credentials().mockReturnValue(null);
+          config(value);
           const warn = jest.spyOn((service as any).logger, 'warn');
 
-          expect((service as any).sentinelDivergenceTargets(mockCtx).empty).toBe('ssh_tunnel');
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe(reason);
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('names a data-node password it cannot decrypt', () => {
+          credentials().mockReturnValue(null);
+          config({ nodePassword: 'ciphertext', nodePasswordEncrypted: true });
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe(
+            'sentinel_credentials_unreadable',
+          );
+          expect(String(warn.mock.calls[0][0])).toContain('ENCRYPTION_KEY');
+        });
+
+        it('names certificate auth, which the connection form stores no data-node settings for', () => {
+          credentials().mockReturnValue(null);
+          config({ authMode: 'certificate' });
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe('certificate_auth');
+          expect(String(warn.mock.calls[0][0])).toContain('nodeUsername ""');
+        });
+
+        it('reports no gap when every primary is its own connection', () => {
+          credentials().mockReturnValue(null);
+          (service as any).connectionRegistry.list = jest
+            .fn()
+            .mockReturnValue([{ id: 'conn-p', host: '10.0.1.5', port: 6379, isConnected: true }]);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'no_targets',
+            notDialed: 0,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('reports no gap when another Sentinel already checks every primary', () => {
+          credentials().mockReturnValue(null);
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [{ addr: NODE, host: '10.0.1.5', port: 6379 }], T0, 30_000);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'covered_elsewhere',
+            notDialed: 0,
+          });
           expect(warn).not.toHaveBeenCalled();
         });
 
         describe('without data-node credentials', () => {
           let warn: jest.SpyInstance;
-          const credentials = () =>
-            (service as any).connectionRegistry.sentinelDataNodeCredentials as jest.Mock;
           const notices = () =>
             warn.mock.calls.filter(([msg]) => String(msg).includes('no data-node credentials'));
 
           beforeEach(() => {
-            (service as any).connectionRegistry.sentinelDataNodeCredentials = jest.fn().mockReturnValue(null);
+            credentials().mockReturnValue(null);
             (service as any).clusterDiscovery = {
               retainAddressConnections: jest.fn().mockResolvedValue(undefined),
               releaseConnection: jest.fn().mockResolvedValue(undefined),
@@ -14485,27 +14544,34 @@ describe('AnomalyService', () => {
 
           async function pollSentinel(at: number): Promise<void> {
             jest.spyOn(Date, 'now').mockReturnValue(at);
-            const { scope, empty } = (service as any).sentinelDivergenceTargets(mockCtx);
-            await (service as any).detectTopologyAnomalies(mockCtx, scope, empty);
+            const { scope, gap } = (service as any).sentinelDivergenceTargets(mockCtx);
+            await (service as any).detectTopologyAnomalies(mockCtx, scope, gap, 'sentinel');
           }
 
-          it('surfaces the empty scope as not covered and says what to set', async () => {
+          it('surfaces the primaries as not dialed and says what to set', async () => {
             await pollSentinel(T0);
 
             expect(service.getFanoutCoverage('conn-1')).toEqual([
               {
                 connectionId: 'conn-1',
+                topology: 'sentinel',
                 checked: 0,
                 unreachable: 0,
+                authFailed: 0,
                 skipped: 0,
+                notDialed: 1,
                 reason: 'no_sentinel_credentials',
+                targetLimit: TOPOLOGY_TARGET_LIMIT,
+                timeoutMs: 2_000,
                 timestamp: T0,
               },
             ]);
             expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledWith('conn-1', {
               checked: 0,
               unreachable: 0,
+              authFailed: 0,
               skipped: 0,
+              notDialed: 1,
               reason: 'no_sentinel_credentials',
             });
             expect(notices()).toHaveLength(1);
@@ -14520,7 +14586,7 @@ describe('AnomalyService', () => {
             expect(notices()).toHaveLength(1);
 
             credentials().mockReturnValue({ username: 'app', password: 'secret' });
-            await pollSentinel(T0 + 30_000);
+            (service as any).sentinelDivergenceTargets(mockCtx);
             expect(notices()).toHaveLength(1);
 
             credentials().mockReturnValue(null);
@@ -14534,7 +14600,7 @@ describe('AnomalyService', () => {
             (service as any).onConnectionRemoved('conn-1');
 
             expect(service.getFanoutCoverage('conn-1')).toEqual([]);
-            expect((service as any).sentinelCredentialsNoticed.has('conn-1')).toBe(false);
+            expect((service as any).fanoutGapNoticed.has('conn-1')).toBe(false);
           });
         });
       });
@@ -14558,16 +14624,23 @@ describe('AnomalyService', () => {
 
           expect(latest()).toEqual({
             connectionId: 'conn-1',
+            topology: null,
             checked: 2,
             unreachable: 0,
+            authFailed: 0,
             skipped: 0,
+            notDialed: 0,
             reason: null,
+            targetLimit: TOPOLOGY_TARGET_LIMIT,
+            timeoutMs: 2_000,
             timestamp: T0,
           });
           expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', {
             checked: 2,
             unreachable: 0,
+            authFailed: 0,
             skipped: 0,
+            notDialed: 0,
             reason: null,
           });
         });
@@ -14580,12 +14653,27 @@ describe('AnomalyService', () => {
           });
 
           await poll([target, other], 1, T0);
-          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, skipped: 0, reason: null });
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0, skipped: 0, reason: null });
 
           // Inside the backoff window node-c is not retried but is still uncovered.
           await poll([target, other], 1, T0 + (service as any).getIntervalMs() / 2);
           expect(getNodeConnection.mock.calls.filter(([id]) => id === 'node-c')).toHaveLength(1);
-          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, skipped: 0 });
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0, skipped: 0 });
+        });
+
+        it('counts a primary that refuses the credentials apart from unreachable ones', async () => {
+          const client = nodeClient([2]);
+          const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('WRONGPASS invalid username-password pair');
+            return client;
+          });
+
+          await poll([target, other], 1, T0);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
+
+          await poll([target, other], 1, T0 + (service as any).getIntervalMs() / 2);
+          expect(getNodeConnection.mock.calls.filter(([id]) => id === 'node-c')).toHaveLength(1);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
         });
 
         it('counts a primary the topology flags as failed as unreachable', async () => {
@@ -14642,6 +14730,39 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 0, unreachable: 0, skipped: 0, reason: 'no_targets' });
         });
 
+        it('records the reads even when detection on them throws', async () => {
+          discovery();
+          jest.spyOn(service as any, 'detectRetryAmplification').mockRejectedValue(new Error('storage down'));
+
+          await expect(poll([target, other], 1, T0)).rejects.toThrow('storage down');
+
+          expect(latest()).toMatchObject({ checked: 2, unreachable: 0, timestamp: T0 });
+        });
+
+        it('records an empty cycle before the storage writes that can throw', async () => {
+          discovery();
+          jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          await expect(poll([], 1, T0)).rejects.toThrow('storage down');
+
+          expect(latest()).toMatchObject({ checked: 0, reason: 'no_targets', timestamp: T0 });
+        });
+
+        it('drops coverage, and its series, once no poll refreshes it', async () => {
+          discovery();
+          await poll([target], 1, T0);
+          prometheusService.updateFanoutCoverage.mockClear();
+
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 29_000);
+          expect(service.getFanoutCoverage('conn-1')).toHaveLength(1);
+          expect(prometheusService.updateFanoutCoverage).not.toHaveBeenCalled();
+
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 31_000);
+          await (service as any).updatePrometheusSummary();
+          expect(service.getFanoutCoverage('conn-1')).toEqual([]);
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledWith('conn-1', null);
+        });
+
         it('marks a standalone connection as not applicable and drops its gauge', async () => {
           discovery();
           jest.spyOn(Date, 'now').mockReturnValue(T0);
@@ -14652,24 +14773,48 @@ describe('AnomalyService', () => {
           expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', null);
         });
 
-        it('reports the topology as unknown when CLUSTER NODES cannot be read', async () => {
-          discovery();
-          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
-            server: { role: 'master' },
-            stats: { cluster_enabled: '1' },
+        describe('on a cluster connection', () => {
+          beforeEach(() => {
+            (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+              server: { role: 'master' },
+              stats: { cluster_enabled: '1' },
+            });
+            jest.spyOn(Date, 'now').mockReturnValue(T0);
           });
-          (dbClient as any).getClusterInfo = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
-          (dbClient as any).getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
-          jest.spyOn(Date, 'now').mockReturnValue(T0);
 
-          await (service as any).pollConnection(mockCtx);
+          it('reports the topology as unreadable when CLUSTER NODES fails', async () => {
+            discovery();
+            (dbClient as any).getClusterInfo = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
+            (dbClient as any).getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
 
-          expect(latest()).toMatchObject({ checked: 0, reason: 'topology_unknown' });
-          expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', {
-            checked: 0,
-            unreachable: 0,
-            skipped: 0,
-            reason: 'topology_unknown',
+            await (service as any).pollConnection(mockCtx);
+
+            expect(latest()).toMatchObject({ topology: 'cluster', checked: 0, reason: 'topology_unreadable' });
+            expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', {
+              checked: 0,
+              unreachable: 0,
+              authFailed: 0,
+              skipped: 0,
+              notDialed: 0,
+              reason: 'topology_unreadable',
+            });
+          });
+
+          it('does not dial the other primaries outside an SSH tunnel', async () => {
+            const getNodeConnection = discovery();
+            (service as any).connectionRegistry.getConfig = jest
+              .fn()
+              .mockReturnValue({ host: '127.0.0.1', port: 6379, sshTunnel: { enabled: true } });
+            (dbClient as any).getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+            (dbClient as any).getClusterNodes = jest.fn().mockResolvedValue([
+              { id: 'self', flags: ['myself', 'master'], master: '-', slots: [], address: '127.0.0.1:6379@16379' },
+              { id: 'node-b', flags: ['master'], master: '-', slots: [], address: `${NODE}@16379` },
+            ]);
+
+            await (service as any).pollConnection(mockCtx);
+
+            expect(latest()).toMatchObject({ topology: 'cluster', notDialed: 1, reason: 'ssh_tunnel' });
+            expect(getNodeConnection).not.toHaveBeenCalled();
           });
         });
 

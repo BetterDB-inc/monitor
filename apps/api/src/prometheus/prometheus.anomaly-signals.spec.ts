@@ -292,53 +292,60 @@ describe('PrometheusService anomaly signal gauges', () => {
   });
 
   describe('updateFanoutCoverage', () => {
+    const counts = (overrides: Partial<Record<string, number>> = {}) => ({
+      checked: 0,
+      unreachable: 0,
+      authFailed: 0,
+      skipped: 0,
+      notDialed: 0,
+      ...overrides,
+    });
+    const zeroSeries = (connection: string, checked = 0) => [
+      { connection, state: 'checked', value: checked },
+      { connection, state: 'unreachable', value: 0 },
+      { connection, state: 'auth_failed', value: 0 },
+      { connection, state: 'skipped', value: 0 },
+      { connection, state: 'not_dialed', value: 0 },
+    ];
+
     it('sets one series per fan-out state', async () => {
-      service.updateFanoutCoverage('conn-1', { checked: 3, unreachable: 2, skipped: 1 });
+      service.updateFanoutCoverage(
+        'conn-1',
+        counts({ checked: 3, unreachable: 2, authFailed: 4, skipped: 1, notDialed: 5 }),
+      );
 
-      const text = await service.getMetrics();
-
-      expect(text).toContain(
-        `betterdb_anomaly_fanout_primaries{connection="${LABEL}",state="checked"} 3`,
-      );
-      expect(text).toContain(
-        `betterdb_anomaly_fanout_primaries{connection="${LABEL}",state="unreachable"} 2`,
-      );
-      expect(text).toContain(
-        `betterdb_anomaly_fanout_primaries{connection="${LABEL}",state="skipped"} 1`,
-      );
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([
+        { connection: LABEL, state: 'checked', value: 3 },
+        { connection: LABEL, state: 'unreachable', value: 2 },
+        { connection: LABEL, state: 'auth_failed', value: 4 },
+        { connection: LABEL, state: 'skipped', value: 1 },
+        { connection: LABEL, state: 'not_dialed', value: 5 },
+      ]);
     });
 
     it('keeps zero series for a topology that checks nothing', async () => {
-      service.updateFanoutCoverage('conn-1', { checked: 0, unreachable: 0, skipped: 0 });
+      service.updateFanoutCoverage('conn-1', counts());
 
-      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([
-        { connection: LABEL, state: 'checked', value: 0 },
-        { connection: LABEL, state: 'unreachable', value: 0 },
-        { connection: LABEL, state: 'skipped', value: 0 },
-      ]);
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual(zeroSeries(LABEL));
     });
 
     it('removes the series of a connection the fan-out does not apply to', async () => {
-      service.updateFanoutCoverage('conn-1', { checked: 3, unreachable: 0, skipped: 0 });
-      service.updateFanoutCoverage('conn-2', { checked: 1, unreachable: 0, skipped: 0 });
+      service.updateFanoutCoverage('conn-1', counts({ checked: 3 }));
+      service.updateFanoutCoverage('conn-2', counts({ checked: 1 }));
 
       service.updateFanoutCoverage('conn-1', null);
 
-      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([
-        { connection: OTHER_LABEL, state: 'checked', value: 1 },
-        { connection: OTHER_LABEL, state: 'unreachable', value: 0 },
-        { connection: OTHER_LABEL, state: 'skipped', value: 0 },
-      ]);
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual(zeroSeries(OTHER_LABEL, 1));
     });
 
     it('ignores a connection that no longer exists', async () => {
-      service.updateFanoutCoverage('deleted', { checked: 3, unreachable: 0, skipped: 0 });
+      service.updateFanoutCoverage('deleted', counts({ checked: 3 }));
 
       expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([]);
     });
 
     it('drops the series when the connection is removed', async () => {
-      service.updateFanoutCoverage('conn-1', { checked: 3, unreachable: 0, skipped: 0 });
+      service.updateFanoutCoverage('conn-1', counts({ checked: 3 }));
 
       service.cleanupConnectionMetrics('conn-1');
       await jest.runAllTimersAsync();

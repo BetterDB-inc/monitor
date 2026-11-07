@@ -105,10 +105,15 @@ describe('AnomalyController incident limit', () => {
 describe('AnomalyController fan-out coverage', () => {
   const coverage = {
     connectionId: 'c1',
+    topology: 'cluster',
     checked: 2,
     unreachable: 1,
+    authFailed: 0,
     skipped: 0,
+    notDialed: 0,
     reason: null,
+    targetLimit: 64,
+    timeoutMs: 2_000,
     timestamp: 1_000,
   };
   const service = { getFanoutCoverage: jest.fn().mockReturnValue([coverage]) };
