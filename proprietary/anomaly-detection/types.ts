@@ -249,6 +249,41 @@ export interface AnomalySummary {
   resolvedEvents: number;
 }
 
+/**
+ * Why the per-node fan-out of a connection checked no other primary:
+ * - `not_applicable`: a standalone, replica or external connection, which has
+ *   no other primaries to reach.
+ * - `no_sentinel_credentials`: a Sentinel connection without data-node
+ *   credentials, so none of its primaries are dialed.
+ * - `ssh_tunnel`: a Sentinel connection behind an SSH tunnel; its data nodes
+ *   cannot be reached through the tunnel.
+ * - `topology_unknown`: `CLUSTER NODES` failed or `SENTINEL MASTERS` has not
+ *   been read yet.
+ * - `no_targets`: every other primary is monitored as its own connection.
+ * - `covered_elsewhere`: every other primary is checked by another connection.
+ */
+export type FanoutCoverageReason =
+  | 'not_applicable'
+  | 'no_sentinel_credentials'
+  | 'ssh_tunnel'
+  | 'topology_unknown'
+  | 'no_targets'
+  | 'covered_elsewhere';
+
+/** Per-connection outcome of the latest per-node fan-out cycle. */
+export interface FanoutCoverage {
+  connectionId: string;
+  /** Primaries read this cycle. */
+  checked: number;
+  /** Primaries flagged down by the topology, in backoff, or whose read failed. */
+  unreachable: number;
+  /** Primaries past the 64-primary cap, left to another connection. */
+  skipped: number;
+  /** Set when no primary was checked, unreachable or skipped. */
+  reason: FanoutCoverageReason | null;
+  timestamp: number;
+}
+
 export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
 
 export interface AnomalyEventSink {

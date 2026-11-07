@@ -350,6 +350,8 @@ import {
   AnomalyPattern,
   BufferStats,
   AnomalySummary,
+  FanoutCoverage,
+  FanoutCoverageReason,
   SpikeDetectorConfig,
   AnomalyEventSink,
   MetricSample,
@@ -679,6 +681,11 @@ export class AnomalyService
   private fanoutInFlight = new Set<string>();
   private openDivergenceReads = new Map<string, Promise<StoredAnomalyEvent[]>>();
   private topologyFanoutUnreachable = new Map<string, number>();
+  private fanoutCoverage = new Map<string, FanoutCoverage>();
+  // Connections already told that their Sentinel primaries are not checked for
+  // lack of data-node credentials; cleared once credentials appear so the
+  // notice fires again if they are removed later.
+  private sentinelCredentialsNoticed = new Set<string>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
   private topologyBackoff = new Map<string, { failures: number; until: number }>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
@@ -1176,6 +1183,8 @@ export class AnomalyService
     this.divergenceRetiredWindowEnd.delete(connectionId);
     this.openDivergenceReads.delete(connectionId);
     this.topologyFanoutUnreachable.delete(connectionId);
+    this.fanoutCoverage.delete(connectionId);
+    this.sentinelCredentialsNoticed.delete(connectionId);
     this.topologyTargetClaims.release(connectionId);
     for (const key of [...this.topologyBackoff.keys()]) {
       if (isTopologyStateKeyOf(key, connectionId)) this.topologyBackoff.delete(key);
@@ -1250,8 +1259,13 @@ export class AnomalyService
     let replicationSample: ReplicationStreamSample | null = null;
     let divergenceTargets: TopologyScope | null = null;
     let sentinelDivergence = false;
+    // Why the fan-out has nothing to check, once the poll has learnt the
+    // topology mode. Stays null when the poll fails before that point, so the
+    // last coverage is kept rather than overwritten with a guess.
+    let fanoutEmpty: FanoutCoverageReason | null = null;
     try {
       const live = ctx.connectionType !== 'external';
+      if (!live) fanoutEmpty = 'not_applicable';
       // Timed around the socket call only: this round-trip doubles as the
       // control-plane probe latency sample for detectControlPlaneSaturation and the
       // loop-stall RTT proxy for Sentinels.
@@ -1830,10 +1844,12 @@ export class AnomalyService
         }
         aclClusterNodes = nodes;
         if (nodes) divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
+        else fanoutEmpty = 'topology_unknown';
       } else if (live && sentinelMode) {
         sentinelDivergence = true;
       } else if (live && sentinelMode === false) {
         divergenceTargets = { targets: [], members: new Set() };
+        fanoutEmpty = 'not_applicable';
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -1952,15 +1968,18 @@ export class AnomalyService
           this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
         });
       }
-      const scope = sentinelDivergence
-        ? this.sentinelDivergenceTargets(ctx.connectionId)
-        : divergenceTargets;
+      const sentinel = sentinelDivergence ? this.sentinelDivergenceTargets(ctx) : null;
+      const scope = sentinel ? sentinel.scope : divergenceTargets;
+      if (sentinel) fanoutEmpty = sentinel.empty;
       if (scope) {
-        await this.detectTopologyAnomalies(ctx, scope).catch((err) => {
+        await this.detectTopologyAnomalies(ctx, scope, fanoutEmpty).catch((err) => {
           this.logger.error(`Failed to check ${ctx.connectionName}'s other nodes:`, err);
         });
       } else {
         this.clearFanoutNodeSignals(ctx.connectionId);
+        if (fanoutEmpty) {
+          this.recordFanoutCoverage(ctx, { checked: 0, unreachable: 0, skipped: 0, reason: fanoutEmpty });
+        }
       }
       this.openDivergenceReads.delete(ctx.connectionId);
       this.crossCheckDeadline.delete(ctx.connectionId);
@@ -8715,12 +8734,68 @@ export class AnomalyService
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
   private static readonly TOPOLOGY_BACKOFF_MAX_POLLS = 8;
 
-  private sentinelDivergenceTargets(connectionId: string): TopologyScope | null {
-    if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) === null) {
-      return { targets: [], members: new Set() };
+  private sentinelDivergenceTargets(
+    ctx: ConnectionContext,
+  ): { scope: TopologyScope | null; empty: FanoutCoverageReason | null } {
+    const empty = this.sentinelFanoutGap(ctx);
+    if (empty) return { scope: { targets: [], members: new Set() }, empty };
+    const masters = this.sentinelMastersSnapshot.get(ctx.connectionId);
+    return masters
+      ? { scope: sentinelTargets(masters, this.registeredAddresses()), empty: null }
+      : { scope: null, empty: 'topology_unknown' };
+  }
+
+  /**
+   * Why a Sentinel connection's primaries cannot be dialed, or null when they
+   * can. The Sentinel's own credentials are never sent to an address it
+   * reports, so without data-node credentials the fan-out skips every primary
+   * rather than trying without AUTH: that would fail on every authenticated
+   * node, poll after poll, and read as "unreachable" instead of "not
+   * configured". Logged once per connection, again if the credentials are
+   * removed later.
+   */
+  private sentinelFanoutGap(ctx: ConnectionContext): FanoutCoverageReason | null {
+    const { connectionId, connectionName } = ctx;
+    if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) !== null) {
+      this.sentinelCredentialsNoticed.delete(connectionId);
+      return null;
     }
-    const masters = this.sentinelMastersSnapshot.get(connectionId);
-    return masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
+    if (this.connectionRegistry.getConfig(connectionId)?.sshTunnel?.enabled) return 'ssh_tunnel';
+    if (!this.sentinelCredentialsNoticed.has(connectionId)) {
+      this.sentinelCredentialsNoticed.add(connectionId);
+      this.logger.warn(
+        `Node fan-out for ${connectionName}: the primaries this Sentinel monitors are not checked because the connection has no data-node credentials. Set nodeUsername/nodePassword ("Data node credentials" in the connection form), or "Connect to data nodes without a username" with an empty password when the data nodes need no AUTH.`,
+      );
+    }
+    return 'no_sentinel_credentials';
+  }
+
+  private recordFanoutCoverage(
+    ctx: ConnectionContext,
+    coverage: Omit<FanoutCoverage, 'connectionId' | 'timestamp'>,
+  ): void {
+    this.fanoutCoverage.set(ctx.connectionId, {
+      connectionId: ctx.connectionId,
+      timestamp: Date.now(),
+      ...coverage,
+    });
+    try {
+      this.prometheusService.updateFanoutCoverage(
+        ctx.connectionId,
+        coverage.reason === 'not_applicable' ? null : coverage,
+      );
+    } catch (err) {
+      this.logger.debug(
+        `Failed to update fan-out coverage gauges for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  getFanoutCoverage(connectionId?: string): FanoutCoverage[] {
+    const entries = connectionId
+      ? [this.fanoutCoverage.get(connectionId)].filter((c): c is FanoutCoverage => c !== undefined)
+      : [...this.fanoutCoverage.values()];
+    return entries.sort((a, b) => a.connectionId.localeCompare(b.connectionId));
   }
 
   private registeredAddresses(): RegisteredAddress {
@@ -8749,16 +8824,21 @@ export class AnomalyService
   private async detectTopologyAnomalies(
     ctx: ConnectionContext,
     scope: TopologyScope,
+    empty: FanoutCoverageReason | null = null,
   ): Promise<void> {
     if (!this.clusterDiscovery) return;
     try {
-      await this.checkTopologyNodes(ctx, scope);
+      await this.checkTopologyNodes(ctx, scope, empty);
     } finally {
       this.openDivergenceReads.delete(ctx.connectionId);
     }
   }
 
-  private async checkTopologyNodes(ctx: ConnectionContext, scope: TopologyScope): Promise<void> {
+  private async checkTopologyNodes(
+    ctx: ConnectionContext,
+    scope: TopologyScope,
+    empty: FanoutCoverageReason | null,
+  ): Promise<void> {
     const now = Date.now();
     const staleMs = Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS);
     const claimed = this.topologyTargetClaims.claim(ctx.connectionId, scope.targets, now, staleMs);
@@ -8771,6 +8851,21 @@ export class AnomalyService
           (claimedAddrs.has(addr) || !reachable.has(addr)),
       ),
     );
+    // Primaries past the target cap that no other connection holds either:
+    // nothing checks them until a connection has room.
+    const skipped = scope.targets.filter(
+      (t) =>
+        !claimedAddrs.has(t.addr) &&
+        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
+    ).length;
+    const down = [...kept].filter((addr) => !reachable.has(addr)).length;
+    const coverage = (checked: number, unreachable: number) => {
+      const reason =
+        checked + unreachable + skipped > 0
+          ? null
+          : (empty ?? (scope.members.size > 0 ? 'covered_elsewhere' : 'no_targets'));
+      this.recordFanoutCoverage(ctx, { checked, unreachable, skipped, reason });
+    };
     const active = new Set([...kept].map((addr) => topologyStateKey(ctx.connectionId, addr)));
     for (const key of this.topologyBackoff.keys()) {
       if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
@@ -8833,6 +8928,7 @@ export class AnomalyService
         );
         this.topologyFanoutUnreachable.delete(ctx.connectionId);
       }
+      coverage(0, backedOff + down);
       return;
     }
 
@@ -8910,6 +9006,7 @@ export class AnomalyService
       }
       this.topologyFanoutUnreachable.set(ctx.connectionId, unreachable);
     }
+    coverage(claimed.length - unreachable, unreachable + down);
   }
 
   private async readTargetReplicationInfo(

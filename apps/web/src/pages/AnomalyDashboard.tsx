@@ -17,6 +17,7 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
+import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
 import {
@@ -29,7 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
 import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
-import type { IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
+import type { FanoutCoverage, IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
   AlertCircle,
@@ -220,6 +221,15 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Which of the selected connection's other primaries the per-node fan-out
+  // reached. Not narrowed by the date picker: a Sentinel without data-node
+  // credentials, or a primary that cannot be reached, is a gap right now.
+  const { data: fanoutCoverage } = usePolling<FanoutCoverage[]>({
+    fetcher: () => (currentConnection?.id ? metricsApi.getAnomalyCoverage() : Promise.resolve([])),
+    interval: 10000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
@@ -313,6 +323,9 @@ export function AnomalyDashboard() {
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
+      <FanoutCoverageNotice
+        coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
+      />
 
       {/* Header */}
       <div className="flex justify-between items-center">
