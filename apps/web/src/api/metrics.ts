@@ -47,6 +47,7 @@ import type {
   CorrelatedAnomalyGroup,
   AnomalySummary,
   AnomalyBufferStats,
+  FanoutCoverage,
   ReplicaDivergenceHistory,
   IncidentTimeline,
 } from '../types/anomaly';
@@ -444,6 +445,9 @@ export const metricsApi = {
   },
 
   getAnomalyBuffers: () => fetchApi<AnomalyBufferStats[]>('/anomaly/buffers'),
+
+  // Scoped to the current connection by the connection header.
+  getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();

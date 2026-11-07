@@ -57,6 +57,24 @@ export interface AnomalyBufferStats {
   isReady: boolean;
 }
 
+export type FanoutCoverageReason =
+  | 'not_applicable'
+  | 'no_sentinel_credentials'
+  | 'ssh_tunnel'
+  | 'topology_unknown'
+  | 'no_targets'
+  | 'covered_elsewhere';
+
+/** Outcome of the latest per-node fan-out of a cluster or Sentinel connection. */
+export interface FanoutCoverage {
+  connectionId: string;
+  checked: number;
+  unreachable: number;
+  skipped: number;
+  reason: FanoutCoverageReason | null;
+  timestamp: number;
+}
+
 export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
 
 export interface ReplicationDivergenceWindow {

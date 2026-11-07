@@ -101,3 +101,29 @@ describe('AnomalyController incident limit', () => {
     expect(service.getIncidentTimelines.mock.calls.map((c) => c[3])).toEqual([10, 50]);
   });
 });
+
+describe('AnomalyController fan-out coverage', () => {
+  const coverage = {
+    connectionId: 'c1',
+    checked: 2,
+    unreachable: 1,
+    skipped: 0,
+    reason: null,
+    timestamp: 1_000,
+  };
+  const service = { getFanoutCoverage: jest.fn().mockReturnValue([coverage]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the coverage of the connection in the header', () => {
+    expect(controller.getCoverage('c1')).toEqual([coverage]);
+    expect(service.getFanoutCoverage).toHaveBeenCalledWith('c1');
+  });
+
+  it('returns every connection without the header', () => {
+    controller.getCoverage(undefined);
+
+    expect(service.getFanoutCoverage).toHaveBeenCalledWith(undefined);
+  });
+});

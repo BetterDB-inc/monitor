@@ -170,6 +170,7 @@ A family marked **removed** tracks only its current label values: a value that d
 | `betterdb_replication_gap_bytes`, `_seconds_behind`, `_divergence_level`                     | 3 × N × R    | N is the number of primaries checked for the connection (1 for a standalone connection, every primary for a cluster or Sentinel connection, up to 64) and R the replicas each one reports. All three are absent until a divergence window has closed for that replica; while a replica has stopped acknowledging, `_gap_bytes` follows its live gap and `_seconds_behind` is absent. A fan-out primary that cannot be read, or every fan-out primary when the topology cannot be read, loses its series until the next good read. | removed      |
 | `betterdb_replication_write_rate_bytes_per_second`, `_backlog_coverage_seconds`              | 2 × N        | One per checked primary. Absent while the write rate (or the backlog size) is unknown, and on a node that reports a replica role.                                             | removed      |
 | `betterdb_connections_received_per_second`, `betterdb_connection_churn_per_op`, `betterdb_retry_amplification_state` | 3 × N | One per checked primary. A node that turns into a replica, or a fan-out node that cannot be read, loses these series.                                          | removed      |
+| `betterdb_anomaly_fanout_primaries`                                                          | 3            | One per `state` (`checked`, `unreachable`, `skipped`) on a cluster or Sentinel connection; absent on a standalone connection.                                                                                   | removed      |
 | `betterdb_incident_active`                                                                   | ≤ 3 × (P + 1) | P sequence patterns plus `none`, × 3 open statuses. Kept while the connection is stale.                                                                                                                         | removed      |
 | `betterdb_metric_forecast_time_to_limit_seconds`                                             | ≤ 4          | The four forecast metric kinds.                                                                                                                                               | removed      |
 | `betterdb_key_pattern_memory_bytes`, `_avg_memory_bytes`, `_max_memory_bytes`, `betterdb_key_pattern_keys` | 4 × P        | P is `METRICS_KEY_PATTERNS_TOP_N` (default 100, `0` disables): the top `(pattern, db)` series by total memory from the latest key analytics run (a pattern in several logical databases is several series, each carrying a `db` label). Pro connections only.                       | removed      |
@@ -231,7 +232,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | ACL reason/user     | 5                  | 5               |
 | **Per connection**  | **270**            | **674**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 3 `betterdb_anomaly_fanout_primaries` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -568,6 +569,16 @@ Inputs and live state of the retry amplification detector, one series per primar
 
 The two rate gauges are absent until two polls have produced a connection rate. `betterdb_retry_amplification_state` is reported on every poll of a primary; a node that becomes a replica loses all three series.
 
+#### Fan-out Coverage Metrics
+
+How much of a cluster or Sentinel topology the per-node fan-out behind the replication, retry and reshard detectors reached on its latest cycle.
+
+| Metric                              | Type  | Labels  | Description                                                                                  | Example |
+| ----------------------------------- | ----- | ------- | -------------------------------------------------------------------------------------------- | ------- |
+| `betterdb_anomaly_fanout_primaries` | gauge | `state` | Other primaries of the connection by outcome: `checked` (read this cycle), `unreachable` (flagged down, in retry backoff, or failed to answer), `skipped` (past the 64-primary cap and checked by no connection) | `3` |
+
+All three series are set on every poll of a cluster or Sentinel connection, including a Sentinel connection without data-node credentials, which reports `0` for each state (see [anomaly detection](./anomaly-detection.md#replication_divergence) for what to set). Primaries monitored as their own connection, and primaries another connection checks, are counted under neither. A standalone connection has no series.
+
 #### Incident Metrics
 
 | Metric                     | Type  | Labels              | Description                                                                 | Example |
@@ -774,6 +785,13 @@ avg_over_time(betterdb_connections_received_per_second[5m])
 
 # Open incident-connection pairs by pattern (an incident spanning two connections counts twice)
 sum by (pattern) (betterdb_incident_active)
+
+# Cluster or Sentinel connections whose fan-out checks no primary at all
+sum by (connection) (betterdb_anomaly_fanout_primaries) == 0
+
+# Share of a connection's primaries the fan-out could not reach
+betterdb_anomaly_fanout_primaries{state="unreachable"}
+  / ignoring(state) sum by (connection) (betterdb_anomaly_fanout_primaries)
 ```
 
 ### CPU Utilization

@@ -398,10 +398,12 @@ Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and clos
 Replica offsets come from the primary's own `INFO replication`, so detection runs on every connection that reports a primary role, and also on primaries reached through a cluster or Sentinel connection:
 
 - A cluster connection reads `INFO` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. These connections log in with the cluster connection's own username and password. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed.
-- A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. SSH-tunnelled connections are skipped. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
+- A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. Set them under **Data node credentials** when adding the connection (`nodeUsername` and `nodePassword` on `POST /api/connections`). Data nodes that need no `AUTH` still need an explicit setting: tick **Connect to data nodes without a username** and leave the password empty. Without either, none of the Sentinel's primaries are checked; this is logged once per connection and shown as *not covered* (see below). The monitor does not try without credentials: on an authenticated node that would fail on every poll and read as unreachable rather than unconfigured. SSH-tunnelled connections are skipped. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
 - Primaries that are already monitored as their own connected connection are skipped. Nodes flagged as failed or down are not read, but their open alerts stay open until they leave the topology. Up to 64 primaries are checked per connection, each with a 2 second timeout. Primaries past that limit are left to another connection that reaches them, and alerts of primaries no connection checks are closed. A primary that can't be reached is retried after 1 poll, then after 2, 4 and up to 8 polls, until a read succeeds. Unreachable primaries are logged once, when the count changes. When several connections reach the same primary, such as two registered nodes of one cluster or two Sentinels, only the first checks it. Another connection takes over when the first can no longer read it, or stops polling for 30 seconds.
 
 Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
+
+**Coverage**: each poll records how many primaries the connection checked, could not reach (flagged down, in retry backoff, or failed to answer) and skipped past the 64-primary cap, and why when all three are zero: `no_sentinel_credentials`, `ssh_tunnel`, `topology_unknown` (`CLUSTER NODES` failed or `SENTINEL MASTERS` not read yet), `no_targets` (every other primary is its own connection), `covered_elsewhere` (another connection checks them) or `not_applicable` (standalone). The anomaly dashboard shows a notice above the overview when the selected connection's primaries are not, or only partly, covered. The counts are returned by [`GET /api/anomaly/coverage`](#get-fan-out-coverage) and exported as `betterdb_anomaly_fanout_primaries{state}` (see [Prometheus metrics](./prometheus-metrics.md#fan-out-coverage-metrics)).
 
 **Replica cross-check**: Before an alert is raised or escalated, the monitor reads `INFO replication` from the replica itself and then from the primary, and compares the replica's `slave_repl_offset` with the primary's `master_repl_offset`. The replica is read through its own connection when it is monitored as one and connected, by node through cluster discovery on a cluster connection, or by address with the data-node credentials on a Sentinel connection that has them. A primary registered from a Sentinel connection uses its Sentinel connection's replica list and credentials. On Sentinel, only replicas listed in `SENTINEL REPLICAS` are dialed, so the credentials never go to an address that only the primary reports. Other replicas are not read.
 
@@ -894,6 +896,29 @@ GET /api/anomaly/buffers
     }
   ]
 }
+```
+
+### Get Fan-out Coverage
+
+```http
+GET /api/anomaly/coverage
+X-Connection-ID: <connection-id>
+```
+
+One entry per polled connection (all connections without the header), with the outcome of its latest per-node fan-out. `reason` is set only when nothing was checked, unreachable or skipped; the values are listed under [REPLICATION_DIVERGENCE](#replication_divergence).
+
+**Response**:
+```json
+[
+  {
+    "connectionId": "550e8400-e29b-41d4-a716-446655440000",
+    "checked": 3,
+    "unreachable": 2,
+    "skipped": 0,
+    "reason": null,
+    "timestamp": 1704067200000
+  }
+]
 ```
 
 ### Resolve Anomaly or Group
