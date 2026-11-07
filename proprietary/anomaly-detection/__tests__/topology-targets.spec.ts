@@ -127,6 +127,20 @@ describe('topology targets', () => {
       expect(claims.claim('a', [target], 2_000, 30_000)).toEqual([target]);
     });
 
+    it('lets a connection that reaches a primary take it over from one holding it as down', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+      expect(claims.heldByOther('b', target.addr, 1_000, 30_000)).toBe(true);
+
+      expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([target]);
+
+      expect(claims.heldByOther('a', target.addr, 2_000, 30_000)).toBe(true);
+      // A down claim never takes a primary back from the connection reading it.
+      claims.claim('a', [], 2_000, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+      expect(claims.heldByOther('a', target.addr, 3_000, 30_000)).toBe(true);
+      expect(claims.heldByOther('b', target.addr, 3_000, 30_000)).toBe(false);
+    });
+
     it('hands a primary over once its owner gives it up', () => {
       const claims = new TopologyTargetClaims();
       claims.claim('a', [target], 0, 30_000);

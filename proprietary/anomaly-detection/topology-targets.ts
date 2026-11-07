@@ -87,12 +87,15 @@ function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): Top
 }
 
 export class TopologyTargetClaims {
-  private owners = new Map<string, { connectionId: string; at: number }>();
+  private owners = new Map<string, { connectionId: string; at: number; down: boolean }>();
 
   /**
    * Claims up to `limit` free targets, and every free `down` address: a
    * primary the topology flags as down is not read, but whoever holds it is
-   * the one connection that counts it unreachable. Returns the claimed targets.
+   * the one connection that counts it unreachable. A primary held only as
+   * down is free to a connection whose topology still reaches it (`fail?` and
+   * `s_down` are one seed's view), so that connection reads it instead.
+   * Returns the claimed targets.
    */
   claim(
     connectionId: string,
@@ -102,20 +105,30 @@ export class TopologyTargetClaims {
     limit = TOPOLOGY_TARGET_LIMIT,
     down: Iterable<string> = [],
   ): TopologyTarget[] {
-    const free = targets.filter((target) => !this.heldByOther(connectionId, target.addr, now, staleMs));
+    const free = targets.filter((target) => {
+      const owner = this.otherOwner(connectionId, target.addr, now, staleMs);
+      return !owner || owner.down;
+    });
     const claimed = free.slice(0, limit);
     const freeDown = [...down].filter((addr) => !this.heldByOther(connectionId, addr, now, staleMs));
-    const wanted = new Set([...claimed.map((t) => t.addr), ...freeDown]);
+    const wanted = new Map<string, boolean>([
+      ...claimed.map((t): [string, boolean] => [t.addr, false]),
+      ...freeDown.map((addr): [string, boolean] => [addr, true]),
+    ]);
     for (const [addr, owner] of this.owners) {
       if (owner.connectionId === connectionId && !wanted.has(addr)) this.owners.delete(addr);
     }
-    for (const addr of wanted) this.owners.set(addr, { connectionId, at: now });
+    for (const [addr, isDown] of wanted) this.owners.set(addr, { connectionId, at: now, down: isDown });
     return claimed;
   }
 
   heldByOther(connectionId: string, addr: string, now: number, staleMs: number): boolean {
+    return this.otherOwner(connectionId, addr, now, staleMs) !== undefined;
+  }
+
+  private otherOwner(connectionId: string, addr: string, now: number, staleMs: number) {
     const owner = this.owners.get(addr);
-    return !!owner && owner.connectionId !== connectionId && now - owner.at <= staleMs;
+    return owner && owner.connectionId !== connectionId && now - owner.at <= staleMs ? owner : undefined;
   }
 
   releaseTarget(connectionId: string, addr: string): void {

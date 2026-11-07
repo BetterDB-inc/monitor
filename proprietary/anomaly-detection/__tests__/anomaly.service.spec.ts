@@ -14826,6 +14826,32 @@ describe('AnomalyService', () => {
           });
         });
 
+        it('reads a down primary from the connection whose topology still reaches it', async () => {
+          discovery();
+          const members = new Set([NODE, other.addr]);
+
+          // conn-1's seed flags node-c as failed and holds it as down.
+          await poll([target], 1, T0, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+
+          // conn-2's seed still reaches node-c: it takes it over and reads it.
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [target, other], members },
+          );
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({
+            checked: 1,
+            unreachable: 0,
+            skipped: 0,
+            reason: null,
+          });
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-c', 'conn-2');
+
+          // conn-1 no longer counts it: the one connection counting node-c is the one reading it.
+          await poll([target], 1, T0 + 10_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, reason: null });
+        });
+
         it('counts the primaries past the target cap as skipped', async () => {
           discovery();
           const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 3 }, (_, i) => ({
