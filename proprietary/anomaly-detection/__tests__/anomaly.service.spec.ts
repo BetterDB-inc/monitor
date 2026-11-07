@@ -15066,6 +15066,22 @@ describe('AnomalyService', () => {
         expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
       });
 
+      it('keeps the alert of a failed primary while another connection counts it', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const t = await poll([target], 18, T0);
+        // The failed read released the claim; the other connection polls first.
+        (service as any).topologyTargetClaims.releaseTarget('conn-1', NODE);
+        (service as any).topologyTargetClaims.claim('conn-2', [], t, 30_000, TOPOLOGY_TARGET_LIMIT, [NODE]);
+
+        await poll([], 1, t, new Set([NODE]));
+
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event.resolved).toBe(false);
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+        expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({ unreachable: 0, reason: 'covered_elsewhere' });
+      });
+
       it('closes a stored alert of a failed primary once it leaves the topology', async () => {
         storage.getAnomalyEvents.mockResolvedValue([
           {

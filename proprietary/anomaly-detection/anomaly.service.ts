@@ -9011,12 +9011,11 @@ export class AnomalyService
       [...scope.members].filter((addr) => !reachable.has(addr)),
     );
     const claimedAddrs = new Set(claimed.map((t) => t.addr));
+    // A down primary stays with every connection of its topology, so its open
+    // alerts stay open until it leaves the topology; only the connection
+    // holding it counts it unreachable.
     const kept = new Set(
-      [...scope.members].filter(
-        (addr) =>
-          !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs) &&
-          (claimedAddrs.has(addr) || !reachable.has(addr)),
-      ),
+      [...scope.members].filter((addr) => claimedAddrs.has(addr) || !reachable.has(addr)),
     );
     // Primaries past the target cap that no other connection holds either:
     // nothing checks them until a connection has room.
@@ -9025,7 +9024,10 @@ export class AnomalyService
         !claimedAddrs.has(t.addr) &&
         !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
     ).length;
-    const down = [...kept].filter((addr) => !reachable.has(addr)).length;
+    const down = [...kept].filter(
+      (addr) =>
+        !reachable.has(addr) && !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
+    ).length;
     const coverage = (checked: number, unreachable: number, authFailed: number) => {
       const notDialed = gap?.notDialed ?? 0;
       const reason =
