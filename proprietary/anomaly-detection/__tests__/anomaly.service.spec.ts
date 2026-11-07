@@ -109,7 +109,7 @@ describe('AnomalyService', () => {
     prometheusService = {
       incrementAnomalyEvent: jest.fn(),
       incrementCorrelatedGroup: jest.fn(),
-      updateAnomalySummary: jest.fn(),
+      updateAnomalySummaries: jest.fn(),
       updateAnomalyBufferStats: jest.fn(),
       updateReplBufferPressure: jest.fn(),
       updateReplicationSignals: jest.fn(),
@@ -179,6 +179,7 @@ describe('AnomalyService', () => {
             list: jest.fn().mockReturnValue([]),
             get: jest.fn(),
             getConfig: jest.fn().mockReturnValue(null),
+            getDefaultId: jest.fn().mockReturnValue(null),
             listMembers: jest.fn().mockReturnValue([]),
             sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
             findIdByHostPort: jest.fn().mockReturnValue(null),
@@ -10393,6 +10394,14 @@ describe('AnomalyService', () => {
       }));
     }
 
+    function summaryFor(connectionId: string) {
+      return lastSummaries().get(connectionId);
+    }
+
+    function polled(...connectionIds: string[]) {
+      (service as any).polledConnections = new Set(connectionIds);
+    }
+
     async function correlate(newGroups: ReturnType<typeof groups>) {
       (service as any).recentAnomalies = [{ resolved: false }];
       jest.spyOn((service as any).correlator, 'correlate').mockReturnValueOnce(newGroups);
@@ -10409,12 +10418,11 @@ describe('AnomalyService', () => {
 
       await (service as any).updatePrometheusSummary();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledWith(
+      expect(summaryFor('')).toEqual(
         expect.objectContaining({
           byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 140 },
           groupsBySeverity: { info: 0, warning: 110, critical: 30 },
         }),
-        '',
       );
     });
 
@@ -10433,14 +10441,13 @@ describe('AnomalyService', () => {
       } as AnomalyEvent;
     }
 
-    function summaryFor(connectionId: string) {
-      const call = prometheusService.updateAnomalySummary.mock.calls.find(
-        ([, id]: [unknown, string]) => id === connectionId,
-      );
-      return call?.[0];
+    function lastSummaries(): Map<string, unknown> {
+      const { calls } = prometheusService.updateAnomalySummaries.mock;
+      return calls[calls.length - 1][0];
     }
 
     it('publishes one summary per connection', async () => {
+      polled('conn-1', 'conn-2');
       const now = Date.now();
       await correlate([
         ...groups(1, AnomalySeverity.CRITICAL, now, [anomaly('conn-1', AnomalySeverity.CRITICAL)]),
@@ -10456,11 +10463,10 @@ describe('AnomalyService', () => {
         anomaly('conn-2', AnomalySeverity.INFO),
         anomaly(undefined, AnomalySeverity.WARNING),
       ];
-      prometheusService.updateAnomalySummary.mockClear();
 
       await (service as any).updatePrometheusSummary();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(3);
+      expect([...lastSummaries().keys()].sort()).toEqual(['', 'conn-1', 'conn-2']);
       expect(summaryFor('conn-1')).toEqual({
         bySeverity: { info: 0, warning: 1, critical: 1 },
         byMetric: { [MetricType.MEMORY_USED]: 2 },
@@ -10492,15 +10498,13 @@ describe('AnomalyService', () => {
       groupsBySeverity: { info: 0, warning: 0, critical: 0 },
     };
 
-    it('publishes an empty summary for every registered connection without events', async () => {
-      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }, { id: 'conn-2' }]);
+    it('publishes an empty summary for every polled connection without events', async () => {
+      polled('conn-1', 'conn-2');
       (service as any).recentAnomalies = [anomaly('conn-1', AnomalySeverity.CRITICAL)];
 
       await (service as any).updatePrometheusSummary();
-      await (service as any).updatePrometheusSummary();
 
-      // Quiet connections are published every cycle; '' only while it has events.
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(4);
+      expect([...lastSummaries().keys()].sort()).toEqual(['conn-1', 'conn-2']);
       expect(summaryFor('conn-1')).toEqual({
         ...emptySummary,
         bySeverity: { info: 0, warning: 0, critical: 1 },
@@ -10508,41 +10512,61 @@ describe('AnomalyService', () => {
         unresolvedBySeverity: { info: 0, warning: 0, critical: 1 },
       });
       expect(summaryFor('conn-2')).toEqual(emptySummary);
-      expect(summaryFor('')).toBeUndefined();
     });
 
-    it('zeroes connection-less series once when their events age out', async () => {
+    it('leaves out connections it does not poll, even with recent events', async () => {
+      // conn-2 is disconnected, retired or deleted: its series are removed
+      // rather than published at zero or recreated after cleanup.
+      polled('conn-1');
+      const now = Date.now();
+      await correlate(groups(1, AnomalySeverity.CRITICAL, now, [anomaly('conn-2', AnomalySeverity.CRITICAL)]));
+      (service as any).recentAnomalies = [anomaly('conn-2', AnomalySeverity.CRITICAL)];
+
+      await (service as any).updatePrometheusSummary();
+
+      expect([...lastSummaries().keys()]).toEqual(['conn-1']);
+    });
+
+    it('stops publishing connection-less events once they age out', async () => {
       (service as any).recentAnomalies = [anomaly(undefined, AnomalySeverity.WARNING)];
       await (service as any).updatePrometheusSummary();
+      expect([...lastSummaries().keys()]).toEqual(['']);
 
       (service as any).recentAnomalies = [];
-      prometheusService.updateAnomalySummary.mockClear();
       await (service as any).updatePrometheusSummary();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(1);
-      expect(summaryFor('')).toEqual(emptySummary);
-
-      prometheusService.updateAnomalySummary.mockClear();
-      await (service as any).updatePrometheusSummary();
-
-      expect(prometheusService.updateAnomalySummary).not.toHaveBeenCalled();
+      expect([...lastSummaries().keys()]).toEqual([]);
     });
 
-    it('publishes a connection that left the registry once more, then forgets it', async () => {
-      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }, { id: 'conn-2' }]);
+    it('counts a group under every member connection in the counter too', async () => {
+      const now = Date.now();
+      await correlate(
+        groups(1, AnomalySeverity.WARNING, now, [
+          anomaly('conn-1', AnomalySeverity.WARNING),
+          anomaly('conn-2', AnomalySeverity.WARNING),
+          anomaly('conn-2', AnomalySeverity.WARNING),
+        ]),
+      );
+
+      expect(prometheusService.incrementCorrelatedGroup.mock.calls).toEqual([
+        [AnomalyPattern.TRAFFIC_BURST, AnomalySeverity.WARNING, 'conn-1'],
+        [AnomalyPattern.TRAFFIC_BURST, AnomalySeverity.WARNING, 'conn-2'],
+      ]);
+    });
+
+    it('publishes only the default connection buffer stats under its label', async () => {
+      (service as any).connectionRegistry.getDefaultId.mockReturnValue('conn-1');
+      const stats = jest.spyOn(service, 'getBufferStats').mockReturnValue([
+        { metricType: MetricType.MEMORY_USED, mean: 1, stdDev: 0, isReady: true, connectionId: 'conn-1' },
+      ] as any);
+
       await (service as any).updatePrometheusSummary();
 
-      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }]);
-      prometheusService.updateAnomalySummary.mockClear();
-      await (service as any).updatePrometheusSummary();
-
-      expect(summaryFor('conn-2')).toEqual(emptySummary);
-
-      prometheusService.updateAnomalySummary.mockClear();
-      await (service as any).updatePrometheusSummary();
-
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(1);
-      expect(summaryFor('conn-2')).toBeUndefined();
+      expect(stats).toHaveBeenCalledWith('conn-1');
+      expect(prometheusService.updateAnomalyBufferStats).toHaveBeenCalledWith(
+        [{ metricType: MetricType.MEMORY_USED, mean: 1, stdDev: 0, ready: true }],
+        'conn-1',
+      );
     });
 
     it('counts open incidents per connection, pattern and status', async () => {
@@ -10592,12 +10616,13 @@ describe('AnomalyService', () => {
     });
 
     it('still publishes the summary when incidents cannot be read', async () => {
+      polled('conn-1');
       (service as any).recentAnomalies = [anomaly('conn-1', AnomalySeverity.CRITICAL)];
       jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
 
       await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledWith(expect.anything(), 'conn-1');
+      expect(summaryFor('conn-1')).toEqual(expect.objectContaining({ bySeverity: { info: 0, warning: 0, critical: 1 } }));
       expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
     });
 

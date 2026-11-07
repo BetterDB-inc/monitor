@@ -103,14 +103,24 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 /**
- * `connection` label value for anomaly summary and incident series that
- * belong to no connection. Prometheus reads an empty label value as the label
- * being absent, so these series never collide with a connection's `host:port`
- * and never share its stale-label cleanup. The empty id doubles as the
+ * Connection id for anomaly events, correlated groups and incidents that
+ * belong to no connection. Their series are exported under an empty
+ * `connection` label, which Prometheus reads as the label being absent, so they
+ * never collide with a connection's `host:port`. The empty id doubles as the
  * per-connection state key for them.
  */
-const NO_CONNECTION_ID = '';
+export const NO_CONNECTION_ID = '';
 const NO_CONNECTION_LABEL = '';
+
+export interface AnomalySummaryCounts {
+  bySeverity: Record<string, number>;
+  byMetric: Record<string, number>;
+  byPattern: Record<string, number>;
+  groupsBySeverity: Record<string, number>;
+  unresolvedBySeverity: Record<string, number>;
+}
+
+const ANOMALY_SEVERITIES = ['info', 'warning', 'critical'] as const;
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -161,9 +171,6 @@ interface ConnectionMetricState {
   currentSlowlogPatternLabels: Set<string>;
   currentCommandlogRequestPatternLabels: Set<string>;
   currentCommandlogReplyPatternLabels: Set<string>;
-  // Anomaly detection labels (per-connection)
-  currentAnomalyMetricLabels: Set<string>;
-  currentCorrelatedPatternLabels: Set<string>;
   // Vector index labels (per-connection)
   currentVectorIndexLabels: Set<string>;
   // Replication output-buffer pressure labels (per-connection)
@@ -208,6 +215,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+  // Metric-type and pattern labels last published per anomaly summary label.
+  // Keyed by label rather than connection id, so connections that share a
+  // host:port share one summary instead of overwriting each other.
+  private readonly anomalySummaryLabels = new Map<
+    string,
+    { metrics: Set<string>; patterns: Set<string> }
+  >();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
@@ -676,9 +690,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentSlowlogPatternLabels: new Set(),
         currentCommandlogRequestPatternLabels: new Set(),
         currentCommandlogReplyPatternLabels: new Set(),
-        // Anomaly detection labels
-        currentAnomalyMetricLabels: new Set(),
-        currentCorrelatedPatternLabels: new Set(),
         // Vector index labels
         currentVectorIndexLabels: new Set(),
         // Replication output-buffer pressure labels
@@ -4017,7 +4028,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     anomalyType: string,
     connectionId?: string,
   ): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const connLabel = this.getConnectionLabel(connectionId ?? NO_CONNECTION_ID);
     if (connLabel === null) {
       return;
     }
@@ -4030,33 +4041,42 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   incrementCorrelatedGroup(pattern: string, severity: string, connectionId?: string): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const connLabel = this.getConnectionLabel(connectionId ?? NO_CONNECTION_ID);
     if (connLabel === null) {
       return;
     }
     this.correlatedGroupsTotal.inc({ connection: connLabel, pattern, severity });
   }
 
-  updateAnomalySummary(
-    summary: {
-      bySeverity: Record<string, number>;
-      byMetric: Record<string, number>;
-      byPattern: Record<string, number>;
-      groupsBySeverity: Record<string, number>;
-      unresolvedBySeverity: Record<string, number>;
-    },
-    connectionId = NO_CONNECTION_ID,
-  ): void {
-    const connLabel = this.getConnectionLabel(connectionId);
-    if (connLabel === null) {
-      return;
+  /**
+   * Publishes the anomaly summary gauges for every connection in
+   * `byConnection` and removes the series of every label that was published
+   * last time but is missing now (a connection that stopped being polled, was
+   * retired or deleted, or connection-less events that aged out). Connections
+   * that resolve to the same host:port are summed into one summary.
+   */
+  updateAnomalySummaries(byConnection: ReadonlyMap<string, AnomalySummaryCounts>): void {
+    const byLabel = new Map<string, AnomalySummaryCounts>();
+    for (const [connectionId, summary] of byConnection) {
+      const connLabel = this.getConnectionLabel(connectionId);
+      if (connLabel === null) {
+        continue;
+      }
+      const merged = byLabel.get(connLabel);
+      byLabel.set(connLabel, merged ? addAnomalySummaries(merged, summary) : summary);
     }
-    const state = this.getConnectionState(connectionId);
-    // Lets cleanupConnectionMetrics find the label for a connection that was
-    // never polled, so a deleted connection does not leave summary series behind.
-    state.signalConnLabel = connLabel;
+    for (const [connLabel, summary] of byLabel) {
+      this.setAnomalySummary(connLabel, summary);
+    }
+    for (const connLabel of [...this.anomalySummaryLabels.keys()]) {
+      if (!byLabel.has(connLabel)) {
+        this.removeAnomalySummary(connLabel);
+      }
+    }
+  }
 
-    for (const sev of ['info', 'warning', 'critical']) {
+  private setAnomalySummary(connLabel: string, summary: AnomalySummaryCounts): void {
+    for (const sev of ANOMALY_SEVERITIES) {
       this.anomalyBySeverity.labels(connLabel, sev).set(summary.bySeverity[sev] ?? 0);
       this.anomalyEventsCurrent.labels(connLabel, sev).set(summary.unresolvedBySeverity[sev] ?? 0);
       this.correlatedGroupsBySeverity
@@ -4064,32 +4084,43 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         .set(summary.groupsBySeverity[sev] ?? 0);
     }
 
-    const newMetricLabels = new Set<string>();
-    const newPatternLabels = new Set<string>();
-
+    const metrics = new Set(Object.keys(summary.byMetric));
+    const patterns = new Set(Object.keys(summary.byPattern));
     for (const [metric, count] of Object.entries(summary.byMetric)) {
-      newMetricLabels.add(metric);
       this.anomalyByMetric.labels(connLabel, metric).set(count);
     }
     for (const [pattern, count] of Object.entries(summary.byPattern)) {
-      newPatternLabels.add(pattern);
       this.correlatedGroupsByPattern.labels(connLabel, pattern).set(count);
     }
 
-    // Clean up stale labels for this connection
-    for (const staleMetric of state.currentAnomalyMetricLabels) {
-      if (!newMetricLabels.has(staleMetric)) {
-        this.anomalyByMetric.labels(connLabel, staleMetric).set(0);
+    const previous = this.anomalySummaryLabels.get(connLabel);
+    for (const staleMetric of previous?.metrics ?? []) {
+      if (!metrics.has(staleMetric)) {
+        this.anomalyByMetric.remove(connLabel, staleMetric);
       }
     }
-    for (const stalePattern of state.currentCorrelatedPatternLabels) {
-      if (!newPatternLabels.has(stalePattern)) {
-        this.correlatedGroupsByPattern.labels(connLabel, stalePattern).set(0);
+    for (const stalePattern of previous?.patterns ?? []) {
+      if (!patterns.has(stalePattern)) {
+        this.correlatedGroupsByPattern.remove(connLabel, stalePattern);
       }
     }
+    this.anomalySummaryLabels.set(connLabel, { metrics, patterns });
+  }
 
-    state.currentAnomalyMetricLabels = newMetricLabels;
-    state.currentCorrelatedPatternLabels = newPatternLabels;
+  private removeAnomalySummary(connLabel: string): void {
+    for (const sev of ANOMALY_SEVERITIES) {
+      this.anomalyBySeverity.remove(connLabel, sev);
+      this.anomalyEventsCurrent.remove(connLabel, sev);
+      this.correlatedGroupsBySeverity.remove(connLabel, sev);
+    }
+    const previous = this.anomalySummaryLabels.get(connLabel);
+    for (const metric of previous?.metrics ?? []) {
+      this.anomalyByMetric.remove(connLabel, metric);
+    }
+    for (const pattern of previous?.patterns ?? []) {
+      this.correlatedGroupsByPattern.remove(connLabel, pattern);
+    }
+    this.anomalySummaryLabels.delete(connLabel);
   }
 
   updateAnomalyBufferStats(
@@ -4169,6 +4200,23 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(2)} KB`;
     return `${bytes} B`;
   }
+}
+
+function addAnomalySummaries(a: AnomalySummaryCounts, b: AnomalySummaryCounts): AnomalySummaryCounts {
+  const add = (x: Record<string, number>, y: Record<string, number>): Record<string, number> => {
+    const sum = { ...x };
+    for (const [key, value] of Object.entries(y)) {
+      sum[key] = (sum[key] ?? 0) + value;
+    }
+    return sum;
+  };
+  return {
+    bySeverity: add(a.bySeverity, b.bySeverity),
+    byMetric: add(a.byMetric, b.byMetric),
+    byPattern: add(a.byPattern, b.byPattern),
+    groupsBySeverity: add(a.groupsBySeverity, b.groupsBySeverity),
+    unresolvedBySeverity: add(a.unresolvedBySeverity, b.unresolvedBySeverity),
+  };
 }
 
 function parseMemoryField(raw: string | number | undefined): number | undefined {

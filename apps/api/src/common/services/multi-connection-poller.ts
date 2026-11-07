@@ -67,6 +67,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   // torn down, a deferred start() must stay suppressed — see start()/stop().
   private stopped = false;
   private knownConnections = new Set<string>();
+  private polledConnections: ReadonlySet<string> = new Set();
 
   constructor(protected readonly connectionRegistry: ConnectionRegistry) {}
 
@@ -224,36 +225,37 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       const pollExternal = this.supportsExternalConnections();
       const skipUnchanged = this.skipUnchangedSamples();
       const pollSentinels = this.pollsSentinels();
-      const pollPromises = connections
+      const polled = connections
         .filter((conn) => conn.isConnected || pollDisconnected)
         .filter((conn) => conn.connectionType !== 'external' || pollExternal)
-        .filter((conn) => pollSentinels || !this.isSentinelConnection(conn.id))
-        .map(async (conn) => {
-          try {
-            const client = this.connectionRegistry.get(conn.id);
-            const version = client.sampleVersion?.() ?? null;
-            if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
-              return;
-            }
-            await this.pollConnection({
-              connectionId: conn.id,
-              connectionName: conn.name,
-              client,
-              host: conn.host,
-              port: conn.port,
-              connectionType: conn.connectionType,
-            });
-            if (version !== null) {
-              this.lastPolledVersion.set(conn.id, version);
-            }
-          } catch (error) {
-            this.logger.warn(
-              `Poll failed for ${conn.name} (${conn.host}:${conn.port}): ${
-                error instanceof Error ? error.message : error
-              }`,
-            );
+        .filter((conn) => pollSentinels || !this.isSentinelConnection(conn.id));
+      this.polledConnections = new Set(polled.map((conn) => conn.id));
+      const pollPromises = polled.map(async (conn) => {
+        try {
+          const client = this.connectionRegistry.get(conn.id);
+          const version = client.sampleVersion?.() ?? null;
+          if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
+            return;
           }
-        });
+          await this.pollConnection({
+            connectionId: conn.id,
+            connectionName: conn.name,
+            client,
+            host: conn.host,
+            port: conn.port,
+            connectionType: conn.connectionType,
+          });
+          if (version !== null) {
+            this.lastPolledVersion.set(conn.id, version);
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Poll failed for ${conn.name} (${conn.host}:${conn.port}): ${
+              error instanceof Error ? error.message : error
+            }`,
+          );
+        }
+      });
 
       await Promise.allSettled(pollPromises);
     } catch (error) {
@@ -261,6 +263,13 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
     } finally {
       this.polling = false;
     }
+  }
+
+  /**
+   * Ids of the connections the last tick polled (or tried to poll).
+   */
+  protected getPolledConnectionIds(): ReadonlySet<string> {
+    return this.polledConnections;
   }
 
   /**

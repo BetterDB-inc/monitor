@@ -6,11 +6,14 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
+import type { AnomalySummaryCounts } from './prometheus.service';
 
 const CONNECTION_ID = 'conn-1';
 const CONNECTION_LABEL = '10.0.0.1:6379';
 const OTHER_CONNECTION_ID = 'conn-2';
 const OTHER_CONNECTION_LABEL = '10.0.0.2:6379';
+// A second connection to the first connection's host:port (another db index).
+const SAME_HOST_CONNECTION_ID = 'conn-3';
 
 const SUMMARY_GAUGES = [
   'betterdb_anomaly_events_current',
@@ -24,6 +27,7 @@ function buildService(): PrometheusService {
   const configs: Record<string, { host: string; port: number }> = {
     [CONNECTION_ID]: { host: '10.0.0.1', port: 6379 },
     [OTHER_CONNECTION_ID]: { host: '10.0.0.2', port: 6379 },
+    [SAME_HOST_CONNECTION_ID]: { host: '10.0.0.1', port: 6379 },
   };
   const registry = {
     // Mirrors ConnectionRegistry.getConfig: an empty id resolves to the default.
@@ -63,22 +67,30 @@ async function connectionLabels(service: PrometheusService, name: string): Promi
   return [...new Set(values.map((v) => String(v.labels.connection)))];
 }
 
-describe('PrometheusService updateAnomalySummary', () => {
-  const emptySummary = {
+describe('PrometheusService updateAnomalySummaries', () => {
+  const emptySummary: AnomalySummaryCounts = {
     bySeverity: {},
     byMetric: {},
     byPattern: {},
     groupsBySeverity: {},
     unresolvedBySeverity: {},
   };
+  const busySummary: AnomalySummaryCounts = {
+    bySeverity: { critical: 1 },
+    byMetric: { memory_used: 1 },
+    byPattern: { memory_pressure: 1 },
+    groupsBySeverity: { critical: 1 },
+    unresolvedBySeverity: { critical: 1 },
+  };
+  const publish = (service: PrometheusService, entries: Array<[string, AnomalySummaryCounts]>): void =>
+    service.updateAnomalySummaries(new Map(entries));
 
   it('sets correlated groups by severity from the summary', async () => {
     const service = buildService();
 
-    service.updateAnomalySummary(
-      { ...emptySummary, groupsBySeverity: { warning: 2, critical: 1 } },
-      CONNECTION_ID,
-    );
+    publish(service, [
+      [CONNECTION_ID, { ...emptySummary, groupsBySeverity: { warning: 2, critical: 1 } }],
+    ]);
 
     expect(
       await gaugeValues(service, 'betterdb_correlated_groups_by_severity', 'severity'),
@@ -88,11 +100,8 @@ describe('PrometheusService updateAnomalySummary', () => {
   it('resets a severity to zero once its groups age out', async () => {
     const service = buildService();
 
-    service.updateAnomalySummary(
-      { ...emptySummary, groupsBySeverity: { critical: 3 } },
-      CONNECTION_ID,
-    );
-    service.updateAnomalySummary(emptySummary, CONNECTION_ID);
+    publish(service, [[CONNECTION_ID, { ...emptySummary, groupsBySeverity: { critical: 3 } }]]);
+    publish(service, [[CONNECTION_ID, emptySummary]]);
 
     expect(
       await gaugeValues(service, 'betterdb_correlated_groups_by_severity', 'severity'),
@@ -102,7 +111,7 @@ describe('PrometheusService updateAnomalySummary', () => {
   it('publishes nine zero severity series and nothing else for an empty summary', async () => {
     const service = buildService();
 
-    service.updateAnomalySummary(emptySummary, CONNECTION_ID);
+    publish(service, [[CONNECTION_ID, emptySummary]]);
 
     for (const name of [
       'betterdb_anomaly_events_current',
@@ -119,29 +128,41 @@ describe('PrometheusService updateAnomalySummary', () => {
     expect(await connectionLabels(service, 'betterdb_correlated_groups_by_pattern')).toEqual([]);
   });
 
+  it('removes metric-type and pattern series once they age out', async () => {
+    const service = buildService();
+
+    publish(service, [[CONNECTION_ID, busySummary]]);
+    publish(service, [[CONNECTION_ID, emptySummary]]);
+
+    expect(await connectionLabels(service, 'betterdb_anomaly_by_metric')).toEqual([]);
+    expect(await connectionLabels(service, 'betterdb_correlated_groups_by_pattern')).toEqual([]);
+  });
+
   it('keeps each connection under its own label', async () => {
     const service = buildService();
 
-    service.updateAnomalySummary(
-      {
-        bySeverity: { critical: 2 },
-        byMetric: { memory_used: 2 },
-        byPattern: { memory_pressure: 1 },
-        groupsBySeverity: { critical: 1 },
-        unresolvedBySeverity: { critical: 1 },
-      },
-      CONNECTION_ID,
-    );
-    service.updateAnomalySummary(
-      {
-        bySeverity: { warning: 3 },
-        byMetric: { connections: 3 },
-        byPattern: { connection_leak: 2 },
-        groupsBySeverity: { warning: 2 },
-        unresolvedBySeverity: { warning: 3 },
-      },
-      OTHER_CONNECTION_ID,
-    );
+    publish(service, [
+      [
+        CONNECTION_ID,
+        {
+          bySeverity: { critical: 2 },
+          byMetric: { memory_used: 2 },
+          byPattern: { memory_pressure: 1 },
+          groupsBySeverity: { critical: 1 },
+          unresolvedBySeverity: { critical: 1 },
+        },
+      ],
+      [
+        OTHER_CONNECTION_ID,
+        {
+          bySeverity: { warning: 3 },
+          byMetric: { connections: 3 },
+          byPattern: { connection_leak: 2 },
+          groupsBySeverity: { warning: 2 },
+          unresolvedBySeverity: { warning: 3 },
+        },
+      ],
+    ]);
 
     expect(await gaugeValues(service, 'betterdb_anomaly_by_severity', 'severity')).toEqual({
       info: 0,
@@ -168,18 +189,36 @@ describe('PrometheusService updateAnomalySummary', () => {
     ).toEqual({ connection_leak: 2 });
   });
 
+  it('sums connections that share a host:port instead of overwriting each other', async () => {
+    const service = buildService();
+    const busy = { ...emptySummary, bySeverity: { critical: 2 }, byMetric: { memory_used: 2 } };
+
+    publish(service, [
+      [CONNECTION_ID, busy],
+      [SAME_HOST_CONNECTION_ID, { ...emptySummary, byMetric: { connections: 1 } }],
+    ]);
+    publish(service, [
+      [CONNECTION_ID, busy],
+      [SAME_HOST_CONNECTION_ID, { ...emptySummary, bySeverity: { warning: 1 } }],
+    ]);
+
+    expect(await gaugeValues(service, 'betterdb_anomaly_by_severity', 'severity')).toEqual({
+      info: 0,
+      warning: 1,
+      critical: 2,
+    });
+    expect(await gaugeValues(service, 'betterdb_anomaly_by_metric', 'metric_type')).toEqual({
+      memory_used: 2,
+    });
+  });
+
   it('exports connection-less events under an empty connection label', async () => {
     const service = buildService();
 
-    service.updateAnomalySummary(
-      { ...emptySummary, bySeverity: { critical: 1 }, byMetric: { memory_used: 1 } },
-      CONNECTION_ID,
-    );
-    service.updateAnomalySummary(
-      { ...emptySummary, bySeverity: { warning: 4 }, byMetric: { connections: 4 } },
-      '',
-    );
-    service.updateAnomalySummary({ ...emptySummary, bySeverity: { info: 5 } });
+    publish(service, [
+      [CONNECTION_ID, { ...emptySummary, bySeverity: { critical: 1 }, byMetric: { memory_used: 1 } }],
+      ['', { ...emptySummary, bySeverity: { info: 5 }, byMetric: { connections: 5 } }],
+    ]);
 
     expect(await gaugeValues(service, 'betterdb_anomaly_by_severity', 'severity')).toEqual({
       info: 0,
@@ -194,44 +233,68 @@ describe('PrometheusService updateAnomalySummary', () => {
       warning: 0,
       critical: 0,
     });
-    expect(await gaugeValues(service, 'betterdb_anomaly_by_metric', 'metric_type', '')).toEqual({
-      connections: 0,
-    });
     expect(await service.getMetrics()).toContain(
       'betterdb_anomaly_by_severity{connection="",severity="info"} 5',
     );
   });
 
-  it('drops a deleted connection even when it was never polled', async () => {
+  it('removes every series of a connection that is no longer published', async () => {
+    const service = buildService();
+
+    publish(service, [
+      [CONNECTION_ID, busySummary],
+      [OTHER_CONNECTION_ID, busySummary],
+      ['', busySummary],
+    ]);
+    for (const name of SUMMARY_GAUGES) {
+      expect(await connectionLabels(service, name)).toEqual([
+        CONNECTION_LABEL,
+        OTHER_CONNECTION_LABEL,
+        '',
+      ]);
+    }
+
+    publish(service, [[CONNECTION_ID, busySummary]]);
+
+    for (const name of SUMMARY_GAUGES) {
+      expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+    }
+  });
+
+  it('does not bring back series that connection cleanup removed', async () => {
     jest.useFakeTimers();
     try {
       const service = buildService();
-      const summary = {
-        bySeverity: { critical: 1 },
-        byMetric: { memory_used: 1 },
-        byPattern: { memory_pressure: 1 },
-        groupsBySeverity: { critical: 1 },
-        unresolvedBySeverity: { critical: 1 },
-      };
-      service.updateAnomalySummary(summary, CONNECTION_ID);
-      service.updateAnomalySummary(summary, OTHER_CONNECTION_ID);
-      service.updateAnomalySummary(summary, '');
-      for (const name of SUMMARY_GAUGES) {
-        expect(await connectionLabels(service, name)).toEqual([
-          CONNECTION_LABEL,
-          OTHER_CONNECTION_LABEL,
-          '',
-        ]);
-      }
+      publish(service, [
+        [CONNECTION_ID, busySummary],
+        [OTHER_CONNECTION_ID, busySummary],
+      ]);
 
       service.cleanupConnectionMetrics(OTHER_CONNECTION_ID);
       await jest.runAllTimersAsync();
+      publish(service, [[CONNECTION_ID, busySummary]]);
 
       for (const name of SUMMARY_GAUGES) {
-        expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL, '']);
+        expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
       }
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('labels connection-less counter events like the gauges', async () => {
+    const service = buildService();
+
+    service.incrementAnomalyEvent('critical', 'memory_used', 'spike');
+    service.incrementCorrelatedGroup('memory_pressure', 'critical');
+
+    const text = await service.getMetrics();
+    expect(text).toContain(
+      'betterdb_anomaly_events_total{connection="",severity="critical",metric_type="memory_used",anomaly_type="spike"} 1',
+    );
+    expect(text).toContain(
+      'betterdb_correlated_groups_total{connection="",pattern="memory_pressure",severity="critical"} 1',
+    );
+    expect(text).not.toContain('connection="unknown"');
   });
 });
