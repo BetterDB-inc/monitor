@@ -418,6 +418,13 @@ interface TrackedResyncEvent {
   since: number;
 }
 
+type AnomalySummaryCounts = Parameters<PrometheusService['updateAnomalySummary']>[0];
+
+interface LastHourGroup extends Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'> {
+  // Every connection the group's members belong to; '' for members without one.
+  connectionIds: string[];
+}
+
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const NEXT_FIRING_CONCURRENCY = 8;
@@ -506,9 +513,10 @@ export class AnomalyService
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
-  private lastHourGroups: Array<
-    Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
-  > = [];
+  private lastHourGroups: LastHourGroup[] = [];
+  // Connections whose anomaly summary was published last cycle, so one that
+  // goes quiet is reported once more at zero instead of keeping its last counts.
+  private summaryConnectionIds = new Set<string>();
   private lastSlowlogId = new Map<string, number>();
   // Previous lifetime rejected_connections counter per connection, so we can feed
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
@@ -7627,11 +7635,7 @@ export class AnomalyService
     );
     this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
     this.recentGroups.push(group);
-    this.lastHourGroups.push({
-      timestamp: group.timestamp,
-      pattern: group.pattern,
-      severity: group.severity,
-    });
+    this.lastHourGroups.push(this.toLastHourGroup(group));
     if (this.recentGroups.length > this.maxRecentGroups) {
       this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
     }
@@ -8027,9 +8031,7 @@ export class AnomalyService
       }
 
       this.recentGroups.push(...newGroups);
-      this.lastHourGroups.push(
-        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
-      );
+      this.lastHourGroups.push(...newGroups.map((group) => this.toLastHourGroup(group)));
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
       }
@@ -9733,16 +9735,42 @@ export class AnomalyService
   private incidentGaugeFailures = 0;
   private openIncidentSince: number | null = null;
 
+  private toLastHourGroup(group: CorrelatedAnomalyGroup): LastHourGroup {
+    // A group normally belongs to one connection, but one that spans several
+    // is counted under each.
+    const connectionIds = new Set(group.anomalies.map((a) => a.connectionId ?? ''));
+    return {
+      timestamp: group.timestamp,
+      pattern: group.pattern,
+      severity: group.severity,
+      connectionIds: connectionIds.size > 0 ? [...connectionIds] : [''],
+    };
+  }
+
   private async updatePrometheusSummary(): Promise<void> {
     const oneHourAgo = Date.now() - 3600000;
-    const bySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byMetric: Record<string, number> = {};
-    const unresolvedBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byPattern: Record<string, number> = {};
-    const groupsBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
+    // One summary per connection; '' collects connection-less events, which
+    // Prometheus exports under an empty connection label rather than the
+    // default connection's.
+    const summaries = new Map<string, AnomalySummaryCounts>();
+    const summaryFor = (connectionId: string): AnomalySummaryCounts => {
+      let summary = summaries.get(connectionId);
+      if (!summary) {
+        summary = {
+          bySeverity: { info: 0, warning: 0, critical: 0 },
+          byMetric: {},
+          byPattern: {},
+          groupsBySeverity: { info: 0, warning: 0, critical: 0 },
+          unresolvedBySeverity: { info: 0, warning: 0, critical: 0 },
+        };
+        summaries.set(connectionId, summary);
+      }
+      return summary;
+    };
 
     for (const a of this.recentAnomalies) {
       if (a.timestamp < oneHourAgo) continue;
+      const { bySeverity, byMetric, unresolvedBySeverity } = summaryFor(a.connectionId ?? '');
       bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
       byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
       if (!a.resolved)
@@ -9751,17 +9779,25 @@ export class AnomalyService
 
     this.lastHourGroups = this.lastHourGroups.filter((g) => g.timestamp >= oneHourAgo);
     for (const g of this.lastHourGroups) {
-      byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
-      groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
+      for (const connectionId of g.connectionIds) {
+        const { byPattern, groupsBySeverity } = summaryFor(connectionId);
+        byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
+        groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
+      }
     }
 
-    this.prometheusService.updateAnomalySummary({
-      bySeverity,
-      byMetric,
-      byPattern,
-      groupsBySeverity,
-      unresolvedBySeverity,
-    });
+    // A connection with events last cycle but none now is published once more
+    // with an empty summary, which zeroes its series instead of leaving the
+    // last non-zero counts in place.
+    const activeConnectionIds = new Set(summaries.keys());
+    for (const connectionId of this.summaryConnectionIds) {
+      if (!activeConnectionIds.has(connectionId)) summaryFor(connectionId);
+    }
+    this.summaryConnectionIds = activeConnectionIds;
+
+    for (const [connectionId, summary] of summaries) {
+      this.prometheusService.updateAnomalySummary(summary, connectionId);
+    }
 
     const bufferStats = this.getBufferStats().map((s) => ({
       metricType: s.metricType,
