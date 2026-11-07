@@ -11,6 +11,7 @@ class TestPoller extends MultiConnectionPoller {
   external = false;
   skipUnchanged = true;
   failNext = false;
+  readonly failing = new Set<string>();
   sentinels = false;
 
   protected getIntervalMs(): number {
@@ -18,7 +19,7 @@ class TestPoller extends MultiConnectionPoller {
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    if (this.failNext) {
+    if (this.failNext || this.failing.has(ctx.connectionId)) {
       this.failNext = false;
       throw new Error('boom');
     }
@@ -51,6 +52,10 @@ class TestPoller extends MultiConnectionPoller {
 
   startAfterNow(gate: Promise<unknown>): void {
     (this as unknown as { startAfter(gate: Promise<unknown>): void }).startAfter(gate);
+  }
+
+  coveredIds(): string[] {
+    return [...this.getPolledConnectionIds()].sort();
   }
 
   active(): boolean {
@@ -233,5 +238,86 @@ describe('MultiConnectionPoller sentinel handling', () => {
     const poller = sentinelSetup(true);
     await poller.tickNow();
     expect(poller.polled.map((c) => c.connectionId)).toEqual(['d', 's']);
+  });
+});
+
+describe('MultiConnectionPoller getPolledConnectionIds', () => {
+  function coverageSetup() {
+    let version = 1;
+    const statuses: ConnectionStatus[] = [
+      status('d', 'direct'),
+      { ...status('down', 'direct'), isConnected: false },
+      status('e', 'external'),
+      status('s', 'direct'),
+      status('f', 'direct'),
+    ];
+    const clients: Record<string, Partial<DatabasePort>> = {
+      d: { getCapabilities: () => ({ isSentinel: false }) as never },
+      down: {},
+      e: { sampleVersion: () => version },
+      s: { getCapabilities: () => ({ isSentinel: true }) as never },
+      f: {},
+    };
+    const registry = { list: () => statuses, get: (id: string) => clients[id] } as unknown as ConnectionRegistry;
+    const poller = new TestPoller(registry);
+    poller.failing.add('f');
+    return { poller, statuses, bumpVersion: () => version++ };
+  }
+
+  it('is empty before the first tick', () => {
+    expect(coverageSetup().poller.coveredIds()).toEqual([]);
+  });
+
+  it('leaves out disconnected, external, sentinel and failing connections by default', async () => {
+    const { poller } = coverageSetup();
+    await poller.tickNow();
+    expect(poller.coveredIds()).toEqual(['d']);
+  });
+
+  it('includes external and sentinel connections the subclass opts into', async () => {
+    const { poller } = coverageSetup();
+    poller.external = true;
+    poller.sentinels = true;
+    await poller.tickNow();
+    expect(poller.coveredIds()).toEqual(['d', 'e', 's']);
+  });
+
+  it('keeps an unchanged external sample covered after a successful poll', async () => {
+    const { poller } = coverageSetup();
+    poller.external = true;
+    await poller.tickNow();
+    await poller.tickNow();
+    expect(poller.polled.filter((c) => c.connectionId === 'e')).toHaveLength(1);
+    expect(poller.coveredIds()).toContain('e');
+  });
+
+  it('never covers an external sample whose poll failed, even while unchanged', async () => {
+    const { poller } = coverageSetup();
+    poller.external = true;
+    poller.failing.add('e');
+    await poller.tickNow();
+    await poller.tickNow();
+    expect(poller.coveredIds()).not.toContain('e');
+  });
+
+  it('drops a connection once its poll starts failing and adds it back on success', async () => {
+    const { poller } = coverageSetup();
+    poller.failing.delete('f');
+    await poller.tickNow();
+    expect(poller.coveredIds()).toContain('f');
+    poller.failing.add('f');
+    await poller.tickNow();
+    expect(poller.coveredIds()).not.toContain('f');
+    poller.failing.delete('f');
+    await poller.tickNow();
+    expect(poller.coveredIds()).toContain('f');
+  });
+
+  it('drops a connection that disconnects', async () => {
+    const { poller, statuses } = coverageSetup();
+    await poller.tickNow();
+    statuses[0] = { ...statuses[0], isConnected: false };
+    await poller.tickNow();
+    expect(poller.coveredIds()).toEqual([]);
   });
 });

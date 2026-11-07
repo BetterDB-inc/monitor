@@ -225,16 +225,19 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       const pollExternal = this.supportsExternalConnections();
       const skipUnchanged = this.skipUnchangedSamples();
       const pollSentinels = this.pollsSentinels();
-      const polled = connections
+      const eligible = connections
         .filter((conn) => conn.isConnected || pollDisconnected)
         .filter((conn) => conn.connectionType !== 'external' || pollExternal)
         .filter((conn) => pollSentinels || !this.isSentinelConnection(conn.id));
-      this.polledConnections = new Set(polled.map((conn) => conn.id));
-      const pollPromises = polled.map(async (conn) => {
+      const covered = new Set<string>();
+      const pollPromises = eligible.map(async (conn) => {
         try {
           const client = this.connectionRegistry.get(conn.id);
           const version = client.sampleVersion?.() ?? null;
           if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
+            // The version was recorded by a successful poll and the connection
+            // is still connected (fresh, for a pushed one), so it stays covered.
+            covered.add(conn.id);
             return;
           }
           await this.pollConnection({
@@ -248,6 +251,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
           if (version !== null) {
             this.lastPolledVersion.set(conn.id, version);
           }
+          covered.add(conn.id);
         } catch (error) {
           this.logger.warn(
             `Poll failed for ${conn.name} (${conn.host}:${conn.port}): ${
@@ -258,6 +262,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       });
 
       await Promise.allSettled(pollPromises);
+      this.polledConnections = covered;
     } catch (error) {
       this.logger.error(`Tick error: ${error instanceof Error ? error.message : error}`);
     } finally {
@@ -266,7 +271,10 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   }
 
   /**
-   * Ids of the connections the last tick polled (or tried to poll).
+   * Ids of the connections the last completed tick covered: polled
+   * successfully, or skipped because their sample was unchanged since a
+   * successful poll. Disconnected, filtered-out and failing connections are
+   * left out.
    */
   protected getPolledConnectionIds(): ReadonlySet<string> {
     return this.polledConnections;
