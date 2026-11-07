@@ -13,6 +13,8 @@ class TestPoller extends MultiConnectionPoller {
   failNext = false;
   readonly failing = new Set<string>();
   sentinels = false;
+  // When set, every poll waits on it, so a test can hold a tick in flight.
+  gate: Promise<void> | null = null;
 
   protected getIntervalMs(): number {
     return 1000;
@@ -22,6 +24,9 @@ class TestPoller extends MultiConnectionPoller {
     if (this.failNext || this.failing.has(ctx.connectionId)) {
       this.failNext = false;
       throw new Error('boom');
+    }
+    if (this.gate) {
+      await this.gate;
     }
     this.polled.push(ctx);
   }
@@ -319,5 +324,22 @@ describe('MultiConnectionPoller getPolledConnectionIds', () => {
     statuses[0] = { ...statuses[0], isConnected: false };
     await poller.tickNow();
     expect(poller.coveredIds()).toEqual([]);
+  });
+
+  it('keeps the previous set until a tick in flight has settled every poll', async () => {
+    const { poller } = coverageSetup();
+    await poller.tickNow();
+    expect(poller.coveredIds()).toEqual(['d']);
+
+    poller.failing.delete('f');
+    let release!: () => void;
+    poller.gate = new Promise<void>((resolve) => (release = resolve));
+    const tick = poller.tickNow();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(poller.coveredIds()).toEqual(['d']);
+
+    release();
+    await tick;
+    expect(poller.coveredIds()).toEqual(['d', 'f']);
   });
 });

@@ -106,6 +106,30 @@ describe('prom-otel-bridge', () => {
       ]);
     });
 
+    it('leaves out an empty connection label on a counter as well', () => {
+      const metric: PromMetricJson = {
+        name: 'betterdb_anomaly_events_total',
+        type: 'counter',
+        values: [
+          {
+            value: 7,
+            labels: {
+              connection: '',
+              severity: 'critical',
+              metric_type: 'memory_used',
+              anomaly_type: 'spike',
+            },
+          },
+        ],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        {
+          value: 7,
+          attributes: { severity: 'critical', metric_type: 'memory_used', anomaly_type: 'spike' },
+        },
+      ]);
+    });
+
     it('keeps empty values of other labels', () => {
       const metric: PromMetricJson = {
         name: 'x',
