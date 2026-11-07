@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { AlertTriangle, Info } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert.tsx';
-import type { FanoutCoverage } from '@/types/anomaly';
+import type { FanoutCoverage, FanoutCoverageReason } from '@/types/anomaly';
 import { PaymentRequiredError } from '@/api/client';
 
 const NOT_CHECKED =
@@ -14,6 +14,14 @@ const SHOW_AGE_AFTER_MS = 15_000;
 // re-added connection must replace the old one rather than sit beside it.
 const READD =
   'Connections cannot be edited in place: add the Sentinel again with the credentials set, then delete this connection so the two do not report under the same address.';
+
+// Reasons with no per-node checks to stop: a standalone connection, every
+// primary registered on its own, or checked through another connection.
+const NO_CHECKS: ReadonlySet<FanoutCoverageReason | null> = new Set<FanoutCoverageReason | null>([
+  'not_applicable',
+  'no_targets',
+  'covered_elsewhere',
+]);
 
 function primaries(count: number): string {
   return `${count} ${count === 1 ? 'primary' : 'primaries'}`;
@@ -85,8 +93,7 @@ export function FanoutCoverageNotice({
 function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefined }) {
   if (!coverage) return null;
 
-  // A standalone connection has no per-node checks to stop.
-  if (coverage.stale && coverage.reason !== 'not_applicable') {
+  if (coverage.stale && !NO_CHECKS.has(coverage.reason)) {
     return (
       <Notice coverage={coverage} title="Fan-out coverage is out of date">
         No poll has refreshed which primaries this connection checks, so the per-node checks may

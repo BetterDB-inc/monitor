@@ -237,7 +237,9 @@ describe('FanoutCoverageNotice', () => {
     ['a standalone connection', coverage({ reason: 'not_applicable' })],
     ['a standalone connection no poll has refreshed', coverage({ reason: 'not_applicable', ageMs: 90_000, stale: true })],
     ['every primary registered on its own', coverage({ reason: 'no_targets' })],
+    ['every primary registered on its own, no poll has refreshed', coverage({ reason: 'no_targets', ageMs: 90_000, stale: true })],
     ['primaries checked by another connection', coverage({ reason: 'covered_elsewhere' })],
+    ['primaries checked by another connection, no poll has refreshed', coverage({ reason: 'covered_elsewhere', ageMs: 90_000, stale: true })],
     ['no coverage yet', undefined],
     ['no entry for the connection', null],
   ])('renders nothing for %s', (_case, value) => {
