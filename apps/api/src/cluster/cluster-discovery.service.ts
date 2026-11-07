@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { dialsDataNodes } from '../connections/data-node-reach';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
@@ -185,6 +186,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Bind the node client to the connection that owns it now, so a later
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, nodeId);
     const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
@@ -217,7 +219,19 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     });
   }
 
+  /**
+   * Refuses node clients for a connection whose nodes the monitor cannot dial
+   * itself (an agent connection), rather than failing later on the seed's raw
+   * client and reading as an unreachable node.
+   */
+  private assertDialsDataNodes(connectionId: string | undefined, node: string): void {
+    if (connectionId && !dialsDataNodes(this.connectionRegistry.getConfig(connectionId))) {
+      throw new Error(`Connection ${connectionId} cannot dial ${node} directly`);
+    }
+  }
+
   async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    this.assertDialsDataNodes(connectionId, `${host}:${port}`);
     const credentials = this.connectionRegistry.sentinelDataNodeCredentials(connectionId);
     if (!credentials) {
       throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);

@@ -63,6 +63,7 @@ describe('ClusterDiscoveryService', () => {
     mockConnectionRegistry = {
       get: jest.fn().mockReturnValue(mockDbClient),
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
+      getConfig: jest.fn().mockReturnValue({ id: 'test-connection', host: 'localhost', port: 6379 }),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -596,6 +597,17 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('getNodeConnection for an agent connection', () => {
+    it('refuses before discovering nodes or touching the raw client', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+
+      await expect(service.getNodeConnection('node-1', 'test-connection')).rejects.toThrow(
+        'cannot dial node-1 directly',
+      );
+      expect(mockDbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAddressConnection', () => {
     beforeEach(() => {
       mockConnectionRegistry.sentinelDataNodeCredentials = jest
@@ -615,6 +627,16 @@ describe('ClusterDiscoveryService', () => {
           password: 'node-pass',
         }),
       );
+    });
+
+    it('refuses to dial for a connection reached through the agent', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      await expect(service.getAddressConnection('10.0.1.5', 6380, 'test-connection')).rejects.toThrow(
+        'cannot dial 10.0.1.5:6380 directly',
+      );
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
     });
 
     it('refuses to dial without data-node credentials', async () => {
