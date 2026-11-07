@@ -14747,10 +14747,15 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0, skipped: 0 });
         });
 
+        // ClusterDiscoveryService surfaces a connect-time refusal as
+        // `Failed to connect to host:port: <reply>`; the raw reply only ever
+        // comes back from a command on an open client.
+        const REFUSED = 'Failed to connect to 10.0.1.7:6379: WRONGPASS invalid username-password pair or user is disabled.';
+
         it('counts a primary that refuses the credentials apart from unreachable ones', async () => {
           const client = nodeClient([2]);
           const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
-            if (nodeId === 'node-c') throw new Error('WRONGPASS invalid username-password pair');
+            if (nodeId === 'node-c') throw new Error(REFUSED);
             return client;
           });
 
@@ -14759,6 +14764,28 @@ describe('AnomalyService', () => {
 
           await poll([target, other], 1, T0 + (service as any).getIntervalMs() / 2);
           expect(getNodeConnection.mock.calls.filter(([id]) => id === 'node-c')).toHaveLength(1);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
+        });
+
+        it('counts a primary whose dial closed without a reply as unreachable', async () => {
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('Connection is closed.');
+            return nodeClient([2]);
+          });
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0 });
+        });
+
+        it('counts a primary whose ACL user may not run INFO as refusing the credentials', async () => {
+          const denied = {
+            info: jest.fn().mockRejectedValue(new Error("NOPERM User monitor has no permissions to run the 'info' command")),
+          };
+          discovery().mockImplementation(async (nodeId: string) => (nodeId === 'node-c' ? denied : nodeClient([2])));
+
+          await poll([target, other], 1, T0);
+
           expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
         });
 
@@ -14870,7 +14897,7 @@ describe('AnomalyService', () => {
           const client = nodeClient([2]);
           const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
             if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
-            if (nodeId === 'node-d') throw new Error('WRONGPASS invalid username-password pair');
+            if (nodeId === 'node-d') throw new Error(REFUSED);
             return client;
           });
           await poll([target, other, third], 1, T0, members);

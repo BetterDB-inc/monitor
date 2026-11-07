@@ -334,7 +334,14 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     // Add error handler to prevent unhandled error events
     // Only log each unique connection error once to avoid log spam
+    //
+    // The last error is kept because iovalkey reports a refused connection
+    // (WRONGPASS, NOAUTH, a socket error) on this event and then rejects
+    // connect() with its generic "Connection is closed.", which tells the
+    // caller nothing about why.
+    let lastError: Error | undefined;
     client.on('error', (err) => {
+      lastError = err;
       const errorCode = (err as any).code || err.name;
       const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
@@ -386,7 +393,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       this.clearNodeErrors(key);
 
       return client;
-    } catch (error) {
+    } catch (connectError) {
+      // Surface the server's reply (or the socket error) behind iovalkey's
+      // generic rejection, so a credential refusal reads as one downstream
+      // (isAuthErrorReply matches the code after the `: `). A rejection that
+      // already is the emitted error, or came with no error event, is kept.
+      const error =
+        lastError && lastError !== connectError
+          ? new Error(`Failed to connect to ${host}:${port}: ${lastError.message}`, { cause: lastError })
+          : connectError;
+
       // Only log each unique connection error once to avoid spam
       const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
