@@ -160,6 +160,19 @@ describe('FanoutCoverageNotice', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Last checked 90 seconds ago');
   });
 
+  it('shows the load failure above stale coverage', () => {
+    render(
+      <FanoutCoverageNotice
+        coverage={coverage({ checked: 4, ageMs: 90_000, stale: true })}
+        error={new Error('Network error')}
+      />,
+    );
+
+    const [failure, notice] = screen.getAllByRole('alert');
+    expect(failure).toHaveTextContent('Fan-out coverage could not be loaded');
+    expect(notice).toHaveTextContent('Fan-out coverage is out of date');
+  });
+
   it('says when coverage could not be loaded at all', () => {
     render(<FanoutCoverageNotice coverage={undefined} error={new Error('Network error')} />);
 
@@ -221,6 +234,7 @@ describe('FanoutCoverageNotice', () => {
   it.each([
     ['full coverage', coverage({ checked: 4 })],
     ['a standalone connection', coverage({ reason: 'not_applicable' })],
+    ['a standalone connection no poll has refreshed', coverage({ reason: 'not_applicable', ageMs: 90_000, stale: true })],
     ['every primary registered on its own', coverage({ reason: 'no_targets' })],
     ['primaries checked by another connection', coverage({ reason: 'covered_elsewhere' })],
     ['no coverage yet', undefined],

@@ -373,13 +373,14 @@ describe('PrometheusService anomaly signal gauges', () => {
       expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([]);
     });
 
-    it('drops the series when the connection is removed', async () => {
-      service.updateFanoutCoverage('conn-1', counts({ checked: 3 }));
+    it('drops the series, and the gap series, when the connection is removed', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unreadable' });
 
       service.cleanupConnectionMetrics('conn-1');
       await jest.runAllTimersAsync();
 
       expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([]);
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
     });
   });
 

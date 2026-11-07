@@ -85,7 +85,8 @@ export function FanoutCoverageNotice({
 function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefined }) {
   if (!coverage) return null;
 
-  if (coverage.stale) {
+  // A standalone connection has no per-node checks to stop.
+  if (coverage.stale && coverage.reason !== 'not_applicable') {
     return (
       <Notice coverage={coverage} title="Fan-out coverage is out of date">
         No poll has refreshed which primaries this connection checks, so the per-node checks may
