@@ -2579,7 +2579,13 @@ export class AnomalyService
         masters = await ctx.client.getSentinelMasters();
       } catch (mastersErr) {
         // Only SENTINEL MASTERS itself failing leaves the fan-out without a
-        // topology; a later replica read or storage error does not.
+        // topology; a later replica read or storage error does not. Drop the
+        // snapshot here rather than let the loop-stall classifier keep
+        // counting an old `s_down` toward a misdirected alert from evidence
+        // we can no longer confirm.
+        this.sentinelMastersSnapshot.delete(ctx.connectionId);
+        this.sentinelReplicaAddrs.delete(ctx.connectionId);
+        this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
         this.sentinelMastersFailed.add(ctx.connectionId);
         throw mastersErr;
       }
@@ -2632,12 +2638,9 @@ export class AnomalyService
         },
       });
     } catch (sentinelErr) {
-      // The probe failed, so the snapshot is either absent or stale. Drop it rather
-      // than let the loop-stall classifier keep counting an old `s_down` toward a
-      // misdirected alert from evidence we can no longer confirm.
-      this.sentinelMastersSnapshot.delete(ctx.connectionId);
-      this.sentinelReplicaAddrs.delete(ctx.connectionId);
-      this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
+      // A failure past SENTINEL MASTERS (the persistence gate, for example)
+      // leaves the snapshot just read in place: it is fresh, and the fan-out
+      // needs it.
       this.logger.debug(
         `Failed to check Sentinel topology for ${ctx.connectionName}: ${sentinelErr instanceof Error ? sentinelErr.message : sentinelErr}`,
       );

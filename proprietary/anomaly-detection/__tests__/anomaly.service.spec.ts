@@ -14510,8 +14510,9 @@ describe('AnomalyService', () => {
           expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe('no_sentinel_credentials');
         });
 
-        it('does not take a failed replica read for a failed SENTINEL MASTERS', async () => {
+        it('keeps the topology it just read when the work after SENTINEL MASTERS fails', async () => {
           credentials().mockReturnValue({ username: 'app', password: 'secret' });
+          (service as any).sentinelMastersSnapshot.delete('conn-1');
           (dbClient as any).getSentinelMasters = jest.fn().mockResolvedValue(masters);
           (dbClient as any).getSentinelReplicas = jest.fn().mockResolvedValue([]);
           jest.spyOn(service as any, 'applyTopologyPersistenceGate').mockRejectedValue(new Error('storage down'));
@@ -14519,7 +14520,11 @@ describe('AnomalyService', () => {
           await (service as any).detectSentinelDrift(mockCtx, T0, { redis_mode: 'sentinel' });
 
           expect((service as any).sentinelMastersFailed.has('conn-1')).toBe(false);
-          expect((service as any).sentinelDivergenceTargets(mockCtx).gap?.reason).not.toBe('topology_unreadable');
+          expect((service as any).sentinelMastersSnapshot.get('conn-1')).toBe(masters);
+          expect((service as any).sentinelReplicaAddrs.has('conn-1')).toBe(true);
+          const { scope, gap } = (service as any).sentinelDivergenceTargets(mockCtx);
+          expect(gap).toBeNull();
+          expect(scope).toEqual({ targets: [{ addr: NODE, host: '10.0.1.5', port: 6379 }], members: new Set([NODE]) });
         });
 
         it('names certificate auth, which the connection form stores no data-node settings for', () => {
