@@ -60,18 +60,27 @@ export interface AnomalyBufferStats {
 export type FanoutCoverageReason =
   | 'not_applicable'
   | 'no_sentinel_credentials'
+  | 'sentinel_credentials_unreadable'
+  | 'certificate_auth'
+  | 'agent_connection'
   | 'ssh_tunnel'
   | 'topology_unknown'
+  | 'topology_unreadable'
   | 'no_targets'
   | 'covered_elsewhere';
 
 /** Outcome of the latest per-node fan-out of a cluster or Sentinel connection. */
 export interface FanoutCoverage {
   connectionId: string;
+  topology: 'cluster' | 'sentinel' | null;
   checked: number;
   unreachable: number;
+  authFailed: number;
   skipped: number;
+  notDialed: number;
   reason: FanoutCoverageReason | null;
+  targetLimit: number;
+  timeoutMs: number;
   timestamp: number;
 }
 
