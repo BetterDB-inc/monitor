@@ -271,7 +271,8 @@ export interface AnomalySummary {
  * - `topology_unreadable`: `CLUSTER NODES` or `SENTINEL MASTERS` failed on the
  *   latest read.
  * - `no_targets`: every other primary is monitored as its own connection.
- * - `covered_elsewhere`: every other primary is checked by another connection.
+ * - `covered_elsewhere`: every other primary is claimed by another connection,
+ *   which reads it or holds it as down; see that connection's coverage.
  * - `fanout_failed`: the cycle failed before the primaries were read (a
  *   storage error, for example), or the deployment has no cluster discovery
  *   to dial them; `notDialed` counts the ones it skipped.

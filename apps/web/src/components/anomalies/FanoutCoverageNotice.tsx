@@ -16,7 +16,8 @@ const READD =
   'Connections cannot be edited in place: add the Sentinel again with the credentials set, then delete this connection so the two do not report under the same address.';
 
 // Reasons with no per-node checks to stop: a standalone connection, every
-// primary registered on its own, or checked through another connection.
+// primary registered on its own, or claimed by another connection (which
+// reads it or holds it as down).
 const NO_CHECKS: ReadonlySet<FanoutCoverageReason | null> = new Set<FanoutCoverageReason | null>([
   'not_applicable',
   'no_targets',
@@ -60,7 +61,7 @@ function Notice({
  * has stopped being refreshed, or when it could not be loaded. Nothing is
  * rendered while every primary is checked, or when the connection has no
  * other primaries to reach (standalone, every primary registered on its own,
- * or checked through another connection).
+ * or claimed by another connection, which reads it or holds it as down).
  */
 export function FanoutCoverageNotice({
   coverage,
