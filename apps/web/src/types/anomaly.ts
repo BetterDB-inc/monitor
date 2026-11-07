@@ -61,13 +61,15 @@ export type FanoutCoverageReason =
   | 'not_applicable'
   | 'no_sentinel_credentials'
   | 'sentinel_credentials_unreadable'
+  | 'connection_secrets_unreadable'
   | 'certificate_auth'
   | 'agent_connection'
   | 'ssh_tunnel'
   | 'topology_unknown'
   | 'topology_unreadable'
   | 'no_targets'
-  | 'covered_elsewhere';
+  | 'covered_elsewhere'
+  | 'fanout_failed';
 
 /** Outcome of the latest per-node fan-out of a cluster or Sentinel connection. */
 export interface FanoutCoverage {
@@ -79,9 +81,14 @@ export interface FanoutCoverage {
   skipped: number;
   notDialed: number;
   reason: FanoutCoverageReason | null;
+  tunnelled: boolean;
   targetLimit: number;
   timeoutMs: number;
   timestamp: number;
+  /** Server-side age when the entry was read. */
+  ageMs: number;
+  /** No poll has refreshed the entry lately; the per-node checks may have stopped. */
+  stale: boolean;
 }
 
 export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';

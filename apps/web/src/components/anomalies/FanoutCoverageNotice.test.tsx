@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { FanoutCoverageNotice } from './FanoutCoverageNotice';
+import { PaymentRequiredError } from '@/api/client';
 import type { FanoutCoverage } from '@/types/anomaly';
 
 const NOW = 1700000000000;
@@ -15,9 +16,12 @@ function coverage(overrides: Partial<FanoutCoverage>): FanoutCoverage {
     skipped: 0,
     notDialed: 0,
     reason: null,
+    tunnelled: false,
     targetLimit: 64,
     timeoutMs: 2000,
     timestamp: NOW,
+    ageMs: 0,
+    stale: false,
     ...overrides,
   };
 }
@@ -80,8 +84,8 @@ describe('FanoutCoverageNotice', () => {
     expect(screen.queryByText('nodePassword')).not.toBeInTheDocument();
   });
 
-  it('does not call an SSH-tunnelled cluster a Sentinel', () => {
-    render(<FanoutCoverageNotice coverage={coverage({ reason: 'ssh_tunnel', notDialed: 2 })} />);
+  it('does not call an agent-connected cluster a Sentinel', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ reason: 'agent_connection', notDialed: 2 })} />);
 
     expect(screen.getByRole('alert')).toHaveTextContent('Other primaries not covered');
     expect(screen.getByRole('alert')).toHaveTextContent('the cluster reports');
@@ -134,18 +138,84 @@ describe('FanoutCoverageNotice', () => {
     expect(screen.getByRole('alert')).not.toHaveTextContent('refused');
   });
 
-  it('shows the age of coverage no poll has refreshed lately', () => {
-    at(NOW + 25_000);
-    render(<FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2 })} />);
+  it('shows the server-side age of coverage no poll has refreshed lately', () => {
+    // A browser clock an hour off does not change it.
+    at(NOW + 3_600_000);
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2, ageMs: 25_000 })} />);
 
     expect(screen.getByRole('alert')).toHaveTextContent('Last checked 25 seconds ago');
   });
 
   it('does not show the age of fresh coverage', () => {
-    at(NOW + 2_000);
-    render(<FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2 })} />);
+    at(NOW + 3_600_000);
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2, ageMs: 2_000 })} />);
 
     expect(screen.getByRole('alert')).not.toHaveTextContent('Last checked');
+  });
+
+  it('warns that stale coverage may hide stopped checks, even when it was full', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 4, ageMs: 90_000, stale: true })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Fan-out coverage is out of date');
+    expect(screen.getByRole('alert')).toHaveTextContent('Last checked 90 seconds ago');
+  });
+
+  it('says when coverage could not be loaded at all', () => {
+    render(<FanoutCoverageNotice coverage={undefined} error={new Error('Network error')} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Fan-out coverage could not be loaded');
+    expect(screen.getByRole('alert')).toHaveTextContent('is not known');
+  });
+
+  it('keeps the last coverage, marked as possibly out of date, when a refresh fails', () => {
+    render(
+      <FanoutCoverageNotice coverage={coverage({ checked: 3, unreachable: 2 })} error={new Error('Network error')} />,
+    );
+
+    const [failure, notice] = screen.getAllByRole('alert');
+    expect(failure).toHaveTextContent('may be out of date');
+    expect(notice).toHaveTextContent('3 of 5 primaries checked');
+  });
+
+  it('does not report a missing license as a failure', () => {
+    const { container } = render(
+      <FanoutCoverageNotice coverage={undefined} error={new PaymentRequiredError({
+            message: 'license required',
+            feature: 'anomalyDetection',
+            currentTier: 'community',
+            requiredTier: 'pro',
+            upgradeUrl: '',
+          })} />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('names other stored secrets that failed to decrypt', () => {
+    render(
+      <FanoutCoverageNotice coverage={coverage({ topology: 'sentinel', reason: 'connection_secrets_unreadable' })} />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('another stored secret');
+  });
+
+  it('says the cycle failed before it read the primaries', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ reason: 'fanout_failed', notDialed: 2 })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('failed before it read the primaries');
+    expect(screen.getByRole('alert')).toHaveTextContent('none of the 2 primaries');
+  });
+
+  it('explains unreachable primaries of an SSH-tunnelled cluster', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 1, unreachable: 2, tunnelled: true })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('outside it');
+  });
+
+  it('does not mention the tunnel when every primary answers', () => {
+    render(<FanoutCoverageNotice coverage={coverage({ checked: 1, skipped: 1, tunnelled: true })} />);
+
+    expect(screen.getByRole('alert')).not.toHaveTextContent('SSH tunnel');
   });
 
   it.each([

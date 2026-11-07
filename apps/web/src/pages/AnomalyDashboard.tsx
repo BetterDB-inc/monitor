@@ -224,7 +224,7 @@ export function AnomalyDashboard() {
   // Which of the selected connection's other primaries the per-node fan-out
   // reached. Not narrowed by the date picker: a Sentinel without data-node
   // credentials, or a primary that cannot be reached, is a gap right now.
-  const { data: fanoutCoverage } = usePolling<FanoutCoverage[]>({
+  const { data: fanoutCoverage, error: fanoutCoverageError } = usePolling<FanoutCoverage[]>({
     fetcher: () => (currentConnection?.id ? metricsApi.getAnomalyCoverage() : Promise.resolve([])),
     interval: 10000,
     refetchKey: currentConnection?.id,
@@ -325,6 +325,7 @@ export function AnomalyDashboard() {
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
+        error={fanoutCoverageError}
       />
 
       {/* Header */}
