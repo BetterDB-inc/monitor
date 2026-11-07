@@ -28,6 +28,7 @@ describe('PrometheusService staleness bounds', () => {
     };
     const registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
+      isListed: jest.fn((id: string) => id in configs),
       get: jest.fn().mockReturnValue({ getInfoParsed }),
       list: jest.fn().mockReturnValue([]),
       getDefaultId: jest.fn().mockReturnValue('conn-1'),

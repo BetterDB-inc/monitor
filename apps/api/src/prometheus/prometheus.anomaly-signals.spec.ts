@@ -46,9 +46,12 @@ describe('PrometheusService anomaly signal gauges', () => {
     const configs: Record<string, { host: string; port: number }> = {
       'conn-1': { host: '10.0.0.1', port: 6379 },
       'conn-2': { host: '10.0.0.2', port: 6379 },
+      // Another connection to conn-1's server (a different db index).
+      'conn-3': { host: '10.0.0.1', port: 6379 },
     };
     registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
+      isListed: jest.fn((id: string) => id in configs),
       get: jest.fn().mockReturnValue({ getInfoParsed: jest.fn().mockResolvedValue({}) }),
       list: jest.fn().mockReturnValue([]),
       getDefaultId: jest.fn().mockReturnValue('conn-1'),
@@ -292,19 +295,19 @@ describe('PrometheusService anomaly signal gauges', () => {
   });
 
   describe('updateActiveIncidents', () => {
+    const incident = (connectionIds: string[], patterns: string[], status: string) => ({
+      connectionIds,
+      patterns,
+      status,
+    });
+
     it('sets counts per pattern and status for every connection', async () => {
-      service.updateActiveIncidents(
-        new Map([
-          [
-            'conn-1',
-            [
-              { pattern: 'retry_storm', status: 'active', count: 2 },
-              { pattern: 'none', status: 'recovering', count: 1 },
-            ],
-          ],
-          ['conn-2', [{ pattern: 'retry_storm', status: 'degraded', count: 1 }]],
-        ]),
-      );
+      service.updateActiveIncidents([
+        incident(['conn-1'], ['retry_storm'], 'active'),
+        incident(['conn-1'], ['retry_storm'], 'active'),
+        incident(['conn-1'], [], 'recovering'),
+        incident(['conn-2'], ['retry_storm'], 'degraded'),
+      ]);
 
       const text = await service.getMetrics();
 
@@ -319,44 +322,64 @@ describe('PrometheusService anomaly signal gauges', () => {
       );
     });
 
+    it('counts an incident under every connection and every pattern it matched', async () => {
+      service.updateActiveIncidents([
+        incident(['conn-1', 'conn-2'], ['retry_storm', 'memory_pressure'], 'active'),
+      ]);
+
+      expect(await series('betterdb_incident_active')).toEqual([
+        { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
+        { connection: LABEL, pattern: 'memory_pressure', status: 'active', value: 1 },
+        { connection: OTHER_LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
+        { connection: OTHER_LABEL, pattern: 'memory_pressure', status: 'active', value: 1 },
+      ]);
+    });
+
+    it('counts an incident once for connections that share a host:port', async () => {
+      service.updateActiveIncidents([
+        incident(['conn-1', 'conn-3'], ['retry_storm'], 'active'),
+        incident(['conn-3'], ['retry_storm'], 'active'),
+      ]);
+
+      expect(await series('betterdb_incident_active')).toEqual([
+        { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 2 },
+      ]);
+    });
+
     it('removes a pattern and status that closed and clears connections left out', async () => {
-      service.updateActiveIncidents(
-        new Map([
-          [
-            'conn-1',
-            [
-              { pattern: 'retry_storm', status: 'active', count: 1 },
-              { pattern: 'memory_pressure', status: 'active', count: 1 },
-            ],
-          ],
-          ['conn-2', [{ pattern: 'retry_storm', status: 'active', count: 1 }]],
-        ]),
-      );
-      service.updateActiveIncidents(
-        new Map([['conn-1', [{ pattern: 'retry_storm', status: 'recovering', count: 1 }]]]),
-      );
+      service.updateActiveIncidents([
+        incident(['conn-1'], ['retry_storm'], 'active'),
+        incident(['conn-1'], ['memory_pressure'], 'active'),
+        incident(['conn-2'], ['retry_storm'], 'active'),
+      ]);
+      service.updateActiveIncidents([incident(['conn-1'], ['retry_storm'], 'recovering')]);
 
       expect(await series('betterdb_incident_active')).toEqual([
         { connection: LABEL, pattern: 'retry_storm', status: 'recovering', value: 1 },
       ]);
     });
 
+    it('skips connections the registry no longer lists', async () => {
+      service.updateActiveIncidents([incident(['conn-1', 'retired'], ['retry_storm'], 'active')]);
+
+      expect(await series('betterdb_incident_active')).toEqual([
+        { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
+      ]);
+    });
+
     it('exports connection-less incidents under an empty connection label', async () => {
-      service.updateActiveIncidents(
-        new Map([
-          ['conn-1', [{ pattern: 'retry_storm', status: 'active', count: 1 }]],
-          ['', [{ pattern: 'none', status: 'active', count: 2 }]],
-        ]),
-      );
+      service.updateActiveIncidents([
+        incident(['conn-1'], ['retry_storm'], 'active'),
+        incident([], [], 'active'),
+        incident([], [], 'active'),
+      ]);
 
       expect(await series('betterdb_incident_active')).toEqual([
         { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
         { connection: '', pattern: 'none', status: 'active', value: 2 },
       ]);
 
-      service.updateActiveIncidents(
-        new Map([['conn-1', [{ pattern: 'retry_storm', status: 'active', count: 1 }]]]),
-      );
+      service.updateActiveIncidents([incident(['conn-1'], ['retry_storm'], 'active')]);
 
       expect(await series('betterdb_incident_active')).toEqual([
         { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
@@ -376,9 +399,7 @@ describe('PrometheusService anomaly signal gauges', () => {
         churnPerOp: 0.1,
         retryState: 1,
       });
-      service.updateActiveIncidents(
-        new Map([[connectionId, [{ pattern: 'none', status: 'active', count: 1 }]]]),
-      );
+      service.updateActiveIncidents([{ connectionIds: [connectionId], patterns: [], status: 'active' }]);
     }
 
     it('drops every signal series when the connection is removed', async () => {

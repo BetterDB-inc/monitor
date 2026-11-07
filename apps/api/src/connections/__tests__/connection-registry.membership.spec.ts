@@ -408,6 +408,23 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.list({ includeRetired: true }).map((c) => c.id)).toEqual(['seed', 'auto', 'adopted']);
   });
 
+  it('reports listed and auto-registered connections like list() does', () => {
+    const { registry } = build();
+    put(registry, seed);
+    put(registry, { id: 'live', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'b', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'c', origin: 'adopted', source: 'cluster', retiredAt: 5 } });
+    expect(['seed', 'live', 'auto', 'adopted', 'deleted', ''].filter((id) => registry.isListed(id))).toEqual([
+      'seed',
+      'live',
+      'adopted',
+    ]);
+    expect(['seed', 'live', 'auto', 'adopted', ''].filter((id) => registry.isAutoRegistered(id))).toEqual([
+      'live',
+      'auto',
+    ]);
+  });
+
   it('uses data node credentials for children when the seed has them', async () => {
     const { registry, storage } = build();
     const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'sentinel-pass', nodeUsername: 'app', nodePassword: 'secret' });

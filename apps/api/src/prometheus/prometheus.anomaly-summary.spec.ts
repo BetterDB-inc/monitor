@@ -23,7 +23,7 @@ const SUMMARY_GAUGES = [
   'betterdb_correlated_groups_by_pattern',
 ];
 
-function buildService(): PrometheusService {
+function buildService(unlisted: ReadonlySet<string> = new Set()): PrometheusService {
   const configs: Record<string, { host: string; port: number }> = {
     [CONNECTION_ID]: { host: '10.0.0.1', port: 6379 },
     [OTHER_CONNECTION_ID]: { host: '10.0.0.2', port: 6379 },
@@ -32,6 +32,8 @@ function buildService(): PrometheusService {
   const registry = {
     // Mirrors ConnectionRegistry.getConfig: an empty id resolves to the default.
     getConfig: jest.fn((id?: string) => configs[id || CONNECTION_ID] ?? null),
+    // A retired member keeps its config but is no longer listed.
+    isListed: jest.fn((id: string) => id in configs && !unlisted.has(id)),
     getDefaultId: jest.fn().mockReturnValue(CONNECTION_ID),
     list: jest.fn().mockReturnValue([]),
   } as unknown as ConnectionRegistry;
@@ -282,6 +284,19 @@ describe('PrometheusService updateAnomalySummaries', () => {
     }
   });
 
+  it('never publishes a retired connection that still has a config', async () => {
+    const service = buildService(new Set([OTHER_CONNECTION_ID]));
+
+    publish(service, [
+      [CONNECTION_ID, busySummary],
+      [OTHER_CONNECTION_ID, busySummary],
+    ]);
+    service.incrementAnomalyEvent('critical', 'memory_used', 'spike', OTHER_CONNECTION_ID);
+    service.incrementCorrelatedGroup('memory_pressure', 'critical', OTHER_CONNECTION_ID);
+
+    expect(await service.getMetrics()).not.toContain(`connection="${OTHER_CONNECTION_LABEL}"`);
+  });
+
   it('labels connection-less counter events like the gauges', async () => {
     const service = buildService();
 
@@ -296,5 +311,60 @@ describe('PrometheusService updateAnomalySummaries', () => {
       'betterdb_correlated_groups_total{connection="",pattern="memory_pressure",severity="critical"} 1',
     );
     expect(text).not.toContain('connection="unknown"');
+  });
+});
+
+describe('PrometheusService updateAnomalyBufferStats', () => {
+  const buffer = (metricType: string) => ({ metricType, mean: 1, stdDev: 0, ready: true });
+
+  async function bufferSeries(service: PrometheusService): Promise<string[]> {
+    const series: string[] = [];
+    for (const name of [
+      'betterdb_anomaly_buffer_ready',
+      'betterdb_anomaly_buffer_mean',
+      'betterdb_anomaly_buffer_stddev',
+    ]) {
+      const { values } = await service['registry'].getSingleMetric(name)!.get();
+      series.push(...values.map((v) => `${name}:${v.labels.connection}:${v.labels.metric_type}`));
+    }
+    return series.sort();
+  }
+
+  it('moves the series when the connection changes', async () => {
+    const service = buildService();
+
+    service.updateAnomalyBufferStats([buffer('memory_used')], CONNECTION_ID);
+    service.updateAnomalyBufferStats([buffer('memory_used')], OTHER_CONNECTION_ID);
+
+    expect(await bufferSeries(service)).toEqual([
+      `betterdb_anomaly_buffer_mean:${OTHER_CONNECTION_LABEL}:memory_used`,
+      `betterdb_anomaly_buffer_ready:${OTHER_CONNECTION_LABEL}:memory_used`,
+      `betterdb_anomaly_buffer_stddev:${OTHER_CONNECTION_LABEL}:memory_used`,
+    ]);
+  });
+
+  it('removes a metric type that is no longer reported', async () => {
+    const service = buildService();
+
+    service.updateAnomalyBufferStats([buffer('memory_used'), buffer('connections')], CONNECTION_ID);
+    service.updateAnomalyBufferStats([buffer('connections')], CONNECTION_ID);
+
+    expect(await bufferSeries(service)).toEqual([
+      `betterdb_anomaly_buffer_mean:${CONNECTION_LABEL}:connections`,
+      `betterdb_anomaly_buffer_ready:${CONNECTION_LABEL}:connections`,
+      `betterdb_anomaly_buffer_stddev:${CONNECTION_LABEL}:connections`,
+    ]);
+  });
+
+  it('removes every series for a null or connection-less id instead of using the default', async () => {
+    const service = buildService();
+
+    service.updateAnomalyBufferStats([buffer('memory_used')], CONNECTION_ID);
+    service.updateAnomalyBufferStats([buffer('memory_used')], '');
+    expect(await bufferSeries(service)).toEqual([]);
+
+    service.updateAnomalyBufferStats([buffer('memory_used')], CONNECTION_ID);
+    service.updateAnomalyBufferStats([], null);
+    expect(await bufferSeries(service)).toEqual([]);
   });
 });
