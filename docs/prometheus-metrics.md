@@ -100,7 +100,7 @@ total = P + A + Σ over connections (F + V)
 ```
 
 - `P`: process metrics, paid once per BetterDB instance.
-- `A`: the anomaly baseline buffers, paid once per instance under `full`, plus an anomaly summary for each connection with anomalies in the last hour.
+- `A`: the anomaly baseline buffers, paid once per instance under `full`, plus 9 anomaly summary series per registered connection and up to 52 more for each connection with anomalies in the last hour.
 - `F`: the fixed series for the connection's type and profile.
 - `V`: the variable series. Under `vitals` this is always 0.
 
@@ -112,9 +112,9 @@ The OTLP mirror exports the same series as the scrape, so the same budget applie
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------- |
 | Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) | about 55 on Node 22. The count shifts slightly with heap spaces and GC kinds. | both    |
 | Anomaly baseline buffers                                            | up to 120, while anomaly detection runs                                       | `full`  |
-| Anomaly summary                                                     | up to 61 per connection with anomalies in the last hour, plus 61 for connection-less events | `full`  |
+| Anomaly summary                                                     | 9 per registered connection, plus up to 52 more per connection with anomalies in the last hour, plus up to 61 for connection-less events | `full`  |
 
-The buffer gauges are published once per instance under the default connection's label. The anomaly summary gauges are published per connection, under each connection's own label, for every connection with an anomaly or correlated group in the last hour. Events that belong to no connection are published under an empty label, `connection=""`, which Prometheus reads as the label being absent; they never share the default connection's series. A connection whose events age out of the window is published once more at zero. Their bounds:
+The buffer gauges are published once per instance under the default connection's label. The anomaly summary gauges are published per connection, under each connection's own label. The three severity gauges are published for every registered connection on every cycle, so a quiet or newly added connection reads 0 rather than no data; the metric-type and pattern gauges appear only for connections with an anomaly or correlated group in the last hour. Events that belong to no connection are published under an empty label, `connection=""`, which Prometheus reads as the label being absent; they never share the default connection's series, and are published only while such events exist (once more at zero when they age out). Their bounds:
 
 | Gauges                                                                                                      | Label               | Bound         | Series |
 | ----------------------------------------------------------------------------------------------------------- | ------------------- | ------------- | ------ |
@@ -123,7 +123,7 @@ The buffer gauges are published once per instance under the default connection's
 | `betterdb_correlated_groups_by_pattern`                                                                     | correlation pattern | 12            | 12     |
 | the three `betterdb_anomaly_buffer_*` gauges                                                                | metric type         | 40 each       | 120    |
 
-Total: 120 once, plus 9 + 40 + 12 = 61 per connection with recent anomalies.
+Total: 120 once, plus 9 per registered connection, plus up to 40 + 12 = 52 more per connection with recent anomalies.
 
 ### Fixed series per connection (`F`)
 
@@ -232,7 +232,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | ACL reason/user     | 5                  | 5               |
 | **Per connection**  | **270**            | **674**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 120 more while anomaly detection runs, and up to 61 for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 120 more while anomaly detection runs, plus 9 per registered connection (63 for this fleet) and up to 52 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -525,7 +525,7 @@ Real-time anomaly detection system metrics.
 - `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
-The three gauges are published per connection, under the connection the anomaly was detected on. An anomaly with no connection is published under an empty `connection=""` label, which Prometheus reads as the label being absent, rather than under the default connection. A connection with no anomalies in the last hour has no series; one whose anomalies age out is set to zero once and then left alone, and its series are removed when the connection is deleted.
+The three gauges are published per connection, under the connection the anomaly was detected on. `betterdb_anomaly_events_current` and `betterdb_anomaly_by_severity` are published for every registered connection on every cycle, so a connection with no anomalies reads 0 for each severity rather than having no series. `betterdb_anomaly_by_metric` series appear only for metric types with an anomaly in the last hour; a metric type whose anomalies age out is set to zero once and then left alone. An anomaly with no connection is published under an empty `connection=""` label, which Prometheus reads as the label being absent, rather than under the default connection; those series exist only while such anomalies are in the window. A deleted connection's series are removed.
 
 #### Correlation Metrics
 
@@ -537,7 +537,7 @@ The three gauges are published per connection, under the connection the anomaly 
 
 **Pattern Values**: `traffic_burst`, `batch_job`, `memory_pressure`, `slow_queries`, `auth_attack`, `connection_leak`, `cache_thrashing`, `node_failover`, `unknown`
 
-The two gauges follow the same per-connection rules as the anomaly gauges above. A group whose members span several connections is counted under each of them; a group with no connection is counted under `connection=""`.
+The two gauges follow the same per-connection rules as the anomaly gauges above: `betterdb_correlated_groups_by_severity` is published for every registered connection, `betterdb_correlated_groups_by_pattern` only for patterns seen in the last hour. A group whose members span several connections is counted under each of them; a group with no connection is counted under `connection=""`.
 
 #### Buffer Stats Metrics
 

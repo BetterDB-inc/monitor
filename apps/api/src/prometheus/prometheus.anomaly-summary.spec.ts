@@ -99,6 +99,26 @@ describe('PrometheusService updateAnomalySummary', () => {
     ).toEqual({ info: 0, warning: 0, critical: 0 });
   });
 
+  it('publishes nine zero severity series and nothing else for an empty summary', async () => {
+    const service = buildService();
+
+    service.updateAnomalySummary(emptySummary, CONNECTION_ID);
+
+    for (const name of [
+      'betterdb_anomaly_events_current',
+      'betterdb_anomaly_by_severity',
+      'betterdb_correlated_groups_by_severity',
+    ]) {
+      expect(await gaugeValues(service, name, 'severity')).toEqual({
+        info: 0,
+        warning: 0,
+        critical: 0,
+      });
+    }
+    expect(await connectionLabels(service, 'betterdb_anomaly_by_metric')).toEqual([]);
+    expect(await connectionLabels(service, 'betterdb_correlated_groups_by_pattern')).toEqual([]);
+  });
+
   it('keeps each connection under its own label', async () => {
     const service = buildService();
 

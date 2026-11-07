@@ -10484,25 +10484,59 @@ describe('AnomalyService', () => {
       });
     });
 
-    it('zeroes a connection that had events last cycle and none now', async () => {
-      (service as any).recentAnomalies = [
-        anomaly('conn-1', AnomalySeverity.CRITICAL),
-        anomaly('conn-2', AnomalySeverity.WARNING),
-      ];
+    const emptySummary = {
+      bySeverity: { info: 0, warning: 0, critical: 0 },
+      byMetric: {},
+      unresolvedBySeverity: { info: 0, warning: 0, critical: 0 },
+      byPattern: {},
+      groupsBySeverity: { info: 0, warning: 0, critical: 0 },
+    };
+
+    it('publishes an empty summary for every registered connection without events', async () => {
+      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }, { id: 'conn-2' }]);
+      (service as any).recentAnomalies = [anomaly('conn-1', AnomalySeverity.CRITICAL)];
+
+      await (service as any).updatePrometheusSummary();
       await (service as any).updatePrometheusSummary();
 
-      (service as any).recentAnomalies = [anomaly('conn-1', AnomalySeverity.CRITICAL)];
+      // Quiet connections are published every cycle; '' only while it has events.
+      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(4);
+      expect(summaryFor('conn-1')).toEqual({
+        ...emptySummary,
+        bySeverity: { info: 0, warning: 0, critical: 1 },
+        byMetric: { [MetricType.MEMORY_USED]: 1 },
+        unresolvedBySeverity: { info: 0, warning: 0, critical: 1 },
+      });
+      expect(summaryFor('conn-2')).toEqual(emptySummary);
+      expect(summaryFor('')).toBeUndefined();
+    });
+
+    it('zeroes connection-less series once when their events age out', async () => {
+      (service as any).recentAnomalies = [anomaly(undefined, AnomalySeverity.WARNING)];
+      await (service as any).updatePrometheusSummary();
+
+      (service as any).recentAnomalies = [];
       prometheusService.updateAnomalySummary.mockClear();
       await (service as any).updatePrometheusSummary();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(2);
-      expect(summaryFor('conn-2')).toEqual({
-        bySeverity: { info: 0, warning: 0, critical: 0 },
-        byMetric: {},
-        unresolvedBySeverity: { info: 0, warning: 0, critical: 0 },
-        byPattern: {},
-        groupsBySeverity: { info: 0, warning: 0, critical: 0 },
-      });
+      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledTimes(1);
+      expect(summaryFor('')).toEqual(emptySummary);
+
+      prometheusService.updateAnomalySummary.mockClear();
+      await (service as any).updatePrometheusSummary();
+
+      expect(prometheusService.updateAnomalySummary).not.toHaveBeenCalled();
+    });
+
+    it('publishes a connection that left the registry once more, then forgets it', async () => {
+      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }, { id: 'conn-2' }]);
+      await (service as any).updatePrometheusSummary();
+
+      (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-1' }]);
+      prometheusService.updateAnomalySummary.mockClear();
+      await (service as any).updatePrometheusSummary();
+
+      expect(summaryFor('conn-2')).toEqual(emptySummary);
 
       prometheusService.updateAnomalySummary.mockClear();
       await (service as any).updatePrometheusSummary();

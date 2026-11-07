@@ -514,8 +514,9 @@ export class AnomalyService
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
   private lastHourGroups: LastHourGroup[] = [];
-  // Connections whose anomaly summary was published last cycle, so one that
-  // goes quiet is reported once more at zero instead of keeping its last counts.
+  // Connection ids whose anomaly summary was published last cycle, so one that
+  // drops out (connection-less events aging out, a connection leaving the
+  // registry) is reported once more at zero instead of keeping its last counts.
   private summaryConnectionIds = new Set<string>();
   private lastSlowlogId = new Map<string, number>();
   // Previous lifetime rejected_connections counter per connection, so we can feed
@@ -9749,9 +9750,11 @@ export class AnomalyService
 
   private async updatePrometheusSummary(): Promise<void> {
     const oneHourAgo = Date.now() - 3600000;
-    // One summary per connection; '' collects connection-less events, which
-    // Prometheus exports under an empty connection label rather than the
-    // default connection's.
+    // One summary per connection. Every registered connection is published,
+    // so a quiet one shows zero severity series rather than no data. '' collects
+    // connection-less events, which Prometheus exports under an empty
+    // connection label rather than the default connection's; it is published
+    // only while such events exist.
     const summaries = new Map<string, AnomalySummaryCounts>();
     const summaryFor = (connectionId: string): AnomalySummaryCounts => {
       let summary = summaries.get(connectionId);
@@ -9786,9 +9789,15 @@ export class AnomalyService
       }
     }
 
-    // A connection with events last cycle but none now is published once more
-    // with an empty summary, which zeroes its series instead of leaving the
-    // last non-zero counts in place.
+    for (const connection of this.connectionRegistry.list()) {
+      summaryFor(connection.id);
+    }
+
+    // Anything published last cycle but not this one (connection-less events
+    // that aged out, or a connection that left the registry) is published once
+    // more with an empty summary, which zeroes its series instead of leaving
+    // the last non-zero counts in place. A deleted connection's series are then
+    // dropped by the Prometheus service's connection cleanup.
     const activeConnectionIds = new Set(summaries.keys());
     for (const connectionId of this.summaryConnectionIds) {
       if (!activeConnectionIds.has(connectionId)) summaryFor(connectionId);
