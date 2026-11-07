@@ -112,6 +112,9 @@ const FANOUT_STATES = [
 
 type FanoutCounts = Record<(typeof FANOUT_STATES)[number][1], number>;
 
+/** Reasons that need no fan-out gap series: nothing is wrong. */
+const FANOUT_NO_GAP: ReadonlySet<string> = new Set(['not_applicable']);
+
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
@@ -400,6 +403,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private connectionChurnPerOp: Gauge;
   private retryAmplificationState: Gauge;
   private anomalyFanoutPrimaries: Gauge;
+  private anomalyFanoutGap: Gauge;
+  // Reason exported under betterdb_anomaly_fanout_gap, by connection label.
+  private fanoutGapReasons = new Map<string, string>();
   private incidentActive: Gauge;
 
   // Metric Forecasting
@@ -1226,6 +1232,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'anomaly_fanout_primaries',
       'Primaries the anomaly fan-out checked, could not reach, was refused by, skipped past its cap, or does not dial, in the latest cycle',
       ['state'],
+    );
+    this.anomalyFanoutGap = this.createGauge(
+      'anomaly_fanout_gap',
+      'Why the anomaly fan-out of a cluster or Sentinel connection dialed no primary in the latest cycle (1 for the current reason)',
+      ['reason'],
     );
     this.incidentActive = this.createGauge(
       'incident_active',
@@ -3858,7 +3869,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * cluster or Sentinel connection keeps one series per state, so a topology
    * it does not dial shows up under `not_dialed` rather than as absent.
    */
-  updateFanoutCoverage(connectionId: string, coverage: FanoutCounts | null): void {
+  updateFanoutCoverage(
+    connectionId: string,
+    coverage: (FanoutCounts & { reason?: string | null }) | null,
+  ): void {
     const connLabel = this.getConnectionLabel(connectionId);
     if (connLabel === null) {
       return;
@@ -3867,6 +3881,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       for (const [fanoutState] of FANOUT_STATES) {
         this.anomalyFanoutPrimaries.remove(connLabel, fanoutState);
       }
+      this.setFanoutGap(connLabel, null);
       return;
     }
     const state = this.getConnectionState(connectionId);
@@ -3874,6 +3889,24 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const [fanoutState, key] of FANOUT_STATES) {
       this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[key]);
     }
+    this.setFanoutGap(connLabel, coverage.reason ?? null);
+  }
+
+  /**
+   * One series for the reason the fan-out dialed nothing, so `topology_unreadable`
+   * and full coverage (`covered_elsewhere`, `no_targets`), which all export zero
+   * counts, can be told apart. Absent while the fan-out reads its primaries.
+   */
+  private setFanoutGap(connLabel: string, reason: string | null): void {
+    const previous = this.fanoutGapReasons.get(connLabel);
+    const next = reason !== null && !FANOUT_NO_GAP.has(reason) ? reason : null;
+    if (previous !== undefined && previous !== next) {
+      this.anomalyFanoutGap.remove(connLabel, previous);
+      this.fanoutGapReasons.delete(connLabel);
+    }
+    if (next === null) return;
+    this.anomalyFanoutGap.labels(connLabel, next).set(1);
+    this.fanoutGapReasons.set(connLabel, next);
   }
 
   updateActiveIncidents(

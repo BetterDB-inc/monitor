@@ -338,6 +338,35 @@ describe('PrometheusService anomaly signal gauges', () => {
       expect(await series('betterdb_anomaly_fanout_primaries')).toEqual(zeroSeries(OTHER_LABEL, 1));
     });
 
+    it('names the reason the fan-out dialed nothing, so a gap differs from full coverage', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unreadable' });
+      service.updateFanoutCoverage('conn-2', { ...counts(), reason: 'covered_elsewhere' });
+
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([
+        { connection: LABEL, reason: 'topology_unreadable', value: 1 },
+        { connection: OTHER_LABEL, reason: 'covered_elsewhere', value: 1 },
+      ]);
+    });
+
+    it('keeps one gap series per connection as the reason changes, and none once it reads', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unknown' });
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'no_sentinel_credentials' });
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([
+        { connection: LABEL, reason: 'no_sentinel_credentials', value: 1 },
+      ]);
+
+      service.updateFanoutCoverage('conn-1', { ...counts({ checked: 2 }), reason: null });
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
+    });
+
+    it('drops the gap series with the coverage', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'agent_connection' });
+
+      service.updateFanoutCoverage('conn-1', null);
+
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
+    });
+
     it('ignores a connection that no longer exists', async () => {
       service.updateFanoutCoverage('deleted', counts({ checked: 3 }));
 

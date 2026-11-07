@@ -303,6 +303,7 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   ),
   betterdb_retry_amplification_state: gauge('betterdb.anomaly.retry_amplification_state', '1'),
   betterdb_anomaly_fanout_primaries: gauge('betterdb.anomaly.fanout_primaries', '{primary}'),
+  betterdb_anomaly_fanout_gap: gauge('betterdb.anomaly.fanout_gap', '1'),
   betterdb_incident_active: gauge('betterdb.anomaly.incidents_active', '{incident}'),
   betterdb_metric_forecast_time_to_limit_seconds: gauge('betterdb.forecast.time_to_limit', 's'),
   betterdb_cve_findings: gauge('betterdb.cve.findings', '{finding}'),

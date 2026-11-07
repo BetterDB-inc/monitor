@@ -89,20 +89,27 @@ function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): Top
 export class TopologyTargetClaims {
   private owners = new Map<string, { connectionId: string; at: number }>();
 
+  /**
+   * Claims up to `limit` free targets, and every free `down` address: a
+   * primary the topology flags as down is not read, but whoever holds it is
+   * the one connection that counts it unreachable. Returns the claimed targets.
+   */
   claim(
     connectionId: string,
     targets: TopologyTarget[],
     now: number,
     staleMs: number,
     limit = TOPOLOGY_TARGET_LIMIT,
+    down: Iterable<string> = [],
   ): TopologyTarget[] {
     const free = targets.filter((target) => !this.heldByOther(connectionId, target.addr, now, staleMs));
     const claimed = free.slice(0, limit);
-    const wanted = new Set(claimed.map((t) => t.addr));
+    const freeDown = [...down].filter((addr) => !this.heldByOther(connectionId, addr, now, staleMs));
+    const wanted = new Set([...claimed.map((t) => t.addr), ...freeDown]);
     for (const [addr, owner] of this.owners) {
       if (owner.connectionId === connectionId && !wanted.has(addr)) this.owners.delete(addr);
     }
-    for (const target of claimed) this.owners.set(target.addr, { connectionId, at: now });
+    for (const addr of wanted) this.owners.set(addr, { connectionId, at: now });
     return claimed;
   }
 

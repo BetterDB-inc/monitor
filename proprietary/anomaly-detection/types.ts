@@ -257,29 +257,37 @@ export interface AnomalySummary {
  *   credentials, so none of its primaries are dialed.
  * - `sentinel_credentials_unreadable`: the data-node password is stored but
  *   could not be decrypted (missing or rotated `ENCRYPTION_KEY`).
+ * - `connection_secrets_unreadable`: data-node credentials are set, but
+ *   another stored secret (password, TLS key, SSH material) could not be
+ *   decrypted.
  * - `certificate_auth`: a certificate-authenticated Sentinel connection; the
  *   connection form stores no data-node settings in that mode.
- * - `agent_connection`: reached through the agent, so the monitor cannot dial
- *   the data nodes itself.
- * - `ssh_tunnel`: a cluster or Sentinel connection behind an SSH tunnel; its
- *   data nodes cannot be reached through the tunnel.
+ * - `agent_connection`: a cluster or Sentinel connection reached through the
+ *   agent, so the monitor cannot dial the data nodes itself.
+ * - `ssh_tunnel`: a Sentinel connection behind an SSH tunnel; its data nodes
+ *   are not dialed. (A tunnelled cluster connection still dials; see
+ *   `tunnelled`.)
  * - `topology_unknown`: `SENTINEL MASTERS` has not been read yet.
  * - `topology_unreadable`: `CLUSTER NODES` or `SENTINEL MASTERS` failed on the
  *   latest read.
  * - `no_targets`: every other primary is monitored as its own connection.
  * - `covered_elsewhere`: every other primary is checked by another connection.
+ * - `fanout_failed`: the cycle failed before the primaries were read (a
+ *   storage error, for example); `notDialed` counts the ones it skipped.
  */
 export type FanoutCoverageReason =
   | 'not_applicable'
   | 'no_sentinel_credentials'
   | 'sentinel_credentials_unreadable'
+  | 'connection_secrets_unreadable'
   | 'certificate_auth'
   | 'agent_connection'
   | 'ssh_tunnel'
   | 'topology_unknown'
   | 'topology_unreadable'
   | 'no_targets'
-  | 'covered_elsewhere';
+  | 'covered_elsewhere'
+  | 'fanout_failed';
 
 /** Per-connection outcome of the latest per-node fan-out cycle. */
 export interface FanoutCoverage {
@@ -298,11 +306,17 @@ export interface FanoutCoverage {
   notDialed: number;
   /** Set when the fan-out cannot dial, or has nothing to check. */
   reason: FanoutCoverageReason | null;
+  /** The connection goes through an SSH tunnel, which the per-node reads do not use. */
+  tunnelled: boolean;
   /** Most primaries one connection checks. */
   targetLimit: number;
   /** Per-primary connect and INFO timeout. */
   timeoutMs: number;
   timestamp: number;
+  /** Server-side age of the entry when it was read. */
+  ageMs: number;
+  /** No poll has refreshed the entry for 3 poll intervals (at least 30 seconds); its gauges are withdrawn. */
+  stale: boolean;
 }
 
 export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
