@@ -338,10 +338,12 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // The last error is kept because iovalkey reports a refused connection
     // (WRONGPASS, NOAUTH, a socket error) on this event and then rejects
     // connect() with its generic "Connection is closed.", which tells the
-    // caller nothing about why.
+    // caller nothing about why. Only kept until connect() settles, so a
+    // stored client does not hold on to its later errors.
     let lastError: Error | undefined;
+    let connecting = true;
     client.on('error', (err) => {
-      lastError = err;
+      if (connecting) lastError = err;
       const errorCode = (err as any).code || err.name;
       const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
@@ -363,6 +365,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           setTimeout(() => reject(new Error('Connection timeout')), this.CONNECTION_TIMEOUT),
         ),
       ]);
+      connecting = false;
+      lastError = undefined;
 
       const connection: NodeConnection = {
         node,
@@ -406,8 +410,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       // Only log each unique connection error once to avoid spam
       const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
+        // The reply itself, not the wrapped message, which repeats this prefix.
+        const reason = lastError ?? connectError;
         this.logger.debug(
-          `Failed to connect to node ${key} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+          `Failed to connect to node ${key} at ${host}:${port}: ${reason instanceof Error ? reason.message : reason}`,
         );
         // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {
