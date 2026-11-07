@@ -340,6 +340,28 @@ describe('PrometheusService anomaly signal gauges', () => {
         { connection: LABEL, pattern: 'retry_storm', status: 'recovering', value: 1 },
       ]);
     });
+
+    it('exports connection-less incidents under an empty connection label', async () => {
+      service.updateActiveIncidents(
+        new Map([
+          ['conn-1', [{ pattern: 'retry_storm', status: 'active', count: 1 }]],
+          ['', [{ pattern: 'none', status: 'active', count: 2 }]],
+        ]),
+      );
+
+      expect(await series('betterdb_incident_active')).toEqual([
+        { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
+        { connection: '', pattern: 'none', status: 'active', value: 2 },
+      ]);
+
+      service.updateActiveIncidents(
+        new Map([['conn-1', [{ pattern: 'retry_storm', status: 'active', count: 1 }]]]),
+      );
+
+      expect(await series('betterdb_incident_active')).toEqual([
+        { connection: LABEL, pattern: 'retry_storm', status: 'active', value: 1 },
+      ]);
+    });
   });
 
   describe('series lifecycle', () => {

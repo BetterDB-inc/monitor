@@ -102,6 +102,16 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
 ]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
+/**
+ * `connection` label value for anomaly summary and incident series that
+ * belong to no connection. Prometheus reads an empty label value as the label
+ * being absent, so these series never collide with a connection's `host:port`
+ * and never share its stale-label cleanup. The empty id doubles as the
+ * per-connection state key for them.
+ */
+const NO_CONNECTION_ID = '';
+const NO_CONNECTION_LABEL = '';
+
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
@@ -610,6 +620,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private getConnectionLabel(connectionId: string): string | null {
+    // The registry resolves an empty id to the default connection, which would
+    // file connection-less series under that connection's label.
+    if (connectionId === NO_CONNECTION_ID) {
+      return NO_CONNECTION_LABEL;
+    }
     try {
       const config = this.connectionRegistry.getConfig(connectionId);
       return config ? `${config.host}:${config.port}` : null;
@@ -4030,15 +4045,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       groupsBySeverity: Record<string, number>;
       unresolvedBySeverity: Record<string, number>;
     },
-    connectionId?: string,
+    connectionId = NO_CONNECTION_ID,
   ): void {
-    const effectiveConnectionId =
-      connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
-    const connLabel = this.getConnectionLabel(effectiveConnectionId);
+    const connLabel = this.getConnectionLabel(connectionId);
     if (connLabel === null) {
       return;
     }
-    const state = this.getConnectionState(effectiveConnectionId);
+    const state = this.getConnectionState(connectionId);
+    // Lets cleanupConnectionMetrics find the label for a connection that was
+    // never polled, so a deleted connection does not leave summary series behind.
+    state.signalConnLabel = connLabel;
 
     for (const sev of ['info', 'warning', 'critical']) {
       this.anomalyBySeverity.labels(connLabel, sev).set(summary.bySeverity[sev] ?? 0);
