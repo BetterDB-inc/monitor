@@ -8847,8 +8847,9 @@ export class AnomalyService
    */
   private sentinelFanoutGap(ctx: ConnectionContext): FanoutCoverageReason | null {
     if (this.connectionRegistry.sentinelDataNodeCredentials(ctx.connectionId) !== null) return null;
-    // Mirrors the order sentinelDataNodeCredentials refuses in, so the reason
-    // names what actually blocks the fan-out.
+    // Follows the checks sentinelDataNodeCredentials refuses on (bar
+    // `membership`: a managed child is a data node, never a Sentinel), so the
+    // reason names what actually blocks the fan-out.
     const config = this.connectionRegistry.getConfig(ctx.connectionId);
     if (config?.sshTunnel?.enabled) return 'ssh_tunnel';
     if (!dialsDataNodes(config) || ctx.connectionType === 'agent') return 'agent_connection';
@@ -8981,9 +8982,10 @@ export class AnomalyService
     topology: FanoutCoverage['topology'] = null,
   ): Promise<void> {
     if (!this.clusterDiscovery) {
-      // Nothing can be dialed without cluster discovery, but a known gap is
-      // still worth reporting.
-      if (gap) this.recordFanoutCoverage(ctx, topology, { ...EMPTY_FANOUT, ...gap });
+      // Nothing can be dialed without cluster discovery. Say so rather than
+      // record nothing, which reads as full coverage.
+      const recorded = gap ?? this.undialedGap(ctx.connectionId, scope, 'fanout_failed');
+      this.recordFanoutCoverage(ctx, topology, { ...EMPTY_FANOUT, ...recorded });
       return;
     }
     try {
@@ -9105,7 +9107,10 @@ export class AnomalyService
       await this.settleRetiredDivergence(ctx.connectionId);
     } catch (err) {
       // The reads below never run. Say so rather than keep the previous
-      // cycle's counts until they go stale.
+      // cycle's counts until they go stale, and let the claims go so another
+      // connection of the topology can take the primaries over instead of
+      // reporting them covered here.
+      this.topologyTargetClaims.release(ctx.connectionId);
       if (targets.length > 0) {
         this.recordFanoutCoverage(ctx, topology, {
           checked: 0,

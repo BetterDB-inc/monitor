@@ -14864,6 +14864,57 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 0, notDialed: 2, reason: 'fanout_failed', timestamp: T0 });
         });
 
+        it('keeps the backed-off and down counts, and lets its claims go, when the storage work throws', async () => {
+          const third = { addr: '10.0.1.8:6379', host: '10.0.1.8', port: 6379, nodeId: 'node-d' };
+          const members = new Set([NODE, other.addr, third.addr, '10.0.1.9:6379']);
+          const client = nodeClient([2]);
+          const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
+            if (nodeId === 'node-d') throw new Error('WRONGPASS invalid username-password pair');
+            return client;
+          });
+          await poll([target, other, third], 1, T0, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 2, authFailed: 1 });
+          getNodeConnection.mockClear();
+          jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          const at = T0 + (service as any).getIntervalMs() / 2;
+          await expect(poll([target, other, third], 1, at, members)).rejects.toThrow('storage down');
+
+          expect(getNodeConnection).not.toHaveBeenCalled();
+          expect(latest()).toMatchObject({
+            checked: 0,
+            unreachable: 2,
+            authFailed: 1,
+            skipped: 0,
+            notDialed: 1,
+            reason: 'fanout_failed',
+            timestamp: at,
+          });
+          // Another connection of the topology may take the primaries over
+          // rather than report them covered here.
+          expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, at, 30_000)).toBe(false);
+          expect((service as any).topologyTargetClaims.heldByOther('conn-2', '10.0.1.9:6379', at, 30_000)).toBe(false);
+        });
+
+        it('says the primaries were not read when there is no cluster discovery to dial them', async () => {
+          (service as any).clusterDiscovery = undefined;
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 0, unreachable: 0, notDialed: 2, reason: 'fanout_failed' });
+        });
+
+        it('reports a covered topology, not a failure, without cluster discovery', async () => {
+          (service as any).clusterDiscovery = undefined;
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
+
+          await poll([target], 1, T0);
+
+          expect(latest()).toMatchObject({ notDialed: 0, reason: 'covered_elsewhere' });
+        });
+
         it('records an empty cycle before the storage writes that can throw', async () => {
           discovery();
           jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
