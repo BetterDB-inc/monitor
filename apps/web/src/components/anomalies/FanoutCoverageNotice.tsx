@@ -178,8 +178,9 @@ function CoverageNotice({ coverage }: { coverage: FanoutCoverage | null | undefi
     case 'fanout_failed':
       return (
         <Notice coverage={coverage} title={notCovered}>
-          The latest check failed before it read the primaries, so {none} {reported} were checked
-          this cycle. {NOT_CHECKED} The monitor log has the error.
+          The latest cycle did not read the primaries, so {none} {reported} were checked this
+          cycle: the check failed before it reached them, or this monitor cannot dial them. {NOT_CHECKED}{' '}
+          The monitor log says which.
         </Notice>
       );
     case 'topology_unknown':

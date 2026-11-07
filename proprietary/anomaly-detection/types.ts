@@ -273,7 +273,8 @@ export interface AnomalySummary {
  * - `no_targets`: every other primary is monitored as its own connection.
  * - `covered_elsewhere`: every other primary is checked by another connection.
  * - `fanout_failed`: the cycle failed before the primaries were read (a
- *   storage error, for example); `notDialed` counts the ones it skipped.
+ *   storage error, for example), or the deployment has no cluster discovery
+ *   to dial them; `notDialed` counts the ones it skipped.
  */
 export type FanoutCoverageReason =
   | 'not_applicable'

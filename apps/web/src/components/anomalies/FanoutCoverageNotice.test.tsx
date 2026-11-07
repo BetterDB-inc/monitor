@@ -212,11 +212,12 @@ describe('FanoutCoverageNotice', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('another stored secret');
   });
 
-  it('says the cycle failed before it read the primaries', () => {
+  it('says the cycle did not read the primaries and points at the log', () => {
     render(<FanoutCoverageNotice coverage={coverage({ reason: 'fanout_failed', notDialed: 2 })} />);
 
-    expect(screen.getByRole('alert')).toHaveTextContent('failed before it read the primaries');
+    expect(screen.getByRole('alert')).toHaveTextContent('did not read the primaries');
     expect(screen.getByRole('alert')).toHaveTextContent('none of the 2 primaries');
+    expect(screen.getByRole('alert')).toHaveTextContent('The monitor log says which');
   });
 
   it('explains unreachable primaries of an SSH-tunnelled cluster', () => {

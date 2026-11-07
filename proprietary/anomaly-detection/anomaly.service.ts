@@ -710,6 +710,10 @@ export class AnomalyService
   // and the reason they were told; cleared once the gap closes so the notice
   // fires again if it reopens.
   private fanoutGapNoticed = new Map<string, FanoutCoverageReason>();
+  // Connections already told that nothing dials their primaries because the
+  // deployment has no cluster discovery. Kept apart from fanoutGapNoticed,
+  // which a Sentinel poll re-arms every cycle its credentials are present.
+  private fanoutUndialedNoticed = new Set<string>();
   // Sentinel connections whose latest SENTINEL MASTERS probe failed.
   private sentinelMastersFailed = new Set<string>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
@@ -1212,6 +1216,7 @@ export class AnomalyService
     this.fanoutCoverage.delete(connectionId);
     this.fanoutCoverageWithdrawn.delete(connectionId);
     this.fanoutGapNoticed.delete(connectionId);
+    this.fanoutUndialedNoticed.delete(connectionId);
     this.sentinelMastersFailed.delete(connectionId);
     this.topologyTargetClaims.release(connectionId);
     for (const key of [...this.topologyBackoff.keys()]) {
@@ -8983,8 +8988,15 @@ export class AnomalyService
   ): Promise<void> {
     if (!this.clusterDiscovery) {
       // Nothing can be dialed without cluster discovery. Say so rather than
-      // record nothing, which reads as full coverage.
+      // record nothing, which reads as full coverage, and log it once per
+      // connection: the dashboard points at the log for this reason.
       const recorded = gap ?? this.undialedGap(ctx.connectionId, scope, 'fanout_failed');
+      if (recorded.reason === 'fanout_failed' && !this.fanoutUndialedNoticed.has(ctx.connectionId)) {
+        this.fanoutUndialedNoticed.add(ctx.connectionId);
+        this.logger.warn(
+          `Node fan-out for ${ctx.connectionName}: the other primaries ${topology === 'sentinel' ? 'this Sentinel monitors' : 'the topology lists'} are not checked because cluster discovery is not available in this deployment.`,
+        );
+      }
       this.recordFanoutCoverage(ctx, topology, { ...EMPTY_FANOUT, ...recorded });
       return;
     }

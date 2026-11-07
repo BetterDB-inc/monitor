@@ -14932,14 +14932,39 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 0, unreachable: 0, notDialed: 2, reason: 'fanout_failed' });
         });
 
+        it('logs once per connection that cluster discovery is not available', async () => {
+          (service as any).clusterDiscovery = undefined;
+          const warn = jest.spyOn((service as any).logger, 'warn');
+          const notices = () => warn.mock.calls.filter(([msg]) => String(msg).includes('cluster discovery is not available'));
+
+          await poll([target, other], 2, T0);
+          expect(notices()).toHaveLength(1);
+          expect(notices()[0][0]).toContain('the topology lists');
+
+          // Another connection gets its own notice; a removed one is told again.
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [{ addr: '10.0.3.1:6379', host: '10.0.3.1', port: 6379 }], members: new Set(['10.0.3.1:6379']) },
+            null,
+            'sentinel',
+          );
+          expect(notices()).toHaveLength(2);
+          expect(notices()[1][0]).toContain('this Sentinel monitors');
+          (service as any).onConnectionRemoved('conn-1');
+          await poll([target, other], 1, T0 + 20_000);
+          expect(notices()).toHaveLength(3);
+        });
+
         it('reports a covered topology, not a failure, without cluster discovery', async () => {
           (service as any).clusterDiscovery = undefined;
           jest.spyOn(Date, 'now').mockReturnValue(T0);
           (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
+          const warn = jest.spyOn((service as any).logger, 'warn');
 
           await poll([target], 1, T0);
 
           expect(latest()).toMatchObject({ notDialed: 0, reason: 'covered_elsewhere' });
+          expect(warn).not.toHaveBeenCalled();
         });
 
         it('records an empty cycle before the storage writes that can throw', async () => {
