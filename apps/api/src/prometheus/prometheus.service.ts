@@ -682,13 +682,25 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return connLabel;
   }
 
+  /**
+   * Whether a connection the registry still lists owns the label. A connection
+   * added and deleted between two polls of this service never reaches
+   * cleanupConnectionMetrics, so its entry is pruned here instead of letting it
+   * claim the label for every later connection on the same host:port.
+   */
   private hasAnomalyLabel(connLabel: string): boolean {
-    for (const label of this.anomalyLabels.values()) {
-      if (label === connLabel) {
-        return true;
+    let found = false;
+    for (const [connectionId, label] of this.anomalyLabels) {
+      if (label !== connLabel) {
+        continue;
+      }
+      if (this.connectionRegistry.isListed(connectionId)) {
+        found = true;
+      } else {
+        this.anomalyLabels.delete(connectionId);
       }
     }
-    return false;
+    return found;
   }
 
   /**

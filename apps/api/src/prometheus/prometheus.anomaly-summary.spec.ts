@@ -359,6 +359,10 @@ describe('PrometheusService updateAnomalySummaries', () => {
     unlisted.add(OTHER_CONNECTION_ID);
     service.cleanupConnectionMetrics(OTHER_CONNECTION_ID);
 
+    // Synchronously: the bookkeeping no longer knows the label once cleanup
+    // returns, not only after the registry has been read.
+    expect(service['anomalySummaryLabels'].has(OTHER_CONNECTION_LABEL)).toBe(false);
+    expect(service['incidentLabels'].has(OTHER_CONNECTION_LABEL)).toBe(false);
     for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
       expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
     }
@@ -382,6 +386,8 @@ describe('PrometheusService updateAnomalySummaries', () => {
     unlisted.add(SAME_HOST_CONNECTION_ID);
     service.cleanupConnectionMetrics(SAME_HOST_CONNECTION_ID);
 
+    expect(service['anomalySummaryLabels'].has(CONNECTION_LABEL)).toBe(true);
+    expect(service['incidentLabels'].has(CONNECTION_LABEL)).toBe(true);
     for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
       expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
     }
@@ -390,6 +396,40 @@ describe('PrometheusService updateAnomalySummaries', () => {
       warning: 0,
       critical: 2,
     });
+  });
+
+  it('ignores a connection deleted between polls when deciding whether a label is still shared', async () => {
+    const unlisted = new Set<string>();
+    const service = buildService(unlisted);
+    // conn-1 raises an anomaly and is deleted before this service's next poll
+    // lists it, so cleanupConnectionMetrics never runs for it and its label
+    // stays recorded.
+    service.incrementAnomalyEvent('critical', 'memory_used', 'spike', CONNECTION_ID);
+    unlisted.add(CONNECTION_ID);
+
+    // Later a connection to the same host:port, never polled by this service,
+    // gets summary and incident series under that label.
+    publish(service, [
+      [OTHER_CONNECTION_ID, busySummary],
+      [SAME_HOST_CONNECTION_ID, busySummary],
+    ]);
+    service.updateActiveIncidents([
+      { connectionIds: [OTHER_CONNECTION_ID], patterns: ['retry_storm'], status: 'active' },
+      { connectionIds: [SAME_HOST_CONNECTION_ID], patterns: ['retry_storm'], status: 'active' },
+    ]);
+    for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
+      expect(await connectionLabels(service, name)).toContain(CONNECTION_LABEL);
+    }
+
+    unlisted.add(SAME_HOST_CONNECTION_ID);
+    service.cleanupConnectionMetrics(SAME_HOST_CONNECTION_ID);
+
+    expect(service['anomalySummaryLabels'].has(CONNECTION_LABEL)).toBe(false);
+    expect(service['incidentLabels'].has(CONNECTION_LABEL)).toBe(false);
+    expect(service['anomalyLabels'].has(CONNECTION_ID)).toBe(false);
+    for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
+      expect(await connectionLabels(service, name)).toEqual([OTHER_CONNECTION_LABEL]);
+    }
   });
 
   it('never publishes a retired connection that still has a config', async () => {
