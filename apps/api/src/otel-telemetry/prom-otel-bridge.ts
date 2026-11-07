@@ -86,6 +86,8 @@ export function planInstruments(metrics: PromMetricJson[]): InstrumentSpec[] {
   return specs;
 }
 
+const CONNECTION_LABEL = 'connection';
+
 function toAttributes(
   labels: Record<string, unknown> | undefined,
 ): Record<string, string | number> {
@@ -94,10 +96,10 @@ function toAttributes(
     return attributes;
   }
   for (const [key, value] of Object.entries(labels)) {
-    // Prometheus reads an empty label value as the label being absent (the
-    // connection-less anomaly series rely on this), so OTLP leaves it out too
-    // rather than sending it as a real attribute value.
-    if (value === '') {
+    // Connection-less anomaly series carry an empty connection label, which
+    // Prometheus treats as no label at all; OTLP leaves the attribute out the
+    // same way rather than sending "" as a connection.
+    if (key === CONNECTION_LABEL && value === '') {
       continue;
     }
     if (typeof value === 'string' || typeof value === 'number') {

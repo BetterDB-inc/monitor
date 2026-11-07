@@ -95,7 +95,7 @@ describe('prom-otel-bridge', () => {
       expect(collectDataPoints(metric)).toEqual([{ value: 1, attributes: { a: 'ok', c: 2 } }]);
     });
 
-    it('leaves out empty label values, which Prometheus reads as absent', () => {
+    it('leaves out an empty connection label, which Prometheus reads as absent', () => {
       const metric: PromMetricJson = {
         name: 'betterdb_anomaly_by_severity',
         type: 'gauge',
@@ -103,6 +103,17 @@ describe('prom-otel-bridge', () => {
       };
       expect(collectDataPoints(metric)).toEqual([
         { value: 2, attributes: { severity: 'critical' } },
+      ]);
+    });
+
+    it('keeps empty values of other labels', () => {
+      const metric: PromMetricJson = {
+        name: 'x',
+        type: 'gauge',
+        values: [{ value: 1, labels: { connection: 'a:1', name: '' } }],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        { value: 1, attributes: { connection: 'a:1', name: '' } },
       ]);
     });
   });
