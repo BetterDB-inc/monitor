@@ -120,6 +120,12 @@ export interface AnomalySummaryCounts {
 
 const ANOMALY_SEVERITIES = ['info', 'warning', 'critical'] as const;
 
+interface IncidentCount {
+  pattern: string;
+  status: string;
+  count: number;
+}
+
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
   previousClusterState: string | null;
@@ -222,6 +228,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // Pattern and status pairs last published per incident label, keyed like
   // anomalySummaryLabels.
   private readonly incidentLabels = new Map<string, Set<string>>();
+  // The label each connection's anomaly-detection series were last published
+  // under. The freshness tracker only knows connections this service polls
+  // itself; the anomaly service also covers Sentinels, so this is what lets
+  // cleanupConnectionMetrics find their summary and incident series.
+  private readonly anomalyLabels = new Map<string, string>();
   // The label and metric types the anomaly buffer gauges were last published under.
   private anomalyBufferLabel: string | null = null;
   private anomalyBufferMetrics = new Set<string>();
@@ -654,13 +665,30 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
    * Label for an anomaly-detection series. Unlike getConnectionLabel it
    * resolves only connections the registry still lists, so a retired member or
    * a deleted connection cannot bring its series back after
-   * cleanupConnectionMetrics removed them.
+   * cleanupConnectionMetrics removed them, and it remembers the label so that
+   * cleanup can find the series of a connection this service never polled.
    */
   private getAnomalyConnectionLabel(connectionId: string): string | null {
-    if (connectionId !== NO_CONNECTION_ID && !this.connectionRegistry.isListed(connectionId)) {
+    if (connectionId === NO_CONNECTION_ID) {
+      return NO_CONNECTION_ID;
+    }
+    if (!this.connectionRegistry.isListed(connectionId)) {
       return null;
     }
-    return this.getConnectionLabel(connectionId);
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel !== null) {
+      this.anomalyLabels.set(connectionId, connLabel);
+    }
+    return connLabel;
+  }
+
+  private hasAnomalyLabel(connLabel: string): boolean {
+    for (const label of this.anomalyLabels.values()) {
+      if (label === connLabel) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -3889,7 +3917,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       status: string;
     }>,
   ): void {
-    const byLabel = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
+    const byLabel = new Map<string, Map<string, IncidentCount>>();
     for (const incident of incidents) {
       const connectionIds =
         incident.connectionIds.length > 0 ? incident.connectionIds : [NO_CONNECTION_ID];
@@ -3902,10 +3930,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
       const patterns = new Set(incident.patterns.length > 0 ? incident.patterns : ['none']);
       for (const connLabel of labels) {
-        const counts = byLabel.get(connLabel) ?? new Map();
+        const counts = byLabel.get(connLabel) ?? new Map<string, IncidentCount>();
         for (const pattern of patterns) {
           const key = JSON.stringify([pattern, incident.status]);
-          const entry = counts.get(key) ?? { pattern, status: incident.status, count: 0 };
+          const entry: IncidentCount = counts.get(key) ?? {
+            pattern,
+            status: incident.status,
+            count: 0,
+          };
           entry.count++;
           counts.set(key, entry);
         }
@@ -4218,7 +4250,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
     this.retireStorageEpoch(connectionId);
-    const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? undefined;
+    // Drop the anomaly summary and incident series now rather than at the
+    // anomaly service's next summary cycle, unless a connection that stays
+    // shares the label and therefore the series.
+    let anomalyLabel = this.anomalyLabels.get(connectionId);
+    this.anomalyLabels.delete(connectionId);
+    if (anomalyLabel !== undefined && this.hasAnomalyLabel(anomalyLabel)) {
+      anomalyLabel = undefined;
+    }
+    if (anomalyLabel !== undefined) {
+      this.removeAnomalySummary(anomalyLabel);
+      this.removeStaleIncidentLabels(anomalyLabel, new Set());
+    }
+    const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? anomalyLabel;
     if (label !== undefined) {
       this.releaseLabel(label);
     }

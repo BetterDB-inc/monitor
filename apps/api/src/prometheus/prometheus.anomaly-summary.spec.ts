@@ -214,6 +214,46 @@ describe('PrometheusService updateAnomalySummaries', () => {
     });
   });
 
+  it('sums every count of connections that share a host:port', async () => {
+    const service = buildService();
+
+    publish(service, [
+      [CONNECTION_ID, busySummary],
+      [
+        SAME_HOST_CONNECTION_ID,
+        {
+          bySeverity: { critical: 1, warning: 2 },
+          byMetric: { memory_used: 1, connections: 2 },
+          byPattern: { memory_pressure: 1, connection_leak: 1 },
+          groupsBySeverity: { critical: 1, warning: 1 },
+          unresolvedBySeverity: { warning: 2 },
+        },
+      ],
+    ]);
+
+    expect(await gaugeValues(service, 'betterdb_anomaly_by_severity', 'severity')).toEqual({
+      info: 0,
+      warning: 2,
+      critical: 2,
+    });
+    expect(await gaugeValues(service, 'betterdb_anomaly_by_metric', 'metric_type')).toEqual({
+      memory_used: 2,
+      connections: 2,
+    });
+    expect(await gaugeValues(service, 'betterdb_correlated_groups_by_pattern', 'pattern')).toEqual({
+      memory_pressure: 2,
+      connection_leak: 1,
+    });
+    expect(
+      await gaugeValues(service, 'betterdb_correlated_groups_by_severity', 'severity'),
+    ).toEqual({ info: 0, warning: 1, critical: 2 });
+    expect(await gaugeValues(service, 'betterdb_anomaly_events_current', 'severity')).toEqual({
+      info: 0,
+      warning: 2,
+      critical: 1,
+    });
+  });
+
   it('exports connection-less events under an empty connection label', async () => {
     const service = buildService();
 
@@ -266,15 +306,29 @@ describe('PrometheusService updateAnomalySummaries', () => {
   it('does not bring back series that connection cleanup removed', async () => {
     jest.useFakeTimers();
     try {
-      const service = buildService();
+      const unlisted = new Set<string>();
+      const service = buildService(unlisted);
+      // Polled by this service, so cleanup finds the label through freshness.
+      service['freshness'].observe(OTHER_CONNECTION_ID, OTHER_CONNECTION_LABEL, Date.now());
       publish(service, [
         [CONNECTION_ID, busySummary],
         [OTHER_CONNECTION_ID, busySummary],
       ]);
 
+      // The connection is deleted: the registry stops listing it and the
+      // poller calls cleanup, but the anomaly service still has its events in
+      // the window and keeps passing it.
+      unlisted.add(OTHER_CONNECTION_ID);
       service.cleanupConnectionMetrics(OTHER_CONNECTION_ID);
       await jest.runAllTimersAsync();
-      publish(service, [[CONNECTION_ID, busySummary]]);
+      for (const name of SUMMARY_GAUGES) {
+        expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+      }
+
+      publish(service, [
+        [CONNECTION_ID, busySummary],
+        [OTHER_CONNECTION_ID, busySummary],
+      ]);
 
       for (const name of SUMMARY_GAUGES) {
         expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
@@ -282,6 +336,60 @@ describe('PrometheusService updateAnomalySummaries', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('removes the series of a deleted connection it never polled without waiting for a summary', async () => {
+    const unlisted = new Set<string>();
+    const service = buildService(unlisted);
+    // A Sentinel the anomaly service polls but this service does not: no
+    // freshness entry and no per-connection state, only anomaly series.
+    publish(service, [
+      [CONNECTION_ID, busySummary],
+      [OTHER_CONNECTION_ID, busySummary],
+    ]);
+    service.updateActiveIncidents([
+      { connectionIds: [CONNECTION_ID], patterns: ['retry_storm'], status: 'active' },
+      { connectionIds: [OTHER_CONNECTION_ID], patterns: ['retry_storm'], status: 'active' },
+    ]);
+    expect(await connectionLabels(service, 'betterdb_incident_active')).toEqual([
+      CONNECTION_LABEL,
+      OTHER_CONNECTION_LABEL,
+    ]);
+
+    unlisted.add(OTHER_CONNECTION_ID);
+    service.cleanupConnectionMetrics(OTHER_CONNECTION_ID);
+
+    for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
+      expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+    }
+  });
+
+  it('keeps shared series when one of the connections under a host:port is deleted', async () => {
+    const unlisted = new Set<string>();
+    const service = buildService(unlisted);
+    publish(service, [
+      [CONNECTION_ID, busySummary],
+      [SAME_HOST_CONNECTION_ID, busySummary],
+    ]);
+    service.updateActiveIncidents([
+      {
+        connectionIds: [CONNECTION_ID, SAME_HOST_CONNECTION_ID],
+        patterns: ['retry_storm'],
+        status: 'active',
+      },
+    ]);
+
+    unlisted.add(SAME_HOST_CONNECTION_ID);
+    service.cleanupConnectionMetrics(SAME_HOST_CONNECTION_ID);
+
+    for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
+      expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+    }
+    expect(await gaugeValues(service, 'betterdb_anomaly_by_severity', 'severity')).toEqual({
+      info: 0,
+      warning: 0,
+      critical: 2,
+    });
   });
 
   it('never publishes a retired connection that still has a config', async () => {
