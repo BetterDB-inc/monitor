@@ -13,17 +13,13 @@ export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 export const RETRY_AMP_MAX_BASELINE_SCALE = 2;
-// Default names of the connections BetterDB itself opens: the monitor (and its
-// -keyscan, -Node-..., -Discovery clients), the agent and the CLI. A custom
-// connection name comes from the adapter (`ownClientNames`).
+// Names of the connections BetterDB itself opens: the monitor (and its
+// -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
 // BetterDB-Migration-* stays visible on purpose.
 const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
 
-function isMonitorClientName(name: string, ownClientNames: readonly string[]): boolean {
-  return (
-    ownClientNames.includes(name) ||
-    OWN_CLIENT_NAMES.some((own) => name === own || name.startsWith(`${own}-`))
-  );
+function isMonitorClientName(name: string): boolean {
+  return OWN_CLIENT_NAMES.some((own) => name === own || name.startsWith(`${own}-`));
 }
 
 export type ContributorKeyKind = 'name' | 'user' | 'ip';
@@ -70,11 +66,6 @@ export interface AttributionInput extends EpisodeClientSnapshots {
   capture: ClientGroupCount[];
   newConnections: NewClientConnectionGroup[];
   baselineConnections?: NewClientConnectionGroup[];
-  /**
-   * The names the monitor's own connections to the node carry (see
-   * DatabasePort.getOwnClientNames), left out like the default names.
-   */
-  ownClientNames?: readonly string[];
   limit?: number;
 }
 
@@ -358,9 +349,8 @@ export function rankRetryAmplificationContributors(
     addCommandGrowth(map, input.before, input.first, input.latest);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
-  const ownClientNames = input.ownClientNames ?? [];
   for (const [id, acc] of map) {
-    if (acc.keyKind === 'name' && isMonitorClientName(acc.key, ownClientNames)) map.delete(id);
+    if (acc.keyKind === 'name' && isMonitorClientName(acc.key)) map.delete(id);
   }
 
   const contributorOf = new Map(

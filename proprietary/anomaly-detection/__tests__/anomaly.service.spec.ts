@@ -5198,35 +5198,6 @@ describe('AnomalyService', () => {
       expect(ranked).toBeNull();
     });
 
-    it("leaves the connections under the adapter's own names out of the ranking", async () => {
-      dbClient.getOwnClientNames = jest.fn().mockReturnValue(['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI']);
-      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
-      storage.getClientCaptureSummary = jest.fn().mockResolvedValue(summarizeClientCaptures([]));
-      const reading = (takenAt: number, api: number, own: number) => ({
-        takenAt,
-        clients: new Map([
-          ['1', { key: 'api', keyKind: 'name', addr: '10.0.0.1:1', totalCommands: api }],
-          ['9', { key: 'acme-monitor', keyKind: 'name', addr: '10.0.0.9:1', totalCommands: own }],
-        ]),
-      });
-      const snapshots = [
-        reading(520_000, 0, 0),
-        reading(580_000, 600, 600),
-        reading(700_000, 6_600, 60_600),
-      ];
-
-      const ranked = await (service as any).attributeRetryAmplification(
-        mockCtx,
-        snapshots,
-        600_000,
-        780_000,
-      );
-
-      // The storage read is not filtered; the own connections are left out by name.
-      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
-      expect(ranked.map((c: { key: string }) => c.key)).toEqual(['api']);
-    });
-
     it('starts the reconnect baseline after the previous episode and scales it to the full span', async () => {
       const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
       storage.getClientSnapshots = jest.fn().mockResolvedValue([
@@ -5543,7 +5514,6 @@ describe('AnomalyService', () => {
         ]),
       });
       const readings = [steady(520_000, 0), steady(580_000, 60_000), steady(700_000, 180_000)];
-      const ownNames = ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'];
       let history: MemoryAdapter;
 
       beforeEach(() => {
@@ -5592,8 +5562,7 @@ describe('AnomalyService', () => {
       });
 
       it('reports that no client stood out when the newest capture lists only the monitor', async () => {
-        dbClient.getOwnClientNames = jest.fn().mockReturnValue(ownNames);
-        const monitor = (capturedAt: number) => stored('9', '10.0.0.9:1', 'acme-monitor', 1_000, capturedAt);
+        const monitor = (capturedAt: number) => stored('9', '10.0.0.9:1', 'BetterDB-Monitor', 1_000, capturedAt);
         const storm = (id: number, capturedAt: number) =>
           stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', 10, capturedAt);
         await history.saveClientSnapshot([monitor(500_000), storm(1, 500_000)], 'conn-1');
@@ -5612,14 +5581,13 @@ describe('AnomalyService', () => {
         expect(ranked).toEqual([]);
       });
 
-      it("keeps a custom-named monitor and its key-scan clients out without crediting their ids to the application", async () => {
-        dbClient.getOwnClientNames = jest.fn().mockReturnValue(ownNames);
+      it('keeps the monitor and its key-scan clients out without crediting their ids to the application', async () => {
         const app = (id: number, name: string, age: number, capturedAt: number) =>
           stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
         const own = (id: number, name: string, age: number, capturedAt: number) =>
           stored(String(id), `10.0.0.9:${id}`, name, age, capturedAt);
         await history.saveClientSnapshot(
-          [app(100, 'pool', 500, 590_000), own(101, 'acme-monitor', 100, 590_000)],
+          [app(100, 'pool', 500, 590_000), own(101, 'BetterDB-Monitor', 100, 590_000)],
           'conn-1',
         );
         // The monitor reconnected three times (ids 102-104) and runs three
@@ -5627,8 +5595,8 @@ describe('AnomalyService', () => {
         await history.saveClientSnapshot(
           [
             app(100, 'pool', 560, 650_000),
-            own(104, 'acme-monitor', 10, 650_000),
-            ...[105, 106, 107].map((id) => own(id, 'acme-monitor-keyscan', 5, 650_000)),
+            own(104, 'BetterDB-Monitor', 10, 650_000),
+            ...[105, 106, 107].map((id) => own(id, 'BetterDB-Monitor-keyscan', 5, 650_000)),
             app(108, 'api', 1, 650_000),
           ],
           'conn-1',

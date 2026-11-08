@@ -401,31 +401,6 @@ describe('retry amplification attribution', () => {
       expect(ranked.map((c) => c.key)).toEqual(['api']);
     });
 
-    it("leaves the monitor's own connections out under its configured connection name", () => {
-      const at = (takenAt: number, monitor: number, api: number) =>
-        snapshot(takenAt, [
-          client({ id: '1', name: 'acme-monitor', 'tot-cmds': String(monitor) }),
-          client({ id: '2', name: 'acme-monitor-keyscan', 'tot-cmds': String(monitor) }),
-          client({ id: '3', name: 'api', 'tot-cmds': String(api) }),
-        ]);
-
-      const ranked = rankRetryAmplificationContributors({
-        before: at(0, 100, 1000),
-        first: at(60_000, 200, 1600),
-        latest: at(120_000, 20_000, 4600),
-        capture: [group({ name: 'acme-monitor', count: 1 }), group({ name: 'acme-monitor-keyscan', count: 1 })],
-        newConnections: [
-          { name: 'acme-monitor', user: 'default', ip: '10.0.0.9', count: 9 },
-          { name: 'acme-monitor-keyscan', user: 'default', ip: '10.0.0.9', count: 9 },
-          // Only the names the adapter sets are its own.
-          { name: 'acme-monitor-worker', user: 'default', ip: '10.0.0.2', count: 9 },
-        ],
-        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
-      });
-
-      expect(ranked.map((c) => c.key)).toEqual(['api', 'acme-monitor-worker']);
-    });
-
     it('leaves out own connections captured before CLIENT SETNAME once a later capture names them', () => {
       const monitor = (clientId: string, name: string, age: number, capturedAt: number) => ({
         capturedAt,
@@ -439,7 +414,7 @@ describe('retry amplification attribution', () => {
       const { connections } = summarizeClientCaptures(
         ['20', '21', '22'].flatMap((id) => [
           monitor(id, '', 0, 650_000),
-          monitor(id, 'acme-monitor', 50, 700_000),
+          monitor(id, 'BetterDB-Monitor', 50, 700_000),
         ]),
       );
 
@@ -449,7 +424,6 @@ describe('retry amplification attribution', () => {
         latest: null,
         capture: [],
         newConnections: newConnectionsBetween(connections, 600_000, 780_000, 420_000),
-        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
       });
 
       // Under the IP they were first listed by, they would rank as 3 reconnects.
@@ -828,16 +802,16 @@ describe('estimateNewConnections', () => {
     ]);
   });
 
-  it("gives a custom-named monitor and its scan client their share of the id growth", () => {
+  it('gives the monitor and its scan client their share of the id growth', () => {
     // The monitor held id 101 at the previous capture, reconnected three times
     // (102-104) and opened a key-scan client (105); one application client
     // connected (106).
     const captures = [
       capture(0, 100, 500, 'pool'),
-      capture(0, 101, 500, 'acme-monitor'),
+      capture(0, 101, 500, 'BetterDB-Monitor'),
       capture(60_000, 100, 560, 'pool'),
-      capture(60_000, 104, 10, 'acme-monitor'),
-      capture(60_000, 105, 5, 'acme-monitor-keyscan'),
+      capture(60_000, 104, 10, 'BetterDB-Monitor'),
+      capture(60_000, 105, 5, 'BetterDB-Monitor-keyscan'),
       capture(60_000, 106, 1, 'storm'),
     ];
     const newConnections = estimateNewConnections(
@@ -860,7 +834,6 @@ describe('estimateNewConnections', () => {
         latest: null,
         capture: [],
         newConnections,
-        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
       }),
     ).toEqual([]);
   });

@@ -103,7 +103,6 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
-const CLI_CLIENT_NAME = 'BetterDB-CLI';
 
 /**
  * How often, at most, file-sourced TLS material is stat-checked for changes when
@@ -346,7 +345,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   private initClient(): void {
-    const client = this.createValkeyClient(this.clientName);
+    const client = this.createValkeyClient(this.config.connectionName ?? 'BetterDB-Monitor');
     this._client = client;
 
     // Identity-guard the state writes: iovalkey emits `close` asynchronously
@@ -503,19 +502,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   /** ACL user the server reported for the current session, when known. */
   getAuthenticatedUser(): string | undefined {
     return this.authenticatedUser;
-  }
-
-  private get clientName(): string {
-    return this.config.connectionName ?? 'BetterDB-Monitor';
-  }
-
-  private get keyScanClientName(): string {
-    return `${this.clientName}-keyscan`;
-  }
-
-  /** The CLIENT SETNAME names of the main, key-scan and CLI clients. */
-  getOwnClientNames(): string[] {
-    return [this.clientName, this.keyScanClientName, CLI_CLIENT_NAME];
   }
 
   /**
@@ -1279,7 +1265,10 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         }
         try {
           if (!scratch) {
-            scratch = this.createValkeyClient(this.keyScanClientName, db);
+            scratch = this.createValkeyClient(
+              `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan`,
+              db,
+            );
             scratch.on('error', (err) => {
               this.logger.debug(`Scratch client error: ${err.message}`);
             });
@@ -1718,7 +1707,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       );
     }
 
-    this.cliClient = this.createValkeyClient(CLI_CLIENT_NAME);
+    this.cliClient = this.createValkeyClient('BetterDB-CLI');
     // Same rotation pickup as the main client: re-read before the next dial.
     this.cliClient.on('reconnecting', () => this.refreshTlsMaterial(true));
     await this.cliClient.connect();

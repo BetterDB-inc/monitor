@@ -407,8 +407,6 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databa
     // db2 is visited through a short-lived client SELECTed onto db 2…
     expect(createValkeyClient).toHaveBeenCalledTimes(1);
     expect(createValkeyClient.mock.calls[0][1]).toBe(2);
-    // Under a name the adapter reports as its own.
-    expect(adapter.getOwnClientNames()).toContain(createValkeyClient.mock.calls[0][0]);
     expect(scratchClients[2].connect).toHaveBeenCalled();
     // …which is closed afterwards.
     expect(scratchClients[2].quit).toHaveBeenCalled();
@@ -1170,21 +1168,5 @@ describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per co
 
     client.emit('ready');
     expect(probe).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('UnifiedDatabaseAdapter.getOwnClientNames', () => {
-  it('reports the configured connection name, its key-scan clients and the CLI client', () => {
-    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, connectionName: 'acme-monitor' });
-
-    expect(adapter.getOwnClientNames()).toEqual(['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI']);
-    expect(adapter.getClient().options.connectionName).toBe('acme-monitor');
-  });
-
-  it('reports the default name without a configured one', () => {
-    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1 });
-
-    expect(adapter.getOwnClientNames()).toEqual(['BetterDB-Monitor', 'BetterDB-Monitor-keyscan', 'BetterDB-CLI']);
-    expect(adapter.getClient().options.connectionName).toBe('BetterDB-Monitor');
   });
 });

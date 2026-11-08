@@ -134,10 +134,4 @@ export interface DatabasePort {
    * adapter probed it on connect. Lets a certificate-mapped identity be verified.
    */
   getAuthenticatedUser?(): string | undefined;
-  /**
-   * The CLIENT SETNAME names of the connections the adapter opens, the
-   * configured connection name included, so readers of CLIENT LIST can leave
-   * the monitor's own connections out. Adapters that open none leave it out.
-   */
-  getOwnClientNames?(): string[];
 }

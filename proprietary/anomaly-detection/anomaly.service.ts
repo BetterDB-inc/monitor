@@ -4242,8 +4242,6 @@ export class AnomalyService
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
-      // The monitor's own connections, under a custom connection name too.
-      ownClientNames: ctx.client.getOwnClientNames?.() ?? [],
       newConnections: reconnectsKnown
         ? estimateNewConnections(
             newConnectionsBetween(summary.connections, episodeStart, until, baselineStart),
