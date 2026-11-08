@@ -271,6 +271,43 @@ describe.each([
         expect.objectContaining({ capturedAt: since + 120_000, name: 'api', maxClientId: 4 }),
       ]);
     });
+
+    it("leaves a closed own connection out up to its close and keeps the id's later holder", async () => {
+      await save(
+        h.storage,
+        rows([
+          // The monitor's previous connection, custom-named, closed at +90s.
+          { clientId: '3', name: '', addr: '10.0.0.9:1', age: 0, capturedAt: since },
+          { clientId: '3', name: 'acme-monitor', addr: '10.0.0.9:1', age: 60, capturedAt: since + 60_000 },
+          { clientId: '3', name: 'acme-monitor', addr: '10.0.0.9:1', age: 90, capturedAt: since + 90_000 },
+          // Its replacement, still open.
+          { clientId: '2', name: 'acme-monitor', addr: '10.0.0.9:2', age: 0, capturedAt: since + 120_000 },
+          // After a server restart the application was handed id 3.
+          { clientId: '3', name: 'api', addr: '10.0.0.1:7', age: 0, capturedAt: since + 120_000 },
+          { clientId: '3', name: 'api', addr: '10.0.0.1:7', age: 60, capturedAt: since + 180_000 },
+        ]),
+      );
+      const own = [
+        { id: '3', connectedAt: since, closedAt: since + 90_000 },
+        { id: '2', connectedAt: since + 100_000 },
+      ];
+
+      expect(await h.storage.getClientConnections('conn-x', since, until, own)).toEqual([
+        expect.objectContaining({
+          clientId: '3',
+          addr: '10.0.0.1:7',
+          name: 'api',
+          openedAt: since + 120_000,
+          firstCapturedAt: since + 120_000,
+          lastCapturedAt: since + 180_000,
+        }),
+      ]);
+      const captures = await h.storage.getClientConnectionCaptures('conn-x', since, until, own);
+      expect(captures.sort((x, y) => x.capturedAt - y.capturedAt)).toEqual([
+        expect.objectContaining({ capturedAt: since + 120_000, name: 'api', ip: '10.0.0.1', maxClientId: 3 }),
+        expect.objectContaining({ capturedAt: since + 180_000, name: 'api', ip: '10.0.0.1', maxClientId: 3 }),
+      ]);
+    });
   });
 
   describe('getClientConnectionCaptures', () => {

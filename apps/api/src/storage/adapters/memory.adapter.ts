@@ -390,9 +390,9 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   // Rows of one connection in [since, until] without replica and master links
   // and without the monitor's own connections (an own client id from the time
-  // it connected on), each carrying the name and user of the newest row of its
-  // (client_id, addr), so a client captured before CLIENT SETNAME ran is
-  // grouped under the name it set later.
+  // it connected on and, once closed, up to the close), each carrying the name
+  // and user of the newest row of its (client_id, addr), so a client captured
+  // before CLIENT SETNAME ran is grouped under the name it set later.
   private clientIdentityRows(
     connectionId: string,
     since: number,
@@ -406,7 +406,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
         snapshot.capturedAt <= until &&
         !/[SM]/.test(snapshot.flags) &&
         !ownClients.some(
-          (own) => own.id === snapshot.clientId && snapshot.capturedAt >= own.connectedAt,
+          (own) =>
+            own.id === snapshot.clientId &&
+            snapshot.capturedAt >= own.connectedAt &&
+            (own.closedAt === undefined || snapshot.capturedAt <= own.closedAt),
         ),
     );
     const newest = new Map<string, StoredClientSnapshot>();

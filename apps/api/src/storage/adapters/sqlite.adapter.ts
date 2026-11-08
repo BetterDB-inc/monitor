@@ -1321,15 +1321,18 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   // Each (client_id, addr) takes the name and user of its newest row in the
   // range, so a client captured before CLIENT SETNAME ran is grouped under the
   // name it set later. `ownClients` leaves the monitor's own connections out:
-  // an own client id from the time it connected on, so an earlier connection
-  // that held the same id before a server restart stays in.
+  // an own client id from the time it connected on and, once the monitor has
+  // closed it, up to the close, so an earlier or later connection that held the
+  // same id around a server restart stays in.
   private clientIdentityRows(ownClients: OwnClientConnection[]): {
     sql: string;
-    params: Array<string | number>;
+    params: Array<string | number | null>;
   } {
     const exclude =
       ownClients.length > 0
-        ? `AND NOT (${ownClients.map(() => '(client_id = ? AND captured_at >= ?)').join(' OR ')})`
+        ? `AND NOT (${ownClients
+            .map(() => '(client_id = ? AND captured_at >= ? AND (? IS NULL OR captured_at <= ?))')
+            .join(' OR ')})`
         : '';
     return {
       sql: `SELECT captured_at, client_id, addr, age,
@@ -1341,7 +1344,10 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
                AND COALESCE(flags, '') NOT GLOB '*[SM]*'
                ${exclude}
             WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
-      params: ownClients.flatMap((own) => [own.id, own.connectedAt]),
+      params: ownClients.flatMap((own) => {
+        const closedAt = own.closedAt ?? null;
+        return [own.id, own.connectedAt, closedAt, closedAt];
+      }),
     };
   }
 

@@ -104,6 +104,19 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
+// How long a connection this adapter has closed stays in getOwnClientIds()
+// with its close time. Retry attribution reads client captures over the
+// episode and as long again before it (anomaly.service.ts
+// attributeRetryAmplification: fullBaselineStart), and the detector keeps an
+// episode's hot windows up to RETRY_AMP_MAX_HOT_WINDOWS x RETRY_AMP_WINDOW_MS
+// = 2 h before it starts dropping them, so 4 h covers that span. Within it the
+// monitor's own reconnects during a storm (the previous main connection) and
+// finished key-scan clients are still left out by id, whatever name they
+// carry; beyond it the default BetterDB-* names still cover them.
+export const OWN_CLIENT_CLOSED_RETENTION_MS = 4 * 60 * 60_000;
+// Upper bound on closed connections kept, oldest close evicted first: a
+// multi-database key scan opens a scratch client per database per scan.
+export const OWN_CLIENT_CLOSED_MAX = 256;
 
 /**
  * How often, at most, file-sourced TLS material is stat-checked for changes when
@@ -212,6 +225,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // Retry attribution leaves them out of the ranking, whatever name they
   // carry and before CLIENT SETNAME has run on them.
   private readonly ownClients = new Map<Valkey, OwnClientConnection>();
+  // Connections this adapter closed in the last OWN_CLIENT_CLOSED_RETENTION_MS,
+  // each with its close time, in close order: their captures up to the close
+  // are still the monitor's own, while an id the server hands out again after
+  // a restart is not claimed past it.
+  private recentlyClosedOwnClients: OwnClientConnection[] = [];
   // Set once the ACL denies CLIENT ID: it is not sent again on later readies,
   // so a user on the previous minimum ACL does not collect a NOPERM reply and
   // an ACL LOG entry per reconnect. Attribution falls back to the default
@@ -227,7 +245,11 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     let generation = 0;
     const forget = () => {
       generation += 1;
+      const own = this.ownClients.get(client);
+      if (own === undefined) return;
       this.ownClients.delete(client);
+      this.recentlyClosedOwnClients.push({ ...own, closedAt: Date.now() });
+      this.pruneClosedOwnClients();
     };
     client.on('connect', () => {
       connectedAt = Date.now();
@@ -260,8 +282,19 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     return Number.isInteger(id) && id >= 1 ? String(id) : null;
   }
 
+  // Drops closed connections past the retention, then the oldest closes past
+  // the cap. Entries are pushed in close order, so the oldest are at the front.
+  private pruneClosedOwnClients(): void {
+    const cutoff = Date.now() - OWN_CLIENT_CLOSED_RETENTION_MS;
+    const kept = this.recentlyClosedOwnClients.filter((own) => own.closedAt! >= cutoff);
+    this.recentlyClosedOwnClients =
+      kept.length > OWN_CLIENT_CLOSED_MAX ? kept.slice(kept.length - OWN_CLIENT_CLOSED_MAX) : kept;
+  }
+
+  // The open connections first, then the recently closed ones (closedAt set).
   getOwnClientIds(): OwnClientConnection[] {
-    return [...this.ownClients.values()];
+    this.pruneClosedOwnClients();
+    return [...this.ownClients.values(), ...this.recentlyClosedOwnClients];
   }
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {

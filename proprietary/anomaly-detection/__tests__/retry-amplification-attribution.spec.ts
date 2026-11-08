@@ -425,6 +425,43 @@ describe('retry amplification attribution', () => {
       expect(ranked.map((c) => c.key)).toEqual(['api']);
     });
 
+    it("leaves the monitor's own connection out across its reconnect during the episode", () => {
+      const api = (addr: string, cmds: number, id = '3') =>
+        client({ id, name: 'api', addr, 'tot-cmds': String(cmds) });
+      const before = snapshot(0, [
+        client({ id: '1', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '100' }),
+        api('10.0.0.1:1', 1000),
+      ]);
+      const first = snapshot(60_000, [
+        client({ id: '1', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '200' }),
+        api('10.0.0.1:1', 1600),
+      ]);
+      // The server restarted at 90s: the monitor's connection 1 closed and it
+      // reconnected as id 2; the application reconnected and was handed id 1.
+      const latest = snapshot(120_000, [
+        client({ id: '2', name: 'acme-monitor', addr: '10.0.0.9:2', 'tot-cmds': '20000' }),
+        api('10.0.0.1:2', 3000, '1'),
+      ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+        ownClients: [
+          { id: '1', connectedAt: 0, closedAt: 90_000 },
+          { id: '2', connectedAt: 90_000 },
+        ],
+      });
+
+      // Neither the closed nor the new own connection ranks, and the
+      // application's reading on the id the monitor gave up is its own:
+      // 10/s before the episode on id 3, 50/s during it on id 1.
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
+    });
+
     it("keeps the readings of an application client that held the monitor's id before a restart", () => {
       const before = snapshot(0, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1000' })]);
       const first = snapshot(60_000, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1600' })]);

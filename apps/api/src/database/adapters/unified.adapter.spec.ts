@@ -6,6 +6,8 @@ import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
   QUIT_TIMEOUT_MS,
+  OWN_CLIENT_CLOSED_MAX,
+  OWN_CLIENT_CLOSED_RETENTION_MS,
   TLS_MATERIAL_RECHECK_MS,
   WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
@@ -1195,36 +1197,41 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
     const scratch = (name: string) =>
       (adapter as unknown as { createValkeyClient(name: string): Client }).createValkeyClient(name);
     const ids = () => adapter.getOwnClientIds().map((own) => own.id);
+    // Open connections carry no closedAt; closed ones do.
+    const live = () =>
+      adapter.getOwnClientIds().filter((own) => own.closedAt === undefined).map((own) => own.id);
+    const closed = () => adapter.getOwnClientIds().filter((own) => own.closedAt !== undefined);
     const ready = async (client: Client, queue: Reply[], reply: Reply) => {
       queue.push(reply);
       client.emit('ready');
       await settle();
     };
-    return { adapter, scratch, ids, ready };
+    return { adapter, scratch, ids, live, closed, ready };
   }
 
   it('learns the id of each connection it opens: the main client, its reconnects and scratch clients', async () => {
-    const { adapter, scratch, ids, ready } = makeAdapter();
+    const { adapter, scratch, live, closed, ready } = makeAdapter();
     const client = adapter.getClient();
     const main = answers(client);
 
     await ready(client, main.replies, 41);
     expect(main.call).toHaveBeenCalledWith('CLIENT', 'ID');
-    expect(ids()).toEqual(['41']);
+    expect(live()).toEqual(['41']);
 
-    // A reconnect replaces the id of the same client.
+    // A reconnect replaces the id of the same client; the old one is kept as closed.
     client.emit('close');
-    expect(ids()).toEqual([]);
+    expect(live()).toEqual([]);
+    expect(closed().map((own) => own.id)).toEqual(['41']);
     await ready(client, main.replies, 57);
-    expect(ids()).toEqual(['57']);
+    expect(live()).toEqual(['57']);
 
     const keyscan = scratch('scratch');
     await ready(keyscan, answers(keyscan).replies, 58);
-    expect(ids().sort()).toEqual(['57', '58']);
+    expect(live().sort()).toEqual(['57', '58']);
   });
 
   it('keeps the main connection known however many scratch clients come and go', async () => {
-    const { adapter, scratch, ids, ready } = makeAdapter();
+    const { adapter, scratch, live, closed, ready } = makeAdapter();
     const client = adapter.getClient();
     await ready(client, answers(client).replies, 41);
 
@@ -1234,8 +1241,60 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
       keyscan.emit('end');
     }
 
-    // The live main connection is still ours and no closed scratch client is.
-    expect(ids()).toEqual(['41']);
+    // The main connection is the only open one; every scratch client is closed.
+    expect(live()).toEqual(['41']);
+    expect(closed().map((own) => own.id)).toEqual(
+      Array.from({ length: 70 }, (_, i) => String(100 + i)),
+    );
+  });
+
+  it('keeps a closed connection with its close time until the retention passes', async () => {
+    const { adapter, live, closed, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies } = answers(client);
+    const now = jest.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000);
+      client.emit('connect');
+      await ready(client, replies, 41);
+      now.mockReturnValue(50_000);
+      client.emit('close');
+      expect(live()).toEqual([]);
+      expect(closed()).toEqual([{ id: '41', connectedAt: 1_000, closedAt: 50_000 }]);
+
+      // The reconnect is a second entry; the closed one stays until the retention.
+      now.mockReturnValue(60_000);
+      client.emit('connect');
+      await ready(client, replies, 57);
+      expect(adapter.getOwnClientIds()).toEqual([
+        { id: '57', connectedAt: 60_000 },
+        { id: '41', connectedAt: 1_000, closedAt: 50_000 },
+      ]);
+      now.mockReturnValue(50_000 + OWN_CLIENT_CLOSED_RETENTION_MS);
+      expect(closed()).toHaveLength(1);
+      now.mockReturnValue(50_000 + OWN_CLIENT_CLOSED_RETENTION_MS + 1);
+      expect(adapter.getOwnClientIds()).toEqual([{ id: '57', connectedAt: 60_000 }]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('keeps at most OWN_CLIENT_CLOSED_MAX closed connections, dropping the oldest closes', async () => {
+    const { adapter, scratch, live, closed, ready } = makeAdapter();
+    const client = adapter.getClient();
+    await ready(client, answers(client).replies, 41);
+
+    const total = OWN_CLIENT_CLOSED_MAX + 40;
+    for (let i = 0; i < total; i++) {
+      const keyscan = scratch(`keyscan-${i}`);
+      await ready(keyscan, answers(keyscan).replies, 100 + i);
+      keyscan.emit('end');
+    }
+
+    expect(live()).toEqual(['41']);
+    expect(closed()).toHaveLength(OWN_CLIENT_CLOSED_MAX);
+    expect(closed()[0].id).toBe(String(100 + total - OWN_CLIENT_CLOSED_MAX));
+    expect(closed()[OWN_CLIENT_CLOSED_MAX - 1].id).toBe(String(100 + total - 1));
   });
 
   it('keeps both ids when two CLIENT ID replies land out of order', async () => {
@@ -1292,13 +1351,13 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
     expect(adapter.getOwnClientIds()).toEqual([{ id: '41', connectedAt: 1_000 }]);
   });
 
-  it('forgets a connection when its socket closes, even if CLIENT ID answers afterwards', async () => {
-    const { adapter, ids, ready } = makeAdapter();
+  it('does not record a CLIENT ID reply that lands after its socket closed', async () => {
+    const { adapter, ids, live, ready } = makeAdapter();
     const client = adapter.getClient();
     const { replies } = answers(client);
     await ready(client, replies, 41);
     client.emit('end');
-    expect(ids()).toEqual([]);
+    expect(live()).toEqual([]);
 
     let answer: (id: number) => void = () => undefined;
     jest.spyOn(client, 'call').mockImplementation(
@@ -1312,7 +1371,8 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
     answer(42);
     await settle();
 
-    expect(ids()).toEqual([]);
+    // Neither open nor closed: 42 was never the monitor's as far as it knows.
+    expect(ids()).toEqual(['41']);
     expect((adapter as unknown as { ownClients: Map<unknown, unknown> }).ownClients.size).toBe(0);
   });
 

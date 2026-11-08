@@ -70,8 +70,9 @@ export interface AttributionInput extends EpisodeClientSnapshots {
   newConnections: NewClientConnectionGroup[];
   baselineConnections?: NewClientConnectionGroup[];
   /**
-   * The monitor's own open connections to the node, by CLIENT LIST id from the
-   * time each connected (see DatabasePort.getOwnClientIds).
+   * The monitor's own connections to the node, open and recently closed, by
+   * CLIENT LIST id from the time each connected until it closed (see
+   * DatabasePort.getOwnClientIds).
    */
   ownClients?: Iterable<OwnClientConnection>;
   limit?: number;
@@ -152,16 +153,33 @@ function latestIdentities(snapshots: ClientCommandSnapshot[]): Map<string, Clien
 }
 
 // Whether a reading of `clientId` taken at `takenAt` is one of the monitor's
-// own connections: the id is held open by the monitor and the reading is from
-// after it connected. An earlier reading of the same id (an application client
-// before a server restart renumbered the ids) is not.
-function isOwnClient(
-  ownClients: Map<string, number>,
-  clientId: string,
-  takenAt: number,
-): boolean {
-  const connectedAt = ownClients.get(clientId);
-  return connectedAt !== undefined && takenAt >= connectedAt;
+// own connections: the monitor held the id when the reading was taken, from
+// its connect until its close (open connections have no close). A reading of
+// the same id outside that span (an application client before a server
+// restart renumbered the ids, or one handed the id after the monitor's
+// connection closed) is not. An id can appear more than once: a closed
+// connection and a live one that got the same id after a restart.
+type OwnClientSpans = Map<string, OwnClientConnection[]>;
+
+function ownClientSpans(ownClients: Iterable<OwnClientConnection>): OwnClientSpans {
+  const spans: OwnClientSpans = new Map();
+  for (const own of ownClients) {
+    const known = spans.get(own.id);
+    if (known === undefined) spans.set(own.id, [own]);
+    else known.push(own);
+  }
+  return spans;
+}
+
+function isOwnClient(ownClients: OwnClientSpans, clientId: string, takenAt: number): boolean {
+  const spans = ownClients.get(clientId);
+  return (
+    spans !== undefined &&
+    spans.some(
+      (own) =>
+        takenAt >= own.connectedAt && (own.closedAt === undefined || takenAt <= own.closedAt),
+    )
+  );
 }
 
 function accumulatorFor(
@@ -227,7 +245,7 @@ function commandRates(
   from: ClientCommandSnapshot,
   to: ClientCommandSnapshot,
   identities: Map<string, ClientIdentity>,
-  ownClients: Map<string, number>,
+  ownClients: OwnClientSpans,
 ): Array<{ identity: ClientIdentity; rate: number }> {
   const dtSec = (to.takenAt - from.takenAt) / 1000;
   if (dtSec <= 0) return [];
@@ -251,7 +269,7 @@ function addCommandGrowth(
   before: ClientCommandSnapshot,
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
-  ownClients: Map<string, number>,
+  ownClients: OwnClientSpans,
 ): void {
   const identities = latestIdentities([before, first, latest]);
   for (const { identity, rate } of commandRates(before, first, identities, ownClients)) {
@@ -371,8 +389,7 @@ export function rankRetryAmplificationContributors(
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
   if (hasRatePair(input)) {
-    const ownClients = new Map<string, number>();
-    for (const own of input.ownClients ?? []) ownClients.set(own.id, own.connectedAt);
+    const ownClients = ownClientSpans(input.ownClients ?? []);
     addCommandGrowth(map, input.before, input.first, input.latest, ownClients);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);

@@ -4217,8 +4217,10 @@ export class AnomalyService
       notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
     const baselineScale =
       (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
-    // The monitor's own open connections to this node, by CLIENT LIST id, so
-    // they stay out of the ranking under a custom name and before CLIENT SETNAME.
+    // The monitor's own connections to this node, open and recently closed, by
+    // CLIENT LIST id, so they stay out of the ranking under a custom name and
+    // before CLIENT SETNAME, the previous main connection of a reconnect and a
+    // finished key scan included.
     const ownClients = ctx.client.getOwnClientIds?.() ?? [];
     // Both reads span the whole attribution range, so a connection carries one
     // identity (the name of its newest reading) in the baseline, the episode

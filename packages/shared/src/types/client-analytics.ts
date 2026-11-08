@@ -68,12 +68,15 @@ export interface ClientConnectionRow {
 }
 
 /**
- * One of the monitor's own open connections to a server: its CLIENT LIST id and
- * the time it connected, so only rows captured while it held the id are its own.
+ * One of the monitor's own connections to a server: its CLIENT LIST id, the
+ * time it connected and, once the monitor has closed it, the time it closed, so
+ * only rows captured while it held the id are its own. `closedAt` is unset
+ * while the connection is open.
  */
 export interface OwnClientConnection {
   id: string;
   connectedAt: number;
+  closedAt?: number;
 }
 
 export interface ClientTimeSeriesPoint {
