@@ -248,19 +248,23 @@ function addCommandGrowth(
 }
 
 /**
- * Connections that opened in [since, until] and were captured by `until`, per
- * (name, user, ip). `connections` come from one storage read over the whole
- * attribution span, so a connection keeps the same identity whichever part of
- * the span it is counted in.
+ * New connections per (name, user, ip) first captured in [since, until],
+ * among those that opened at or after `openedSince` (the start of the read
+ * span: older ones were open before it). Each connection is counted in the
+ * part of the span that first listed it, so one that opened just before the
+ * episode and was first captured during it counts once, in the episode.
+ * `connections` come from one storage read over the whole attribution span,
+ * so a connection keeps the same identity whichever part it is counted in.
  */
 export function newConnectionsBetween(
   connections: ClientConnectionRow[],
   since: number,
   until: number,
+  openedSince: number,
 ): NewClientConnectionGroup[] {
   const groups = new Map<string, NewClientConnectionGroup>();
   for (const { name, user, ip, openedAt, firstCapturedAt } of connections) {
-    if (openedAt < since || firstCapturedAt > until) continue;
+    if (openedAt < openedSince || firstCapturedAt < since || firstCapturedAt > until) continue;
     const key = JSON.stringify([name, user, ip]);
     const group = groups.get(key) ?? { name, user, ip, count: 0 };
     group.count += 1;

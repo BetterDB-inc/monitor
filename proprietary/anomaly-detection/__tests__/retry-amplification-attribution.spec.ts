@@ -448,7 +448,7 @@ describe('retry amplification attribution', () => {
         first: null,
         latest: null,
         capture: [],
-        newConnections: newConnectionsBetween(connections, 600_000, 780_000),
+        newConnections: newConnectionsBetween(connections, 600_000, 780_000, 420_000),
         ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
       });
 
@@ -575,21 +575,35 @@ describe('retry amplification attribution', () => {
         connection({ clientId: '6', name: '', ip: '10.0.0.2', openedAt: 610_000, firstCapturedAt: 650_000 }),
       ];
 
-      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([
+      expect(newConnectionsBetween(connections, 420_000, 599_999, 420_000)).toEqual([
         { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
       ]);
-      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([
+      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([
         { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
         { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
       ]);
     });
 
-    it('does not count a connection in a part of the span it was first captured after', () => {
-      // Opened just before the episode, first listed during it: new in neither part.
-      const connections = [connection({ clientId: '1', openedAt: 599_500, firstCapturedAt: 650_000 })];
+    it('counts a connection in the part of the span that first captured it', () => {
+      const connections = [
+        // Opened 300 ms before the episode, first listed 40 s into it.
+        connection({ clientId: '1', openedAt: 599_700, firstCapturedAt: 640_000 }),
+        // Opened in the baseline and first listed there.
+        connection({ clientId: '2', openedAt: 550_000, firstCapturedAt: 560_000 }),
+      ];
 
-      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([]);
-      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([]);
+      expect(newConnectionsBetween(connections, 420_000, 599_999, 420_000)).toEqual([
+        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
+      ]);
+      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([
+        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
+      ]);
+    });
+
+    it('does not count a connection that was open before the span', () => {
+      const connections = [connection({ clientId: '1', openedAt: 100_000, firstCapturedAt: 650_000 })];
+
+      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([]);
     });
   });
 

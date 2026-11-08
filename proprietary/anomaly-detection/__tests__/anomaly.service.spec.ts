@@ -5622,59 +5622,55 @@ describe('AnomalyService', () => {
 
     it('counts early reconnects next to a later capture of older clients', async () => {
       const history = new MemoryAdapter();
-      const seed = async (episodeStart: number, until: number) => {
-        const row = (clientId: string, name: string, age: number, capturedAt: number) => ({
-          id: 0,
-          clientId,
-          addr: `10.0.0.1:${clientId}`,
-          name,
-          user: 'default',
-          db: 0,
-          cmd: 'get',
-          age,
-          idle: 0,
-          flags: 'N',
-          sub: 0,
-          psub: 0,
-          qbuf: 0,
-          qbufFree: 0,
-          obl: 0,
-          oll: 0,
-          omem: 0,
-          capturedAt,
-          sourceHost: 'h',
-          sourcePort: 1,
-          connectionId: 'conn-1',
-        });
-        await history.saveClientSnapshot([row('pool-0', 'pool', 999_000, episodeStart - 1)], 'conn-1');
-        await history.saveClientSnapshot(
-          ['early-1', 'early-2', 'early-3'].map((id) => row(id, 'retrier', 0, episodeStart)),
-          'conn-1',
-        );
-        const pool = Array.from({ length: 5 }, (_, i) =>
-          row(`pool-${i}`, 'pool', 1_000_000, until),
-        );
-        await history.saveClientSnapshot(pool, 'conn-1');
-      };
-      // The connections read spans the baseline and the episode and gives the
-      // end; the baseline check that runs next to it gives the episode start.
-      let until = 0;
-      let episodeStart: (at: number) => void = () => undefined;
-      const seeded = new Promise<number>((resolve) => (episodeStart = resolve)).then((start) =>
-        seed(start, until),
-      );
-      storage.getClientCaptureSummary = jest
-        .fn()
-        .mockImplementation(async (connectionId, since, end) => {
-          until = end;
-          await seeded;
-          return history.getClientCaptureSummary(connectionId, since, end);
-        });
-      storage.getClientSnapshots = jest.fn().mockImplementation(async (options) => {
-        episodeStart(options.endTime + 1);
-        await seeded;
-        return history.getClientSnapshots(options);
+      const row = (clientId: string, name: string, age: number, capturedAt: number) => ({
+        id: 0,
+        clientId,
+        addr: `10.0.0.1:${clientId}`,
+        name,
+        user: 'default',
+        db: 0,
+        cmd: 'get',
+        age,
+        idle: 0,
+        flags: 'N',
+        sub: 0,
+        psub: 0,
+        qbuf: 0,
+        qbufFree: 0,
+        obl: 0,
+        oll: 0,
+        omem: 0,
+        capturedAt,
+        sourceHost: 'h',
+        sourcePort: 1,
+        connectionId: 'conn-1',
       });
+      // Seeded from the episode the service attributes, before it reads storage.
+      const attribute = (service as any).attributeRetryAmplification.bind(service);
+      let seeded = false;
+      jest
+        .spyOn(service as any, 'attributeRetryAmplification')
+        .mockImplementation(async (ctx, snapshots, episodeStart, until, ...rest) => {
+          if (!seeded) {
+            seeded = true;
+            const start = episodeStart as number;
+            await history.saveClientSnapshot([row('pool-0', 'pool', 999_000, start - 1)], 'conn-1');
+            await history.saveClientSnapshot(
+              ['early-1', 'early-2', 'early-3'].map((id) => row(id, 'retrier', 0, start)),
+              'conn-1',
+            );
+            const pool = Array.from({ length: 5 }, (_, i) =>
+              row(`pool-${i}`, 'pool', 1_000_000, until as number),
+            );
+            await history.saveClientSnapshot(pool, 'conn-1');
+          }
+          return attribute(ctx, snapshots, episodeStart, until, ...rest);
+        });
+      storage.getClientSnapshots = jest.fn((options) => history.getClientSnapshots(options));
+      storage.getClientCaptureSummary = jest.fn(
+        (...args: Parameters<MemoryAdapter['getClientCaptureSummary']>) =>
+          history.getClientCaptureSummary(...args),
+      );
 
       const { recorded } = await runRetry();
 
