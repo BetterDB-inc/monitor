@@ -139,10 +139,22 @@ export const GRAPH_MEMORY_PROBES_PER_SCAN = 20;
 export const GRAPH_MEMORY_TTL_MS = 60 * 60 * 1000;
 export const GRAPH_MEMORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-// An ACL denial reply ("NOPERM ... no permissions to run the 'client|id'
-// command"), as opposed to a lost connection or a timeout.
-function isAclDenied(error: unknown): boolean {
-  return error instanceof Error && /^NOPERM\b/i.test(error.message);
+// Error replies for a passing server state rather than for the command: the
+// same command is answered once the state passes.
+const TRANSIENT_REPLY_ERROR = /^(LOADING|BUSY|MASTERDOWN|CLUSTERDOWN|TRYAGAIN)\b/;
+
+// The server rejected the command: an error reply (iovalkey's ReplyError:
+// "NOPERM ... no permissions to run the 'client|id' command" from the ACL,
+// "ERR unknown command" where CLIENT is renamed or blocked, a managed
+// service's "command not available"), as opposed to a reply lost with the
+// connection or a timeout, which are the transport's and retryable. A reply
+// for a passing server state (LOADING, BUSY, ...) is not a rejection either.
+function isCommandRejected(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === 'ReplyError' &&
+    !TRANSIENT_REPLY_ERROR.test(error.message)
+  );
 }
 
 async function closeClient(client: Valkey): Promise<void> {
@@ -230,39 +242,64 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // are still the monitor's own, while an id the server hands out again after
   // a restart is not claimed past it.
   private recentlyClosedOwnClients: OwnClientConnection[] = [];
-  // Set once the ACL denies CLIENT ID: it is not sent again on later readies,
-  // so a user on the previous minimum ACL does not collect a NOPERM reply and
-  // an ACL LOG entry per reconnect. Attribution falls back to the default
-  // connection names.
+  // Set once the server rejects CLIENT ID (the ACL denies it, the command is
+  // unknown or unavailable): it is not sent again on later readies, so a user
+  // on the previous minimum ACL does not collect a NOPERM reply and an ACL LOG
+  // entry per reconnect. Attribution falls back to the default connection
+  // names.
   private clientIdDenied = false;
 
   private trackOwnClient(client: Valkey): void {
-    // The socket connects before the handshake (AUTH, SELECT, SETNAME, ready
-    // check) completes, and the server lists the client from the connect on.
-    let connectedAt = Date.now();
-    // Bumped by every ready and every close, so a CLIENT ID reply that lands
-    // after the socket it was sent on closed does not record a dead client.
+    // The server lists a client from the TCP accept on, before the TLS
+    // handshake ('connect' is emitted on secureConnect) and the AUTH, SELECT,
+    // SETNAME and ready check that follow, so a connection is dated from the
+    // start of its dial ('connecting', emitted by connect()). 'connect' only
+    // stands in when no dial was seen; a close clears the stamp for the next.
+    let dialedAt: number | null = null;
+    // Bumped by every ready and every close, so a CLIENT ID reply is matched
+    // to the socket it was sent on.
     let generation = 0;
+    // The generation of the last ready and, once its socket closed, when: a
+    // reply that lands after the close names a connection the server listed
+    // from its dial to that close, recorded as closed. A reply that lands
+    // after the next ready is not recorded (iovalkey resends a command left
+    // unanswered by a dropped socket on the next one, so it would carry that
+    // socket's id, which that socket's own ready learns).
+    let readyGeneration = 0;
+    let readyClosedAt: number | null = null;
     const forget = () => {
+      const now = Date.now();
+      if (generation === readyGeneration) readyClosedAt = now;
       generation += 1;
+      dialedAt = null;
       const own = this.ownClients.get(client);
       if (own === undefined) return;
       this.ownClients.delete(client);
-      this.recentlyClosedOwnClients.push({ ...own, closedAt: Date.now() });
+      this.recentlyClosedOwnClients.push({ ...own, closedAt: now });
       this.pruneClosedOwnClients();
     };
+    client.on('connecting', () => {
+      dialedAt = Date.now();
+    });
     client.on('connect', () => {
-      connectedAt = Date.now();
+      dialedAt ??= Date.now();
     });
     client.on('close', forget);
     client.on('end', forget);
     client.on('ready', () => {
       generation += 1;
+      readyGeneration = generation;
+      readyClosedAt = null;
       const current = generation;
-      const since = connectedAt;
+      const since = dialedAt ?? Date.now();
       void this.readOwnClientId(client).then((id) => {
-        if (id === null || generation !== current) return;
-        this.ownClients.set(client, { id, connectedAt: since });
+        if (id === null) return;
+        if (generation === current) {
+          this.ownClients.set(client, { id, connectedAt: since });
+        } else if (current === readyGeneration && readyClosedAt !== null) {
+          this.recentlyClosedOwnClients.push({ id, connectedAt: since, closedAt: readyClosedAt });
+          this.pruneClosedOwnClients();
+        }
       });
     });
   }
@@ -273,8 +310,9 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
     try {
       reply = await withTimeout(client.call('CLIENT', 'ID'), WHOAMI_TIMEOUT_MS, 'CLIENT ID timed out');
     } catch (error) {
-      if (isAclDenied(error)) this.clientIdDenied = true;
-      // Otherwise lost with the connection or timed out: the next ready asks again.
+      if (isCommandRejected(error)) this.clientIdDenied = true;
+      // Otherwise lost with the connection, timed out or a passing server
+      // state: the next ready asks again.
       return null;
     }
     // Ids start at 1; anything else (nil, text) is not an id.

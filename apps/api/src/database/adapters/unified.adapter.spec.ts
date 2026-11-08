@@ -1178,6 +1178,8 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
   type Client = ReturnType<UnifiedDatabaseAdapter['getClient']>;
   type Reply = number | string | null | Error;
   const settle = () => new Promise((resolve) => setImmediate(resolve));
+  // An error reply from the server, as iovalkey raises it.
+  const replyError = (message: string): Error => Object.assign(new Error(message), { name: 'ReplyError' });
 
   // Every client answers CLIENT ID from its own queue; other commands (the
   // WHOAMI probe on a reconnect) get an empty reply.
@@ -1351,36 +1353,115 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
     expect(adapter.getOwnClientIds()).toEqual([{ id: '41', connectedAt: 1_000 }]);
   });
 
-  it('does not record a CLIENT ID reply that lands after its socket closed', async () => {
-    const { adapter, ids, live, ready } = makeAdapter();
+  it('dates a connection from the start of its dial, before the TLS handshake completes', async () => {
+    const { adapter, ready } = makeAdapter();
     const client = adapter.getClient();
     const { replies } = answers(client);
-    await ready(client, replies, 41);
-    client.emit('end');
-    expect(live()).toEqual([]);
+    const now = jest.spyOn(Date, 'now');
+    try {
+      // iovalkey: 'connecting' when connect() starts the dial, 'connect' on
+      // secureConnect, 'ready' after the handshake.
+      now.mockReturnValue(1_000);
+      client.emit('connecting');
+      now.mockReturnValue(2_000);
+      client.emit('connect');
+      now.mockReturnValue(5_000);
+      await ready(client, replies, 41);
+      expect(adapter.getOwnClientIds()).toEqual([{ id: '41', connectedAt: 1_000 }]);
 
-    let answer: (id: number) => void = () => undefined;
+      // A reconnect is dated from its own dial, not the first one's.
+      now.mockReturnValue(50_000);
+      client.emit('close');
+      now.mockReturnValue(60_000);
+      client.emit('connecting');
+      now.mockReturnValue(61_000);
+      client.emit('connect');
+      now.mockReturnValue(62_000);
+      await ready(client, replies, 57);
+      expect(adapter.getOwnClientIds()).toEqual([
+        { id: '57', connectedAt: 60_000 },
+        { id: '41', connectedAt: 1_000, closedAt: 50_000 },
+      ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('records a CLIENT ID reply that lands after its socket closed as a closed connection', async () => {
+    const { adapter, live, closed, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies } = answers(client);
+    const now = jest.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000);
+      client.emit('connecting');
+      await ready(client, replies, 41);
+      now.mockReturnValue(10_000);
+      client.emit('end');
+      expect(live()).toEqual([]);
+
+      let answer: (id: number) => void = () => undefined;
+      jest.spyOn(client, 'call').mockImplementation(
+        (command: string) =>
+          command === 'CLIENT'
+            ? new Promise<number>((resolve) => (answer = resolve))
+            : Promise.resolve(undefined),
+      );
+      now.mockReturnValue(20_000);
+      client.emit('connecting');
+      now.mockReturnValue(21_000);
+      client.emit('ready');
+      now.mockReturnValue(30_000);
+      client.emit('close');
+      client.emit('end');
+      answer(42);
+      await settle();
+
+      // The server listed 42 from the dial to the close: its captures in that
+      // span are the monitor's own, and it is not open.
+      expect(live()).toEqual([]);
+      expect(closed()).toEqual([
+        { id: '41', connectedAt: 1_000, closedAt: 10_000 },
+        { id: '42', connectedAt: 20_000, closedAt: 30_000 },
+      ]);
+      expect((adapter as unknown as { ownClients: Map<unknown, unknown> }).ownClients.size).toBe(0);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not record a reply that lands after the next ready, which answers for the new socket', async () => {
+    const { adapter, live, closed } = makeAdapter();
+    const client = adapter.getClient();
+    const pending: Array<(id: number) => void> = [];
     jest.spyOn(client, 'call').mockImplementation(
       (command: string) =>
         command === 'CLIENT'
-          ? new Promise<number>((resolve) => (answer = resolve))
+          ? new Promise<number>((resolve) => pending.push(resolve))
           : Promise.resolve(undefined),
     );
+    // The first socket drops before CLIENT ID is answered; iovalkey resends
+    // the command on the next socket, whose ready sends its own as well.
     client.emit('ready');
     client.emit('close');
-    answer(42);
+    client.emit('ready');
+    pending[0](57);
+    pending[1](57);
     await settle();
 
-    // Neither open nor closed: 42 was never the monitor's as far as it knows.
-    expect(ids()).toEqual(['41']);
-    expect((adapter as unknown as { ownClients: Map<unknown, unknown> }).ownClients.size).toBe(0);
+    expect(live()).toEqual(['57']);
+    expect(closed()).toEqual([]);
   });
 
   it('sends CLIENT ID once when the ACL denies it', async () => {
     const { adapter, scratch, ids, ready } = makeAdapter();
     const client = adapter.getClient();
     const main = answers(client);
-    await ready(client, main.replies, new Error("NOPERM this user has no permissions to run the 'client|id' command"));
+    await ready(
+      client,
+      main.replies,
+      replyError("NOPERM this user has no permissions to run the 'client|id' command"),
+    );
     expect(ids()).toEqual([]);
 
     client.emit('close');
@@ -1396,11 +1477,35 @@ describe('UnifiedDatabaseAdapter own client ids', () => {
     expect(ids()).toEqual([]);
   });
 
-  it('asks again on the next ready after a reply lost with the connection', async () => {
+  it('sends CLIENT ID once when the server rejects it for another reason', async () => {
+    const { adapter, scratch, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const main = answers(client);
+    // CLIENT renamed or blocked, or a managed service without the command.
+    await ready(client, main.replies, replyError("ERR unknown command 'client', with args beginning with: 'ID'"));
+    expect(ids()).toEqual([]);
+
+    client.emit('close');
+    await ready(client, main.replies, 41);
+    const keyscan = scratch('keyscan');
+    const other = answers(keyscan);
+    await ready(keyscan, other.replies, 42);
+
+    expect(main.call.mock.calls.filter(([command]) => command === 'CLIENT')).toHaveLength(1);
+    expect(other.call.mock.calls.filter(([command]) => command === 'CLIENT')).toHaveLength(0);
+    expect(ids()).toEqual([]);
+  });
+
+  it.each([
+    ['a reply lost with the connection', new Error('Connection is closed.')],
+    ['a timeout', new Error('CLIENT ID timed out')],
+    ['a busy server', replyError('BUSY Valkey is busy running a script.')],
+    ['a loading server', replyError('LOADING Valkey is loading the dataset in memory')],
+  ])('asks again on the next ready after %s', async (_label, error) => {
     const { adapter, ids, ready } = makeAdapter();
     const client = adapter.getClient();
     const { replies, call } = answers(client);
-    await ready(client, replies, new Error('Connection is closed.'));
+    await ready(client, replies, error);
     expect(ids()).toEqual([]);
 
     await ready(client, replies, 41);

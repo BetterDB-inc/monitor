@@ -86,12 +86,13 @@ export interface DatabasePort {
   /**
    * The connections this adapter currently holds open to the server: the
    * CLIENT LIST id of each, learned with CLIENT ID as it connects, and when it
-   * connected. A connection the adapter has closed stays listed for a while
-   * with `closedAt` set, so its captures up to the close are still its own
-   * while an id the server hands to another client later is not claimed. Lets
-   * readers of CLIENT LIST tell the monitor's own clients apart from the
-   * application's whatever name they carry. Adapters that open no connection
-   * leave it out.
+   * started connecting (the server lists a client from the TCP accept on,
+   * before the TLS handshake and the ready check). A connection the adapter
+   * has closed stays listed for a while with `closedAt` set, so its captures
+   * up to the close are still its own while an id the server hands to another
+   * client later is not claimed. Lets readers of CLIENT LIST tell the
+   * monitor's own clients apart from the application's whatever name they
+   * carry. Adapters that open no connection leave it out.
    */
   getOwnClientIds?(): OwnClientConnection[];
   getClientById(id: string): Promise<ClientInfo | null>;
