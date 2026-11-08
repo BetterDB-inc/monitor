@@ -249,8 +249,9 @@ function addCommandGrowth(
 
 /**
  * New connections per (name, user, ip) first captured in [since, until],
- * among those that opened at or after `openedSince` (the start of the read
- * span: older ones were open before it). Each connection is counted in the
+ * among those that opened at or after `openedSince` (the start of the
+ * baseline: older ones were open before it, or opened during a previous
+ * episode the baseline was cut after). Each connection is counted in the
  * part of the span that first listed it, so one that opened just before the
  * episode and was first captured during it counts once, in the episode.
  * `connections` come from one storage read over the whole attribution span,

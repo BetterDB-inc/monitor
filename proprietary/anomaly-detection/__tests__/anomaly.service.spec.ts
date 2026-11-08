@@ -5263,6 +5263,34 @@ describe('AnomalyService', () => {
       expect(ranked).toEqual([]);
     });
 
+    it('does not count connections opened in the previous episode in the baseline or the episode', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          // Opened in the previous episode, first captured after it.
+          ...opened(worker, 50, 505_000, 520_000, 780_000),
+          // Opened in the previous episode, first captured during this one.
+          ...opened(worker, 5, 505_001, 650_000, 780_000),
+          ...opened(worker, 60, 650_000, 680_000, 780_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      // 60 reconnects against a baseline of 0, not the 50 storm connections scaled to 100.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 60 })]);
+    });
+
     describe('when the reconnect baseline cannot be trusted', () => {
       const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
       const snapshotRow = { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 };

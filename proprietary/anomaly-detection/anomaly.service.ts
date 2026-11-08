@@ -4246,7 +4246,7 @@ export class AnomalyService
       ownClientNames: ctx.client.getOwnClientNames?.() ?? [],
       newConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(summary.connections, episodeStart, until, fullBaselineStart),
+            newConnectionsBetween(summary.connections, episodeStart, until, baselineStart),
             summary.captures,
             episodeStart,
             until,
@@ -4258,7 +4258,7 @@ export class AnomalyService
               summary.connections,
               baselineStart,
               episodeStart - 1,
-              fullBaselineStart,
+              baselineStart,
             ),
             summary.captures.filter((row) => row.capturedAt >= baselineStart),
             baselineStart,
