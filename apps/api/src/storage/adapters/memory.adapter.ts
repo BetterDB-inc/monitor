@@ -16,8 +16,9 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
+  ClientConnectionRow,
   ClientConnectionCaptureRow,
+  OwnClientConnection,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -105,6 +106,7 @@ import {
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
   clientAddrIp,
+  clientConnectionKey,
   foldClientAnalyticsStats,
   type ClientStatsGroup,
 } from './client-analytics-stats';
@@ -387,73 +389,86 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // Rows of one connection in [since, until] without replica and master links
-  // and without the given client ids, each carrying the name and user of the
-  // newest row of its (client_id, addr), so a client captured before CLIENT
-  // SETNAME ran is grouped under the name it set later.
+  // and without the monitor's own connections (an own client id from the time
+  // it connected on), each carrying the name and user of the newest row of its
+  // (client_id, addr), so a client captured before CLIENT SETNAME ran is
+  // grouped under the name it set later.
   private clientIdentityRows(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds: string[],
+    ownClients: OwnClientConnection[],
   ): Array<{ row: StoredClientSnapshot; name: string; user: string; ip: string }> {
-    const excluded = new Set(excludeClientIds);
     const rows = this.clientSnapshots.filter(
       (snapshot) =>
         snapshot.connectionId === connectionId &&
         snapshot.capturedAt >= since &&
         snapshot.capturedAt <= until &&
         !/[SM]/.test(snapshot.flags) &&
-        !excluded.has(snapshot.clientId),
+        !ownClients.some(
+          (own) => own.id === snapshot.clientId && snapshot.capturedAt >= own.connectedAt,
+        ),
     );
     const newest = new Map<string, StoredClientSnapshot>();
     for (const row of rows) {
-      const key = `${row.clientId} ${row.addr}`;
+      const key = clientConnectionKey(row.clientId, row.addr);
       const known = newest.get(key);
       if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
     }
     return rows.map((row) => {
-      const identity = newest.get(`${row.clientId} ${row.addr}`)!;
+      const identity = newest.get(clientConnectionKey(row.clientId, row.addr))!;
       return { row, name: identity.name, user: identity.user, ip: clientAddrIp(row.addr) };
     });
   }
 
-  async getNewClientConnections(
+  async getClientConnections(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds: string[] = [],
-  ): Promise<NewClientConnectionGroup[]> {
-    const groups = new Map<string, { group: NewClientConnectionGroup; clients: Set<string> }>();
+    ownClients: OwnClientConnection[] = [],
+  ): Promise<ClientConnectionRow[]> {
+    const connections = new Map<string, ClientConnectionRow>();
     for (const { row, name, user, ip } of this.clientIdentityRows(
       connectionId,
       since,
       until,
-      excludeClientIds,
+      ownClients,
     )) {
-      if (row.capturedAt - row.age * 1000 < since) continue;
-      const key = JSON.stringify([name, user, ip]);
-      const entry = groups.get(key) ?? {
-        group: { name, user, ip, count: 0 },
-        clients: new Set<string>(),
-      };
-      entry.clients.add(`${row.clientId} ${row.addr}`);
-      groups.set(key, entry);
+      const openedAt = row.capturedAt - row.age * 1000;
+      const key = clientConnectionKey(row.clientId, row.addr);
+      const known = connections.get(key);
+      if (known === undefined) {
+        connections.set(key, {
+          clientId: row.clientId,
+          addr: row.addr,
+          name,
+          user,
+          ip,
+          openedAt,
+          firstCapturedAt: row.capturedAt,
+          lastCapturedAt: row.capturedAt,
+        });
+        continue;
+      }
+      known.openedAt = Math.min(known.openedAt, openedAt);
+      known.firstCapturedAt = Math.min(known.firstCapturedAt, row.capturedAt);
+      known.lastCapturedAt = Math.max(known.lastCapturedAt, row.capturedAt);
     }
-    return [...groups.values()].map(({ group, clients }) => ({ ...group, count: clients.size }));
+    return [...connections.values()];
   }
 
   async getClientConnectionCaptures(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds: string[] = [],
+    ownClients: OwnClientConnection[] = [],
   ): Promise<ClientConnectionCaptureRow[]> {
     const rows = new Map<string, ClientConnectionCaptureRow>();
     for (const { row: snapshot, name, user, ip } of this.clientIdentityRows(
       connectionId,
       since,
       until,
-      excludeClientIds,
+      ownClients,
     )) {
       const key = JSON.stringify([snapshot.capturedAt, name, user, ip]);
       const row = rows.get(key) ?? {

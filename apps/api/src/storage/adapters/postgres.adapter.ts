@@ -37,8 +37,9 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
+  ClientConnectionRow,
   ClientConnectionCaptureRow,
+  OwnClientConnection,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -989,8 +990,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
   // Each (client_id, addr) takes the name and user of its newest row in the
   // range ($1 connection, $2..$3 captured_at), so a client captured before
-  // CLIENT SETNAME ran is grouped under the name it set later. $4 lists the
-  // client ids to leave out (the monitor's own connections).
+  // CLIENT SETNAME ran is grouped under the name it set later. $4 and $5 are
+  // the monitor's own connections (client id, connected at): their rows from
+  // the time they connected on are left out, so an earlier connection that
+  // held the same id before a server restart stays in.
   private static readonly CLIENT_IDENTITY_ROWS = `
     SELECT captured_at, client_id, addr, age,
            FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
@@ -999,31 +1002,53 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       FROM client_snapshots
      WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
        AND COALESCE(flags, '') !~ '[SM]'
-       AND NOT (client_id = ANY($4::text[]))
+       AND NOT EXISTS (SELECT 1
+                         FROM unnest($4::text[], $5::bigint[]) AS own(client_id, connected_at)
+                        WHERE own.client_id = client_snapshots.client_id
+                          AND client_snapshots.captured_at >= own.connected_at)
     WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`;
 
-  async getNewClientConnections(
+  private static clientIdentityParams(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds: string[] = [],
-  ): Promise<NewClientConnectionGroup[]> {
+    ownClients: OwnClientConnection[],
+  ): unknown[] {
+    return [
+      connectionId,
+      since,
+      until,
+      ownClients.map((own) => own.id),
+      ownClients.map((own) => own.connectedAt),
+    ];
+  }
+
+  async getClientConnections(
+    connectionId: string,
+    since: number,
+    until: number,
+    ownClients: OwnClientConnection[] = [],
+  ): Promise<ClientConnectionRow[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query(
-      `SELECT name, user_name, ip, COUNT(*) AS count
-         FROM (SELECT DISTINCT client_id, addr, name, user_name, ip
-                 FROM (${PostgresAdapter.CLIENT_IDENTITY_ROWS}) identified
-                WHERE captured_at - age::bigint * 1000 >= $2) opened
-        GROUP BY name, user_name, ip`,
-      [connectionId, since, until, excludeClientIds],
+      `SELECT client_id, addr, name, user_name, ip,
+              MIN(captured_at - age::bigint * 1000) AS opened_at,
+              MIN(captured_at) AS first_captured_at, MAX(captured_at) AS last_captured_at
+         FROM (${PostgresAdapter.CLIENT_IDENTITY_ROWS}) identified
+        GROUP BY client_id, addr, name, user_name, ip`,
+      PostgresAdapter.clientIdentityParams(connectionId, since, until, ownClients),
     );
     return result.rows.map((row) => ({
+      clientId: String(row.client_id),
+      addr: row.addr,
       name: row.name,
       user: row.user_name,
       ip: row.ip,
-      count: Number(row.count),
+      openedAt: Number(row.opened_at),
+      firstCapturedAt: Number(row.first_captured_at),
+      lastCapturedAt: Number(row.last_captured_at),
     }));
   }
 
@@ -1031,7 +1056,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds: string[] = [],
+    ownClients: OwnClientConnection[] = [],
   ): Promise<ClientConnectionCaptureRow[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
@@ -1041,7 +1066,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
               MAX(CASE WHEN client_id::text ~ '^[0-9]+$' THEN client_id::text::bigint END) AS max_client_id
          FROM (${PostgresAdapter.CLIENT_IDENTITY_ROWS}) identified
         GROUP BY captured_at, name, user_name, ip`,
-      [connectionId, since, until, excludeClientIds],
+      PostgresAdapter.clientIdentityParams(connectionId, since, until, ownClients),
     );
     return result.rows.map((row) => ({
       capturedAt: Number(row.captured_at),

@@ -48,6 +48,7 @@ import type {
   KeyAnalyticsResult,
   KeyDetail,
   KeyPatternData,
+  OwnClientConnection,
 } from '@betterdb/shared';
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
@@ -103,10 +104,6 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
-// How many of this adapter's connection ids are kept, newest last. A server
-// numbers clients in increasing order, so an id below the ones known marks a
-// restart and the earlier ids are dropped.
-export const OWN_CLIENT_ID_HISTORY = 64;
 
 /**
  * How often, at most, file-sourced TLS material is stat-checked for changes when
@@ -128,6 +125,12 @@ export const MIN_DB_SAMPLE_SIZE = 100;
 export const GRAPH_MEMORY_PROBES_PER_SCAN = 20;
 export const GRAPH_MEMORY_TTL_MS = 60 * 60 * 1000;
 export const GRAPH_MEMORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// An ACL denial reply ("NOPERM ... no permissions to run the 'client|id'
+// command"), as opposed to a lost connection or a timeout.
+function isAclDenied(error: unknown): boolean {
+  return error instanceof Error && /^NOPERM\b/i.test(error.message);
+}
 
 async function closeClient(client: Valkey): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
@@ -203,30 +206,62 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
   private authenticatedUser: string | undefined;
-  // CLIENT ID of every connection this adapter opened (main client and its
-  // reconnects, key-analytics scratch clients, the CLI client), oldest first.
+  // The server-side id of every connection this adapter holds open (main
+  // client, key-analytics scratch clients, the CLI client), keyed by the
+  // client so a closed socket drops out and a reconnect replaces its entry.
   // Retry attribution leaves them out of the ranking, whatever name they
   // carry and before CLIENT SETNAME has run on them.
-  private ownClientIds: string[] = [];
+  private readonly ownClients = new Map<Valkey, OwnClientConnection>();
+  // Set once the ACL denies CLIENT ID: it is not sent again on later readies,
+  // so a user on the previous minimum ACL does not collect a NOPERM reply and
+  // an ACL LOG entry per reconnect. Attribution falls back to the default
+  // connection names.
+  private clientIdDenied = false;
 
-  private async recordOwnClientId(client: Valkey): Promise<void> {
+  private trackOwnClient(client: Valkey): void {
+    // The socket connects before the handshake (AUTH, SELECT, SETNAME, ready
+    // check) completes, and the server lists the client from the connect on.
+    let connectedAt = Date.now();
+    // Bumped by every ready and every close, so a CLIENT ID reply that lands
+    // after the socket it was sent on closed does not record a dead client.
+    let generation = 0;
+    const forget = () => {
+      generation += 1;
+      this.ownClients.delete(client);
+    };
+    client.on('connect', () => {
+      connectedAt = Date.now();
+    });
+    client.on('close', forget);
+    client.on('end', forget);
+    client.on('ready', () => {
+      generation += 1;
+      const current = generation;
+      const since = connectedAt;
+      void this.readOwnClientId(client).then((id) => {
+        if (id === null || generation !== current) return;
+        this.ownClients.set(client, { id, connectedAt: since });
+      });
+    });
+  }
+
+  private async readOwnClientId(client: Valkey): Promise<string | null> {
+    if (this.clientIdDenied) return null;
     let reply: unknown;
     try {
       reply = await withTimeout(client.call('CLIENT', 'ID'), WHOAMI_TIMEOUT_MS, 'CLIENT ID timed out');
-    } catch {
-      // Denied by the ACL or lost with the connection: attribution falls back
-      // to the default connection names.
-      return;
+    } catch (error) {
+      if (isAclDenied(error)) this.clientIdDenied = true;
+      // Otherwise lost with the connection or timed out: the next ready asks again.
+      return null;
     }
-    const id = Number(reply);
-    if (!Number.isInteger(id) || id < 0) return;
-    this.ownClientIds = this.ownClientIds.filter((known) => Number(known) < id);
-    this.ownClientIds.push(String(id));
-    this.ownClientIds = this.ownClientIds.slice(-OWN_CLIENT_ID_HISTORY);
+    // Ids start at 1; anything else (nil, text) is not an id.
+    const id = typeof reply === 'string' || typeof reply === 'number' ? Number(reply) : NaN;
+    return Number.isInteger(id) && id >= 1 ? String(id) : null;
   }
 
-  getOwnClientIds(): string[] {
-    return [...this.ownClientIds];
+  getOwnClientIds(): OwnClientConnection[] {
+    return [...this.ownClients.values()];
   }
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
@@ -256,7 +291,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Custom CA and client certificate (mutual TLS) ride on the same object.
       tls: this.tlsOptions(),
     });
-    client.on('ready', () => void this.recordOwnClientId(client));
+    this.trackOwnClient(client);
     return client;
   }
 

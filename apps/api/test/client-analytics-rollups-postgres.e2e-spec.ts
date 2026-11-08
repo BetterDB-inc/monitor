@@ -508,19 +508,17 @@ describePostgres('client analytics rollups — postgres', () => {
     });
   });
 
-  describe('getNewClientConnections', () => {
+  describe('getClientConnections', () => {
     const since = T0 + BATCH_MS;
     const until = T0 + 5 * BATCH_MS;
-    const sortGroups = (groups: Array<{ name: string; user: string; ip: string; count: number }>) =>
-      [...groups].sort((a, b) =>
-        `${a.name}|${a.user}|${a.ip}` < `${b.name}|${b.user}|${b.ip}` ? -1 : 1,
-      );
+    const byClient = <T extends { clientId: string; addr: string }>(connections: T[]) =>
+      [...connections].sort((a, b) => `${a.clientId} ${a.addr}`.localeCompare(`${b.clientId} ${b.addr}`));
 
     it.each(CONNECTIONS)('matches the memory adapter for %s', async (connectionId) => {
-      const groups = await pg.getNewClientConnections(connectionId, since, until);
-      expect(groups.length).toBeGreaterThan(0);
-      expect(sortGroups(groups)).toEqual(
-        sortGroups(await memory.getNewClientConnections(connectionId, since, until)),
+      const connections = await pg.getClientConnections(connectionId, since, until);
+      expect(connections.length).toBeGreaterThan(0);
+      expect(byClient(connections)).toEqual(
+        byClient(await memory.getClientConnections(connectionId, since, until)),
       );
     });
 
@@ -532,7 +530,9 @@ describePostgres('client analytics rollups — postgres', () => {
         connectionId,
       );
 
-      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+      await expect(pg.getClientConnections(connectionId, since, until)).resolves.toEqual([
+        expect.objectContaining({ clientId: 'old', openedAt: since - 3_000_000_000 }),
+      ]);
     });
 
     it('leaves replica and master links out', async () => {
@@ -547,10 +547,10 @@ describePostgres('client analytics rollups — postgres', () => {
         connectionId,
       );
 
-      await expect(pg.getNewClientConnections(connectionId, since, until)).resolves.toEqual([]);
+      await expect(pg.getClientConnections(connectionId, since, until)).resolves.toEqual([]);
     });
 
-    it('matches the memory adapter for a late CLIENT SETNAME and excluded ids', async () => {
+    it("matches the memory adapter for a late CLIENT SETNAME and the monitor's own connections", async () => {
       const connectionId = 'conn-setname';
       const [template] = rows;
       const row = { ...template, id: 0, user: 'default', connectionId };
@@ -559,27 +559,68 @@ describePostgres('client analytics rollups — postgres', () => {
         { ...row, clientId: '7', name: 'storm', addr: '10.0.0.5:4001', age: 60, capturedAt: since + 60_000 },
         { ...row, clientId: '5', name: 'api', addr: '10.0.0.1:1', age: 0, capturedAt: since },
         { ...row, clientId: '5', name: '', addr: '10.0.0.2:1', age: 0, capturedAt: since + 60_000 },
-        { ...row, clientId: '9', name: 'acme-monitor', addr: '10.0.0.9:1', age: 0, capturedAt: since },
+        // The application held id 9 before a restart; the monitor holds it since.
+        { ...row, clientId: '9', name: 'api', addr: '10.0.0.1:9', age: 0, capturedAt: since },
+        { ...row, clientId: '9', name: 'acme-monitor', addr: '10.0.0.9:1', age: 0, capturedAt: since + 60_000 },
       ];
       await pg.saveClientSnapshot(batch, connectionId);
       await memory.saveClientSnapshot(batch, connectionId);
+      const own = [{ id: '9', connectedAt: since + 30_000 }];
 
-      const groups = await pg.getNewClientConnections(connectionId, since, until, ['9']);
-      expect(sortGroups(groups)).toEqual([
-        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
-        { name: 'storm', user: 'default', ip: '10.0.0.5', count: 1 },
-        { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
+      const connections = await pg.getClientConnections(connectionId, since, until, own);
+      expect(byClient(connections)).toEqual([
+        {
+          clientId: '5',
+          addr: '10.0.0.1:1',
+          name: 'api',
+          user: 'default',
+          ip: '10.0.0.1',
+          openedAt: since,
+          firstCapturedAt: since,
+          lastCapturedAt: since,
+        },
+        {
+          clientId: '5',
+          addr: '10.0.0.2:1',
+          name: '',
+          user: 'default',
+          ip: '10.0.0.2',
+          openedAt: since + 60_000,
+          firstCapturedAt: since + 60_000,
+          lastCapturedAt: since + 60_000,
+        },
+        {
+          clientId: '7',
+          addr: '10.0.0.5:4001',
+          name: 'storm',
+          user: 'default',
+          ip: '10.0.0.5',
+          openedAt: since,
+          firstCapturedAt: since,
+          lastCapturedAt: since + 60_000,
+        },
+        {
+          clientId: '9',
+          addr: '10.0.0.1:9',
+          name: 'api',
+          user: 'default',
+          ip: '10.0.0.1',
+          openedAt: since,
+          firstCapturedAt: since,
+          lastCapturedAt: since,
+        },
       ]);
-      expect(sortGroups(groups)).toEqual(
-        sortGroups(await memory.getNewClientConnections(connectionId, since, until, ['9'])),
+      expect(byClient(connections)).toEqual(
+        byClient(await memory.getClientConnections(connectionId, since, until, own)),
       );
-      const captures = await pg.getClientConnectionCaptures(connectionId, since, until, ['9']);
+      const captures = await pg.getClientConnectionCaptures(connectionId, since, until, own);
       const byCapture = (rows: Array<{ capturedAt: number; name: string; ip: string }>) =>
         [...rows].sort((a, b) => a.capturedAt - b.capturedAt || `${a.name}|${a.ip}`.localeCompare(`${b.name}|${b.ip}`));
       expect(byCapture(captures)).toEqual(
-        byCapture(await memory.getClientConnectionCaptures(connectionId, since, until, ['9'])),
+        byCapture(await memory.getClientConnectionCaptures(connectionId, since, until, own)),
       );
       expect(captures.filter((c) => c.ip === '10.0.0.5').map((c) => c.name)).toEqual(['storm', 'storm']);
+      expect(captures.filter((c) => c.ip === '10.0.0.9')).toEqual([]);
     });
   });
 

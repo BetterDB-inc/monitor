@@ -1,9 +1,11 @@
 import type {
   ClientConnectionCaptureRow,
+  ClientConnectionRow,
   ClientSnapshotGroupRow,
   NewClientConnectionGroup,
+  OwnClientConnection,
 } from '@betterdb/shared';
-import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
+import { clientAddrIp, clientConnectionKey } from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
@@ -13,8 +15,8 @@ export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 export const RETRY_AMP_MAX_BASELINE_SCALE = 2;
 // Default names of the connections BetterDB itself opens: the monitor (and its
 // -keyscan, -Node-..., -Discovery clients), the agent and the CLI. The
-// monitor's own connections to the node are also known by client id
-// (`ownClientIds`), which covers a custom connection name and a connection
+// monitor's own open connections to the node are also known by client id
+// (`ownClients`), which covers a custom connection name and a connection
 // listed before CLIENT SETNAME ran on it. BetterDB-Migration-* stays visible
 // on purpose.
 const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
@@ -60,12 +62,18 @@ export interface EpisodeClientSnapshots {
   latest: ClientCommandSnapshot | null;
 }
 
+/** Connections per (name, user, ip) in the newest capture of the episode. */
+export type ClientGroupCount = Pick<ClientSnapshotGroupRow, 'name' | 'user' | 'ip' | 'count'>;
+
 export interface AttributionInput extends EpisodeClientSnapshots {
-  capture: ClientSnapshotGroupRow[];
+  capture: ClientGroupCount[];
   newConnections: NewClientConnectionGroup[];
   baselineConnections?: NewClientConnectionGroup[];
-  /** CLIENT LIST ids of the monitor's own connections to the node. */
-  ownClientIds?: Iterable<string>;
+  /**
+   * The monitor's own open connections to the node, by CLIENT LIST id from the
+   * time each connected (see DatabasePort.getOwnClientIds).
+   */
+  ownClients?: Iterable<OwnClientConnection>;
   limit?: number;
 }
 
@@ -128,15 +136,32 @@ type ClientIdentity = Pick<ClientCommandCount, 'key' | 'keyKind'>;
 // A connection is one identity across snapshots: the newest reading of a
 // client id on the same address names it, so a client caught before CLIENT
 // SETNAME ran is counted under the name it set later. A reused id on another
-// address is a different connection.
+// address is a different connection. `snapshots` are in chronological order,
+// so a later reading overwrites an earlier one.
 function latestIdentities(snapshots: ClientCommandSnapshot[]): Map<string, ClientIdentity> {
   const identities = new Map<string, ClientIdentity>();
-  for (const snapshot of [...snapshots].sort((a, b) => a.takenAt - b.takenAt)) {
+  for (const snapshot of snapshots) {
     for (const [clientId, client] of snapshot.clients) {
-      identities.set(`${clientId} ${client.addr}`, { key: client.key, keyKind: client.keyKind });
+      identities.set(clientConnectionKey(clientId, client.addr), {
+        key: client.key,
+        keyKind: client.keyKind,
+      });
     }
   }
   return identities;
+}
+
+// Whether a reading of `clientId` taken at `takenAt` is one of the monitor's
+// own connections: the id is held open by the monitor and the reading is from
+// after it connected. An earlier reading of the same id (an application client
+// before a server restart renumbered the ids) is not.
+function isOwnClient(
+  ownClients: Map<string, number>,
+  clientId: string,
+  takenAt: number,
+): boolean {
+  const connectedAt = ownClients.get(clientId);
+  return connectedAt !== undefined && takenAt >= connectedAt;
 }
 
 function accumulatorFor(
@@ -202,19 +227,20 @@ function commandRates(
   from: ClientCommandSnapshot,
   to: ClientCommandSnapshot,
   identities: Map<string, ClientIdentity>,
-  ownClientIds: Set<string>,
+  ownClients: Map<string, number>,
 ): Array<{ identity: ClientIdentity; rate: number }> {
   const dtSec = (to.takenAt - from.takenAt) / 1000;
   if (dtSec <= 0) return [];
   const rates: Array<{ identity: ClientIdentity; rate: number }> = [];
   for (const [clientId, client] of to.clients) {
-    if (ownClientIds.has(clientId)) continue;
-    const earlier = from.clients.get(clientId)?.totalCommands ?? 0;
+    if (isOwnClient(ownClients, clientId, to.takenAt)) continue;
+    // The earlier reading counts only for the same connection: an id reused on
+    // another address after a server restart starts from zero.
+    const previous = from.clients.get(clientId);
+    const earlier = previous?.addr === client.addr ? previous.totalCommands : 0;
     if (client.totalCommands < earlier) continue;
-    const identity = identities.get(`${clientId} ${client.addr}`) ?? {
-      key: client.key,
-      keyKind: client.keyKind,
-    };
+    // Every reading of `to` is in `identities` (built from `to` among others).
+    const identity = identities.get(clientConnectionKey(clientId, client.addr))!;
     rates.push({ identity, rate: (client.totalCommands - earlier) / dtSec });
   }
   return rates;
@@ -225,15 +251,58 @@ function addCommandGrowth(
   before: ClientCommandSnapshot,
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
-  ownClientIds: Set<string>,
+  ownClients: Map<string, number>,
 ): void {
   const identities = latestIdentities([before, first, latest]);
-  for (const { identity, rate } of commandRates(before, first, identities, ownClientIds)) {
+  for (const { identity, rate } of commandRates(before, first, identities, ownClients)) {
     accumulatorFor(map, identity).preEpisodeRate += rate;
   }
-  for (const { identity, rate } of commandRates(first, latest, identities, ownClientIds)) {
+  for (const { identity, rate } of commandRates(first, latest, identities, ownClients)) {
     accumulatorFor(map, identity).episodeRate += rate;
   }
+}
+
+function groupCounts<T extends { name: string; user: string; ip: string }>(
+  rows: T[],
+): NewClientConnectionGroup[] {
+  const groups = new Map<string, NewClientConnectionGroup>();
+  for (const { name, user, ip } of rows) {
+    const key = JSON.stringify([name, user, ip]);
+    const group = groups.get(key) ?? { name, user, ip, count: 0 };
+    group.count += 1;
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Connections that opened in [since, until] and were captured by `until`, per
+ * (name, user, ip). `connections` come from one storage read over the whole
+ * attribution span, so a connection keeps the same identity whichever part of
+ * the span it is counted in.
+ */
+export function newConnectionsBetween(
+  connections: ClientConnectionRow[],
+  since: number,
+  until: number,
+): NewClientConnectionGroup[] {
+  return groupCounts(
+    connections.filter((c) => c.openedAt >= since && c.firstCapturedAt <= until),
+  );
+}
+
+/**
+ * Connections per (name, user, ip) in the newest capture among `connections`,
+ * or none when that capture is older than `notBefore` (no capture during the
+ * episode). Same identities and exclusions as the reconnect counts.
+ */
+export function latestCaptureGroups(
+  connections: ClientConnectionRow[],
+  notBefore: number,
+): ClientGroupCount[] {
+  const newest = connections.reduce((at, c) => Math.max(at, c.lastCapturedAt), -Infinity);
+  if (newest < notBefore) return [];
+  return groupCounts(connections.filter((c) => c.lastCapturedAt === newest));
 }
 
 function highestClientId(rows: ClientConnectionCaptureRow[]): number {
@@ -282,7 +351,7 @@ export function estimateNewConnections(
 function addReconnects(
   map: Map<string, ContributorAccumulator>,
   groups: NewClientConnectionGroup[],
-  capture: ClientSnapshotGroupRow[],
+  capture: ClientGroupCount[],
   baseline: NewClientConnectionGroup[],
 ): void {
   for (const group of groups) {
@@ -302,13 +371,9 @@ export function rankRetryAmplificationContributors(
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
   if (hasRatePair(input)) {
-    addCommandGrowth(
-      map,
-      input.before,
-      input.first,
-      input.latest,
-      new Set(input.ownClientIds ?? []),
-    );
+    const ownClients = new Map<string, number>();
+    for (const own of input.ownClients ?? []) ownClients.set(own.id, own.connectedAt);
+    addCommandGrowth(map, input.before, input.first, input.latest, ownClients);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
   for (const [id, acc] of map) {

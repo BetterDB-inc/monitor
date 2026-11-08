@@ -105,13 +105,15 @@ describe.each([
     await h.cleanup();
   });
 
-  describe('getNewClientConnections', () => {
+  describe('getClientConnections', () => {
     const since = 1_000_000;
     const until = 2_000_000;
     const rows = (overrides: Array<Partial<ReturnType<typeof client>>>) =>
       overrides.map((o) => ({ ...client(since), ...o }));
+    const byClient = <T extends { clientId: string; addr: string }>(connections: T[]) =>
+      [...connections].sort((x, y) => `${x.clientId} ${x.addr}`.localeCompare(`${y.clientId} ${y.addr}`));
 
-    it('counts each client once across captures, grouped by name, user and ip', async () => {
+    it('reads each connection once across captures with when it opened and was captured', async () => {
       await save(
         h.storage,
         rows([
@@ -122,24 +124,51 @@ describe.each([
         ]),
       );
 
-      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
-      expect(groups.sort((x, y) => y.count - x.count)).toEqual([
-        { name: 'api', user: 'svc', ip: '10.0.0.1', count: 2 },
-        { name: '', user: 'default', ip: '[::1]', count: 1 },
+      expect(byClient(await h.storage.getClientConnections('conn-x', since, until))).toEqual([
+        {
+          clientId: 'a',
+          addr: '10.0.0.1:1',
+          name: 'api',
+          user: 'svc',
+          ip: '10.0.0.1',
+          openedAt: since,
+          firstCapturedAt: since,
+          lastCapturedAt: since + 60_000,
+        },
+        {
+          clientId: 'b',
+          addr: '10.0.0.1:2',
+          name: 'api',
+          user: 'svc',
+          ip: '10.0.0.1',
+          openedAt: since + 59_000,
+          firstCapturedAt: since + 60_000,
+          lastCapturedAt: since + 60_000,
+        },
+        {
+          clientId: 'c',
+          addr: '[::1]:6379',
+          name: '',
+          user: 'default',
+          ip: '[::1]',
+          openedAt: since + 59_000,
+          firstCapturedAt: since + 60_000,
+          lastCapturedAt: since + 60_000,
+        },
       ]);
     });
 
-    it('skips clients connected before the range, other connections and later captures', async () => {
+    it('skips other connections and captures outside the range', async () => {
       await save(
         h.storage,
         rows([
-          { clientId: 'old', name: 'pool', age: 5, capturedAt: since + 1_000 },
+          { clientId: 'early', name: 'pool', age: 5, capturedAt: since - 1 },
           { clientId: 'late', name: 'later', age: 0, capturedAt: until + 1 },
         ]),
       );
       await save(h.storage, rows([{ clientId: 'x', name: 'other', age: 0 }]), 'other');
 
-      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([]);
+      expect(await h.storage.getClientConnections('conn-x', since, until)).toEqual([]);
     });
 
     it('finds early connections that a limited snapshot read drops', async () => {
@@ -159,9 +188,9 @@ describe.each([
         limit: 2,
       });
       expect(limited.map((r) => r.clientId)).not.toContain('early');
-      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([
-        expect.objectContaining({ name: 'retrier', count: 1 }),
-      ]);
+      expect(await h.storage.getClientConnections('conn-x', since, until)).toContainEqual(
+        expect.objectContaining({ clientId: 'early', name: 'retrier', openedAt: since }),
+      );
     });
 
     it('leaves replica and master links out', async () => {
@@ -174,12 +203,12 @@ describe.each([
         ]),
       );
 
-      expect(await h.storage.getNewClientConnections('conn-x', since, until)).toEqual([
-        expect.objectContaining({ name: 'api', count: 1 }),
+      expect(await h.storage.getClientConnections('conn-x', since, until)).toEqual([
+        expect.objectContaining({ clientId: 'n', name: 'api' }),
       ]);
     });
 
-    it('counts a client that set its name after a capture once, under that name', async () => {
+    it('names a client that set its name after a capture by that name', async () => {
       const storm = { addr: '10.0.0.5:4001', user: 'default' };
       await save(
         h.storage,
@@ -191,10 +220,15 @@ describe.each([
         ]),
       );
 
-      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
-      expect(groups.sort((x, y) => x.name.localeCompare(y.name))).toEqual([
-        { name: '', user: 'default', ip: '10.0.0.5', count: 1 },
-        { name: 'storm', user: 'default', ip: '10.0.0.5', count: 1 },
+      expect(byClient(await h.storage.getClientConnections('conn-x', since, until))).toEqual([
+        expect.objectContaining({
+          clientId: '7',
+          name: 'storm',
+          openedAt: since,
+          firstCapturedAt: since,
+          lastCapturedAt: since + 120_000,
+        }),
+        expect.objectContaining({ clientId: '8', name: '', ip: '10.0.0.5' }),
       ]);
     });
 
@@ -207,25 +241,34 @@ describe.each([
         ]),
       );
 
-      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
-      expect(groups.sort((x, y) => x.name.localeCompare(y.name))).toEqual([
-        { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
-        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
+      expect(byClient(await h.storage.getClientConnections('conn-x', since, until))).toEqual([
+        expect.objectContaining({ clientId: '5', addr: '10.0.0.1:1', name: 'api', openedAt: since }),
+        expect.objectContaining({ clientId: '5', addr: '10.0.0.2:1', name: '', openedAt: since + 60_000 }),
       ]);
     });
 
-    it('leaves the given client ids out', async () => {
+    it("leaves the monitor's own connections out from the time they connected", async () => {
       await save(
         h.storage,
         rows([
-          { clientId: '1', name: 'acme-monitor', age: 0 },
-          { clientId: '2', name: '', addr: '10.0.0.9:1', age: 0 },
-          { clientId: '3', name: 'api', age: 0 },
+          // The application held id 3 before the server restarted and renumbered.
+          { clientId: '3', name: 'api', addr: '10.0.0.1:1', age: 0, capturedAt: since },
+          // The monitor got id 3 after the restart, unnamed at first.
+          { clientId: '3', name: '', addr: '10.0.0.9:1', age: 0, capturedAt: since + 60_000 },
+          { clientId: '3', name: 'acme-monitor', addr: '10.0.0.9:1', age: 60, capturedAt: since + 120_000 },
+          { clientId: '4', name: 'api', addr: '10.0.0.1:2', age: 0, capturedAt: since + 120_000 },
         ]),
       );
+      const own = [{ id: '3', connectedAt: since + 30_000 }];
 
-      expect(await h.storage.getNewClientConnections('conn-x', since, until, ['1', '2'])).toEqual([
-        expect.objectContaining({ name: 'api', count: 1 }),
+      expect(byClient(await h.storage.getClientConnections('conn-x', since, until, own))).toEqual([
+        expect.objectContaining({ clientId: '3', addr: '10.0.0.1:1', name: 'api' }),
+        expect.objectContaining({ clientId: '4', addr: '10.0.0.1:2', name: 'api' }),
+      ]);
+      const captures = await h.storage.getClientConnectionCaptures('conn-x', since, until, own);
+      expect(captures.sort((x, y) => x.capturedAt - y.capturedAt)).toEqual([
+        expect.objectContaining({ capturedAt: since, name: 'api', maxClientId: 3 }),
+        expect.objectContaining({ capturedAt: since + 120_000, name: 'api', maxClientId: 4 }),
       ]);
     });
   });
@@ -305,7 +348,7 @@ describe.each([
       ]);
     });
 
-    it('leaves the given client ids out', async () => {
+    it("leaves the monitor's own connections out", async () => {
       await save(
         h.storage,
         rows([
@@ -314,9 +357,9 @@ describe.each([
         ]),
       );
 
-      expect(await h.storage.getClientConnectionCaptures('conn-x', since, until, ['9'])).toEqual([
-        expect.objectContaining({ name: 'api', oldestAge: 5, maxClientId: 3 }),
-      ]);
+      expect(
+        await h.storage.getClientConnectionCaptures('conn-x', since, until, [{ id: '9', connectedAt: 0 }]),
+      ).toEqual([expect.objectContaining({ name: 'api', oldestAge: 5, maxClientId: 3 })]);
     });
   });
 

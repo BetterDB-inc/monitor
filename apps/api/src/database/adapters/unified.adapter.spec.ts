@@ -1170,41 +1170,181 @@ describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per co
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
-  it('learns the server-side id of each connection it opens and forgets ids from before a restart', async () => {
-    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
-    const client = adapter.getClient();
-    const replies: Array<number | Error> = [];
+});
+
+describe('UnifiedDatabaseAdapter own client ids', () => {
+  type Client = ReturnType<UnifiedDatabaseAdapter['getClient']>;
+  type Reply = number | string | null | Error;
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  // Every client answers CLIENT ID from its own queue; other commands (the
+  // WHOAMI probe on a reconnect) get an empty reply.
+  function answers(client: Client): { replies: Reply[]; call: jest.SpyInstance } {
+    const replies: Reply[] = [];
     const call = jest.spyOn(client, 'call').mockImplementation(async (command: string) => {
       if (command !== 'CLIENT') return undefined;
       const reply = replies.shift();
       if (reply instanceof Error) throw reply;
       return reply;
     });
-    const ready = async (reply: number | Error) => {
-      replies.push(reply);
+    return { replies, call };
+  }
+
+  function makeAdapter() {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
+    const scratch = (name: string) =>
+      (adapter as unknown as { createValkeyClient(name: string): Client }).createValkeyClient(name);
+    const ids = () => adapter.getOwnClientIds().map((own) => own.id);
+    const ready = async (client: Client, queue: Reply[], reply: Reply) => {
+      queue.push(reply);
       client.emit('ready');
-      await new Promise((resolve) => setImmediate(resolve));
+      await settle();
     };
+    return { adapter, scratch, ids, ready };
+  }
 
-    await ready(41);
-    expect(call).toHaveBeenCalledWith('CLIENT', 'ID');
-    expect(adapter.getOwnClientIds()).toEqual(['41']);
+  it('learns the id of each connection it opens: the main client, its reconnects and scratch clients', async () => {
+    const { adapter, scratch, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const main = answers(client);
 
-    // A reconnect adds the new id; a scratch client is one of ours as well.
-    await ready(57);
-    const scratch = (adapter as unknown as { createValkeyClient(name: string): typeof client }).createValkeyClient(
-      'scratch',
+    await ready(client, main.replies, 41);
+    expect(main.call).toHaveBeenCalledWith('CLIENT', 'ID');
+    expect(ids()).toEqual(['41']);
+
+    // A reconnect replaces the id of the same client.
+    client.emit('close');
+    expect(ids()).toEqual([]);
+    await ready(client, main.replies, 57);
+    expect(ids()).toEqual(['57']);
+
+    const keyscan = scratch('scratch');
+    await ready(keyscan, answers(keyscan).replies, 58);
+    expect(ids().sort()).toEqual(['57', '58']);
+  });
+
+  it('keeps the main connection known however many scratch clients come and go', async () => {
+    const { adapter, scratch, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    await ready(client, answers(client).replies, 41);
+
+    for (let i = 0; i < 70; i++) {
+      const keyscan = scratch(`keyscan-${i}`);
+      await ready(keyscan, answers(keyscan).replies, 100 + i);
+      keyscan.emit('end');
+    }
+
+    // The live main connection is still ours and no closed scratch client is.
+    expect(ids()).toEqual(['41']);
+  });
+
+  it('keeps both ids when two CLIENT ID replies land out of order', async () => {
+    const { adapter, scratch, ids } = makeAdapter();
+    const client = adapter.getClient();
+    const keyscan = scratch('keyscan');
+    const pending = new Map<Client, (id: number) => void>();
+    for (const c of [client, keyscan]) {
+      jest.spyOn(c, 'call').mockImplementation(
+        (command: string) =>
+          command === 'CLIENT'
+            ? new Promise<number>((resolve) => pending.set(c, resolve))
+            : Promise.resolve(undefined),
+      );
+    }
+
+    client.emit('ready');
+    keyscan.emit('ready');
+    // The scratch client's higher id answers first, then the main client's.
+    pending.get(keyscan)!(42);
+    await settle();
+    pending.get(client)!(41);
+    await settle();
+
+    expect(ids().sort()).toEqual(['41', '42']);
+  });
+
+  it('ignores a reply that is not a client id', async () => {
+    const { adapter, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies } = answers(client);
+    await ready(client, replies, 41);
+
+    for (const reply of [null, 0, -1, '', 'OK'] as Reply[]) {
+      await ready(client, replies, reply);
+      expect(ids()).toEqual(['41']);
+    }
+  });
+
+  it('records when the socket connected, not when CLIENT ID answered', async () => {
+    const { adapter, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies } = answers(client);
+    const now = jest.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000);
+      client.emit('connect');
+      now.mockReturnValue(5_000);
+      await ready(client, replies, 41);
+    } finally {
+      now.mockRestore();
+    }
+
+    expect(adapter.getOwnClientIds()).toEqual([{ id: '41', connectedAt: 1_000 }]);
+  });
+
+  it('forgets a connection when its socket closes, even if CLIENT ID answers afterwards', async () => {
+    const { adapter, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies } = answers(client);
+    await ready(client, replies, 41);
+    client.emit('end');
+    expect(ids()).toEqual([]);
+
+    let answer: (id: number) => void = () => undefined;
+    jest.spyOn(client, 'call').mockImplementation(
+      (command: string) =>
+        command === 'CLIENT'
+          ? new Promise<number>((resolve) => (answer = resolve))
+          : Promise.resolve(undefined),
     );
-    jest.spyOn(scratch, 'call').mockResolvedValue(58);
-    scratch.emit('ready');
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(adapter.getOwnClientIds()).toEqual(['41', '57', '58']);
+    client.emit('ready');
+    client.emit('close');
+    answer(42);
+    await settle();
 
-    // Denied CLIENT ID changes nothing; an id below the known ones means the
-    // server restarted and renumbered its clients.
-    await ready(new Error('NOPERM'));
-    expect(adapter.getOwnClientIds()).toEqual(['41', '57', '58']);
-    await ready(3);
-    expect(adapter.getOwnClientIds()).toEqual(['3']);
+    expect(ids()).toEqual([]);
+    expect((adapter as unknown as { ownClients: Map<unknown, unknown> }).ownClients.size).toBe(0);
+  });
+
+  it('sends CLIENT ID once when the ACL denies it', async () => {
+    const { adapter, scratch, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const main = answers(client);
+    await ready(client, main.replies, new Error("NOPERM this user has no permissions to run the 'client|id' command"));
+    expect(ids()).toEqual([]);
+
+    client.emit('close');
+    await ready(client, main.replies, 41);
+    const keyscan = scratch('keyscan');
+    const other = answers(keyscan);
+    await ready(keyscan, other.replies, 42);
+
+    const clientIdCalls = (call: jest.SpyInstance) =>
+      call.mock.calls.filter(([command, sub]) => command === 'CLIENT' && sub === 'ID');
+    expect(clientIdCalls(main.call)).toHaveLength(1);
+    expect(clientIdCalls(other.call)).toHaveLength(0);
+    expect(ids()).toEqual([]);
+  });
+
+  it('asks again on the next ready after a reply lost with the connection', async () => {
+    const { adapter, ids, ready } = makeAdapter();
+    const client = adapter.getClient();
+    const { replies, call } = answers(client);
+    await ready(client, replies, new Error('Connection is closed.'));
+    expect(ids()).toEqual([]);
+
+    await ready(client, replies, 41);
+    expect(call.mock.calls.filter(([command]) => command === 'CLIENT')).toHaveLength(2);
+    expect(ids()).toEqual(['41']);
   });
 });

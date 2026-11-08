@@ -1,4 +1,4 @@
-import type { ClientSnapshotGroupRow } from '@betterdb/shared';
+import type { ClientConnectionRow, ClientSnapshotGroupRow } from '@betterdb/shared';
 import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
 import { RETRY_AMP_EVENT_GRACE_MS, RETRY_AMP_WINDOW_MS } from '../retry-amplification-detector';
 import {
@@ -7,6 +7,8 @@ import {
   contributorKey,
   describeRetryAmplificationContributors,
   estimateNewConnections,
+  latestCaptureGroups,
+  newConnectionsBetween,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   RETRY_AMP_CLIENT_SNAPSHOTS,
@@ -414,10 +416,57 @@ describe('retry amplification attribution', () => {
         latest: at(120_000, 20_000, 4600),
         capture: [],
         newConnections: [],
-        ownClientIds: ['1', '2'],
+        ownClients: [
+          { id: '1', connectedAt: 0 },
+          { id: '2', connectedAt: 0 },
+        ],
       });
 
       expect(ranked.map((c) => c.key)).toEqual(['api']);
+    });
+
+    it("keeps the readings of an application client that held the monitor's id before a restart", () => {
+      const before = snapshot(0, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1000' })]);
+      const first = snapshot(60_000, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1600' })]);
+      // The server restarted at 100s: the monitor now holds id 3 and the
+      // application reconnected as id 4.
+      const latest = snapshot(120_000, [
+        client({ id: '3', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '20000' }),
+        client({ id: '4', name: 'api', addr: '10.0.0.1:2', 'tot-cmds': '3000' }),
+      ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+        ownClients: [{ id: '3', connectedAt: 100_000 }],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+      // 10/s before the episode on id 3, 50/s during it on id 4.
+      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
+    });
+
+    it('starts the command count of an id reused on another address from zero', () => {
+      const before = snapshot(0, [client({ id: '5', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1000' })]);
+      const first = snapshot(60_000, [client({ id: '5', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1600' })]);
+      // After a restart the same id names a new connection: its whole counter
+      // is this episode's, not the growth over the old connection's counter.
+      const latest = snapshot(120_000, [client({ id: '5', name: 'api', addr: '10.0.0.1:2', 'tot-cmds': '3000' })]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+      // 10/s before the episode, 50/s during it on the new connection.
+      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
     });
 
     it('keeps an application whose name only starts with the monitor name', () => {
@@ -492,6 +541,72 @@ describe('retry amplification attribution', () => {
           newConnections: [],
         }),
       ).toEqual([]);
+    });
+  });
+
+  describe('stored connections', () => {
+    const connection = (overrides: Partial<ClientConnectionRow> & { clientId: string }): ClientConnectionRow => ({
+      addr: `10.0.0.1:${overrides.clientId}`,
+      name: 'api',
+      user: 'default',
+      ip: '10.0.0.1',
+      openedAt: 0,
+      firstCapturedAt: 0,
+      lastCapturedAt: 0,
+      ...overrides,
+    });
+
+    it('splits one read of the span into baseline and episode reconnects under one identity', () => {
+      const connections = [
+        // Opened in the baseline, first captured there unnamed, named later.
+        connection({ clientId: '1', name: 'storm', openedAt: 500_000, firstCapturedAt: 530_000, lastCapturedAt: 700_000 }),
+        connection({ clientId: '2', name: 'storm', openedAt: 590_000, firstCapturedAt: 590_000, lastCapturedAt: 700_000 }),
+        // Opened in the episode.
+        connection({ clientId: '3', name: 'storm', openedAt: 600_000, firstCapturedAt: 650_000, lastCapturedAt: 700_000 }),
+        connection({ clientId: '4', name: 'storm', openedAt: 640_000, firstCapturedAt: 650_000, lastCapturedAt: 650_000 }),
+        // Opened before the span, and one of another identity.
+        connection({ clientId: '5', name: 'pool', openedAt: 100_000, firstCapturedAt: 420_000, lastCapturedAt: 700_000 }),
+        connection({ clientId: '6', name: '', ip: '10.0.0.2', openedAt: 610_000, firstCapturedAt: 650_000, lastCapturedAt: 700_000 }),
+      ];
+
+      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([
+        { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
+      ]);
+      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([
+        { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
+        { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
+      ]);
+    });
+
+    it('does not count a connection in a part of the span it was first captured after', () => {
+      // Opened just before the episode, first listed during it: new in neither part.
+      const connections = [
+        connection({ clientId: '1', openedAt: 599_500, firstCapturedAt: 650_000, lastCapturedAt: 650_000 }),
+      ];
+
+      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([]);
+      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([]);
+    });
+
+    it('counts the connections of the newest capture per identity', () => {
+      const connections = [
+        connection({ clientId: '1', name: 'storm', firstCapturedAt: 500_000, lastCapturedAt: 700_000 }),
+        connection({ clientId: '2', name: 'storm', firstCapturedAt: 650_000, lastCapturedAt: 700_000 }),
+        connection({ clientId: '3', name: 'storm', firstCapturedAt: 650_000, lastCapturedAt: 650_000 }),
+        connection({ clientId: '4', name: '', ip: '10.0.0.2', firstCapturedAt: 700_000, lastCapturedAt: 700_000 }),
+      ];
+
+      expect(latestCaptureGroups(connections, 600_000)).toEqual([
+        { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
+        { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
+      ]);
+    });
+
+    it('has no capture when the newest one is from before the episode', () => {
+      const connections = [connection({ clientId: '1', firstCapturedAt: 500_000, lastCapturedAt: 590_000 })];
+
+      expect(latestCaptureGroups(connections, 600_000)).toEqual([]);
+      expect(latestCaptureGroups([], 600_000)).toEqual([]);
     });
   });
 

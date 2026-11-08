@@ -2,8 +2,9 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
+  ClientConnectionRow,
   ClientConnectionCaptureRow,
+  OwnClientConnection,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -96,8 +97,9 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
+  ClientConnectionRow,
   ClientConnectionCaptureRow,
+  OwnClientConnection,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -573,27 +575,29 @@ export interface StoragePort {
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
   /**
-   * Connections that opened in [since, until] (captured_at - age), counted once per (client_id, addr)
-   * and grouped by (name, user, ip). A connection is identified by its newest row in the range, so a
-   * client captured before it ran CLIENT SETNAME is counted under the name it set later. Replica and
-   * master links are left out, as are the given client ids (the monitor's own connections).
+   * One row per (client_id, addr) captured in [since, until]: the name and user of its newest row in
+   * the range, so a client captured before it ran CLIENT SETNAME carries the name it set later; the
+   * earliest `captured_at - age` estimate of when it opened; and the first and last capture that
+   * listed it. Replica and master links are left out, as are the rows of each `ownClients` entry
+   * captured at or after its `connectedAt` (the monitor's own connections; an earlier connection
+   * that held the same id before a server restart stays in).
    */
-  getNewClientConnections(
+  getClientConnections(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds?: string[],
-  ): Promise<NewClientConnectionGroup[]>;
+    ownClients?: OwnClientConnection[],
+  ): Promise<ClientConnectionRow[]>;
   /**
    * Oldest connection age and highest numeric client id per (captured_at, name, user, ip) in
    * [since, until], with each (client_id, addr) grouped under the identity of its newest row in the
-   * range. Same exclusions as getNewClientConnections.
+   * range. Same exclusions as getClientConnections.
    */
   getClientConnectionCaptures(
     connectionId: string,
     since: number,
     until: number,
-    excludeClientIds?: string[],
+    ownClients?: OwnClientConnection[],
   ): Promise<ClientConnectionCaptureRow[]>;
   getClientTimeSeries(
     startTime: number,

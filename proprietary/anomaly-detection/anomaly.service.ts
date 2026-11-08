@@ -25,7 +25,7 @@ import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
   ClientConnectionCaptureRow,
-  ClientSnapshotGroupRow,
+  ClientConnectionRow,
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
@@ -322,6 +322,8 @@ import {
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   estimateNewConnections,
+  latestCaptureGroups,
+  newConnectionsBetween,
   selectClientSnapshots,
   hasRatePair,
   readClientCommandCounts,
@@ -4207,9 +4209,7 @@ export class AnomalyService
     notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
     const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
-    let capture: ClientSnapshotGroupRow[] = [];
-    let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
-    let baselineConnections: typeof newConnections = [];
+    let connections: ClientConnectionRow[] = [];
     let baselineRead = false;
     let snapshotsLoaded = true;
     const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
@@ -4217,15 +4217,19 @@ export class AnomalyService
       notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
     const baselineScale =
       (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
-    // The monitor's own connections to this node, by CLIENT LIST id, so they
-    // stay out of the ranking under a custom name and before CLIENT SETNAME.
-    const ownClientIds = ctx.client.getOwnClientIds?.() ?? [];
+    // The monitor's own open connections to this node, by CLIENT LIST id, so
+    // they stay out of the ranking under a custom name and before CLIENT SETNAME.
+    const ownClients = ctx.client.getOwnClientIds?.() ?? [];
+    // Both reads span the whole attribution range, so a connection carries one
+    // identity (the name of its newest reading) in the baseline, the episode
+    // and the newest capture alike; the split into baseline and episode is
+    // made here.
     const captureRead = withTimeout(
       this.storage.getClientConnectionCaptures(
         ctx.connectionId,
         fullBaselineStart,
         until,
-        ownClientIds,
+        ownClients,
       ),
       RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
     ).catch((error): ClientConnectionCaptureRow[] => {
@@ -4233,21 +4237,9 @@ export class AnomalyService
       return [];
     });
     try {
-      [capture, newConnections, baselineConnections, baselineRead] = await withTimeout(
+      [connections, baselineRead] = await withTimeout(
         Promise.all([
-          this.latestClientCapture(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(
-            ctx.connectionId,
-            episodeStart,
-            until,
-            ownClientIds,
-          ),
-          this.storage.getNewClientConnections(
-            ctx.connectionId,
-            baselineStart,
-            episodeStart - 1,
-            ownClientIds,
-          ),
+          this.storage.getClientConnections(ctx.connectionId, fullBaselineStart, until, ownClients),
           this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
@@ -4257,6 +4249,7 @@ export class AnomalyService
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
     const connectionCaptures = await captureRead;
+    const capture = latestCaptureGroups(connections, episodeStart);
     const reconnectsKnown =
       snapshotsLoaded &&
       capture.length > 0 &&
@@ -4266,13 +4259,18 @@ export class AnomalyService
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
-      ownClientIds,
+      ownClients,
       newConnections: reconnectsKnown
-        ? estimateNewConnections(newConnections, connectionCaptures, episodeStart, until)
+        ? estimateNewConnections(
+            newConnectionsBetween(connections, episodeStart, until),
+            connectionCaptures,
+            episodeStart,
+            until,
+          )
         : [],
       baselineConnections: reconnectsKnown
         ? estimateNewConnections(
-            baselineConnections,
+            newConnectionsBetween(connections, baselineStart, episodeStart - 1),
             connectionCaptures.filter((row) => row.capturedAt >= baselineStart),
             baselineStart,
             episodeStart - 1,
@@ -4295,25 +4293,6 @@ export class AnomalyService
       limit: 1,
     });
     return readings.length > 0;
-  }
-
-  private async latestClientCapture(
-    connectionId: string,
-    startTime: number,
-    endTime: number,
-  ): Promise<ClientSnapshotGroupRow[]> {
-    const [newest] = await this.storage.getClientSnapshots({
-      connectionId,
-      startTime,
-      endTime,
-      limit: 1,
-    });
-    if (newest === undefined) return [];
-    return this.storage.getClientSnapshotGroups(
-      connectionId,
-      newest.capturedAt - 1,
-      newest.capturedAt,
-    );
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {

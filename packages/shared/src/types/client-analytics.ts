@@ -49,6 +49,33 @@ export interface ClientConnectionCaptureRow {
   maxClientId: number;
 }
 
+/**
+ * One connection seen in a range of client snapshots: a (clientId, addr) pair
+ * with the name and user of its newest row, when it opened (the earliest
+ * `capturedAt - age` estimate over its rows) and the first and last capture
+ * that listed it.
+ */
+export interface ClientConnectionRow {
+  clientId: string;
+  addr: string;
+  name: string;
+  user: string;
+  /** addr with the port stripped. */
+  ip: string;
+  openedAt: number;
+  firstCapturedAt: number;
+  lastCapturedAt: number;
+}
+
+/**
+ * One of the monitor's own open connections to a server: its CLIENT LIST id and
+ * the time it connected, so only rows captured while it held the id are its own.
+ */
+export interface OwnClientConnection {
+  id: string;
+  connectedAt: number;
+}
+
 export interface ClientTimeSeriesPoint {
   timestamp: number;
   totalConnections: number;

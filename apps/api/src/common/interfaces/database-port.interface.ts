@@ -21,7 +21,11 @@ import {
   ProfileResult,
   SentinelNodeInfo,
 } from '../types/metrics.types';
-import type { KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
+import type {
+  KeyAnalyticsOptions,
+  KeyAnalyticsResult,
+  OwnClientConnection,
+} from '@betterdb/shared';
 
 // Re-export types that are commonly needed alongside DatabasePort
 export { SlowLogEntry, CommandLogEntry, CommandLogType };
@@ -80,12 +84,14 @@ export interface DatabasePort {
   getMemoryDoctor(): Promise<string>;
   getClients(filters?: ClientFilters): Promise<ClientInfo[]>;
   /**
-   * CLIENT LIST ids of the connections this adapter opened to the server,
-   * learned with CLIENT ID as each one connects, oldest first. Lets readers of
-   * CLIENT LIST tell the monitor's own clients apart from the application's
-   * whatever name they carry. Adapters that open no connection leave it out.
+   * The connections this adapter currently holds open to the server: the
+   * CLIENT LIST id of each, learned with CLIENT ID as it connects, and when it
+   * connected. A connection that closes drops out at once, so an id the server
+   * hands to another client later is not claimed. Lets readers of CLIENT LIST
+   * tell the monitor's own clients apart from the application's whatever name
+   * they carry. Adapters that open no connection leave it out.
    */
-  getOwnClientIds?(): string[];
+  getOwnClientIds?(): OwnClientConnection[];
   getClientById(id: string): Promise<ClientInfo | null>;
   killClient(filters: ClientFilters): Promise<number>;
   getAclLog(count?: number): Promise<AclLogEntry[]>;

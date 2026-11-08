@@ -153,6 +153,15 @@ export function clientAddrIp(addr: string): string {
 }
 
 /**
+ * Key of one connection across CLIENT LIST captures. A server numbers clients
+ * from 1 again after a restart, so an id alone can name two connections; the
+ * address tells them apart.
+ */
+export function clientConnectionKey(clientId: string, addr: string): string {
+  return `${clientId} ${addr}`;
+}
+
+/**
  * Map a client_analytics_rollups row to the shared shape. pg returns BIGINT as
  * a string and JSONB already parsed; SQLite returns numbers and JSON text.
  */
