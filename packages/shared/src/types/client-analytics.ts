@@ -40,34 +40,43 @@ export interface NewClientConnectionGroup {
   count: number;
 }
 
-/**
- * One connection in one CLIENT LIST capture of a range of client snapshots.
- * `name` and `user` are those of the newest row of the same (clientId, addr)
- * in the range, so a client captured before it ran CLIENT SETNAME carries the
- * name it set later in every capture.
- */
-export interface ClientCaptureEntry {
+export interface ClientConnectionCaptureRow {
   capturedAt: number;
-  clientId: string;
-  addr: string;
-  /** Connection age in seconds at the capture. */
-  age: number;
   name: string;
   user: string;
-  /** addr with the port stripped. */
   ip: string;
+  oldestAge: number;
+  maxClientId: number;
+}
+
+/** One (name, user, ip) group of one capture, with its number of connections. */
+export interface ClientCaptureGroupRow extends ClientConnectionCaptureRow {
+  count: number;
+}
+
+/** One connection, a (clientId, addr) pair, seen in a range of client snapshots. */
+export interface ClientConnectionRow {
+  clientId: string;
+  addr: string;
+  name: string;
+  user: string;
+  ip: string;
+  /** When it opened: the earliest `capturedAt - age * 1000` over its rows. */
+  openedAt: number;
+  /** The first capture of the range that listed it. */
+  firstCapturedAt: number;
 }
 
 /**
- * One of the monitor's own connections to a server: its CLIENT LIST id, the
- * time it started connecting and, once the monitor has closed it, the time it
- * closed, so only rows captured while it held the id are its own. `closedAt`
- * is unset while the connection is open.
+ * A range of client snapshots aggregated for retry attribution, replica and
+ * master links left out. Each (clientId, addr) carries the name and user of its
+ * newest row in the range, in its groups and as a connection, so a client
+ * captured before it ran CLIENT SETNAME counts under the name it set later.
  */
-export interface OwnClientConnection {
-  id: string;
-  connectedAt: number;
-  closedAt?: number;
+export interface ClientCaptureSummary {
+  /** The groups of every capture, in no particular order. */
+  captures: ClientCaptureGroupRow[];
+  connections: ClientConnectionRow[];
 }
 
 export interface ClientTimeSeriesPoint {

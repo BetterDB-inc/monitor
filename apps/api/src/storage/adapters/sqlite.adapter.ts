@@ -35,7 +35,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  ClientCaptureEntry,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -138,8 +138,10 @@ import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
   clientAddrIp,
+  clientCaptureSummaryFromSql,
   foldClientAnalyticsStats,
   mapClientAnalyticsRollupRow,
+  type ClientCaptureSqlRow,
 } from './client-analytics-stats';
 import { openLibsqlDatabase } from './libsql-driver';
 import { loadBetterSqlite3 } from './better-sqlite3-driver';
@@ -1316,31 +1318,46 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  // Each (client_id, addr) takes the name and user of its newest row in the
-  // range, so a client captured before CLIENT SETNAME ran carries the name it
-  // set later in every capture. Nothing but replica and master links is left
-  // out; the caller aggregates the rows and leaves the monitor's own
-  // connections out in code, so one statement serves every read.
-  async getClientCaptureEntries(
+  // One statement over idx_client_connection_captured. The window gives each
+  // (client_id, addr) the name and user of its newest row in the range; the
+  // rows are then grouped twice, per capture and (name, user, ip) and per
+  // connection, so the result has a row per group and per connection, not
+  // per client per capture.
+  async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientCaptureEntry[]> {
+  ): Promise<ClientCaptureSummary> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
-    return this.db
+    const rows = this.db
       .prepare(
-        `SELECT captured_at AS capturedAt, client_id AS clientId, addr, age,
-                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
-                FIRST_VALUE(COALESCE(user, '')) OVER w AS user,
-                ${SQLITE_CLIENT_IP_EXPR} AS ip
-           FROM client_snapshots
-          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
-            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
-         WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
+        `WITH resolved AS (
+           SELECT captured_at, client_id, addr, age,
+                  FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                  FIRST_VALUE(COALESCE(user, '')) OVER w AS user_name,
+                  ${SQLITE_CLIENT_IP_EXPR} AS ip
+             FROM client_snapshots
+            WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
+              AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+           WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)
+         )
+         SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
+                COUNT(*) AS count, MAX(age) AS oldest_age,
+                MAX(CASE WHEN client_id <> '' AND client_id NOT GLOB '*[^0-9]*'
+                         THEN CAST(client_id AS INTEGER) END) AS max_client_id,
+                NULL AS opened_at
+           FROM resolved
+          GROUP BY captured_at, name, user_name, ip
+         UNION ALL
+         SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
+                NULL, NULL, NULL, MIN(captured_at - age * 1000)
+           FROM resolved
+          GROUP BY client_id, addr, name, user_name, ip`,
       )
-      .all(connectionId, since, until) as ClientCaptureEntry[];
+      .all(connectionId, since, until) as ClientCaptureSqlRow[];
+    return clientCaptureSummaryFromSql(rows);
   }
 
   async getClientTimeSeries(

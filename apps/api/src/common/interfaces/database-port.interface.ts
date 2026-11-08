@@ -21,11 +21,7 @@ import {
   ProfileResult,
   SentinelNodeInfo,
 } from '../types/metrics.types';
-import type {
-  KeyAnalyticsOptions,
-  KeyAnalyticsResult,
-  OwnClientConnection,
-} from '@betterdb/shared';
+import type { KeyAnalyticsOptions, KeyAnalyticsResult } from '@betterdb/shared';
 
 // Re-export types that are commonly needed alongside DatabasePort
 export { SlowLogEntry, CommandLogEntry, CommandLogType };
@@ -83,18 +79,6 @@ export interface DatabasePort {
   getMemoryStats(): Promise<MemoryStats>;
   getMemoryDoctor(): Promise<string>;
   getClients(filters?: ClientFilters): Promise<ClientInfo[]>;
-  /**
-   * The connections this adapter currently holds open to the server: the
-   * CLIENT LIST id of each, learned with CLIENT ID as it connects, and when it
-   * started connecting (the server lists a client from the TCP accept on,
-   * before the TLS handshake and the ready check). A connection the adapter
-   * has closed stays listed for a while with `closedAt` set, so its captures
-   * up to the close are still its own while an id the server hands to another
-   * client later is not claimed. Lets readers of CLIENT LIST tell the
-   * monitor's own clients apart from the application's whatever name they
-   * carry. Adapters that open no connection leave it out.
-   */
-  getOwnClientIds?(): OwnClientConnection[];
   getClientById(id: string): Promise<ClientInfo | null>;
   killClient(filters: ClientFilters): Promise<number>;
   getAclLog(count?: number): Promise<AclLogEntry[]>;
@@ -150,4 +134,10 @@ export interface DatabasePort {
    * adapter probed it on connect. Lets a certificate-mapped identity be verified.
    */
   getAuthenticatedUser?(): string | undefined;
+  /**
+   * The CLIENT SETNAME names of the connections the adapter opens, the
+   * configured connection name included, so readers of CLIENT LIST can leave
+   * the monitor's own connections out. Adapters that open none leave it out.
+   */
+  getOwnClientNames?(): string[];
 }

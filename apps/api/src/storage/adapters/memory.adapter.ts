@@ -16,7 +16,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  ClientCaptureEntry,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -104,8 +104,8 @@ import {
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
   clientAddrIp,
-  clientConnectionKey,
   foldClientAnalyticsStats,
+  summarizeClientCaptures,
   type ClientStatsGroup,
 } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
@@ -386,41 +386,20 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return filtered.slice(offset, offset + limit);
   }
 
-  // Every row of one connection in [since, until] without replica and master
-  // links, each carrying the name and user of the newest row of its
-  // (client_id, addr), so a client captured before CLIENT SETNAME ran carries
-  // the name it set later in every capture. The caller aggregates the rows and
-  // leaves the monitor's own connections out in code.
-  async getClientCaptureEntries(
+  async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientCaptureEntry[]> {
-    const rows = this.clientSnapshots.filter(
-      (snapshot) =>
-        snapshot.connectionId === connectionId &&
-        snapshot.capturedAt >= since &&
-        snapshot.capturedAt <= until &&
-        !/[SM]/.test(snapshot.flags),
+  ): Promise<ClientCaptureSummary> {
+    return summarizeClientCaptures(
+      this.clientSnapshots.filter(
+        (snapshot) =>
+          snapshot.connectionId === connectionId &&
+          snapshot.capturedAt >= since &&
+          snapshot.capturedAt <= until &&
+          !/[SM]/.test(snapshot.flags),
+      ),
     );
-    const newest = new Map<string, StoredClientSnapshot>();
-    for (const row of rows) {
-      const key = clientConnectionKey(row.clientId, row.addr);
-      const known = newest.get(key);
-      if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
-    }
-    return rows.map((row) => {
-      const identity = newest.get(clientConnectionKey(row.clientId, row.addr))!;
-      return {
-        capturedAt: row.capturedAt,
-        clientId: row.clientId,
-        addr: row.addr,
-        age: row.age,
-        name: identity.name,
-        user: identity.user,
-        ip: clientAddrIp(row.addr),
-      };
-    });
   }
 
   async getClientTimeSeries(

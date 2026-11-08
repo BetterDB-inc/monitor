@@ -4,7 +4,10 @@ import type {
   ClientRollupGroupStat,
   ClientRollupPairStat,
   ClientRollupUserStat,
-  OwnClientConnection,
+  ClientCaptureGroupRow,
+  ClientCaptureSummary,
+  ClientConnectionRow,
+  StoredClientSnapshot,
 } from '@betterdb/shared';
 import { clientPairKey, clientPairStatsByDisplayKey, emptyClientAnalyticsStats } from '@betterdb/shared';
 import type { SqlDialect } from './base-sql.adapter';
@@ -162,38 +165,118 @@ export function clientConnectionKey(clientId: string, addr: string): string {
   return `${clientId} ${addr}`;
 }
 
-/**
- * The monitor's own connections by CLIENT LIST id. An id can carry more than
- * one span: a closed connection and a live one that got the same id again
- * after a server restart.
- */
-export type OwnClientSpans = ReadonlyMap<string, readonly OwnClientConnection[]>;
+/** The client_snapshots columns retry attribution aggregates. */
+export type ClientCaptureRow = Pick<
+  StoredClientSnapshot,
+  'capturedAt' | 'clientId' | 'addr' | 'age' | 'name' | 'user'
+>;
 
-export function ownClientSpans(ownClients: Iterable<OwnClientConnection>): OwnClientSpans {
-  const spans = new Map<string, OwnClientConnection[]>();
-  for (const own of ownClients) {
-    const known = spans.get(own.id);
-    if (known === undefined) spans.set(own.id, [own]);
-    else known.push(own);
+/**
+ * A row of the SQL adapters' getClientCaptureSummary statement: one (name,
+ * user, ip) group of one capture (`kind` 'group'), or one connection with its
+ * first capture in `captured_at` (`kind` 'connection'). pg returns BIGINT as a
+ * string.
+ */
+export interface ClientCaptureSqlRow {
+  kind: 'group' | 'connection';
+  captured_at: number | string;
+  client_id: string | null;
+  addr: string | null;
+  name: string;
+  user_name: string;
+  ip: string;
+  count: number | string | null;
+  oldest_age: number | string | null;
+  max_client_id: number | string | null;
+  opened_at: number | string | null;
+}
+
+/** Maps the rows of the SQL adapters' getClientCaptureSummary statement. */
+export function clientCaptureSummaryFromSql(rows: ClientCaptureSqlRow[]): ClientCaptureSummary {
+  const summary: ClientCaptureSummary = { captures: [], connections: [] };
+  for (const row of rows) {
+    const { name, user_name: user, ip } = row;
+    if (row.kind === 'connection') {
+      summary.connections.push({
+        clientId: String(row.client_id),
+        addr: String(row.addr),
+        name,
+        user,
+        ip,
+        openedAt: Number(row.opened_at),
+        firstCapturedAt: Number(row.captured_at),
+      });
+    } else {
+      summary.captures.push({
+        capturedAt: Number(row.captured_at),
+        name,
+        user,
+        ip,
+        count: Number(row.count),
+        oldestAge: Number(row.oldest_age),
+        maxClientId: Number(row.max_client_id ?? 0),
+      });
+    }
   }
-  return spans;
+  return summary;
 }
 
 /**
- * Whether a row of `clientId` captured at `at` is one of the monitor's own
- * connections: the monitor held the id at that time, from the start of its
- * connect until its close (an open connection has no close). A row of the
- * same id outside every span (an application client before a server restart
- * renumbered the ids, or one handed the id after the monitor's connection
- * closed) is not.
+ * The memory adapter's getClientCaptureSummary: the aggregation the SQL
+ * adapters run in SQL, over rows already narrowed to one connection, the range
+ * and no replica or master links, in insertion order. Each (clientId, addr)
+ * takes the name and user of its newest row, the later insert on a tie.
  */
-export function isOwnClientAt(spans: OwnClientSpans, clientId: string, at: number): boolean {
-  const own = spans.get(clientId);
-  if (own === undefined) return false;
-  for (const span of own) {
-    if (at >= span.connectedAt && (span.closedAt === undefined || at <= span.closedAt)) return true;
+export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): ClientCaptureSummary {
+  const newest = new Map<string, ClientCaptureRow>();
+  for (const row of rows) {
+    const key = clientConnectionKey(row.clientId, row.addr);
+    const known = newest.get(key);
+    if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
   }
-  return false;
+  const groups = new Map<string, ClientCaptureGroupRow>();
+  const connections = new Map<string, ClientConnectionRow>();
+  for (const row of rows) {
+    const key = clientConnectionKey(row.clientId, row.addr);
+    const { name, user } = newest.get(key)!;
+    const ip = clientAddrIp(row.addr);
+    // Ids are decimal; anything else has no bearing on the growth.
+    const clientId = /^\d+$/.test(row.clientId) ? Number(row.clientId) : 0;
+    const groupKey = JSON.stringify([row.capturedAt, name, user, ip]);
+    const group = groups.get(groupKey);
+    if (group === undefined) {
+      groups.set(groupKey, {
+        capturedAt: row.capturedAt,
+        name,
+        user,
+        ip,
+        count: 1,
+        oldestAge: row.age,
+        maxClientId: clientId,
+      });
+    } else {
+      group.count += 1;
+      group.oldestAge = Math.max(group.oldestAge, row.age);
+      group.maxClientId = Math.max(group.maxClientId, clientId);
+    }
+    const openedAt = row.capturedAt - row.age * 1000;
+    const connection = connections.get(key);
+    if (connection === undefined) {
+      connections.set(key, {
+        clientId: row.clientId,
+        addr: row.addr,
+        name,
+        user,
+        ip,
+        openedAt,
+        firstCapturedAt: row.capturedAt,
+      });
+    } else {
+      connection.openedAt = Math.min(connection.openedAt, openedAt);
+      connection.firstCapturedAt = Math.min(connection.firstCapturedAt, row.capturedAt);
+    }
+  }
+  return { captures: [...groups.values()], connections: [...connections.values()] };
 }
 
 /**

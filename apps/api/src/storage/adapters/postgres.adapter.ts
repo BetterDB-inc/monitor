@@ -37,7 +37,7 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
-  ClientCaptureEntry,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -135,8 +135,10 @@ import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
   clientAddrIp,
+  clientCaptureSummaryFromSql,
   foldClientAnalyticsStats,
   mapClientAnalyticsRollupRow,
+  type ClientCaptureSqlRow,
 } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
@@ -986,40 +988,43 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  // Each (client_id, addr) takes the name and user of its newest row in the
-  // range ($1 connection, $2..$3 captured_at), so a client captured before
-  // CLIENT SETNAME ran carries the name it set later in every capture. Nothing
-  // but replica and master links is left out; the caller aggregates the rows
-  // and leaves the monitor's own connections out in code, so one statement
-  // serves every read.
-  async getClientCaptureEntries(
+  // One statement over idx_client_connection_captured, as in the SQLite
+  // adapter: the window gives each (client_id, addr) the name and user of its
+  // newest row in the range, then the rows are grouped per capture and
+  // (name, user, ip) and per connection.
+  async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientCaptureEntry[]> {
+  ): Promise<ClientCaptureSummary> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
-    const result = await this.pool.query(
-      `SELECT captured_at, client_id, addr, age,
-              FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
-              FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip
-         FROM client_snapshots
-        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND COALESCE(flags, '') !~ '[SM]'
-       WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
+    const result = await this.pool.query<ClientCaptureSqlRow>(
+      `WITH resolved AS (
+         SELECT captured_at, client_id, addr, age,
+                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
+                ${PG_CLIENT_IP_EXPR} AS ip
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+         WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)
+       )
+       SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
+              COUNT(*) AS count, MAX(age) AS oldest_age,
+              MAX(CASE WHEN client_id ~ '^[0-9]+$' THEN client_id::bigint END) AS max_client_id,
+              NULL::bigint AS opened_at
+         FROM resolved
+        GROUP BY captured_at, name, user_name, ip
+       UNION ALL
+       SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
+              NULL, NULL, NULL, MIN(captured_at - age::bigint * 1000)
+         FROM resolved
+        GROUP BY client_id, addr, name, user_name, ip`,
       [connectionId, since, until],
     );
-    return result.rows.map((row) => ({
-      capturedAt: Number(row.captured_at),
-      clientId: String(row.client_id),
-      addr: row.addr,
-      age: Number(row.age),
-      name: row.name,
-      user: row.user_name,
-      ip: row.ip,
-    }));
+    return clientCaptureSummaryFromSql(result.rows);
   }
 
   async getClientTimeSeries(

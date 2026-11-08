@@ -2,8 +2,7 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  ClientCaptureEntry,
-  OwnClientConnection,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -96,7 +95,7 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
-  ClientCaptureEntry,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -572,18 +571,18 @@ export interface StoragePort {
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
   /**
-   * Every client row captured in [since, until], one per connection per capture, with the name and
-   * user of the newest row of its (client_id, addr) in the range, so a client captured before it
-   * ran CLIENT SETNAME carries the name it set later in every capture. Replica and master links
-   * are left out; nothing else is, so the monitor's own connections are in. Rows are in no
-   * particular order. Retry attribution aggregates them in code (see
-   * summarizeClientCaptures in proprietary/anomaly-detection/retry-amplification-attribution.ts).
+   * The client snapshots captured in [since, until], replica and master links left out, aggregated
+   * for retry attribution: per capture, the connections per (name, user, ip) with the oldest age and
+   * the highest numeric client id over the whole capture; per connection (client_id, addr), when it
+   * opened (the earliest captured_at - age) and its first capture. Each connection takes the name
+   * and user of its newest row in the range, so a client captured before it ran CLIENT SETNAME
+   * counts under the name it set later. The monitor's own connections are in, like any other.
    */
-  getClientCaptureEntries(
+  getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientCaptureEntry[]>;
+  ): Promise<ClientCaptureSummary>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,

@@ -1,10 +1,8 @@
-import type { ClientCaptureEntry, ClientSnapshotGroupRow } from '@betterdb/shared';
-import { clientAddrIp } from '@app/storage/adapters/client-analytics-stats';
+import type { ClientConnectionRow, ClientSnapshotGroupRow } from '@betterdb/shared';
+import { clientAddrIp, summarizeClientCaptures } from '@app/storage/adapters/client-analytics-stats';
 import { RETRY_AMP_EVENT_GRACE_MS, RETRY_AMP_WINDOW_MS } from '../retry-amplification-detector';
 import {
-  ClientCapture,
   ClientCommandSnapshot,
-  ClientConnectionRow,
   ClientListEntry,
   contributorKey,
   describeRetryAmplificationContributors,
@@ -17,7 +15,6 @@ import {
   RETRY_AMP_MIN_NEW_CONNECTIONS,
   readClientCommandCounts,
   selectClientSnapshots,
-  summarizeClientCaptures,
 } from '../retry-amplification-attribution';
 
 function client(overrides: Partial<ClientListEntry> & { id: string }): ClientListEntry {
@@ -404,12 +401,11 @@ describe('retry amplification attribution', () => {
       expect(ranked.map((c) => c.key)).toEqual(['api']);
     });
 
-    it("leaves the monitor's own connections out by client id, named or not", () => {
+    it("leaves the monitor's own connections out under its configured connection name", () => {
       const at = (takenAt: number, monitor: number, api: number) =>
         snapshot(takenAt, [
           client({ id: '1', name: 'acme-monitor', 'tot-cmds': String(monitor) }),
-          // Caught before CLIENT SETNAME ran on it.
-          client({ id: '2', addr: '10.0.0.9:7', 'tot-cmds': String(monitor) }),
+          client({ id: '2', name: 'acme-monitor-keyscan', 'tot-cmds': String(monitor) }),
           client({ id: '3', name: 'api', 'tot-cmds': String(api) }),
         ]);
 
@@ -417,76 +413,47 @@ describe('retry amplification attribution', () => {
         before: at(0, 100, 1000),
         first: at(60_000, 200, 1600),
         latest: at(120_000, 20_000, 4600),
-        capture: [],
-        newConnections: [],
-        ownClients: [
-          { id: '1', connectedAt: 0 },
-          { id: '2', connectedAt: 0 },
+        capture: [group({ name: 'acme-monitor', count: 1 }), group({ name: 'acme-monitor-keyscan', count: 1 })],
+        newConnections: [
+          { name: 'acme-monitor', user: 'default', ip: '10.0.0.9', count: 9 },
+          { name: 'acme-monitor-keyscan', user: 'default', ip: '10.0.0.9', count: 9 },
+          // Only the names the adapter sets are its own.
+          { name: 'acme-monitor-worker', user: 'default', ip: '10.0.0.2', count: 9 },
         ],
+        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
       });
 
-      expect(ranked.map((c) => c.key)).toEqual(['api']);
+      expect(ranked.map((c) => c.key)).toEqual(['api', 'acme-monitor-worker']);
     });
 
-    it("leaves the monitor's own connection out across its reconnect during the episode", () => {
-      const api = (addr: string, cmds: number, id = '3') =>
-        client({ id, name: 'api', addr, 'tot-cmds': String(cmds) });
-      const before = snapshot(0, [
-        client({ id: '1', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '100' }),
-        api('10.0.0.1:1', 1000),
-      ]);
-      const first = snapshot(60_000, [
-        client({ id: '1', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '200' }),
-        api('10.0.0.1:1', 1600),
-      ]);
-      // The server restarted at 90s: the monitor's connection 1 closed and it
-      // reconnected as id 2; the application reconnected and was handed id 1.
-      const latest = snapshot(120_000, [
-        client({ id: '2', name: 'acme-monitor', addr: '10.0.0.9:2', 'tot-cmds': '20000' }),
-        api('10.0.0.1:2', 3000, '1'),
-      ]);
+    it('leaves out own connections captured before CLIENT SETNAME once a later capture names them', () => {
+      const monitor = (clientId: string, name: string, age: number, capturedAt: number) => ({
+        capturedAt,
+        clientId,
+        addr: `10.0.0.9:${clientId}`,
+        age,
+        name,
+        user: 'default',
+      });
+      // Three reconnects of the monitor, each listed mid-handshake, then named.
+      const { connections } = summarizeClientCaptures(
+        ['20', '21', '22'].flatMap((id) => [
+          monitor(id, '', 0, 650_000),
+          monitor(id, 'acme-monitor', 50, 700_000),
+        ]),
+      );
 
       const ranked = rankRetryAmplificationContributors({
-        before,
-        first,
-        latest,
+        before: null,
+        first: null,
+        latest: null,
         capture: [],
-        newConnections: [],
-        ownClients: [
-          { id: '1', connectedAt: 0, closedAt: 90_000 },
-          { id: '2', connectedAt: 90_000 },
-        ],
+        newConnections: newConnectionsBetween(connections, 600_000, 780_000),
+        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
       });
 
-      // Neither the closed nor the new own connection ranks, and the
-      // application's reading on the id the monitor gave up is its own:
-      // 10/s before the episode on id 3, 50/s during it on id 1.
-      expect(ranked.map((c) => c.key)).toEqual(['api']);
-      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
-    });
-
-    it("keeps the readings of an application client that held the monitor's id before a restart", () => {
-      const before = snapshot(0, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1000' })]);
-      const first = snapshot(60_000, [client({ id: '3', name: 'api', addr: '10.0.0.1:1', 'tot-cmds': '1600' })]);
-      // The server restarted at 100s: the monitor now holds id 3 and the
-      // application reconnected as id 4.
-      const latest = snapshot(120_000, [
-        client({ id: '3', name: 'acme-monitor', addr: '10.0.0.9:1', 'tot-cmds': '20000' }),
-        client({ id: '4', name: 'api', addr: '10.0.0.1:2', 'tot-cmds': '3000' }),
-      ]);
-
-      const ranked = rankRetryAmplificationContributors({
-        before,
-        first,
-        latest,
-        capture: [],
-        newConnections: [],
-        ownClients: [{ id: '3', connectedAt: 100_000 }],
-      });
-
-      expect(ranked.map((c) => c.key)).toEqual(['api']);
-      // 10/s before the episode on id 3, 50/s during it on id 4.
-      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
+      // Under the IP they were first listed by, they would rank as 3 reconnects.
+      expect(ranked).toEqual([]);
     });
 
     it('starts the command count of an id reused on another address from zero', () => {
@@ -626,134 +593,25 @@ describe('retry amplification attribution', () => {
     });
   });
 
-  describe('summarizeClientCaptures', () => {
-    const entry = (
-      capturedAt: number,
-      clientId: string,
-      overrides: Partial<ClientCaptureEntry> = {},
-    ): ClientCaptureEntry => ({
+  describe('latestCaptureGroups', () => {
+    const row = (capturedAt: number, clientId: string, overrides: Partial<{ name: string; addr: string }> = {}) => ({
       capturedAt,
       clientId,
       addr: `10.0.0.1:${clientId}`,
       age: 1,
       name: 'storm',
       user: 'default',
-      ip: '10.0.0.1',
       ...overrides,
-    });
-    const byClient = (connections: ClientConnectionRow[]) =>
-      [...connections].sort((a, b) => a.clientId.localeCompare(b.clientId));
-
-    it('folds the rows into one connection per (id, addr) and one capture per time', () => {
-      const { connections, captures } = summarizeClientCaptures([
-        entry(700_000, '1', { age: 110 }),
-        entry(650_000, '1', { age: 60 }),
-        entry(650_000, '2', { age: 10 }),
-        entry(700_000, '2', { age: 60 }),
-        // The same id on another address is another connection.
-        entry(700_000, '2', { addr: '10.0.0.2:2', ip: '10.0.0.2', name: '', age: 5 }),
-        entry(590_000, '1', { age: 0 }),
-      ]);
-
-      expect(byClient(connections)).toEqual([
-        { clientId: '1', addr: '10.0.0.1:1', name: 'storm', user: 'default', ip: '10.0.0.1', openedAt: 590_000, firstCapturedAt: 590_000 },
-        { clientId: '2', addr: '10.0.0.1:2', name: 'storm', user: 'default', ip: '10.0.0.1', openedAt: 640_000, firstCapturedAt: 650_000 },
-        { clientId: '2', addr: '10.0.0.2:2', name: '', user: 'default', ip: '10.0.0.2', openedAt: 695_000, firstCapturedAt: 700_000 },
-      ]);
-      expect(captures).toEqual([
-        { capturedAt: 590_000, maxClientId: 1, groups: [{ name: 'storm', user: 'default', ip: '10.0.0.1', count: 1, oldestAge: 0 }] },
-        { capturedAt: 650_000, maxClientId: 2, groups: [{ name: 'storm', user: 'default', ip: '10.0.0.1', count: 2, oldestAge: 60 }] },
-        {
-          capturedAt: 700_000,
-          maxClientId: 2,
-          groups: [
-            { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2, oldestAge: 110 },
-            { name: '', user: 'default', ip: '10.0.0.2', count: 1, oldestAge: 5 },
-          ],
-        },
-      ]);
-    });
-
-    it("leaves the monitor's own connections out from the time they started connecting", () => {
-      const { connections, captures } = summarizeClientCaptures(
-        [
-          // The application held id 3 before the server restarted and renumbered.
-          entry(500_000, '3', { name: 'api', addr: '10.0.0.1:1', age: 0 }),
-          // The monitor got id 3 after the restart, custom-named.
-          entry(560_000, '3', { name: 'acme-monitor', addr: '10.0.0.9:1', ip: '10.0.0.9', age: 0 }),
-          entry(620_000, '3', { name: 'acme-monitor', addr: '10.0.0.9:1', ip: '10.0.0.9', age: 60 }),
-          entry(620_000, '4', { name: 'api', addr: '10.0.0.1:2', age: 0 }),
-        ],
-        [{ id: '3', connectedAt: 530_000 }],
-      );
-
-      expect(byClient(connections)).toEqual([
-        expect.objectContaining({ clientId: '3', addr: '10.0.0.1:1', name: 'api' }),
-        expect.objectContaining({ clientId: '4', addr: '10.0.0.1:2', name: 'api' }),
-      ]);
-      expect(captures.map((c) => [c.capturedAt, c.maxClientId, c.groups.map((g) => g.name)])).toEqual([
-        [500_000, 3, ['api']],
-        [560_000, 3, []],
-        [620_000, 4, ['api']],
-      ]);
-    });
-
-    it("leaves a closed own connection out up to its close and keeps the id's later holder", () => {
-      const monitor = { addr: '10.0.0.9:1', ip: '10.0.0.9' };
-      const { connections, captures } = summarizeClientCaptures(
-        [
-          // The monitor's previous connection, closed at 590_000.
-          entry(500_000, '3', { ...monitor, name: 'acme-monitor', age: 0 }),
-          entry(560_000, '3', { ...monitor, name: 'acme-monitor', age: 60 }),
-          entry(590_000, '3', { ...monitor, name: 'acme-monitor', age: 90 }),
-          // Its replacement, still open.
-          entry(620_000, '2', { ...monitor, addr: '10.0.0.9:2', name: 'acme-monitor', age: 0 }),
-          // After a server restart the application was handed id 3.
-          entry(620_000, '3', { name: 'api', addr: '10.0.0.1:7', age: 0 }),
-          entry(680_000, '3', { name: 'api', addr: '10.0.0.1:7', age: 60 }),
-        ],
-        [
-          { id: '3', connectedAt: 500_000, closedAt: 590_000 },
-          { id: '2', connectedAt: 600_000 },
-        ],
-      );
-
-      expect(connections).toEqual([
-        expect.objectContaining({ clientId: '3', addr: '10.0.0.1:7', name: 'api', openedAt: 620_000, firstCapturedAt: 620_000 }),
-      ]);
-      expect(captures.map((c) => [c.capturedAt, c.groups.map((g) => [g.name, g.count])])).toEqual([
-        [500_000, []],
-        [560_000, []],
-        [590_000, []],
-        [620_000, [['api', 1]]],
-        [680_000, [['api', 1]]],
-      ]);
-    });
-
-    it("counts the monitor's own ids toward the highest id of a capture", () => {
-      const { captures } = summarizeClientCaptures(
-        [
-          entry(500_000, '100', { age: 500 }),
-          entry(500_000, '101', { name: 'acme-monitor', addr: '10.0.0.9:1', ip: '10.0.0.9', age: 1 }),
-          entry(560_000, '100', { age: 560 }),
-          entry(560_000, '104', { name: 'acme-monitor', addr: '10.0.0.9:2', ip: '10.0.0.9', age: 1 }),
-          // Not a numeric id: no bearing on the growth.
-          entry(560_000, 'cluster:7', { age: 1 }),
-        ],
-        [{ id: '101', connectedAt: 400_000, closedAt: 510_000 }, { id: '104', connectedAt: 530_000 }],
-      );
-
-      expect(captures.map((c) => c.maxClientId)).toEqual([101, 104]);
     });
 
     it('counts the connections of the newest capture per identity', () => {
       const summary = summarizeClientCaptures([
-        entry(500_000, '1'),
-        entry(700_000, '1'),
-        entry(650_000, '2'),
-        entry(700_000, '2'),
-        entry(650_000, '3'),
-        entry(700_000, '4', { name: '', ip: '10.0.0.2', addr: '10.0.0.2:4' }),
+        row(500_000, '1'),
+        row(700_000, '1'),
+        row(650_000, '2'),
+        row(700_000, '2'),
+        row(650_000, '3'),
+        row(700_000, '4', { name: '', addr: '10.0.0.2:4' }),
       ]);
 
       expect(latestCaptureGroups(summary, 600_000)).toEqual([
@@ -762,31 +620,9 @@ describe('retry amplification attribution', () => {
       ]);
     });
 
-    it('has no capture when the newest one is from before the episode', () => {
-      expect(latestCaptureGroups(summarizeClientCaptures([entry(500_000, '1'), entry(590_000, '1')]), 600_000)).toBeNull();
-      expect(latestCaptureGroups(summarizeClientCaptures([]), 600_000)).toBeNull();
-    });
-
-    it('counts zero connections, not an older capture, when the newest capture lists only the monitor', () => {
-      const monitor = (capturedAt: number) =>
-        entry(capturedAt, '9', { name: 'acme-monitor', addr: '10.0.0.9:1', ip: '10.0.0.9', age: 1_000 });
-      // Every storm client is mid-reconnect at the final capture.
-      const summary = summarizeClientCaptures(
-        [monitor(650_000), ...['1', '2', '3'].map((id) => entry(650_000, id)), monitor(700_000)],
-        [{ id: '9', connectedAt: 0 }],
-      );
-
-      expect(latestCaptureGroups(summary, 600_000)).toEqual([]);
-    });
-
-    it('still has a capture when every capture of the episode lists only the monitor', () => {
-      const monitor = (capturedAt: number) =>
-        entry(capturedAt, '9', { name: 'acme-monitor', addr: '10.0.0.9:1', ip: '10.0.0.9', age: 1_000 });
-      const summary = summarizeClientCaptures([monitor(650_000), monitor(700_000)], [{ id: '9', connectedAt: 0 }]);
-
-      expect(summary.connections).toEqual([]);
-      expect(latestCaptureGroups(summary, 600_000)).toEqual([]);
-      expect(latestCaptureGroups(summary, 700_001)).toBeNull();
+    it('has no connections when the newest capture is from before the episode', () => {
+      expect(latestCaptureGroups(summarizeClientCaptures([row(500_000, '1'), row(590_000, '1')]), 600_000)).toEqual([]);
+      expect(latestCaptureGroups(summarizeClientCaptures([]), 600_000)).toEqual([]);
     });
   });
 
@@ -898,11 +734,12 @@ describe('retry amplification attribution', () => {
 
 describe('estimateNewConnections', () => {
   const identity = { name: 'worker', user: 'default', ip: '10.0.0.1' };
-  const groupOf = (oldestAge: number, name = 'worker') => ({ ...identity, name, count: 1, oldestAge });
-  const capture = (capturedAt: number, maxClientId: number, oldestAge: number, name = 'worker'): ClientCapture => ({
+  const capture = (capturedAt: number, maxClientId: number, oldestAge: number, name = 'worker') => ({
+    ...identity,
+    name,
     capturedAt,
     maxClientId,
-    groups: [groupOf(oldestAge, name)],
+    oldestAge,
   });
 
   it('credits the id growth between captures to the only fresh client', () => {
@@ -917,7 +754,8 @@ describe('estimateNewConnections', () => {
   it('shares the growth between clients that are fresh in the same capture', () => {
     const captures = [
       capture(0, 100, 5),
-      { capturedAt: 60_000, maxClientId: 130, groups: [groupOf(1), groupOf(2, 'other')] },
+      capture(60_000, 130, 1),
+      capture(60_000, 120, 2, 'other'),
     ];
 
     expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
@@ -934,8 +772,10 @@ describe('estimateNewConnections', () => {
 
   it('credits the growth to a retrier and not a pool with older connections', () => {
     const captures = [
-      { capturedAt: 0, maxClientId: 100, groups: [groupOf(5), groupOf(500, 'pool')] },
-      { capturedAt: 60_000, maxClientId: 130, groups: [groupOf(1), groupOf(560, 'pool')] },
+      capture(0, 100, 5),
+      capture(0, 90, 500, 'pool'),
+      capture(60_000, 130, 1),
+      capture(60_000, 129, 560, 'pool'),
     ];
 
     expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
@@ -957,15 +797,12 @@ describe('estimateNewConnections', () => {
   });
 
   it('handles a capture with more identities than a spread call can take', () => {
-    const fresh = Array.from({ length: 200_000 }, (_, i) => groupOf(1, `client-${i}`));
+    const fresh = Array.from({ length: 200_000 }, (_, i) =>
+      capture(60_000, 130 + i, 1, `client-${i}`),
+    );
 
     expect(() =>
-      estimateNewConnections(
-        [],
-        [capture(0, 100, 5), { capturedAt: 60_000, maxClientId: 200_130, groups: fresh }],
-        60_000,
-        60_000,
-      ),
+      estimateNewConnections([], [capture(0, 100, 5), ...fresh], 60_000, 60_000),
     ).not.toThrow();
   });
 
@@ -977,43 +814,40 @@ describe('estimateNewConnections', () => {
     ]);
   });
 
-  it("takes the ids the monitor's own reconnects consumed off the growth", () => {
-    // Previous capture: the application's highest id is 100, the monitor holds
-    // 101. Before the next capture the monitor reconnects three times (ids
-    // 102-104) and one application client connects (105).
-    const groups = [{ ...identity, count: 1 }];
-    const captures = [capture(0, 101, 500), capture(60_000, 105, 1)];
-    const own = [
-      { id: '101', connectedAt: -5_000, closedAt: 10_000 },
-      { id: '102', connectedAt: 10_000, closedAt: 20_000 },
-      { id: '103', connectedAt: 20_000, closedAt: 30_000 },
-      { id: '104', connectedAt: 30_000 },
+  it("gives a custom-named monitor and its scan client their share of the id growth", () => {
+    // The monitor held id 101 at the previous capture, reconnected three times
+    // (102-104) and opened a key-scan client (105); one application client
+    // connected (106).
+    const captures = [
+      capture(0, 100, 500, 'pool'),
+      capture(0, 101, 500, 'acme-monitor'),
+      capture(60_000, 100, 560, 'pool'),
+      capture(60_000, 104, 10, 'acme-monitor'),
+      capture(60_000, 105, 5, 'acme-monitor-keyscan'),
+      capture(60_000, 106, 1, 'storm'),
     ];
+    const newConnections = estimateNewConnections(
+      [{ ...identity, name: 'storm', count: 1 }],
+      captures,
+      60_000,
+      60_000,
+    );
 
-    expect(estimateNewConnections(groups, captures, 60_000, 60_000, own)).toEqual([
-      { ...identity, count: 1 },
-    ]);
-  });
-
-  it('subtracts an own connection in the interval it started connecting in, once', () => {
-    const groups = [{ ...identity, count: 1 }];
-    // One own connection at the boundary between the two intervals.
-    const captures = [capture(0, 100, 500), capture(60_000, 103, 1), capture(120_000, 106, 1)];
-    const own = [{ id: '103', connectedAt: 60_000 }];
-
-    expect(estimateNewConnections(groups, captures, 60_000, 120_000, own)).toEqual([
-      { ...identity, count: 5 },
-    ]);
-  });
-
-  it('gives no growth when only the monitor reconnected', () => {
-    const captures = [capture(0, 101, 500), capture(60_000, 104, 500)];
-    const own = [
-      { id: '102', connectedAt: 10_000, closedAt: 20_000 },
-      { id: '103', connectedAt: 20_000, closedAt: 30_000 },
-      { id: '104', connectedAt: 30_000 },
-    ];
-
-    expect(estimateNewConnections([], captures, 60_000, 60_000, own)).toEqual([]);
+    // Five ids split over three fresh identities, not all five to the application.
+    expect(newConnections.find((group) => group.name === 'storm')).toEqual({
+      ...identity,
+      name: 'storm',
+      count: 2,
+    });
+    expect(
+      rankRetryAmplificationContributors({
+        before: null,
+        first: null,
+        latest: null,
+        capture: [],
+        newConnections,
+        ownClientNames: ['acme-monitor', 'acme-monitor-keyscan', 'BetterDB-CLI'],
+      }),
+    ).toEqual([]);
   });
 });

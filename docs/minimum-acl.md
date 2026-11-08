@@ -25,7 +25,7 @@ When a command is blocked (`NOPERM`, or "command not available" on a managed ser
 This user can poll the server metrics BetterDB collects in the background. It has no key permissions, so it can't read or write keys, and the AI cache and agent memory panels stay empty until you add the [AI observability](#ai-observability) rules. `reset` clears any passwords, key patterns and selectors an existing user already has, so running the line again gives the same user:
 
 ```
-ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +select +client|setname +client|getname +client|id +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|myid +command|info +dbsize +lastsave +time +module|list
+ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +select +client|setname +client|getname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|myid +command|info +dbsize +lastsave +time +module|list
 ```
 
 This user can still see and change some things:
@@ -108,7 +108,6 @@ The migration analysis report on the source. Add the key sampling rules too.
 | `INFO` (all sections, including `commandstats`, `latencystats`, `keysizes`) | Dashboard, memory analytics, command stats, Prometheus exporter, anomaly detection, CVE scan, fleet view | Most of the product. Treat it as required. |
 | `SELECT` | Connections with a database index other than 0, and key analytics, which scans every database listed in `INFO keyspace` | Key analytics only covers the connection's own database |
 | `CLIENT SETNAME` | Labels BetterDB's own connections in `CLIENT LIST` | Connections still open, unnamed |
-| `CLIENT ID` | Tells BetterDB's own open connections apart in `CLIENT LIST`, so retry attribution leaves them out under a custom connection name or before `CLIENT SETNAME` has run | Own connections are left out by their default `BetterDB-*` names only. The command is sent once when the connection is set up; after a denial (or any other error reply, such as an unknown command) it is not retried until the connection is edited or BetterDB restarts |
 | `CLIENT LIST` | Clients page, client analytics, COB pressure, KV cache client detection | Client pages show as unavailable |
 | `CLIENT GETNAME` | **Retry** on the client pages, which checks whether `CLIENT LIST` is now allowed | Client pages work, but **Retry** can't re-enable them after you grant `CLIENT LIST`; reconnect instead |
 | `CLIENT NO-TOUCH` | Session explorer reads don't reset key idle times | Reads still work, and reset idle times |
@@ -144,7 +143,7 @@ Apart from `ACL LOG RESET` (see above) and `SENTINEL CONFIG SET` (see [Sentinel]
 For a Sentinel-monitored deployment, BetterDB also connects to the Sentinels themselves. A Sentinel user needs:
 
 ```
-ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +client|setname +client|getname +client|id +client|list +acl|whoami +acl|log +sentinel|masters +sentinel|replicas +sentinel|sentinels +sentinel|config
+ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +client|setname +client|getname +client|list +acl|whoami +acl|log +sentinel|masters +sentinel|replicas +sentinel|sentinels +sentinel|config
 ```
 
 The `SENTINEL` rules power topology discovery, auto-registration, Sentinel drift detection and the Sentinel config hazard checks. `CLIENT LIST` and `ACL LOG` feed client analytics and the audit trail, which also poll Sentinels.

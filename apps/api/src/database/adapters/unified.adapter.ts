@@ -48,7 +48,6 @@ import type {
   KeyAnalyticsResult,
   KeyDetail,
   KeyPatternData,
-  OwnClientConnection,
 } from '@betterdb/shared';
 import { extractPattern, pruneKeyDetails, KEY_DETAILS_PRUNE_AT, STALE_KEY_IDLE_SECONDS } from '@betterdb/shared';
 
@@ -104,19 +103,7 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
-// How long a connection this adapter has closed stays in getOwnClientIds()
-// with its close time. Retry attribution reads client captures over the
-// episode and as long again before it (anomaly.service.ts
-// attributeRetryAmplification: fullBaselineStart), and the detector keeps an
-// episode's hot windows up to RETRY_AMP_MAX_HOT_WINDOWS x RETRY_AMP_WINDOW_MS
-// = 2 h before it starts dropping them, so 4 h covers that span. Within it the
-// monitor's own reconnects during a storm (the previous main connection) and
-// finished key-scan clients are still left out by id, whatever name they
-// carry; beyond it the default BetterDB-* names still cover them.
-export const OWN_CLIENT_CLOSED_RETENTION_MS = 4 * 60 * 60_000;
-// Upper bound on closed connections kept, oldest close evicted first: a
-// multi-database key scan opens a scratch client per database per scan.
-export const OWN_CLIENT_CLOSED_MAX = 256;
+const CLI_CLIENT_NAME = 'BetterDB-CLI';
 
 /**
  * How often, at most, file-sourced TLS material is stat-checked for changes when
@@ -138,24 +125,6 @@ export const MIN_DB_SAMPLE_SIZE = 100;
 export const GRAPH_MEMORY_PROBES_PER_SCAN = 20;
 export const GRAPH_MEMORY_TTL_MS = 60 * 60 * 1000;
 export const GRAPH_MEMORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-// Error replies for a passing server state rather than for the command: the
-// same command is answered once the state passes.
-const TRANSIENT_REPLY_ERROR = /^(LOADING|BUSY|MASTERDOWN|CLUSTERDOWN|TRYAGAIN)\b/;
-
-// The server rejected the command: an error reply (iovalkey's ReplyError:
-// "NOPERM ... no permissions to run the 'client|id' command" from the ACL,
-// "ERR unknown command" where CLIENT is renamed or blocked, a managed
-// service's "command not available"), as opposed to a reply lost with the
-// connection or a timeout, which are the transport's and retryable. A reply
-// for a passing server state (LOADING, BUSY, ...) is not a rejection either.
-function isCommandRejected(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.name === 'ReplyError' &&
-    !TRANSIENT_REPLY_ERROR.test(error.message)
-  );
-}
 
 async function closeClient(client: Valkey): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
@@ -231,115 +200,12 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
   private authenticatedUser: string | undefined;
-  // The server-side id of every connection this adapter holds open (main
-  // client, key-analytics scratch clients, the CLI client), keyed by the
-  // client so a closed socket drops out and a reconnect replaces its entry.
-  // Retry attribution leaves them out of the ranking, whatever name they
-  // carry and before CLIENT SETNAME has run on them.
-  private readonly ownClients = new Map<Valkey, OwnClientConnection>();
-  // Connections this adapter closed in the last OWN_CLIENT_CLOSED_RETENTION_MS,
-  // each with its close time, in close order: their captures up to the close
-  // are still the monitor's own, while an id the server hands out again after
-  // a restart is not claimed past it.
-  private recentlyClosedOwnClients: OwnClientConnection[] = [];
-  // Set once the server rejects CLIENT ID (the ACL denies it, the command is
-  // unknown or unavailable): it is not sent again on later readies, so a user
-  // on the previous minimum ACL does not collect a NOPERM reply and an ACL LOG
-  // entry per reconnect. Attribution falls back to the default connection
-  // names.
-  private clientIdDenied = false;
-
-  private trackOwnClient(client: Valkey): void {
-    // The server lists a client from the TCP accept on, before the TLS
-    // handshake ('connect' is emitted on secureConnect) and the AUTH, SELECT,
-    // SETNAME and ready check that follow, so a connection is dated from the
-    // start of its dial ('connecting', emitted by connect()). 'connect' only
-    // stands in when no dial was seen; a close clears the stamp for the next.
-    let dialedAt: number | null = null;
-    // Bumped by every ready and every close, so a CLIENT ID reply is matched
-    // to the socket it was sent on.
-    let generation = 0;
-    // The generation of the last ready and, once its socket closed, when: a
-    // reply that lands after the close names a connection the server listed
-    // from its dial to that close, recorded as closed. A reply that lands
-    // after the next ready is not recorded (iovalkey resends a command left
-    // unanswered by a dropped socket on the next one, so it would carry that
-    // socket's id, which that socket's own ready learns).
-    let readyGeneration = 0;
-    let readyClosedAt: number | null = null;
-    const forget = () => {
-      const now = Date.now();
-      if (generation === readyGeneration) readyClosedAt = now;
-      generation += 1;
-      dialedAt = null;
-      const own = this.ownClients.get(client);
-      if (own === undefined) return;
-      this.ownClients.delete(client);
-      this.recentlyClosedOwnClients.push({ ...own, closedAt: now });
-      this.pruneClosedOwnClients();
-    };
-    client.on('connecting', () => {
-      dialedAt = Date.now();
-    });
-    client.on('connect', () => {
-      dialedAt ??= Date.now();
-    });
-    client.on('close', forget);
-    client.on('end', forget);
-    client.on('ready', () => {
-      generation += 1;
-      readyGeneration = generation;
-      readyClosedAt = null;
-      const current = generation;
-      const since = dialedAt ?? Date.now();
-      void this.readOwnClientId(client).then((id) => {
-        if (id === null) return;
-        if (generation === current) {
-          this.ownClients.set(client, { id, connectedAt: since });
-        } else if (current === readyGeneration && readyClosedAt !== null) {
-          this.recentlyClosedOwnClients.push({ id, connectedAt: since, closedAt: readyClosedAt });
-          this.pruneClosedOwnClients();
-        }
-      });
-    });
-  }
-
-  private async readOwnClientId(client: Valkey): Promise<string | null> {
-    if (this.clientIdDenied) return null;
-    let reply: unknown;
-    try {
-      reply = await withTimeout(client.call('CLIENT', 'ID'), WHOAMI_TIMEOUT_MS, 'CLIENT ID timed out');
-    } catch (error) {
-      if (isCommandRejected(error)) this.clientIdDenied = true;
-      // Otherwise lost with the connection, timed out or a passing server
-      // state: the next ready asks again.
-      return null;
-    }
-    // Ids start at 1; anything else (nil, text) is not an id.
-    const id = typeof reply === 'string' || typeof reply === 'number' ? Number(reply) : NaN;
-    return Number.isInteger(id) && id >= 1 ? String(id) : null;
-  }
-
-  // Drops closed connections past the retention, then the oldest closes past
-  // the cap. Entries are pushed in close order, so the oldest are at the front.
-  private pruneClosedOwnClients(): void {
-    const cutoff = Date.now() - OWN_CLIENT_CLOSED_RETENTION_MS;
-    const kept = this.recentlyClosedOwnClients.filter((own) => own.closedAt! >= cutoff);
-    this.recentlyClosedOwnClients =
-      kept.length > OWN_CLIENT_CLOSED_MAX ? kept.slice(kept.length - OWN_CLIENT_CLOSED_MAX) : kept;
-  }
-
-  // The open connections first, then the recently closed ones (closedAt set).
-  getOwnClientIds(): OwnClientConnection[] {
-    this.pruneClosedOwnClients();
-    return [...this.ownClients.values(), ...this.recentlyClosedOwnClients];
-  }
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     // In certificate mode both are undefined, so iovalkey sends no AUTH and the
     // server keeps the ACL user derived from the client certificate.
     const { username, password } = clientCredentials(this.config);
-    const client = new Valkey({
+    return new Valkey({
       host: this.connectHost,
       port: this.connectPort,
       username,
@@ -362,8 +228,6 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Custom CA and client certificate (mutual TLS) ride on the same object.
       tls: this.tlsOptions(),
     });
-    this.trackOwnClient(client);
-    return client;
   }
 
   /**
@@ -482,7 +346,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   }
 
   private initClient(): void {
-    const client = this.createValkeyClient(this.config.connectionName ?? 'BetterDB-Monitor');
+    const client = this.createValkeyClient(this.clientName);
     this._client = client;
 
     // Identity-guard the state writes: iovalkey emits `close` asynchronously
@@ -639,6 +503,19 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   /** ACL user the server reported for the current session, when known. */
   getAuthenticatedUser(): string | undefined {
     return this.authenticatedUser;
+  }
+
+  private get clientName(): string {
+    return this.config.connectionName ?? 'BetterDB-Monitor';
+  }
+
+  private get keyScanClientName(): string {
+    return `${this.clientName}-keyscan`;
+  }
+
+  /** The CLIENT SETNAME names of the main, key-scan and CLI clients. */
+  getOwnClientNames(): string[] {
+    return [this.clientName, this.keyScanClientName, CLI_CLIENT_NAME];
   }
 
   /**
@@ -1402,10 +1279,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
         }
         try {
           if (!scratch) {
-            scratch = this.createValkeyClient(
-              `${this.config.connectionName ?? 'BetterDB-Monitor'}-keyscan`,
-              db,
-            );
+            scratch = this.createValkeyClient(this.keyScanClientName, db);
             scratch.on('error', (err) => {
               this.logger.debug(`Scratch client error: ${err.message}`);
             });
@@ -1844,7 +1718,7 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       );
     }
 
-    this.cliClient = this.createValkeyClient('BetterDB-CLI');
+    this.cliClient = this.createValkeyClient(CLI_CLIENT_NAME);
     // Same rotation pickup as the main client: re-read before the next dial.
     this.cliClient.on('reconnecting', () => this.refreshTlsMaterial(true));
     await this.cliClient.connect();

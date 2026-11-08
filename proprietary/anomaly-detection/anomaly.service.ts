@@ -24,7 +24,7 @@ import { withTimeout } from '@app/common/utils/with-timeout';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
-  ClientCaptureEntry,
+  ClientCaptureSummary,
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
@@ -323,7 +323,6 @@ import {
   estimateNewConnections,
   latestCaptureGroups,
   newConnectionsBetween,
-  summarizeClientCaptures,
   selectClientSnapshots,
   hasRatePair,
   readClientCommandCounts,
@@ -4209,7 +4208,7 @@ export class AnomalyService
     notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
     const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
-    let entries: ClientCaptureEntry[] = [];
+    let summary: ClientCaptureSummary = { captures: [], connections: [] };
     let baselineRead = false;
     let snapshotsLoaded = true;
     const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
@@ -4217,20 +4216,14 @@ export class AnomalyService
       notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
     const baselineScale =
       (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
-    // The monitor's own connections to this node, open and recently closed, by
-    // CLIENT LIST id, so they stay out of the ranking under a custom name and
-    // before CLIENT SETNAME, the previous main connection of a reconnect and a
-    // finished key scan included.
-    const ownClients = ctx.client.getOwnClientIds?.() ?? [];
     // One storage read spans the whole attribution range, so a connection
     // carries one identity (the name of its newest reading) in the baseline,
-    // the episode and the newest capture alike; the rows are aggregated, the
-    // monitor's own connections left out and the span split into baseline and
-    // episode here.
+    // the episode and the newest capture alike; the span is split into
+    // baseline and episode here.
     try {
-      [entries, baselineRead] = await withTimeout(
+      [summary, baselineRead] = await withTimeout(
         Promise.all([
-          this.storage.getClientCaptureEntries(ctx.connectionId, fullBaselineStart, until),
+          this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until),
           this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
@@ -4239,36 +4232,32 @@ export class AnomalyService
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    const { connections, captures } = summarizeClientCaptures(entries, ownClients);
-    // Null without a capture during the episode; an empty list when the newest
-    // capture lists only the monitor, which is a known count of zero.
-    const capture = latestCaptureGroups({ connections, captures }, episodeStart);
+    const capture = latestCaptureGroups(summary, episodeStart);
     const reconnectsKnown =
       snapshotsLoaded &&
-      capture !== null &&
+      capture.length > 0 &&
       baselineRead &&
       baselineScale <= RETRY_AMP_MAX_BASELINE_SCALE;
     const ratesKnown = hasRatePair(snapshots);
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
-      capture: capture ?? [],
-      ownClients,
+      capture,
+      // The monitor's own connections, under a custom connection name too.
+      ownClientNames: ctx.client.getOwnClientNames?.() ?? [],
       newConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(connections, episodeStart, until),
-            captures,
+            newConnectionsBetween(summary.connections, episodeStart, until),
+            summary.captures,
             episodeStart,
             until,
-            ownClients,
           )
         : [],
       baselineConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(connections, baselineStart, episodeStart - 1),
-            captures.filter((row) => row.capturedAt >= baselineStart),
+            newConnectionsBetween(summary.connections, baselineStart, episodeStart - 1),
+            summary.captures.filter((row) => row.capturedAt >= baselineStart),
             baselineStart,
             episodeStart - 1,
-            ownClients,
           ).map((group) => ({ ...group, count: group.count * baselineScale }))
         : [],
     });
