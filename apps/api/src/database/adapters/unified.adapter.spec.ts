@@ -1169,4 +1169,42 @@ describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per co
     client.emit('ready');
     expect(probe).toHaveBeenCalledTimes(1);
   });
+
+  it('learns the server-side id of each connection it opens and forgets ids from before a restart', async () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
+    const client = adapter.getClient();
+    const replies: Array<number | Error> = [];
+    const call = jest.spyOn(client, 'call').mockImplementation(async (command: string) => {
+      if (command !== 'CLIENT') return undefined;
+      const reply = replies.shift();
+      if (reply instanceof Error) throw reply;
+      return reply;
+    });
+    const ready = async (reply: number | Error) => {
+      replies.push(reply);
+      client.emit('ready');
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    await ready(41);
+    expect(call).toHaveBeenCalledWith('CLIENT', 'ID');
+    expect(adapter.getOwnClientIds()).toEqual(['41']);
+
+    // A reconnect adds the new id; a scratch client is one of ours as well.
+    await ready(57);
+    const scratch = (adapter as unknown as { createValkeyClient(name: string): typeof client }).createValkeyClient(
+      'scratch',
+    );
+    jest.spyOn(scratch, 'call').mockResolvedValue(58);
+    scratch.emit('ready');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(adapter.getOwnClientIds()).toEqual(['41', '57', '58']);
+
+    // Denied CLIENT ID changes nothing; an id below the known ones means the
+    // server restarted and renumbered its clients.
+    await ready(new Error('NOPERM'));
+    expect(adapter.getOwnClientIds()).toEqual(['41', '57', '58']);
+    await ready(3);
+    expect(adapter.getOwnClientIds()).toEqual(['3']);
+  });
 });

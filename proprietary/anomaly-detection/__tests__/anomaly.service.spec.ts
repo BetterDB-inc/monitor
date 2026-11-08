@@ -4990,7 +4990,7 @@ describe('AnomalyService', () => {
         storage.getNewClientConnections = jest.fn().mockReturnValue(new Promise(() => undefined));
 
         const attribution = (service as any).attributeRetryAmplification(
-          { connectionId: 'conn-1', connectionName: 'conn' },
+          mockCtx,
           [],
           1,
           2,
@@ -5160,8 +5160,38 @@ describe('AnomalyService', () => {
 
       await (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
 
-      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 600_000, 780_000);
-      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 420_000, 599_999);
+      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 600_000, 780_000, []);
+      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 420_000, 599_999, []);
+    });
+
+    it("leaves the adapter's own connections out of the reconnect queries and the ranking", async () => {
+      dbClient.getOwnClientIds = jest.fn().mockReturnValue(['9']);
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      storage.getNewClientConnections = jest.fn().mockResolvedValue([]);
+      storage.getClientConnectionCaptures = jest.fn().mockResolvedValue([]);
+      const reading = (takenAt: number, api: number, own: number) => ({
+        takenAt,
+        clients: new Map([
+          ['1', { key: 'api', keyKind: 'name', addr: '10.0.0.1:1', totalCommands: api }],
+          ['9', { key: 'acme-monitor', keyKind: 'name', addr: '10.0.0.9:1', totalCommands: own }],
+        ]),
+      });
+      const snapshots = [
+        reading(520_000, 0, 0),
+        reading(580_000, 600, 600),
+        reading(700_000, 6_600, 60_600),
+      ];
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        snapshots,
+        600_000,
+        780_000,
+      );
+
+      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 600_000, 780_000, ['9']);
+      expect(storage.getClientConnectionCaptures).toHaveBeenCalledWith('conn-1', 420_000, 780_000, ['9']);
+      expect(ranked.map((c: { key: string }) => c.key)).toEqual(['api']);
     });
 
     it('starts the reconnect baseline after the previous episode and scales it to the full span', async () => {
@@ -5193,7 +5223,7 @@ describe('AnomalyService', () => {
         509_999,
       );
 
-      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 510_000, 599_999);
+      expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 510_000, 599_999, []);
       expect(ranked).toEqual([]);
     });
 
@@ -5354,7 +5384,7 @@ describe('AnomalyService', () => {
         780_000,
       );
 
-      expect(storage.getClientConnectionCaptures).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
+      expect(storage.getClientConnectionCaptures).toHaveBeenCalledWith('conn-1', 420_000, 780_000, []);
       expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
     });
 
@@ -5605,7 +5635,7 @@ describe('AnomalyService', () => {
         expect(storage.getClientSnapshots).toHaveBeenCalledWith(
           expect.objectContaining({ startTime: 320_000, endTime: 500_000 }),
         );
-        expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 320_000, 500_000);
+        expect(storage.getNewClientConnections).toHaveBeenCalledWith('conn-1', 320_000, 500_000, []);
       });
 
       it('dates the event at the end of the episode', async () => {

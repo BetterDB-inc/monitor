@@ -178,6 +178,56 @@ describe.each([
         expect.objectContaining({ name: 'api', count: 1 }),
       ]);
     });
+
+    it('counts a client that set its name after a capture once, under that name', async () => {
+      const storm = { addr: '10.0.0.5:4001', user: 'default' };
+      await save(
+        h.storage,
+        rows([
+          { clientId: '7', name: '', ...storm, age: 0, capturedAt: since },
+          { clientId: '7', name: 'storm', ...storm, age: 60, capturedAt: since + 60_000 },
+          { clientId: '7', name: 'storm', ...storm, age: 120, capturedAt: since + 120_000 },
+          { clientId: '8', name: '', ...storm, addr: '10.0.0.5:4002', age: 1, capturedAt: since + 120_000 },
+        ]),
+      );
+
+      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
+      expect(groups.sort((x, y) => x.name.localeCompare(y.name))).toEqual([
+        { name: '', user: 'default', ip: '10.0.0.5', count: 1 },
+        { name: 'storm', user: 'default', ip: '10.0.0.5', count: 1 },
+      ]);
+    });
+
+    it('keeps a client id reused on another address apart', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '5', name: 'api', addr: '10.0.0.1:1', age: 0, capturedAt: since },
+          { clientId: '5', name: '', addr: '10.0.0.2:1', age: 0, capturedAt: since + 60_000 },
+        ]),
+      );
+
+      const groups = await h.storage.getNewClientConnections('conn-x', since, until);
+      expect(groups.sort((x, y) => x.name.localeCompare(y.name))).toEqual([
+        { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
+        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
+      ]);
+    });
+
+    it('leaves the given client ids out', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '1', name: 'acme-monitor', age: 0 },
+          { clientId: '2', name: '', addr: '10.0.0.9:1', age: 0 },
+          { clientId: '3', name: 'api', age: 0 },
+        ]),
+      );
+
+      expect(await h.storage.getNewClientConnections('conn-x', since, until, ['1', '2'])).toEqual([
+        expect.objectContaining({ name: 'api', count: 1 }),
+      ]);
+    });
   });
 
   describe('getClientConnectionCaptures', () => {
@@ -229,6 +279,44 @@ describe.each([
       await save(h.storage, rows([{ clientId: '4', name: 'other' }]), 'other');
 
       expect(await h.storage.getClientConnectionCaptures('conn-x', since, until)).toEqual([]);
+    });
+
+    it('groups a client under the name it set later in every capture', async () => {
+      const storm = { addr: '10.0.0.5:4001', user: 'default' };
+      await save(
+        h.storage,
+        rows([
+          { clientId: '7', name: '', ...storm, age: 1, capturedAt: since },
+          { clientId: '7', name: 'storm', ...storm, age: 61, capturedAt: since + 60_000 },
+        ]),
+      );
+
+      const captures = await h.storage.getClientConnectionCaptures('conn-x', since, until);
+      expect(captures.sort((x, y) => x.capturedAt - y.capturedAt)).toEqual([
+        { capturedAt: since, name: 'storm', user: 'default', ip: '10.0.0.5', oldestAge: 1, maxClientId: 7 },
+        {
+          capturedAt: since + 60_000,
+          name: 'storm',
+          user: 'default',
+          ip: '10.0.0.5',
+          oldestAge: 61,
+          maxClientId: 7,
+        },
+      ]);
+    });
+
+    it('leaves the given client ids out', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '9', name: 'acme-monitor', age: 1 },
+          { clientId: '3', name: 'api', age: 5 },
+        ]),
+      );
+
+      expect(await h.storage.getClientConnectionCaptures('conn-x', since, until, ['9'])).toEqual([
+        expect.objectContaining({ name: 'api', oldestAge: 5, maxClientId: 3 }),
+      ]);
     });
   });
 

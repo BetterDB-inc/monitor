@@ -371,6 +371,8 @@ When other findings share the correlation window, the group takes the likely cau
 
 Attribution sends no `CLIENT LIST` of its own. It reuses the client analytics poll, which runs on `CLIENT_ANALYTICS_POLL_INTERVAL_MS` (60s by default) on each monitored connection, including between episodes, so the rate just before an episode is known. Readings closer than 30s apart are skipped. If that poll is unavailable or the server stops answering it during an episode, the finding goes out with reconnect counts only. Reconnects come from the snapshots of the same poll. A client that connects, retries and disconnects between two captures does not appear, so short-lived retry connections can be undercounted. The reconnect rate in the trigger still includes them.
 
+A connection is one identity across captures, by client id and address: a client caught by `CLIENT LIST` before it ran `CLIENT SETNAME` is counted under the name it set later, in both rankings. A connection that is never seen named stays under its user or IP. BetterDB's own connections to the node are left out by client id, learned with `CLIENT ID` as each connection opens, so a custom connection name or a capture before `CLIENT SETNAME` does not put the monitor in the list. Connections of other BetterDB processes (the agent, the CLI, another monitor) are left out by their default `BetterDB-*` names, which is also what the monitor falls back to when `CLIENT ID` is denied.
+
 **Recommended actions**:
 - Add exponential backoff with jitter and a retry budget
 - Put a circuit breaker in front of the instance

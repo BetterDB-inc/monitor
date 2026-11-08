@@ -1317,46 +1317,68 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
+  // Each (client_id, addr) takes the name and user of its newest row in the
+  // range, so a client captured before CLIENT SETNAME ran is grouped under the
+  // name it set later. `excludeClientIds` leaves the monitor's own connections
+  // out.
+  private clientIdentityRows(excludeClientIds: string[]): { sql: string; params: string[] } {
+    const exclude =
+      excludeClientIds.length > 0
+        ? `AND client_id NOT IN (${excludeClientIds.map(() => '?').join(', ')})`
+        : '';
+    return {
+      sql: `SELECT captured_at, client_id, addr, age,
+                   FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                   FIRST_VALUE(COALESCE(user, '')) OVER w AS user,
+                   ${SQLITE_CLIENT_IP_EXPR} AS ip
+              FROM client_snapshots
+             WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
+               AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+               ${exclude}
+            WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
+      params: excludeClientIds,
+    };
+  }
+
   async getNewClientConnections(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<NewClientConnectionGroup[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
+    const rows = this.clientIdentityRows(excludeClientIds);
     return this.db
       .prepare(
-        `SELECT COALESCE(name, '') AS name, COALESCE(user, '') AS user,
-                ${SQLITE_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
-           FROM client_snapshots
-          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
-            AND captured_at - age * 1000 >= ?
-            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
-          GROUP BY COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}`,
+        `SELECT name, user, ip, COUNT(*) AS count
+           FROM (SELECT DISTINCT client_id, addr, name, user, ip
+                   FROM (${rows.sql})
+                  WHERE captured_at - age * 1000 >= ?)
+          GROUP BY name, user, ip`,
       )
-      .all(connectionId, since, until, since) as NewClientConnectionGroup[];
+      .all(connectionId, since, until, ...rows.params, since) as NewClientConnectionGroup[];
   }
 
   async getClientConnectionCaptures(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<ClientConnectionCaptureRow[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
+    const rows = this.clientIdentityRows(excludeClientIds);
     return this.db
       .prepare(
-        `SELECT captured_at AS capturedAt, COALESCE(name, '') AS name, COALESCE(user, '') AS user,
-                ${SQLITE_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldestAge,
+        `SELECT captured_at AS capturedAt, name, user, ip, MAX(age) AS oldestAge,
                 MAX(CAST(client_id AS INTEGER)) AS maxClientId
-           FROM client_snapshots
-          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
-            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
-          GROUP BY captured_at, COALESCE(name, ''), COALESCE(user, ''), ${SQLITE_CLIENT_IP_EXPR}`,
+           FROM (${rows.sql})
+          GROUP BY captured_at, name, user, ip`,
       )
-      .all(connectionId, since, until) as ClientConnectionCaptureRow[];
+      .all(connectionId, since, until, ...rows.params) as ClientConnectionCaptureRow[];
   }
 
   async getClientTimeSeries(

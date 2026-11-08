@@ -103,6 +103,10 @@ export const QUIT_TIMEOUT_MS = 2_000;
 // has no commandTimeout, so without this a server that stops answering after
 // capability detection would leave connect() (and every Test Connection) hung.
 export const WHOAMI_TIMEOUT_MS = 5_000;
+// How many of this adapter's connection ids are kept, newest last. A server
+// numbers clients in increasing order, so an id below the ones known marks a
+// restart and the earlier ids are dropped.
+export const OWN_CLIENT_ID_HISTORY = 64;
 
 /**
  * How often, at most, file-sourced TLS material is stat-checked for changes when
@@ -199,12 +203,37 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
   // ACL user the server reported on the last successful connect (ACL WHOAMI).
   // Lets the UI confirm which identity a client certificate mapped to.
   private authenticatedUser: string | undefined;
+  // CLIENT ID of every connection this adapter opened (main client and its
+  // reconnects, key-analytics scratch clients, the CLI client), oldest first.
+  // Retry attribution leaves them out of the ranking, whatever name they
+  // carry and before CLIENT SETNAME has run on them.
+  private ownClientIds: string[] = [];
+
+  private async recordOwnClientId(client: Valkey): Promise<void> {
+    let reply: unknown;
+    try {
+      reply = await withTimeout(client.call('CLIENT', 'ID'), WHOAMI_TIMEOUT_MS, 'CLIENT ID timed out');
+    } catch {
+      // Denied by the ACL or lost with the connection: attribution falls back
+      // to the default connection names.
+      return;
+    }
+    const id = Number(reply);
+    if (!Number.isInteger(id) || id < 0) return;
+    this.ownClientIds = this.ownClientIds.filter((known) => Number(known) < id);
+    this.ownClientIds.push(String(id));
+    this.ownClientIds = this.ownClientIds.slice(-OWN_CLIENT_ID_HISTORY);
+  }
+
+  getOwnClientIds(): string[] {
+    return [...this.ownClientIds];
+  }
 
   private createValkeyClient(connectionName: string, db?: number): Valkey {
     // In certificate mode both are undefined, so iovalkey sends no AUTH and the
     // server keeps the ACL user derived from the client certificate.
     const { username, password } = clientCredentials(this.config);
-    return new Valkey({
+    const client = new Valkey({
       host: this.connectHost,
       port: this.connectPort,
       username,
@@ -227,6 +256,8 @@ export class UnifiedDatabaseAdapter implements DatabasePort {
       // Custom CA and client certificate (mutual TLS) ride on the same object.
       tls: this.tlsOptions(),
     });
+    client.on('ready', () => void this.recordOwnClientId(client));
+    return client;
   }
 
   /**

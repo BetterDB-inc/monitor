@@ -572,15 +572,28 @@ export interface StoragePort {
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
+  /**
+   * Connections that opened in [since, until] (captured_at - age), counted once per (client_id, addr)
+   * and grouped by (name, user, ip). A connection is identified by its newest row in the range, so a
+   * client captured before it ran CLIENT SETNAME is counted under the name it set later. Replica and
+   * master links are left out, as are the given client ids (the monitor's own connections).
+   */
   getNewClientConnections(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds?: string[],
   ): Promise<NewClientConnectionGroup[]>;
+  /**
+   * Oldest connection age and highest numeric client id per (captured_at, name, user, ip) in
+   * [since, until], with each (client_id, addr) grouped under the identity of its newest row in the
+   * range. Same exclusions as getNewClientConnections.
+   */
   getClientConnectionCaptures(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds?: string[],
   ): Promise<ClientConnectionCaptureRow[]>;
   getClientTimeSeries(
     startTime: number,

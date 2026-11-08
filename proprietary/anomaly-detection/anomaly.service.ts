@@ -4217,8 +4217,16 @@ export class AnomalyService
       notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
     const baselineScale =
       (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
+    // The monitor's own connections to this node, by CLIENT LIST id, so they
+    // stay out of the ranking under a custom name and before CLIENT SETNAME.
+    const ownClientIds = ctx.client.getOwnClientIds?.() ?? [];
     const captureRead = withTimeout(
-      this.storage.getClientConnectionCaptures(ctx.connectionId, fullBaselineStart, until),
+      this.storage.getClientConnectionCaptures(
+        ctx.connectionId,
+        fullBaselineStart,
+        until,
+        ownClientIds,
+      ),
       RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
     ).catch((error): ClientConnectionCaptureRow[] => {
       this.logger.debug(`Client captures unavailable for ${ctx.connectionName}: ${String(error)}`);
@@ -4228,8 +4236,18 @@ export class AnomalyService
       [capture, newConnections, baselineConnections, baselineRead] = await withTimeout(
         Promise.all([
           this.latestClientCapture(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(ctx.connectionId, baselineStart, episodeStart - 1),
+          this.storage.getNewClientConnections(
+            ctx.connectionId,
+            episodeStart,
+            until,
+            ownClientIds,
+          ),
+          this.storage.getNewClientConnections(
+            ctx.connectionId,
+            baselineStart,
+            episodeStart - 1,
+            ownClientIds,
+          ),
           this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
         ]),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
@@ -4248,6 +4266,7 @@ export class AnomalyService
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
+      ownClientIds,
       newConnections: reconnectsKnown
         ? estimateNewConnections(newConnections, connectionCaptures, episodeStart, until)
         : [],

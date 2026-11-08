@@ -11,9 +11,12 @@ export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 export const RETRY_AMP_MAX_BASELINE_SCALE = 2;
-// Names of the connections BetterDB itself opens: the monitor (and its
-// -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
-// BetterDB-Migration-* stays visible on purpose.
+// Default names of the connections BetterDB itself opens: the monitor (and its
+// -keyscan, -Node-..., -Discovery clients), the agent and the CLI. The
+// monitor's own connections to the node are also known by client id
+// (`ownClientIds`), which covers a custom connection name and a connection
+// listed before CLIENT SETNAME ran on it. BetterDB-Migration-* stays visible
+// on purpose.
 const OWN_CLIENT_NAMES = ['BetterDB-Monitor', 'BetterDB-Agent', 'BetterDB-CLI'];
 
 function isMonitorClientName(name: string): boolean {
@@ -42,6 +45,7 @@ export interface ClientListEntry {
 interface ClientCommandCount {
   key: string;
   keyKind: ContributorKeyKind;
+  addr: string;
   totalCommands: number;
 }
 
@@ -60,6 +64,8 @@ export interface AttributionInput extends EpisodeClientSnapshots {
   capture: ClientSnapshotGroupRow[];
   newConnections: NewClientConnectionGroup[];
   baselineConnections?: NewClientConnectionGroup[];
+  /** CLIENT LIST ids of the monitor's own connections to the node. */
+  ownClientIds?: Iterable<string>;
   limit?: number;
 }
 
@@ -110,10 +116,27 @@ export function readClientCommandCounts(
     if (totalCommands === null) continue;
     counts.set(client.id, {
       ...contributorKey(client),
+      addr: client.addr,
       totalCommands,
     });
   }
   return counts.size === 0 ? null : { takenAt, clients: counts };
+}
+
+type ClientIdentity = Pick<ClientCommandCount, 'key' | 'keyKind'>;
+
+// A connection is one identity across snapshots: the newest reading of a
+// client id on the same address names it, so a client caught before CLIENT
+// SETNAME ran is counted under the name it set later. A reused id on another
+// address is a different connection.
+function latestIdentities(snapshots: ClientCommandSnapshot[]): Map<string, ClientIdentity> {
+  const identities = new Map<string, ClientIdentity>();
+  for (const snapshot of [...snapshots].sort((a, b) => a.takenAt - b.takenAt)) {
+    for (const [clientId, client] of snapshot.clients) {
+      identities.set(`${clientId} ${client.addr}`, { key: client.key, keyKind: client.keyKind });
+    }
+  }
+  return identities;
 }
 
 function accumulatorFor(
@@ -178,14 +201,21 @@ export function selectClientSnapshots(
 function commandRates(
   from: ClientCommandSnapshot,
   to: ClientCommandSnapshot,
-): Array<{ client: ClientCommandCount; rate: number }> {
+  identities: Map<string, ClientIdentity>,
+  ownClientIds: Set<string>,
+): Array<{ identity: ClientIdentity; rate: number }> {
   const dtSec = (to.takenAt - from.takenAt) / 1000;
   if (dtSec <= 0) return [];
-  const rates: Array<{ client: ClientCommandCount; rate: number }> = [];
+  const rates: Array<{ identity: ClientIdentity; rate: number }> = [];
   for (const [clientId, client] of to.clients) {
+    if (ownClientIds.has(clientId)) continue;
     const earlier = from.clients.get(clientId)?.totalCommands ?? 0;
     if (client.totalCommands < earlier) continue;
-    rates.push({ client, rate: (client.totalCommands - earlier) / dtSec });
+    const identity = identities.get(`${clientId} ${client.addr}`) ?? {
+      key: client.key,
+      keyKind: client.keyKind,
+    };
+    rates.push({ identity, rate: (client.totalCommands - earlier) / dtSec });
   }
   return rates;
 }
@@ -195,12 +225,14 @@ function addCommandGrowth(
   before: ClientCommandSnapshot,
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
+  ownClientIds: Set<string>,
 ): void {
-  for (const { client, rate } of commandRates(before, first)) {
-    accumulatorFor(map, client).preEpisodeRate += rate;
+  const identities = latestIdentities([before, first, latest]);
+  for (const { identity, rate } of commandRates(before, first, identities, ownClientIds)) {
+    accumulatorFor(map, identity).preEpisodeRate += rate;
   }
-  for (const { client, rate } of commandRates(first, latest)) {
-    accumulatorFor(map, client).episodeRate += rate;
+  for (const { identity, rate } of commandRates(first, latest, identities, ownClientIds)) {
+    accumulatorFor(map, identity).episodeRate += rate;
   }
 }
 
@@ -270,7 +302,13 @@ export function rankRetryAmplificationContributors(
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
   if (hasRatePair(input)) {
-    addCommandGrowth(map, input.before, input.first, input.latest);
+    addCommandGrowth(
+      map,
+      input.before,
+      input.first,
+      input.latest,
+      new Set(input.ownClientIds ?? []),
+    );
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
   for (const [id, acc] of map) {

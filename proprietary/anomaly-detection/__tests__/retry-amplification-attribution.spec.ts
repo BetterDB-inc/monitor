@@ -197,6 +197,33 @@ describe('retry amplification attribution', () => {
       expect(storm.commandRateGrowth).toBeCloseTo(5, 5);
     });
 
+    it('counts a client that sets its name after a capture once, under that name', () => {
+      const storm = { addr: '10.0.0.5:4001', 'tot-cmds': '300' };
+      const before = snapshot(0, [client({ id: '1', name: 'storm', 'tot-cmds': '1000' })]);
+      const first = snapshot(60_000, [
+        client({ id: '1', name: 'storm', 'tot-cmds': '1600' }),
+        // Caught by CLIENT LIST before it ran CLIENT SETNAME.
+        client({ id: '7', ...storm }),
+      ]);
+      const latest = snapshot(120_000, [
+        client({ id: '7', ...storm, name: 'storm', 'tot-cmds': '3300' }),
+        client({ id: '8', name: 'storm', addr: '10.0.0.5:4002', 'tot-cmds': '3000' }),
+        client({ id: '9', addr: '10.0.0.5:4003', 'tot-cmds': '3000' }),
+      ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [{ name: 'storm', user: 'default', ip: '10.0.0.5', count: 3 }],
+      });
+
+      expect(ranked.map((c) => [c.key, c.keyKind])).toEqual([['storm', 'name']]);
+      // Before: 10/s on id 1 and 5/s on id 7. During: 50/s each on ids 7 and 8.
+      expect(ranked[0].commandRateGrowth).toBeCloseTo(100 / 15, 5);
+    });
+
     it('leaves growth unknown without a pre-episode rate', () => {
       const first = snapshot(60_000, [client({ id: '1', name: 'api', 'tot-cmds': '1600' })]);
       const latest = snapshot(120_000, [client({ id: '1', name: 'api', 'tot-cmds': '9000' })]);
@@ -367,6 +394,27 @@ describe('retry amplification attribution', () => {
           { name: 'BetterDB-Agent', user: 'default', ip: '10.0.0.8', count: 9 },
           { name: 'BetterDB-CLI', user: 'default', ip: '10.0.0.7', count: 9 },
         ],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+    });
+
+    it("leaves the monitor's own connections out by client id, named or not", () => {
+      const at = (takenAt: number, monitor: number, api: number) =>
+        snapshot(takenAt, [
+          client({ id: '1', name: 'acme-monitor', 'tot-cmds': String(monitor) }),
+          // Caught before CLIENT SETNAME ran on it.
+          client({ id: '2', addr: '10.0.0.9:7', 'tot-cmds': String(monitor) }),
+          client({ id: '3', name: 'api', 'tot-cmds': String(api) }),
+        ]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before: at(0, 100, 1000),
+        first: at(60_000, 200, 1600),
+        latest: at(120_000, 20_000, 4600),
+        capture: [],
+        newConnections: [],
+        ownClientIds: ['1', '2'],
       });
 
       expect(ranked.map((c) => c.key)).toEqual(['api']);

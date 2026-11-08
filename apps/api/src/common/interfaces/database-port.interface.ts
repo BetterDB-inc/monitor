@@ -79,6 +79,13 @@ export interface DatabasePort {
   getMemoryStats(): Promise<MemoryStats>;
   getMemoryDoctor(): Promise<string>;
   getClients(filters?: ClientFilters): Promise<ClientInfo[]>;
+  /**
+   * CLIENT LIST ids of the connections this adapter opened to the server,
+   * learned with CLIENT ID as each one connects, oldest first. Lets readers of
+   * CLIENT LIST tell the monitor's own clients apart from the application's
+   * whatever name they carry. Adapters that open no connection leave it out.
+   */
+  getOwnClientIds?(): string[];
   getClientById(id: string): Promise<ClientInfo | null>;
   killClient(filters: ClientFilters): Promise<number>;
   getAclLog(count?: number): Promise<AclLogEntry[]>;

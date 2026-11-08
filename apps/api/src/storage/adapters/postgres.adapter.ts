@@ -987,23 +987,37 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
+  // Each (client_id, addr) takes the name and user of its newest row in the
+  // range ($1 connection, $2..$3 captured_at), so a client captured before
+  // CLIENT SETNAME ran is grouped under the name it set later. $4 lists the
+  // client ids to leave out (the monitor's own connections).
+  private static readonly CLIENT_IDENTITY_ROWS = `
+    SELECT captured_at, client_id, addr, age,
+           FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+           FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
+           ${PG_CLIENT_IP_EXPR} AS ip
+      FROM client_snapshots
+     WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
+       AND COALESCE(flags, '') !~ '[SM]'
+       AND NOT (client_id = ANY($4::text[]))
+    WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`;
+
   async getNewClientConnections(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<NewClientConnectionGroup[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query(
-      `SELECT COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
-         FROM client_snapshots
-        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND captured_at - age::bigint * 1000 >= $2
-          AND COALESCE(flags, '') !~ '[SM]'
-        GROUP BY COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
-      [connectionId, since, until],
+      `SELECT name, user_name, ip, COUNT(*) AS count
+         FROM (SELECT DISTINCT client_id, addr, name, user_name, ip
+                 FROM (${PostgresAdapter.CLIENT_IDENTITY_ROWS}) identified
+                WHERE captured_at - age::bigint * 1000 >= $2) opened
+        GROUP BY name, user_name, ip`,
+      [connectionId, since, until, excludeClientIds],
     );
     return result.rows.map((row) => ({
       name: row.name,
@@ -1017,19 +1031,17 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<ClientConnectionCaptureRow[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query(
-      `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldest_age,
+      `SELECT captured_at, name, user_name, ip, MAX(age) AS oldest_age,
               MAX(CASE WHEN client_id::text ~ '^[0-9]+$' THEN client_id::text::bigint END) AS max_client_id
-         FROM client_snapshots
-        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND COALESCE(flags, '') !~ '[SM]'
-        GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
-      [connectionId, since, until],
+         FROM (${PostgresAdapter.CLIENT_IDENTITY_ROWS}) identified
+        GROUP BY captured_at, name, user_name, ip`,
+      [connectionId, since, until, excludeClientIds],
     );
     return result.rows.map((row) => ({
       capturedAt: Number(row.captured_at),

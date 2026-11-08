@@ -386,45 +386,80 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return filtered.slice(offset, offset + limit);
   }
 
+  // Rows of one connection in [since, until] without replica and master links
+  // and without the given client ids, each carrying the name and user of the
+  // newest row of its (client_id, addr), so a client captured before CLIENT
+  // SETNAME ran is grouped under the name it set later.
+  private clientIdentityRows(
+    connectionId: string,
+    since: number,
+    until: number,
+    excludeClientIds: string[],
+  ): Array<{ row: StoredClientSnapshot; name: string; user: string; ip: string }> {
+    const excluded = new Set(excludeClientIds);
+    const rows = this.clientSnapshots.filter(
+      (snapshot) =>
+        snapshot.connectionId === connectionId &&
+        snapshot.capturedAt >= since &&
+        snapshot.capturedAt <= until &&
+        !/[SM]/.test(snapshot.flags) &&
+        !excluded.has(snapshot.clientId),
+    );
+    const newest = new Map<string, StoredClientSnapshot>();
+    for (const row of rows) {
+      const key = `${row.clientId} ${row.addr}`;
+      const known = newest.get(key);
+      if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
+    }
+    return rows.map((row) => {
+      const identity = newest.get(`${row.clientId} ${row.addr}`)!;
+      return { row, name: identity.name, user: identity.user, ip: clientAddrIp(row.addr) };
+    });
+  }
+
   async getNewClientConnections(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<NewClientConnectionGroup[]> {
-    const groups = new Map<string, { group: NewClientConnectionGroup; ids: Set<string> }>();
-    for (const snapshot of this.clientSnapshots) {
-      if (snapshot.connectionId !== connectionId) continue;
-      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
-      if (snapshot.capturedAt - snapshot.age * 1000 < since) continue;
-      if (/[SM]/.test(snapshot.flags)) continue;
-      const ip = clientAddrIp(snapshot.addr);
-      const key = JSON.stringify([snapshot.name, snapshot.user, ip]);
+    const groups = new Map<string, { group: NewClientConnectionGroup; clients: Set<string> }>();
+    for (const { row, name, user, ip } of this.clientIdentityRows(
+      connectionId,
+      since,
+      until,
+      excludeClientIds,
+    )) {
+      if (row.capturedAt - row.age * 1000 < since) continue;
+      const key = JSON.stringify([name, user, ip]);
       const entry = groups.get(key) ?? {
-        group: { name: snapshot.name, user: snapshot.user, ip, count: 0 },
-        ids: new Set<string>(),
+        group: { name, user, ip, count: 0 },
+        clients: new Set<string>(),
       };
-      entry.ids.add(snapshot.clientId);
+      entry.clients.add(`${row.clientId} ${row.addr}`);
       groups.set(key, entry);
     }
-    return [...groups.values()].map(({ group, ids }) => ({ ...group, count: ids.size }));
+    return [...groups.values()].map(({ group, clients }) => ({ ...group, count: clients.size }));
   }
 
   async getClientConnectionCaptures(
     connectionId: string,
     since: number,
     until: number,
+    excludeClientIds: string[] = [],
   ): Promise<ClientConnectionCaptureRow[]> {
     const rows = new Map<string, ClientConnectionCaptureRow>();
-    for (const snapshot of this.clientSnapshots) {
-      if (snapshot.connectionId !== connectionId) continue;
-      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
-      if (/[SM]/.test(snapshot.flags)) continue;
-      const ip = clientAddrIp(snapshot.addr);
-      const key = JSON.stringify([snapshot.capturedAt, snapshot.name, snapshot.user, ip]);
+    for (const { row: snapshot, name, user, ip } of this.clientIdentityRows(
+      connectionId,
+      since,
+      until,
+      excludeClientIds,
+    )) {
+      const key = JSON.stringify([snapshot.capturedAt, name, user, ip]);
       const row = rows.get(key) ?? {
         capturedAt: snapshot.capturedAt,
-        name: snapshot.name,
-        user: snapshot.user,
+        name,
+        user,
         ip,
         oldestAge: snapshot.age,
         maxClientId: 0,
