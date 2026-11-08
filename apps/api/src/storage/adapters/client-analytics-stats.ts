@@ -4,6 +4,7 @@ import type {
   ClientRollupGroupStat,
   ClientRollupPairStat,
   ClientRollupUserStat,
+  OwnClientConnection,
 } from '@betterdb/shared';
 import { clientPairKey, clientPairStatsByDisplayKey, emptyClientAnalyticsStats } from '@betterdb/shared';
 import type { SqlDialect } from './base-sql.adapter';
@@ -159,6 +160,40 @@ export function clientAddrIp(addr: string): string {
  */
 export function clientConnectionKey(clientId: string, addr: string): string {
   return `${clientId} ${addr}`;
+}
+
+/**
+ * The monitor's own connections by CLIENT LIST id. An id can carry more than
+ * one span: a closed connection and a live one that got the same id again
+ * after a server restart.
+ */
+export type OwnClientSpans = ReadonlyMap<string, readonly OwnClientConnection[]>;
+
+export function ownClientSpans(ownClients: Iterable<OwnClientConnection>): OwnClientSpans {
+  const spans = new Map<string, OwnClientConnection[]>();
+  for (const own of ownClients) {
+    const known = spans.get(own.id);
+    if (known === undefined) spans.set(own.id, [own]);
+    else known.push(own);
+  }
+  return spans;
+}
+
+/**
+ * Whether a row of `clientId` captured at `at` is one of the monitor's own
+ * connections: the monitor held the id at that time, from the start of its
+ * connect until its close (an open connection has no close). A row of the
+ * same id outside every span (an application client before a server restart
+ * renumbered the ids, or one handed the id after the monitor's connection
+ * closed) is not.
+ */
+export function isOwnClientAt(spans: OwnClientSpans, clientId: string, at: number): boolean {
+  const own = spans.get(clientId);
+  if (own === undefined) return false;
+  for (const span of own) {
+    if (at >= span.connectedAt && (span.closedAt === undefined || at <= span.closedAt)) return true;
+  }
+  return false;
 }
 
 /**

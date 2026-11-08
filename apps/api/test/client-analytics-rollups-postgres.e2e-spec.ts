@@ -508,30 +508,34 @@ describePostgres('client analytics rollups — postgres', () => {
     });
   });
 
-  describe('getClientConnections', () => {
+  describe('getClientCaptureEntries', () => {
     const since = T0 + BATCH_MS;
     const until = T0 + 5 * BATCH_MS;
-    const byClient = <T extends { clientId: string; addr: string }>(connections: T[]) =>
-      [...connections].sort((a, b) => `${a.clientId} ${a.addr}`.localeCompare(`${b.clientId} ${b.addr}`));
+    const byRow = <T extends { capturedAt: number; clientId: string; addr: string }>(entries: T[]) =>
+      [...entries].sort(
+        (a, b) =>
+          a.capturedAt - b.capturedAt ||
+          `${a.clientId} ${a.addr}`.localeCompare(`${b.clientId} ${b.addr}`),
+      );
 
     it.each(CONNECTIONS)('matches the memory adapter for %s', async (connectionId) => {
-      const connections = await pg.getClientConnections(connectionId, since, until);
-      expect(connections.length).toBeGreaterThan(0);
-      expect(byClient(connections)).toEqual(
-        byClient(await memory.getClientConnections(connectionId, since, until)),
+      const entries = await pg.getClientCaptureEntries(connectionId, since, until);
+      expect(entries.length).toBeGreaterThan(0);
+      expect(byRow(entries)).toEqual(
+        byRow(await memory.getClientCaptureEntries(connectionId, since, until)),
       );
     });
 
-    it('handles clients connected for longer than 32-bit milliseconds allow', async () => {
+    it('returns captured_at, age and client_id as a number, a number and a string', async () => {
       const connectionId = 'conn-old-client';
       const [template] = rows;
       await pg.saveClientSnapshot(
-        [{ ...template, id: 0, clientId: 'old', age: 3_000_000, capturedAt: since, connectionId }],
+        [{ ...template, id: 0, clientId: '77', age: 3_000_000, capturedAt: since, connectionId }],
         connectionId,
       );
 
-      await expect(pg.getClientConnections(connectionId, since, until)).resolves.toEqual([
-        expect.objectContaining({ clientId: 'old', openedAt: since - 3_000_000_000 }),
+      await expect(pg.getClientCaptureEntries(connectionId, since, until)).resolves.toEqual([
+        expect.objectContaining({ capturedAt: since, clientId: '77', age: 3_000_000 }),
       ]);
     });
 
@@ -547,10 +551,10 @@ describePostgres('client analytics rollups — postgres', () => {
         connectionId,
       );
 
-      await expect(pg.getClientConnections(connectionId, since, until)).resolves.toEqual([]);
+      await expect(pg.getClientCaptureEntries(connectionId, since, until)).resolves.toEqual([]);
     });
 
-    it("matches the memory adapter for a late CLIENT SETNAME and the monitor's own connections", async () => {
+    it('matches the memory adapter for a late CLIENT SETNAME, a reused id and an unnamed row', async () => {
       const connectionId = 'conn-setname';
       const [template] = rows;
       const row = { ...template, id: 0, user: 'default', connectionId };
@@ -559,139 +563,62 @@ describePostgres('client analytics rollups — postgres', () => {
         { ...row, clientId: '7', name: 'storm', addr: '10.0.0.5:4001', age: 60, capturedAt: since + 60_000 },
         { ...row, clientId: '5', name: 'api', addr: '10.0.0.1:1', age: 0, capturedAt: since },
         { ...row, clientId: '5', name: '', addr: '10.0.0.2:1', age: 0, capturedAt: since + 60_000 },
-        // The application held id 9 before a restart; the monitor holds it since.
-        { ...row, clientId: '9', name: 'api', addr: '10.0.0.1:9', age: 0, capturedAt: since },
+        // The monitor's own connection: returned like any other, left out by the reader.
         { ...row, clientId: '9', name: 'acme-monitor', addr: '10.0.0.9:1', age: 0, capturedAt: since + 60_000 },
       ];
       await pg.saveClientSnapshot(batch, connectionId);
       await memory.saveClientSnapshot(batch, connectionId);
-      const own = [{ id: '9', connectedAt: since + 30_000 }];
 
-      const connections = await pg.getClientConnections(connectionId, since, until, own);
-      expect(byClient(connections)).toEqual([
+      const entries = await pg.getClientCaptureEntries(connectionId, since, until);
+      expect(byRow(entries)).toEqual([
+        { capturedAt: since, clientId: '5', addr: '10.0.0.1:1', age: 0, name: 'api', user: 'default', ip: '10.0.0.1' },
+        { capturedAt: since, clientId: '7', addr: '10.0.0.5:4001', age: 0, name: 'storm', user: 'default', ip: '10.0.0.5' },
         {
-          clientId: '5',
-          addr: '10.0.0.1:1',
-          name: 'api',
-          user: 'default',
-          ip: '10.0.0.1',
-          openedAt: since,
-          firstCapturedAt: since,
-          lastCapturedAt: since,
-        },
-        {
+          capturedAt: since + 60_000,
           clientId: '5',
           addr: '10.0.0.2:1',
+          age: 0,
           name: '',
           user: 'default',
           ip: '10.0.0.2',
-          openedAt: since + 60_000,
-          firstCapturedAt: since + 60_000,
-          lastCapturedAt: since + 60_000,
         },
         {
+          capturedAt: since + 60_000,
           clientId: '7',
           addr: '10.0.0.5:4001',
+          age: 60,
           name: 'storm',
           user: 'default',
           ip: '10.0.0.5',
-          openedAt: since,
-          firstCapturedAt: since,
-          lastCapturedAt: since + 60_000,
         },
         {
+          capturedAt: since + 60_000,
           clientId: '9',
-          addr: '10.0.0.1:9',
-          name: 'api',
+          addr: '10.0.0.9:1',
+          age: 0,
+          name: 'acme-monitor',
           user: 'default',
-          ip: '10.0.0.1',
-          openedAt: since,
-          firstCapturedAt: since,
-          lastCapturedAt: since,
+          ip: '10.0.0.9',
         },
       ]);
-      expect(byClient(connections)).toEqual(
-        byClient(await memory.getClientConnections(connectionId, since, until, own)),
+      expect(byRow(entries)).toEqual(
+        byRow(await memory.getClientCaptureEntries(connectionId, since, until)),
       );
-      const captures = await pg.getClientConnectionCaptures(connectionId, since, until, own);
-      const byCapture = (rows: Array<{ capturedAt: number; name: string; ip: string }>) =>
-        [...rows].sort((a, b) => a.capturedAt - b.capturedAt || `${a.name}|${a.ip}`.localeCompare(`${b.name}|${b.ip}`));
-      expect(byCapture(captures)).toEqual(
-        byCapture(await memory.getClientConnectionCaptures(connectionId, since, until, own)),
-      );
-      expect(captures.filter((c) => c.ip === '10.0.0.5').map((c) => c.name)).toEqual(['storm', 'storm']);
-      expect(captures.filter((c) => c.ip === '10.0.0.9')).toEqual([]);
     });
 
-    it("matches the memory adapter for a closed own connection and the id's later holder", async () => {
-      const connectionId = 'conn-closed-own';
+    it('takes the newest row of a connection by captured_at, then by insertion', async () => {
+      const connectionId = 'conn-newest';
       const [template] = rows;
-      const row = { ...template, id: 0, user: 'default', connectionId };
-      const batch = [
-        // The monitor's previous connection, custom-named, closed at +90s.
-        { ...row, clientId: '3', name: '', addr: '10.0.0.9:1', age: 0, capturedAt: since },
-        { ...row, clientId: '3', name: 'acme-monitor', addr: '10.0.0.9:1', age: 60, capturedAt: since + 60_000 },
-        { ...row, clientId: '3', name: 'acme-monitor', addr: '10.0.0.9:1', age: 90, capturedAt: since + 90_000 },
-        // Its replacement, still open.
-        { ...row, clientId: '2', name: 'acme-monitor', addr: '10.0.0.9:2', age: 0, capturedAt: since + 120_000 },
-        // After a server restart the application was handed id 3.
-        { ...row, clientId: '3', name: 'api', addr: '10.0.0.1:7', age: 0, capturedAt: since + 120_000 },
-        { ...row, clientId: '3', name: 'api', addr: '10.0.0.1:7', age: 60, capturedAt: since + 180_000 },
-      ];
-      await pg.saveClientSnapshot(batch, connectionId);
-      await memory.saveClientSnapshot(batch, connectionId);
-      const own = [
-        { id: '3', connectedAt: since, closedAt: since + 90_000 },
-        { id: '2', connectedAt: since + 100_000 },
-      ];
+      const row = { ...template, id: 0, user: 'default', addr: '10.0.0.5:4001', clientId: '7', connectionId };
+      // Two rows at the same capture time: the later insert is the newest.
+      await pg.saveClientSnapshot([{ ...row, name: 'first', age: 0, capturedAt: since }], connectionId);
+      await pg.saveClientSnapshot([{ ...row, name: 'second', age: 0, capturedAt: since }], connectionId);
+      await memory.saveClientSnapshot([{ ...row, name: 'first', age: 0, capturedAt: since }], connectionId);
+      await memory.saveClientSnapshot([{ ...row, name: 'second', age: 0, capturedAt: since }], connectionId);
 
-      const connections = await pg.getClientConnections(connectionId, since, until, own);
-      expect(connections).toEqual([
-        {
-          clientId: '3',
-          addr: '10.0.0.1:7',
-          name: 'api',
-          user: 'default',
-          ip: '10.0.0.1',
-          openedAt: since + 120_000,
-          firstCapturedAt: since + 120_000,
-          lastCapturedAt: since + 180_000,
-        },
-      ]);
-      expect(connections).toEqual(await memory.getClientConnections(connectionId, since, until, own));
-      const captures = await pg.getClientConnectionCaptures(connectionId, since, until, own);
-      const byCapture = <T extends { capturedAt: number }>(rows: T[]) =>
-        [...rows].sort((a, b) => a.capturedAt - b.capturedAt);
-      expect(byCapture(captures)).toEqual(
-        byCapture(await memory.getClientConnectionCaptures(connectionId, since, until, own)),
-      );
-      expect(byCapture(captures).map((c) => [c.capturedAt - since, c.name, c.maxClientId])).toEqual([
-        [120_000, 'api', 3],
-        [180_000, 'api', 3],
-      ]);
-    });
-  });
-
-  describe('getClientConnectionCaptures', () => {
-    it('reads the oldest connection and highest id of each identity per capture', async () => {
-      const connectionId = 'conn-captures';
-      const capturedAt = T0 + BATCH_MS;
-      const [template] = rows;
-      const row = { ...template, id: 0, name: 'api', user: 'svc', capturedAt, connectionId };
-      await pg.saveClientSnapshot(
-        [
-          { ...row, clientId: '9', addr: '10.0.0.1:1', age: 30 },
-          { ...row, clientId: '10', addr: '10.0.0.1:2', age: 2 },
-          { ...row, clientId: '99', addr: '10.0.0.2:1', age: 0, flags: 'S' },
-        ],
-        connectionId,
-      );
-
-      await expect(
-        pg.getClientConnectionCaptures(connectionId, capturedAt, capturedAt),
-      ).resolves.toEqual([
-        { capturedAt, name: 'api', user: 'svc', ip: '10.0.0.1', oldestAge: 30, maxClientId: 10 },
-      ]);
+      const entries = await pg.getClientCaptureEntries(connectionId, since, until);
+      expect(entries.map((e) => e.name)).toEqual(['second', 'second']);
+      expect(entries).toEqual(await memory.getClientCaptureEntries(connectionId, since, until));
     });
   });
 });

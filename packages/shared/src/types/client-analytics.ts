@@ -40,38 +40,29 @@ export interface NewClientConnectionGroup {
   count: number;
 }
 
-export interface ClientConnectionCaptureRow {
-  capturedAt: number;
-  name: string;
-  user: string;
-  ip: string;
-  oldestAge: number;
-  maxClientId: number;
-}
-
 /**
- * One connection seen in a range of client snapshots: a (clientId, addr) pair
- * with the name and user of its newest row, when it opened (the earliest
- * `capturedAt - age` estimate over its rows) and the first and last capture
- * that listed it.
+ * One connection in one CLIENT LIST capture of a range of client snapshots.
+ * `name` and `user` are those of the newest row of the same (clientId, addr)
+ * in the range, so a client captured before it ran CLIENT SETNAME carries the
+ * name it set later in every capture.
  */
-export interface ClientConnectionRow {
+export interface ClientCaptureEntry {
+  capturedAt: number;
   clientId: string;
   addr: string;
+  /** Connection age in seconds at the capture. */
+  age: number;
   name: string;
   user: string;
   /** addr with the port stripped. */
   ip: string;
-  openedAt: number;
-  firstCapturedAt: number;
-  lastCapturedAt: number;
 }
 
 /**
  * One of the monitor's own connections to a server: its CLIENT LIST id, the
- * time it connected and, once the monitor has closed it, the time it closed, so
- * only rows captured while it held the id are its own. `closedAt` is unset
- * while the connection is open.
+ * time it started connecting and, once the monitor has closed it, the time it
+ * closed, so only rows captured while it held the id are its own. `closedAt`
+ * is unset while the connection is open.
  */
 export interface OwnClientConnection {
   id: string;

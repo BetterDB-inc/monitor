@@ -1,11 +1,16 @@
 import type {
-  ClientConnectionCaptureRow,
-  ClientConnectionRow,
+  ClientCaptureEntry,
   ClientSnapshotGroupRow,
   NewClientConnectionGroup,
   OwnClientConnection,
 } from '@betterdb/shared';
-import { clientAddrIp, clientConnectionKey } from '@app/storage/adapters/client-analytics-stats';
+import {
+  clientAddrIp,
+  clientConnectionKey,
+  isOwnClientAt,
+  ownClientSpans,
+  type OwnClientSpans,
+} from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
@@ -152,36 +157,6 @@ function latestIdentities(snapshots: ClientCommandSnapshot[]): Map<string, Clien
   return identities;
 }
 
-// Whether a reading of `clientId` taken at `takenAt` is one of the monitor's
-// own connections: the monitor held the id when the reading was taken, from
-// its connect until its close (open connections have no close). A reading of
-// the same id outside that span (an application client before a server
-// restart renumbered the ids, or one handed the id after the monitor's
-// connection closed) is not. An id can appear more than once: a closed
-// connection and a live one that got the same id after a restart.
-type OwnClientSpans = Map<string, OwnClientConnection[]>;
-
-function ownClientSpans(ownClients: Iterable<OwnClientConnection>): OwnClientSpans {
-  const spans: OwnClientSpans = new Map();
-  for (const own of ownClients) {
-    const known = spans.get(own.id);
-    if (known === undefined) spans.set(own.id, [own]);
-    else known.push(own);
-  }
-  return spans;
-}
-
-function isOwnClient(ownClients: OwnClientSpans, clientId: string, takenAt: number): boolean {
-  const spans = ownClients.get(clientId);
-  return (
-    spans !== undefined &&
-    spans.some(
-      (own) =>
-        takenAt >= own.connectedAt && (own.closedAt === undefined || takenAt <= own.closedAt),
-    )
-  );
-}
-
 function accumulatorFor(
   map: Map<string, ContributorAccumulator>,
   identity: { key: string; keyKind: ContributorKeyKind },
@@ -251,7 +226,9 @@ function commandRates(
   if (dtSec <= 0) return [];
   const rates: Array<{ identity: ClientIdentity; rate: number }> = [];
   for (const [clientId, client] of to.clients) {
-    if (isOwnClient(ownClients, clientId, to.takenAt)) continue;
+    // A reading of one of the monitor's own connections is not the
+    // application's, whatever name the connection carries.
+    if (isOwnClientAt(ownClients, clientId, to.takenAt)) continue;
     // The earlier reading counts only for the same connection: an id reused on
     // another address after a server restart starts from zero.
     const previous = from.clients.get(clientId);
@@ -280,17 +257,131 @@ function addCommandGrowth(
   }
 }
 
-function groupCounts<T extends { name: string; user: string; ip: string }>(
-  rows: T[],
-): NewClientConnectionGroup[] {
-  const groups = new Map<string, NewClientConnectionGroup>();
-  for (const { name, user, ip } of rows) {
-    const key = JSON.stringify([name, user, ip]);
-    const group = groups.get(key) ?? { name, user, ip, count: 0 };
-    group.count += 1;
-    groups.set(key, group);
+/**
+ * One application connection seen in the attribution span: a (clientId, addr)
+ * pair with the name and user of its newest row, when it opened (the earliest
+ * `capturedAt - age` estimate over its rows) and the first capture that listed
+ * it.
+ */
+export interface ClientConnectionRow {
+  clientId: string;
+  addr: string;
+  name: string;
+  user: string;
+  ip: string;
+  openedAt: number;
+  firstCapturedAt: number;
+}
+
+/** Connections per (name, user, ip) in one capture, with the oldest among them. */
+export interface ClientCaptureGroup extends ClientGroupCount {
+  /** Age in seconds of the oldest connection of the group at the capture. */
+  oldestAge: number;
+}
+
+/** One CLIENT LIST capture of the attribution span. */
+export interface ClientCapture {
+  capturedAt: number;
+  /**
+   * Highest numeric client id the capture listed, the monitor's own
+   * connections included: every connection the server accepted consumed an id,
+   * so the growth of this number between captures counts connections that
+   * came and went between them.
+   */
+  maxClientId: number;
+  /** The application's connections, the monitor's own left out. */
+  groups: ClientCaptureGroup[];
+}
+
+export interface ClientCaptureSummary {
+  /** The application's connections, the monitor's own left out. */
+  connections: ClientConnectionRow[];
+  /** In chronological order; a capture that listed only the monitor has no groups. */
+  captures: ClientCapture[];
+}
+
+function groupKey(group: { name: string; user: string; ip: string }): string {
+  return JSON.stringify([group.name, group.user, group.ip]);
+}
+
+/**
+ * Aggregates one storage read of the attribution span (StoragePort
+ * .getClientCaptureEntries) into the connections and captures the ranking
+ * works from. Rows of the monitor's own connections (`ownClients`, by client
+ * id from the start of each connect until its close) count toward each
+ * capture's `maxClientId` and nowhere else, so the ids they consumed are
+ * known while their connections are neither reconnects nor live connections
+ * of the application. A row's name and user come from the storage read, which
+ * resolves each (clientId, addr) to its newest reading, so a connection keeps
+ * one identity whichever part of the span it is counted in. One pass over
+ * the rows.
+ */
+export function summarizeClientCaptures(
+  entries: ClientCaptureEntry[],
+  ownClients: Iterable<OwnClientConnection> = [],
+): ClientCaptureSummary {
+  const spans = ownClientSpans(ownClients);
+  const connections = new Map<string, ClientConnectionRow>();
+  const captures = new Map<
+    number,
+    { capture: ClientCapture; groups: Map<string, ClientCaptureGroup> }
+  >();
+  for (const entry of entries) {
+    let capture = captures.get(entry.capturedAt);
+    if (capture === undefined) {
+      capture = {
+        capture: { capturedAt: entry.capturedAt, maxClientId: 0, groups: [] },
+        groups: new Map(),
+      };
+      captures.set(entry.capturedAt, capture);
+    }
+    // Ids are decimal; anything else does not count toward the growth.
+    if (/^\d+$/.test(entry.clientId)) {
+      capture.capture.maxClientId = Math.max(capture.capture.maxClientId, Number(entry.clientId));
+    }
+    if (isOwnClientAt(spans, entry.clientId, entry.capturedAt)) continue;
+
+    const key = groupKey(entry);
+    const group = capture.groups.get(key);
+    if (group === undefined) {
+      const fresh = {
+        name: entry.name,
+        user: entry.user,
+        ip: entry.ip,
+        count: 1,
+        oldestAge: entry.age,
+      };
+      capture.groups.set(key, fresh);
+      capture.capture.groups.push(fresh);
+    } else {
+      group.count += 1;
+      group.oldestAge = Math.max(group.oldestAge, entry.age);
+    }
+
+    const connectionKey = clientConnectionKey(entry.clientId, entry.addr);
+    const openedAt = entry.capturedAt - entry.age * 1000;
+    const known = connections.get(connectionKey);
+    if (known === undefined) {
+      connections.set(connectionKey, {
+        clientId: entry.clientId,
+        addr: entry.addr,
+        name: entry.name,
+        user: entry.user,
+        ip: entry.ip,
+        openedAt,
+        firstCapturedAt: entry.capturedAt,
+      });
+    } else {
+      known.openedAt = Math.min(known.openedAt, openedAt);
+      known.firstCapturedAt = Math.min(known.firstCapturedAt, entry.capturedAt);
+    }
   }
-  return [...groups.values()];
+  return {
+    connections: [...connections.values()],
+    captures: [...captures.values()]
+      .map(({ capture }) => capture)
+      .sort((a, b) => a.capturedAt - b.capturedAt),
+  };
 }
 
 /**
@@ -304,64 +395,83 @@ export function newConnectionsBetween(
   since: number,
   until: number,
 ): NewClientConnectionGroup[] {
-  return groupCounts(
-    connections.filter((c) => c.openedAt >= since && c.firstCapturedAt <= until),
-  );
+  const groups = new Map<string, NewClientConnectionGroup>();
+  for (const connection of connections) {
+    if (connection.openedAt < since || connection.firstCapturedAt > until) continue;
+    const key = groupKey(connection);
+    const group = groups.get(key);
+    if (group === undefined) {
+      const { name, user, ip } = connection;
+      groups.set(key, { name, user, ip, count: 1 });
+    } else {
+      group.count += 1;
+    }
+  }
+  return [...groups.values()];
 }
 
 /**
- * Connections per (name, user, ip) in the newest capture among `connections`,
- * or none when that capture is older than `notBefore` (no capture during the
- * episode). Same identities and exclusions as the reconnect counts.
+ * The application's connections per (name, user, ip) in the newest capture of
+ * the span, or null when there is none at or after `notBefore` (no capture
+ * during the episode). The newest capture is the newest of all rows, so one
+ * that lists only the monitor's own connections (every application client
+ * mid-reconnect) is an empty list, not a fall-back to an older capture.
  */
 export function latestCaptureGroups(
-  connections: ClientConnectionRow[],
+  summary: ClientCaptureSummary,
   notBefore: number,
-): ClientGroupCount[] {
-  const newest = connections.reduce((at, c) => Math.max(at, c.lastCapturedAt), -Infinity);
-  if (newest < notBefore) return [];
-  return groupCounts(connections.filter((c) => c.lastCapturedAt === newest));
+): ClientGroupCount[] | null {
+  const newest = summary.captures[summary.captures.length - 1];
+  if (newest === undefined || newest.capturedAt < notBefore) return null;
+  return newest.groups.map(({ name, user, ip, count }) => ({ name, user, ip, count }));
 }
 
-function highestClientId(rows: ClientConnectionCaptureRow[]): number {
-  return rows.reduce((highest, row) => Math.max(highest, row.maxClientId), 0);
-}
-
+/**
+ * Reconnects per (name, user, ip) in [since, until]: the connections observed
+ * (`groups`), raised to the share of the client id growth between consecutive
+ * captures that falls to the clients fresh in the later capture, so a retrier
+ * whose connections come and go between captures is still counted. The ids the
+ * monitor's own connections consumed (`ownClients` that started connecting in
+ * the interval) are taken off the growth first. `captures` are in
+ * chronological order.
+ */
 export function estimateNewConnections(
   groups: NewClientConnectionGroup[],
-  captures: ClientConnectionCaptureRow[],
+  captures: ClientCapture[],
   since: number,
   until: number,
+  ownClients: Iterable<OwnClientConnection> = [],
 ): NewClientConnectionGroup[] {
-  const byCapture = new Map<number, ClientConnectionCaptureRow[]>();
-  for (const row of captures) {
-    const rows = byCapture.get(row.capturedAt);
-    if (rows) rows.push(row);
-    else byCapture.set(row.capturedAt, [row]);
-  }
-  const estimates = new Map(
-    groups.map((group) => [JSON.stringify([group.name, group.user, group.ip]), { ...group }]),
-  );
-  const shares = new Map<string, { row: ClientConnectionCaptureRow; share: number }>();
-  const times = [...byCapture.keys()].sort((a, b) => a - b);
-  for (let i = 1; i < times.length; i++) {
-    const capturedAt = times[i];
-    if (capturedAt < since || capturedAt > until) continue;
-    const rows = byCapture.get(capturedAt) ?? [];
-    const previous = byCapture.get(times[i - 1]) ?? [];
-    const growth = highestClientId(rows) - highestClientId(previous);
+  const estimates = new Map(groups.map((group) => [groupKey(group), { ...group }]));
+  const ownConnectedAt = [...ownClients].map((own) => own.connectedAt);
+  const shares = new Map<string, { group: ClientCaptureGroup; share: number }>();
+  for (let i = 1; i < captures.length; i++) {
+    const capture = captures[i];
+    if (capture.capturedAt < since || capture.capturedAt > until) continue;
+    const previous = captures[i - 1];
+    let growth = capture.maxClientId - previous.maxClientId;
+    for (const connectedAt of ownConnectedAt) {
+      if (connectedAt > previous.capturedAt && connectedAt <= capture.capturedAt) growth -= 1;
+    }
     if (growth <= 0) continue;
-    const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= times[i - 1]);
-    for (const row of fresh) {
-      const key = JSON.stringify([row.name, row.user, row.ip]);
-      const entry = shares.get(key) ?? { row, share: 0 };
+    const fresh = capture.groups.filter(
+      (group) => capture.capturedAt - group.oldestAge * 1000 >= previous.capturedAt,
+    );
+    for (const group of fresh) {
+      const key = groupKey(group);
+      const entry = shares.get(key) ?? { group, share: 0 };
       entry.share += growth / fresh.length;
       shares.set(key, entry);
     }
   }
-  for (const [key, { row, share }] of shares) {
-    const group = estimates.get(key) ?? { name: row.name, user: row.user, ip: row.ip, count: 0 };
-    estimates.set(key, { ...group, count: Math.max(group.count, Math.round(share)) });
+  for (const [key, { group, share }] of shares) {
+    const estimate = estimates.get(key) ?? {
+      name: group.name,
+      user: group.user,
+      ip: group.ip,
+      count: 0,
+    };
+    estimates.set(key, { ...estimate, count: Math.max(estimate.count, Math.round(share)) });
   }
   return [...estimates.values()];
 }

@@ -35,9 +35,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  ClientConnectionRow,
-  ClientConnectionCaptureRow,
-  OwnClientConnection,
+  ClientCaptureEntry,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -1319,77 +1317,30 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // Each (client_id, addr) takes the name and user of its newest row in the
-  // range, so a client captured before CLIENT SETNAME ran is grouped under the
-  // name it set later. `ownClients` leaves the monitor's own connections out:
-  // an own client id from the time it connected on and, once the monitor has
-  // closed it, up to the close, so an earlier or later connection that held the
-  // same id around a server restart stays in.
-  private clientIdentityRows(ownClients: OwnClientConnection[]): {
-    sql: string;
-    params: Array<string | number | null>;
-  } {
-    const exclude =
-      ownClients.length > 0
-        ? `AND NOT (${ownClients
-            .map(() => '(client_id = ? AND captured_at >= ? AND (? IS NULL OR captured_at <= ?))')
-            .join(' OR ')})`
-        : '';
-    return {
-      sql: `SELECT captured_at, client_id, addr, age,
-                   FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
-                   FIRST_VALUE(COALESCE(user, '')) OVER w AS user,
-                   ${SQLITE_CLIENT_IP_EXPR} AS ip
-              FROM client_snapshots
-             WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
-               AND COALESCE(flags, '') NOT GLOB '*[SM]*'
-               ${exclude}
-            WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
-      params: ownClients.flatMap((own) => {
-        const closedAt = own.closedAt ?? null;
-        return [own.id, own.connectedAt, closedAt, closedAt];
-      }),
-    };
-  }
-
-  async getClientConnections(
+  // range, so a client captured before CLIENT SETNAME ran carries the name it
+  // set later in every capture. Nothing but replica and master links is left
+  // out; the caller aggregates the rows and leaves the monitor's own
+  // connections out in code, so one statement serves every read.
+  async getClientCaptureEntries(
     connectionId: string,
     since: number,
     until: number,
-    ownClients: OwnClientConnection[] = [],
-  ): Promise<ClientConnectionRow[]> {
+  ): Promise<ClientCaptureEntry[]> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
-    const rows = this.clientIdentityRows(ownClients);
     return this.db
       .prepare(
-        `SELECT client_id AS clientId, addr, name, user, ip,
-                MIN(captured_at - age * 1000) AS openedAt,
-                MIN(captured_at) AS firstCapturedAt, MAX(captured_at) AS lastCapturedAt
-           FROM (${rows.sql})
-          GROUP BY client_id, addr, name, user, ip`,
+        `SELECT captured_at AS capturedAt, client_id AS clientId, addr, age,
+                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                FIRST_VALUE(COALESCE(user, '')) OVER w AS user,
+                ${SQLITE_CLIENT_IP_EXPR} AS ip
+           FROM client_snapshots
+          WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
+            AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+         WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)`,
       )
-      .all(connectionId, since, until, ...rows.params) as ClientConnectionRow[];
-  }
-
-  async getClientConnectionCaptures(
-    connectionId: string,
-    since: number,
-    until: number,
-    ownClients: OwnClientConnection[] = [],
-  ): Promise<ClientConnectionCaptureRow[]> {
-    if (!this.db) {
-      throw new Error('Database not initialized');
-    }
-    const rows = this.clientIdentityRows(ownClients);
-    return this.db
-      .prepare(
-        `SELECT captured_at AS capturedAt, name, user, ip, MAX(age) AS oldestAge,
-                MAX(CAST(client_id AS INTEGER)) AS maxClientId
-           FROM (${rows.sql})
-          GROUP BY captured_at, name, user, ip`,
-      )
-      .all(connectionId, since, until, ...rows.params) as ClientConnectionCaptureRow[];
+      .all(connectionId, since, until) as ClientCaptureEntry[];
   }
 
   async getClientTimeSeries(

@@ -16,9 +16,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  ClientConnectionRow,
-  ClientConnectionCaptureRow,
-  OwnClientConnection,
+  ClientCaptureEntry,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -388,29 +386,22 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return filtered.slice(offset, offset + limit);
   }
 
-  // Rows of one connection in [since, until] without replica and master links
-  // and without the monitor's own connections (an own client id from the time
-  // it connected on and, once closed, up to the close), each carrying the name
-  // and user of the newest row of its (client_id, addr), so a client captured
-  // before CLIENT SETNAME ran is grouped under the name it set later.
-  private clientIdentityRows(
+  // Every row of one connection in [since, until] without replica and master
+  // links, each carrying the name and user of the newest row of its
+  // (client_id, addr), so a client captured before CLIENT SETNAME ran carries
+  // the name it set later in every capture. The caller aggregates the rows and
+  // leaves the monitor's own connections out in code.
+  async getClientCaptureEntries(
     connectionId: string,
     since: number,
     until: number,
-    ownClients: OwnClientConnection[],
-  ): Array<{ row: StoredClientSnapshot; name: string; user: string; ip: string }> {
+  ): Promise<ClientCaptureEntry[]> {
     const rows = this.clientSnapshots.filter(
       (snapshot) =>
         snapshot.connectionId === connectionId &&
         snapshot.capturedAt >= since &&
         snapshot.capturedAt <= until &&
-        !/[SM]/.test(snapshot.flags) &&
-        !ownClients.some(
-          (own) =>
-            own.id === snapshot.clientId &&
-            snapshot.capturedAt >= own.connectedAt &&
-            (own.closedAt === undefined || snapshot.capturedAt <= own.closedAt),
-        ),
+        !/[SM]/.test(snapshot.flags),
     );
     const newest = new Map<string, StoredClientSnapshot>();
     for (const row of rows) {
@@ -420,73 +411,16 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     return rows.map((row) => {
       const identity = newest.get(clientConnectionKey(row.clientId, row.addr))!;
-      return { row, name: identity.name, user: identity.user, ip: clientAddrIp(row.addr) };
-    });
-  }
-
-  async getClientConnections(
-    connectionId: string,
-    since: number,
-    until: number,
-    ownClients: OwnClientConnection[] = [],
-  ): Promise<ClientConnectionRow[]> {
-    const connections = new Map<string, ClientConnectionRow>();
-    for (const { row, name, user, ip } of this.clientIdentityRows(
-      connectionId,
-      since,
-      until,
-      ownClients,
-    )) {
-      const openedAt = row.capturedAt - row.age * 1000;
-      const key = clientConnectionKey(row.clientId, row.addr);
-      const known = connections.get(key);
-      if (known === undefined) {
-        connections.set(key, {
-          clientId: row.clientId,
-          addr: row.addr,
-          name,
-          user,
-          ip,
-          openedAt,
-          firstCapturedAt: row.capturedAt,
-          lastCapturedAt: row.capturedAt,
-        });
-        continue;
-      }
-      known.openedAt = Math.min(known.openedAt, openedAt);
-      known.firstCapturedAt = Math.min(known.firstCapturedAt, row.capturedAt);
-      known.lastCapturedAt = Math.max(known.lastCapturedAt, row.capturedAt);
-    }
-    return [...connections.values()];
-  }
-
-  async getClientConnectionCaptures(
-    connectionId: string,
-    since: number,
-    until: number,
-    ownClients: OwnClientConnection[] = [],
-  ): Promise<ClientConnectionCaptureRow[]> {
-    const rows = new Map<string, ClientConnectionCaptureRow>();
-    for (const { row: snapshot, name, user, ip } of this.clientIdentityRows(
-      connectionId,
-      since,
-      until,
-      ownClients,
-    )) {
-      const key = JSON.stringify([snapshot.capturedAt, name, user, ip]);
-      const row = rows.get(key) ?? {
-        capturedAt: snapshot.capturedAt,
-        name,
-        user,
-        ip,
-        oldestAge: snapshot.age,
-        maxClientId: 0,
+      return {
+        capturedAt: row.capturedAt,
+        clientId: row.clientId,
+        addr: row.addr,
+        age: row.age,
+        name: identity.name,
+        user: identity.user,
+        ip: clientAddrIp(row.addr),
       };
-      row.oldestAge = Math.max(row.oldestAge, snapshot.age);
-      row.maxClientId = Math.max(row.maxClientId, Number(snapshot.clientId) || 0);
-      rows.set(key, row);
-    }
-    return [...rows.values()];
+    });
   }
 
   async getClientTimeSeries(
