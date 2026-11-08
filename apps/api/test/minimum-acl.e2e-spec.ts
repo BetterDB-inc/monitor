@@ -15,6 +15,7 @@ const BASE_ALLOWED: Command[] = [
   ['SELECT', '1'],
   ['CLIENT', 'SETNAME', 'BetterDB-Monitor'],
   ['CLIENT', 'GETNAME'],
+  ['CLIENT', 'ID'],
   ['CLIENT', 'LIST'],
   ['CLIENT', 'NO-TOUCH', 'ON'],
   ['CONFIG', 'GET', '*'],
