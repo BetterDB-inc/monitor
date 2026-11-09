@@ -442,8 +442,8 @@ interface PendingNodeEvents {
   cob: StoredAnomalyEvent[];
 }
 
-interface FanoutClient {
-  disconnect(): void;
+interface FanoutSocket {
+  stalled: boolean;
 }
 
 interface SeedBackoff {
@@ -5100,18 +5100,21 @@ export class AnomalyService
   }
 
   private async readFanoutCob(
-    client: FanoutClient & { call(...args: string[]): Promise<unknown> },
+    client: { call(...args: string[]): Promise<unknown> },
+    socket: FanoutSocket,
     key: string,
     addr: string,
     info: Record<string, string>,
-    deadline: number,
   ): Promise<CobReads> {
     const needed = this.cobReadsNeeded(key, info);
-    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> => {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) return Promise.reject(new Error(`${what} to ${addr} timed out`));
-      return this.fanoutRead(client, `${key}#${suffix}`, remaining, `${what} to ${addr} timed out`, read);
-    };
+    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> =>
+      this.fanoutRead(
+        socket,
+        `${key}#${suffix}`,
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `${what} to ${addr} timed out`,
+        read,
+      );
     const [limit, replicas] = await Promise.allSettled([
       needed.limit
         ? send('cob-limit', 'CONFIG GET', async () => {
@@ -6209,13 +6212,14 @@ export class AnomalyService
   }
 
   private async readNodeSelf(
-    client: FanoutClient & { call(...args: string[]): Promise<unknown> },
+    client: { call(...args: string[]): Promise<unknown> },
+    socket: FanoutSocket,
     addr: string,
     stateKey: string,
   ): Promise<ClusterNode | null> {
     try {
       const raw = await this.fanoutRead(
-        client,
+        socket,
         `${stateKey}#nodes`,
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `CLUSTER NODES to ${addr} timed out`,
@@ -6244,7 +6248,8 @@ export class AnomalyService
   }
 
   private async readNodeWriteP99(
-    client: FanoutClient & { info(section: string): Promise<string> },
+    client: { info(section: string): Promise<string> },
+    socket: FanoutSocket,
     key: string,
     addr: string,
     timestamp: number,
@@ -6254,7 +6259,7 @@ export class AnomalyService
     }
     try {
       const raw = await this.fanoutRead(
-        client,
+        socket,
         `${key}#latency`,
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `INFO latencystats to ${addr} timed out`,
@@ -9714,26 +9719,30 @@ export class AnomalyService
           `Connecting to ${target.addr} timed out`,
         );
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
-        const deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
-        const raw = await this.fanoutRead(
-          client,
-          stateKey,
-          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-          `INFO to ${target.addr} timed out`,
-          () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
-        );
-        const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
-        const cobRead = this.readFanoutCob(client, stateKey, target.addr, info, deadline);
-        const [self, writeP99, cob] = await Promise.all([
-          target.nodeId
-            ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
-              this.readNodeSelf(client, target.addr, stateKey))
-            : Promise.resolve(null),
-          target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : null,
-          cobRead,
-        ]);
-        if (writeP99) this.reshardWriteP99.set(stateKey, writeP99);
-        return { info, self, cob };
+        const socket: FanoutSocket = { stalled: false };
+        try {
+          const raw = await this.fanoutRead(
+            socket,
+            stateKey,
+            AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+            `INFO to ${target.addr} timed out`,
+            () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
+          );
+          const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
+          const cobRead = this.readFanoutCob(client, socket, stateKey, target.addr, info);
+          const [self, writeP99, cob] = await Promise.all([
+            target.nodeId
+              ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+                this.readNodeSelf(client, socket, target.addr, stateKey))
+              : Promise.resolve(null),
+            target.nodeId ? this.readNodeWriteP99(client, socket, stateKey, target.addr, timestamp) : null,
+            cobRead,
+          ]);
+          if (writeP99) this.reshardWriteP99.set(stateKey, writeP99);
+          return { info, self, cob };
+        } finally {
+          if (socket.stalled) client.disconnect();
+        }
       }),
     );
 
@@ -9846,14 +9855,14 @@ export class AnomalyService
   }
 
   private fanoutRead<T>(
-    client: FanoutClient,
+    socket: FanoutSocket,
     key: string,
     timeoutMs: number,
     message: string,
     send: () => Promise<T>,
   ): Promise<T> {
     return withTimeout(this.fanoutCommand(key, send), timeoutMs, message).catch((err: unknown) => {
-      if (err instanceof Error && err.message === message) client.disconnect();
+      if (err instanceof Error && err.message === message) socket.stalled = true;
       throw err;
     });
   }

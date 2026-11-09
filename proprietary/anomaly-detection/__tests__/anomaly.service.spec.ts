@@ -15633,26 +15633,6 @@ describe('AnomalyService', () => {
         }
       });
 
-      it('skips output-buffer reads once INFO has used the fan-out budget', async () => {
-        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
-        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 50;
-        try {
-          const client = nodeClient();
-          client.info.mockImplementation(async (name?: string) => {
-            clock += 60;
-            return nodeInfo(name);
-          });
-          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
-
-          await pollNode({ replicaOmem: HARD * 0.7 });
-
-          expect(client.call.mock.calls.filter(([command]: string[]) => command === 'CLIENT')).toHaveLength(0);
-          expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
-        } finally {
-          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
-        }
-      });
-
       it('does not raise a second output-buffer alert when one CLIENT LIST read fails', async () => {
         node.memory = { mem_clients_slaves: String(HARD * 0.7) };
         await pollNode({ replicaOmem: HARD * 0.7 });
@@ -15790,6 +15770,53 @@ describe('AnomalyService', () => {
           expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
             expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
           ]);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('gives CLIENT LIST its own budget after a slow INFO', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        const client = nodeClient();
+        client.info.mockImplementation(async (name?: string) => {
+          clock += timeout;
+          return nodeInfo(name);
+        });
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('drops a hung connection only after its other reads have answered', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (args[0] === 'CLIENT') return new Promise((_, reject) => stuck.push(reject));
+            if (args[0] === 'CLUSTER') {
+              return new Promise((resolve, reject) =>
+                setTimeout(() => (closed ? reject(new Error('Connection is closed.')) : resolve(nodeCall(...args))), 20),
+              );
+            }
+            return nodeCall(...args);
+          });
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode();
+
+          expect((service as any).reshardNodeSelves.has(NODE_KEY)).toBe(true);
+          expect(client.disconnect).toHaveBeenCalledTimes(1);
         } finally {
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
         }
