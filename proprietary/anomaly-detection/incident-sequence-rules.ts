@@ -9,17 +9,23 @@ const MIN = 60_000;
 
 export const DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS = 15 * MIN;
 export const RESHARD_UNDER_WRITES_MAX_SPAN_MS = 15 * MIN;
+export const RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS = 15 * MIN;
 export const RETRY_STORM_MAX_SPAN_MS = 10 * MIN;
 export const BACKLOG_EXHAUSTION_MAX_SPAN_MS = 30 * MIN;
 
+const MEMORY_PRESSURE = [MetricType.MEMORY_USED, MetricType.MEMORY_OVERHEAD, MetricType.REPL_BUFFER_PRESSURE];
+
 registerSequenceRule({
   pattern: AnomalyPattern.DIVERGENCE_UNDER_PRESSURE,
-  steps: [
-    [MetricType.OPS_PER_SEC, MetricType.INPUT_KBPS],
-    [MetricType.REPLICATION_DIVERGENCE],
-    [MetricType.MEMORY_USED, MetricType.MEMORY_OVERHEAD, MetricType.REPL_BUFFER_PRESSURE],
-  ],
+  steps: [[MetricType.OPS_PER_SEC, MetricType.INPUT_KBPS], [MetricType.REPLICATION_DIVERGENCE], MEMORY_PRESSURE],
   optionalMetrics: [MetricType.EVICTED_KEYS, MetricType.EVICTED_CLIENTS, MetricType.FORK_MEMORY_RISK],
+  directions: {
+    [MetricType.OPS_PER_SEC]: 'rise',
+    [MetricType.INPUT_KBPS]: 'rise',
+    [MetricType.MEMORY_USED]: 'rise',
+    [MetricType.EVICTED_KEYS]: 'rise',
+    [MetricType.EVICTED_CLIENTS]: 'rise',
+  },
   maxSpanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
   leadMs: { 2: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
   sameConnection: true,
@@ -47,26 +53,61 @@ registerSequenceRule({
 });
 
 registerSequenceRule({
+  pattern: AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
+  steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE], MEMORY_PRESSURE],
+  optionalMetrics: [
+    MetricType.OPS_PER_SEC,
+    MetricType.INPUT_KBPS,
+    MetricType.COMMAND_P99,
+    MetricType.EVICTED_KEYS,
+    MetricType.EVICTED_CLIENTS,
+    MetricType.FORK_MEMORY_RISK,
+  ],
+  directions: {
+    [MetricType.OPS_PER_SEC]: 'rise',
+    [MetricType.INPUT_KBPS]: 'rise',
+    [MetricType.MEMORY_USED]: 'rise',
+    [MetricType.EVICTED_KEYS]: 'rise',
+    [MetricType.EVICTED_CLIENTS]: 'rise',
+  },
+  maxSpanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
+  leadMs: { 2: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
+  supersedes: [AnomalyPattern.RESHARD_UNDER_WRITES, AnomalyPattern.DIVERGENCE_UNDER_PRESSURE],
+  diagnosis:
+    'A reshard loaded one shard, its replicas fell behind, and the primary ran short of memory or replica buffer room, each slowing the others\' recovery. ' +
+    'Slot migration adds writes the lagging replicas must still apply. The writes they have not applied hold memory and buffer space on the primary. ' +
+    'Memory pressure can make slot imports fail, which keeps the reshard running, and a full replica buffer drops the link and forces a resync that costs more memory and more lag.',
+  recommendations: [
+    'Pause the slot migration until replica lag and memory settle, then resume in smaller batches',
+    'Raise client-output-buffer-limit for replicas or add memory headroom so the replica link is not dropped',
+    'Check replica network and CPU headroom on the skewed shard so replicas can catch up',
+  ],
+});
+
+registerSequenceRule({
   pattern: AnomalyPattern.RETRY_STORM,
   steps: [
-    [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
+    [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES, MetricType.CONNECTION_CHURN],
     [MetricType.RETRY_AMPLIFICATION],
-    [
-      MetricType.CLIENT_SATURATION,
-      MetricType.LOAD_SATURATION,
-      MetricType.REJECTED_CONNECTIONS,
-      MetricType.CLIENT_LOCKOUT_RISK,
-    ],
   ],
-  optionalMetrics: [MetricType.CONNECTION_CHURN],
+  optionalMetrics: [
+    MetricType.CLIENT_SATURATION,
+    MetricType.LOAD_SATURATION,
+    MetricType.REJECTED_CONNECTIONS,
+    MetricType.CLIENT_LOCKOUT_RISK,
+  ],
+  directions: {
+    [MetricType.COMMAND_P99]: 'rise',
+    [MetricType.ERROR_REPLIES]: 'rise',
+    [MetricType.CONNECTION_CHURN]: 'rise',
+  },
   maxSpanMs: RETRY_STORM_MAX_SPAN_MS,
-  leadMs: { 2: RETRY_STORM_MAX_SPAN_MS },
   sameConnection: true,
   diagnosis:
-    'Slow or failing commands made clients retry while the server was out of client or processing headroom, and the retries multiplied the load.',
+    'Slow commands, failing commands or a wave of reconnects made clients retry, and the retries multiplied the load. Saturation in the same window means the server had no headroom left to absorb them.',
   recommendations: [
     'Add backoff with jitter and a retry budget to the clients',
-    'Fix the slow or failing commands that started the retries',
+    'Fix the slow or failing commands, or the cause of the reconnects, that started the retries',
     'Raise maxclients or shed load until the retry traffic drains',
   ],
 });

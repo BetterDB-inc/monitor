@@ -2,6 +2,7 @@ import { IncidentTimelineBuilder, RecoveryProbe } from '../incident-timeline';
 import {
   BACKLOG_EXHAUSTION_MAX_SPAN_MS,
   DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
+  RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
   RESHARD_UNDER_WRITES_MAX_SPAN_MS,
   RETRY_STORM_MAX_SPAN_MS,
 } from '../incident-sequence-rules';
@@ -14,13 +15,18 @@ const MIN = 60_000;
 const neverRecovers: RecoveryProbe = () => null;
 
 let seq = 0;
-function event(metricType: MetricType, at: number, connectionId = 'conn-a'): AnomalyEvent {
+function event(
+  metricType: MetricType,
+  at: number,
+  connectionId = 'conn-a',
+  anomalyType = AnomalyType.SPIKE,
+): AnomalyEvent {
   seq++;
   return {
     id: `evt-${String(seq).padStart(3, '0')}`,
     timestamp: T0 + at,
     metricType,
-    anomalyType: AnomalyType.SPIKE,
+    anomalyType,
     severity: AnomalySeverity.WARNING,
     value: 1,
     baseline: 0,
@@ -39,14 +45,16 @@ function ruleFor(pattern: AnomalyPattern): SequenceRule {
   return rule;
 }
 
-function patternsOf(events: AnomalyEvent[], pattern: AnomalyPattern, scope = (id: string) => id) {
-  const incidents = new IncidentTimelineBuilder({}, scope, () => [ruleFor(pattern)]).build(
-    events,
-    T0 + 60 * MIN,
-    neverRecovers,
-  );
-  return incidents.flatMap((incident) => incident.matchedPatterns);
+function incidentsOf(events: AnomalyEvent[], rules: readonly SequenceRule[], scope = (id: string) => id) {
+  return new IncidentTimelineBuilder({}, scope, () => rules).build(events, T0 + 60 * MIN, neverRecovers);
 }
+
+function patternsOf(events: AnomalyEvent[], pattern: AnomalyPattern, scope = (id: string) => id) {
+  return incidentsOf(events, [ruleFor(pattern)], scope).flatMap((incident) => incident.matchedPatterns);
+}
+
+const drop = (metric: MetricType, at: number, connectionId = 'conn-a') =>
+  event(metric, at, connectionId, AnomalyType.DROP);
 
 interface RuleCase {
   pattern: AnomalyPattern;
@@ -81,21 +89,27 @@ const cases: RuleCase[] = [
     sameConnection: false,
   },
   {
-    pattern: AnomalyPattern.RETRY_STORM,
-    steps: [MetricType.ERROR_REPLIES, MetricType.RETRY_AMPLIFICATION, MetricType.CLIENT_LOCKOUT_RISK],
+    pattern: AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
+    steps: [MetricType.RESHARD_SHARD_SKEW, MetricType.REPLICATION_DIVERGENCE, MetricType.REPL_BUFFER_PRESSURE],
     alternatives: [
-      [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES],
-      [MetricType.RETRY_AMPLIFICATION],
-      [
-        MetricType.CLIENT_SATURATION,
-        MetricType.LOAD_SATURATION,
-        MetricType.REJECTED_CONNECTIONS,
-        MetricType.CLIENT_LOCKOUT_RISK,
-      ],
+      [MetricType.RESHARD_SHARD_SKEW],
+      [MetricType.REPLICATION_DIVERGENCE],
+      [MetricType.MEMORY_USED, MetricType.MEMORY_OVERHEAD, MetricType.REPL_BUFFER_PRESSURE],
     ],
-    optional: MetricType.CONNECTION_CHURN,
+    optional: MetricType.INPUT_KBPS,
+    spanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
+    lead: { step: 2, ms: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
+    sameConnection: false,
+  },
+  {
+    pattern: AnomalyPattern.RETRY_STORM,
+    steps: [MetricType.ERROR_REPLIES, MetricType.RETRY_AMPLIFICATION],
+    alternatives: [
+      [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES, MetricType.CONNECTION_CHURN],
+      [MetricType.RETRY_AMPLIFICATION],
+    ],
+    optional: MetricType.CLIENT_LOCKOUT_RISK,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
-    lead: { step: 2, ms: RETRY_STORM_MAX_SPAN_MS },
     sameConnection: true,
   },
   {
@@ -191,6 +205,33 @@ describe('incident sequence rules', () => {
       });
     }
 
+    const directed = alternatives.flatMap((metrics, stepIndex) =>
+      metrics
+        .filter((metric) => ruleFor(pattern).directions?.[metric] === 'rise')
+        .map((metric) => ({ stepIndex, metric })),
+    );
+    if (directed.length > 0) {
+      it.each(directed)('does not take a drop in $metric as step $stepIndex', ({ stepIndex, metric }) => {
+        const events = steps.map((step, i) =>
+          i === stepIndex ? drop(metric, i * MIN) : event(step, i * MIN),
+        );
+
+        expect(patternsOf(events, pattern)).toEqual([]);
+      });
+    }
+
+    const directedOptional = (ruleFor(pattern).optionalMetrics ?? []).filter(
+      (metric) => ruleFor(pattern).directions?.[metric] === 'rise',
+    );
+    if (directedOptional.length > 0) {
+      it.each(directedOptional)('does not take in a drop in optional %s', (metric) => {
+        const events = [...inOrder(), drop(metric, steps.length * MIN)];
+        const [incident] = incidentsOf(events, [ruleFor(pattern)]);
+
+        expect(incident.sequenceMatches[0].anomalyIds).toHaveLength(steps.length);
+      });
+    }
+
     if (optional) {
       it('takes in its optional signal', () => {
         const events = [...inOrder(), event(optional, steps.length * MIN)];
@@ -214,6 +255,143 @@ describe('incident sequence rules', () => {
         expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(sameConnection ? [] : [pattern]);
       },
     );
+  });
+
+  describe('overlapping reshard, divergence and memory pressure', () => {
+    const allRules = () => getSequenceRules();
+    const compound = AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE;
+
+    it('yields one compound match instead of reshard_under_writes and divergence_under_pressure', () => {
+      const events = [
+        event(MetricType.RESHARD_SHARD_SKEW, 0),
+        event(MetricType.OPS_PER_SEC, MIN),
+        event(MetricType.REPLICATION_DIVERGENCE, 2 * MIN),
+        event(MetricType.REPL_BUFFER_PRESSURE, 3 * MIN),
+      ];
+      const [incident] = incidentsOf(events, allRules());
+
+      expect(incident.matchedPatterns).toEqual([compound]);
+      expect(incident.sequenceMatches[0].diagnosis).toBe(ruleFor(compound).diagnosis);
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual(
+        expect.arrayContaining(events.map((e) => e.id)),
+      );
+    });
+
+    it('leaves divergence_under_pressure alone without a reshard', () => {
+      const events = [
+        event(MetricType.OPS_PER_SEC, 0),
+        event(MetricType.REPLICATION_DIVERGENCE, MIN),
+        event(MetricType.REPL_BUFFER_PRESSURE, 2 * MIN),
+      ];
+
+      expect(incidentsOf(events, allRules())[0].matchedPatterns).toEqual([
+        AnomalyPattern.DIVERGENCE_UNDER_PRESSURE,
+      ]);
+    });
+
+    it('leaves reshard_under_writes alone without memory or buffer pressure', () => {
+      const events = [event(MetricType.RESHARD_SHARD_SKEW, 0), event(MetricType.REPLICATION_DIVERGENCE, MIN)];
+
+      expect(incidentsOf(events, allRules())[0].matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+      ]);
+    });
+
+    it('does not take a drop in memory as the pressure step', () => {
+      const events = [
+        event(MetricType.RESHARD_SHARD_SKEW, 0),
+        event(MetricType.REPLICATION_DIVERGENCE, MIN),
+        drop(MetricType.MEMORY_USED, 2 * MIN),
+      ];
+
+      expect(incidentsOf(events, allRules())[0].matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+      ]);
+    });
+
+    it('keeps a superseded rule whose match shares no event with the compound match', () => {
+      const first: SequenceRule = {
+        pattern: AnomalyPattern.BATCH_JOB,
+        steps: [[MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+        maxSpanMs: 15 * MIN,
+        diagnosis: 'batch',
+        recommendations: [],
+      };
+      const combined: SequenceRule = {
+        pattern: AnomalyPattern.TRAFFIC_BURST,
+        steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
+        maxSpanMs: 15 * MIN,
+        supersedes: [AnomalyPattern.BATCH_JOB],
+        diagnosis: 'combined',
+        recommendations: [],
+      };
+      const events = [
+        event(MetricType.OPS_PER_SEC, 0),
+        event(MetricType.MEMORY_USED, MIN),
+        event(MetricType.RESHARD_SHARD_SKEW, 2 * MIN),
+        event(MetricType.REPLICATION_DIVERGENCE, 3 * MIN),
+      ];
+
+      expect(incidentsOf(events, [first, combined])[0].matchedPatterns).toEqual([
+        AnomalyPattern.BATCH_JOB,
+        AnomalyPattern.TRAFFIC_BURST,
+      ]);
+    });
+  });
+
+  describe('retry_storm', () => {
+    const retryStorm = AnomalyPattern.RETRY_STORM;
+
+    it('matches a churn-triggered retry loop without saturation', () => {
+      const churn = event(MetricType.CONNECTION_CHURN, 0);
+      const retries = { ...event(MetricType.RETRY_AMPLIFICATION, 2 * MIN), retryTrigger: 'churn' as const };
+
+      expect(patternsOf([churn, retries], retryStorm)).toEqual([retryStorm]);
+    });
+
+    it('does not match a churn drop followed by retry amplification', () => {
+      const events = [drop(MetricType.CONNECTION_CHURN, 0), event(MetricType.RETRY_AMPLIFICATION, 2 * MIN)];
+
+      expect(patternsOf(events, retryStorm)).toEqual([]);
+    });
+
+    it('does not match retry amplification alone', () => {
+      expect(patternsOf([event(MetricType.RETRY_AMPLIFICATION, 0)], retryStorm)).toEqual([]);
+    });
+
+    it('takes in saturation raised before the retry amplification', () => {
+      const events = [
+        event(MetricType.CLIENT_SATURATION, 0),
+        event(MetricType.COMMAND_P99, MIN),
+        event(MetricType.RETRY_AMPLIFICATION, 2 * MIN),
+      ];
+      const [incident] = incidentsOf(events, [ruleFor(retryStorm)]);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual(
+        expect.arrayContaining(events.map((e) => e.id)),
+      );
+    });
+  });
+
+  it('does not take a drop in ops/sec as the write rise of divergence_under_pressure', () => {
+    const events = [
+      drop(MetricType.OPS_PER_SEC, 0),
+      event(MetricType.REPLICATION_DIVERGENCE, MIN),
+      event(MetricType.MEMORY_USED, 2 * MIN),
+    ];
+
+    expect(patternsOf(events, AnomalyPattern.DIVERGENCE_UNDER_PRESSURE)).toEqual([]);
+  });
+
+  it('still takes a backlog coverage risk, which is raised as a drop, as the first step of backlog_exhaustion', () => {
+    const events = [
+      drop(MetricType.BACKLOG_COVERAGE_RISK, 0),
+      event(MetricType.RESYNC_ESCALATION, MIN),
+    ];
+
+    expect(patternsOf(events, AnomalyPattern.BACKLOG_EXHAUSTION)).toEqual([
+      AnomalyPattern.BACKLOG_EXHAUSTION,
+    ]);
   });
 
   it('recommends raising the backlog once when backlog exhaustion and recovery amplification share an incident', () => {

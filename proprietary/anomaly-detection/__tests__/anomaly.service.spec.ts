@@ -12309,8 +12309,18 @@ describe('AnomalyService', () => {
         expect.objectContaining({
           anomalyId: 'first',
           members: expect.arrayContaining([
-            { metricType: MetricType.MEMORY_USED, connectionId: 'conn-1', timestamp: now - 2 * MIN },
-            { metricType: MetricType.CONNECTIONS, connectionId: 'conn-1', timestamp: now - MIN },
+            {
+              metricType: MetricType.MEMORY_USED,
+              anomalyType: AnomalyType.SPIKE,
+              connectionId: 'conn-1',
+              timestamp: now - 2 * MIN,
+            },
+            {
+              metricType: MetricType.CONNECTIONS,
+              anomalyType: AnomalyType.SPIKE,
+              connectionId: 'conn-1',
+              timestamp: now - MIN,
+            },
           ]),
         }),
       ]);

@@ -7967,8 +7967,8 @@ export class AnomalyService
       const seen = incident.entries.flatMap((entry) => {
         const event = this.liveEventsById.get(entry.anomalyId);
         if (!event) return [];
-        const { metricType, connectionId, nodeAddr, timestamp } = event;
-        return [{ metricType, connectionId, ...(nodeAddr ? { nodeAddr } : {}), timestamp }];
+        const { metricType, anomalyType, connectionId, nodeAddr, timestamp } = event;
+        return [{ metricType, anomalyType, connectionId, ...(nodeAddr ? { nodeAddr } : {}), timestamp }];
       });
       return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
     };

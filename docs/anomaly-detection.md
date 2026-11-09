@@ -455,12 +455,17 @@ A rule's span is measured from its earliest matched event to its latest, using t
 
 Steps count in order: each step must come after the steps before it, within the span. A step with a lead may also come before the steps before it, by up to its lead. A later step alone never joins or extends an incident. A lead step joins across a quiet gap once the steps before the step it may precede were seen. A first step joins an incident across a quiet gap only when the incident already holds a lead step of the rule, stamped within that lead. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster. When two rules match the same incident and give the same recommendation, it is listed once, on the first match.
 
+A metric marked ↑ only counts when it rose. A drop in that metric does not fill the step or optional signal, so a fall in ops/sec cannot stand in for a write rise. An event whose direction is not known, such as an incident's first event read back from storage, still counts.
+
+A compound rule replaces the rules it combines. When `reshard_divergence_pressure` matches, a `reshard_under_writes` or `divergence_under_pressure` match that shares an event with it is not listed, so the incident shows one diagnosis instead of two. A sequence group recorded for one of those rules before the compound rule matched stays recorded.
+
 | Rule | Steps | Lead | Optional | Span | Same connection |
 | --- | --- | --- | --- | --- | --- |
-| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`, `memory_overhead` or `output_kbps` | — | `connection_churn` | 10 min | yes |
-| `divergence_under_pressure` | `ops_per_sec` or `input_kbps` → `replication_divergence` → `memory_used`, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`, `evicted_clients`, `fork_memory_risk` | 15 min | yes |
+| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`↑, `memory_overhead` or `output_kbps`↑ | — | `connection_churn`↑ | 10 min | yes |
+| `divergence_under_pressure` | `ops_per_sec`↑ or `input_kbps`↑ → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | yes |
 | `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | — | `command_p99` | 15 min | no |
-| `retry_storm` | `command_p99` or `error_replies` → `retry_amplification` → `client_saturation`, `load_saturation`, `rejected_connections` or `client_lockout_risk` | saturation step: 10 min | `connection_churn` | 10 min | yes |
+| `reshard_divergence_pressure` | `reshard_shard_skew` → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `ops_per_sec`↑, `input_kbps`↑, `command_p99`, `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | no |
+| `retry_storm` | `command_p99`↑, `error_replies`↑ or `connection_churn`↑ → `retry_amplification` | — | `client_saturation`, `load_saturation`, `rejected_connections`, `client_lockout_risk` | 10 min | yes |
 | `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | `resync_escalation`: 5 min | — | 30 min | yes |
 
 Why each span is that long:
@@ -468,7 +473,8 @@ Why each span is that long:
 - **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
 - **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that. The divergence detector counts memory and buffer pressure seen since its divergence span began, so pressure may come before the divergence anywhere in the span.
 - **reshard_under_writes**: skew only fires during an active reshard, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
-- **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation shows up within minutes of it or it has another cause. The retry detector rates a storm critical on saturation it already holds, so saturation may come before the retry amplification anywhere in the span.
+- **reshard_divergence_pressure**: it combines `reshard_under_writes` and `divergence_under_pressure`, so it keeps their 15 minute span and the pressure step's lead. Each failure slows the others' recovery: slot migration adds writes the lagging replicas must apply, the unapplied writes hold memory and buffer space on the primary, memory pressure can fail slot imports and keep the reshard running, and a full replica buffer drops the link and forces a resync.
+- **retry_storm**: retry amplification needs a sustained run of hot polls after the slow commands, errors or reconnects that start it. Saturation shows up within minutes of it or it has another cause. It is optional, because a retry loop that the server still absorbs is worth naming too, and it may come before the retry amplification anywhere in the span, since the retry detector rates a storm critical on saturation it already holds.
 - **backlog_exhaustion**: a coverage warning can be raised well before the disconnect that exhausts it, so this rule allows the full incident span from the warning to the resync. A resync escalation is stamped with the time the replica disconnected, up to five minutes before it is raised, so it may be stamped up to five minutes before the coverage warning.
 
 `reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.

@@ -1,4 +1,4 @@
-import { AnomalyPattern, MetricType } from '../types';
+import { AnomalyPattern, AnomalyType, MetricType } from '../types';
 
 describe('sequence rule registry', () => {
   let registry: typeof import('../sequence-rules');
@@ -51,6 +51,45 @@ describe('sequence rule registry', () => {
     [{ 1: Number.NaN }],
   ])('rejects a lead of %j', (leadMs) => {
     expect(() => registry.registerSequenceRule({ ...rule, leadMs })).toThrow(/lead/);
+  });
+
+  it('rejects a direction on a metric the rule does not use', () => {
+    expect(() =>
+      registry.registerSequenceRule({ ...rule, directions: { [MetricType.INPUT_KBPS]: 'rise' } }),
+    ).toThrow(/direction on input_kbps/);
+  });
+
+  it('rejects a rule that supersedes itself', () => {
+    expect(() =>
+      registry.registerSequenceRule({ ...rule, supersedes: [AnomalyPattern.BATCH_JOB] }),
+    ).toThrow(/supersede itself/);
+  });
+
+  describe('fills', () => {
+    const directed = { ...rule, directions: { [MetricType.OPS_PER_SEC]: 'rise' as const } };
+
+    it.each([
+      [AnomalyType.SPIKE, true],
+      [AnomalyType.DROP, false],
+      [undefined, true],
+    ])('takes an %s ops/sec event on a rise step: %s', (anomalyType, expected) => {
+      expect(
+        registry.fills(directed, directed.steps[0], { metricType: MetricType.OPS_PER_SEC, anomalyType }),
+      ).toBe(expected);
+    });
+
+    it('takes either direction on a step without one', () => {
+      expect(
+        registry.fills(directed, directed.steps[1], {
+          metricType: MetricType.MEMORY_USED,
+          anomalyType: AnomalyType.DROP,
+        }),
+      ).toBe(true);
+    });
+
+    it('does not take a metric outside the step', () => {
+      expect(registry.fills(directed, directed.steps[1], { metricType: MetricType.OPS_PER_SEC })).toBe(false);
+    });
   });
 
   it('accepts a lead on a later step', () => {

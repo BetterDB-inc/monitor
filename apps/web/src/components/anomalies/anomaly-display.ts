@@ -74,6 +74,11 @@ export const PATTERN_CONFIG: Record<
     label: 'Reshard Under Writes',
     color: 'var(--chart-warning)',
   },
+  reshard_divergence_pressure: {
+    icon: Database,
+    label: 'Reshard, Divergence and Memory Pressure',
+    color: 'var(--destructive)',
+  },
   retry_storm: { icon: AlertTriangle, label: 'Retry Storm', color: 'var(--destructive)' },
   backlog_exhaustion: { icon: Database, label: 'Backlog Exhaustion', color: 'var(--destructive)' },
   unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },

@@ -155,6 +155,7 @@ export enum AnomalyPattern {
   RESHARD_UNDER_WRITES = 'reshard_under_writes',
   RETRY_STORM = 'retry_storm',
   BACKLOG_EXHAUSTION = 'backlog_exhaustion',
+  RESHARD_DIVERGENCE_PRESSURE = 'reshard_divergence_pressure',
   UNKNOWN = 'unknown',
 }
 
