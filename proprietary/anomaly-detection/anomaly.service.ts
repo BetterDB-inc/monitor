@@ -429,6 +429,7 @@ const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const NEXT_FIRING_SKIP_TTL_MS = 10 * 60_000;
+const NEXT_FIRING_MAX_SHARE_MS = 2 * NEXT_FIRING_BUDGET_MS;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7373,7 +7374,7 @@ export class AnomalyService
   private nextFiringCache = new Map<string, CachedFiring>();
   private nextFiringInFlight = new Map<
     string,
-    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number } }
+    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number }; startedAt: number }
   >();
   private skippedNextFirings = new Map<string, number>();
 
@@ -7893,7 +7894,10 @@ export class AnomalyService
     if (cached !== undefined) return Promise.resolve(cached);
     const inFlight = this.nextFiringInFlight.get(cacheKey);
     if (inFlight && inFlight.budget.deadline > Date.now()) {
-      inFlight.budget.deadline = Math.max(inFlight.budget.deadline, deadline);
+      inFlight.budget.deadline = Math.min(
+        Math.max(inFlight.budget.deadline, deadline),
+        inFlight.startedAt + NEXT_FIRING_MAX_SHARE_MS,
+      );
       return inFlight.lookup;
     }
     const budget = { deadline };
@@ -7903,7 +7907,7 @@ export class AnomalyService
       }
     });
     this.nextFiringInFlight.delete(cacheKey);
-    this.nextFiringInFlight.set(cacheKey, { lookup, budget });
+    this.nextFiringInFlight.set(cacheKey, { lookup, budget, startedAt: Date.now() });
     if (this.nextFiringInFlight.size > NEXT_FIRING_CACHE_SIZE) this.evictInFlightLookup();
     return lookup;
   }

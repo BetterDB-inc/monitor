@@ -13306,13 +13306,35 @@ describe('AnomalyService', () => {
         expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
       });
 
+      it('replaces a stuck lookup under polling faster than the budget', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
+
+        const first = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        const polls: Promise<unknown>[] = [];
+        for (let t = 5_000; t <= 25_000; t += 5_000) {
+          await jest.advanceTimersByTimeAsync(5_000);
+          polls.push((service as any).nextFiring(signal, after, Date.now() + 10_000));
+        }
+
+        expect(polls.slice(0, 3).every((p) => p === first)).toBe(true);
+        expect(polls[3]).not.toBe(first);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      });
+
       it('evicts an expired in-flight lookup before a live one when full', () => {
         const inFlight: Map<string, any> = (service as any).nextFiringInFlight;
         const now = Date.now();
         inFlight.set('live', { lookup: Promise.resolve(null), budget: { deadline: now + 10_000 } });
         inFlight.set('expired', { lookup: Promise.resolve(null), budget: { deadline: now - 1 } });
         for (let i = 0; i < 1_998; i++) {
-          inFlight.set(`k-${i}`, { lookup: Promise.resolve(null), budget: { deadline: now + 10_000 } });
+          inFlight.set(`k-${i}`, {
+            lookup: Promise.resolve(null),
+            budget: { deadline: now + 10_000 },
+            startedAt: now,
+          });
         }
         storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
 
