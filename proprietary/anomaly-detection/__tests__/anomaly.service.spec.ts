@@ -16469,6 +16469,7 @@ describe('AnomalyService', () => {
             slave0: `ip=10.0.0.2,port=6379,state=online,offset=${1_000 * MiB - primaryGap},lag=0`,
           },
         }));
+        (dbClient as any).getClients = jest.fn().mockResolvedValue([{ addr: '10.0.0.2:51234' }]);
         replica = { info: jest.fn().mockResolvedValue(replicaReply(0)) };
         getReplicaConnection = jest.fn().mockResolvedValue(replica);
         (service as any).clusterDiscovery = { getReplicaConnection };
@@ -16493,6 +16494,26 @@ describe('AnomalyService', () => {
 
         expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1');
         expect(await persistedViews()).toContainEqual(['ok', MiB / 2]);
+      });
+
+      it('does not send credentials to an address no replica is connected from', async () => {
+        (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '10.0.0.9:51234' }]);
+
+        await feed([0, 0, 0], T0);
+
+        expect(dbClient.getClients).toHaveBeenCalledWith({ type: 'replica' });
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view]) => view === 'unreachable')).toBe(true);
+      });
+
+      it('does not dial the replica when the primary refuses CLIENT LIST', async () => {
+        (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
       });
 
       it('stores an unreachable replica without its own gap', async () => {

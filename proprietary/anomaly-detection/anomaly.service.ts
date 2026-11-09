@@ -9407,7 +9407,12 @@ export class AnomalyService
       return () => readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId));
     }
     if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
-      return () => readNode(discovery.getReplicaConnection(host, port, connectionId));
+      return async () => {
+        const peers = await ctx.client.getClients({ type: 'replica' });
+        const connectedFrom = peers.some((peer) => splitHostPort(peer.addr)?.host.toLowerCase() === host.toLowerCase());
+        if (!connectedFrom) throw new Error(`no replica is connected to the primary from ${host}`);
+        return readNode(discovery.getReplicaConnection(host, port, connectionId));
+      };
     }
     return null;
   }
