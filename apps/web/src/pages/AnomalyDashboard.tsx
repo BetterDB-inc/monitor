@@ -7,6 +7,7 @@ import { useConnection } from '../hooks/useConnection';
 import { useLicense } from '../hooks/useLicense';
 import { metricsApi } from '../api/metrics';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import { Button } from '../components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { EmptyState } from '../components/ui/empty-state';
@@ -16,9 +17,20 @@ import { ThresholdsLink } from '../components/anomalies/ThresholdsLink';
 import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressionBanner';
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
+import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
-import type { ReplicaDivergenceHistory } from '../types/anomaly';
+import {
+  SEVERITY_CONFIG,
+  PATTERN_CONFIG,
+  formatTime,
+  metricLabel,
+} from '../components/anomalies/anomaly-display';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { IncidentList } from '../components/anomalies/incidents/IncidentList';
+import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
+import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
+import type { FanoutCoverage, IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
 import {
   AlertTriangle,
   AlertCircle,
@@ -26,15 +38,8 @@ import {
   TrendingUp,
   TrendingDown,
   Activity,
-  Clock,
   ChevronDown,
   ChevronRight,
-  Zap,
-  Database,
-  Users,
-  Shield,
-  HardDrive,
-  AlertOctagon,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -90,114 +95,32 @@ interface MetricBaselineBuffer {
   isReady: boolean;
 }
 
-const SEVERITY_CONFIG = {
-  critical: {
-    color: 'text-destructive',
-    bg: 'bg-destructive/10',
-    border: 'border-destructive',
-    icon: AlertCircle,
-  },
-  warning: {
-    color: 'text-yellow-500',
-    bg: 'bg-yellow-500/10',
-    border: 'border-yellow-500',
-    icon: AlertTriangle,
-  },
-  info: { color: 'text-primary', bg: 'bg-primary/10', border: 'border-primary', icon: Info },
-};
-
-const PATTERN_CONFIG: Record<string, { icon: typeof Activity; label: string; color: string }> = {
-  traffic_burst: { icon: TrendingUp, label: 'Traffic Burst', color: 'var(--chart-1)' },
-  batch_job: { icon: Database, label: 'Batch Job', color: 'var(--chart-2)' },
-  memory_pressure: { icon: HardDrive, label: 'Memory Pressure', color: 'var(--destructive)' },
-  slow_queries: { icon: Clock, label: 'Slow Queries', color: 'var(--chart-warning)' },
-  auth_attack: { icon: Shield, label: 'Auth Anomaly', color: 'var(--destructive)' },
-  connection_leak: { icon: Users, label: 'Connection Leak', color: 'var(--chart-3)' },
-  cache_thrashing: { icon: Zap, label: 'Cache Thrashing', color: 'var(--chart-warning)' },
-  node_failover: { icon: AlertOctagon, label: 'Node Failover', color: 'var(--destructive)' },
-  reshard_pressure: { icon: Database, label: 'Reshard Pressure', color: 'var(--chart-warning)' },
-  recovery_amplification: {
-    icon: Database,
-    label: 'Recovery Amplification',
-    color: 'var(--destructive)',
-  },
-  retry_amplification: { icon: AlertTriangle, label: 'Retry Amplification', color: 'var(--chart-warning)' },
-  replication_divergence: {
-    icon: Database,
-    label: 'Replication Divergence',
-    color: 'var(--destructive)',
-  },
-  unknown: { icon: Activity, label: 'Unknown', color: 'var(--muted-foreground)' },
-};
-
-const METRIC_LABELS: Record<string, string> = {
-  connections: 'Connections',
-  ops_per_sec: 'Ops/sec',
-  memory_used: 'Memory',
-  input_kbps: 'Input KB/s',
-  output_kbps: 'Output KB/s',
-  slowlog_last_id: 'Slow Queries',
-  acl_denied: 'ACL Denied',
-  auth_failure_burst: 'Auth Failure Burst',
-  evicted_keys: 'Evictions',
-  blocked_clients: 'Blocked',
-  keyspace_misses: 'Cache Misses',
-  fragmentation_ratio: 'Fragmentation',
-  replication_role: 'Replication Role',
-  dataset_keys: 'Dataset Keys',
-  command_p99: 'Command P99',
-  rejected_connections: 'Rejected Connections',
-  client_saturation: 'Client Saturation',
-  client_lockout_risk: 'Admin Lockout Risk',
-  evicted_clients: 'Client Evictions',
-  raft_health: 'Raft Health',
-  replica_slot_state: 'Replica Slot State',
-  resync_loop: 'Replica Resync Loop',
-  orphaned_slot_keys: 'Orphaned Slot Keys',
-  failover_churn: 'Failover Churn',
-  repl_buffer_pressure: 'Replica Buffer Pressure',
-  memory_overhead: 'Memory Overhead',
-  load_saturation: 'Load Saturation',
-  fork_memory_risk: 'Fork Memory Risk',
-  config_drift: 'Config Drift',
-  acl_drift: 'ACL Drift',
-  sentinel_endpoint_drift: 'Sentinel Endpoint Drift',
-  hostname_staleness: 'Hostname Staleness',
-  large_reply_pressure: 'Large-Reply Pressure',
-  ghost_membership: 'Ghost Membership',
-  lagging_promotion: 'Lagging Promotion',
-  cluster_state: 'Cluster State',
-  cluster_topology: 'Cluster Topology',
-  persistence_child: 'Persistence Child',
-  cpu_utilization: 'CPU Utilization',
-  slowlog_count: 'Slow Queries (legacy)',
-  connection_churn: 'Connection Churn',
-  reshard_shard_skew: 'Reshard Shard Skew',
-  backlog_coverage_risk: 'Backlog Coverage Risk',
-  resync_escalation: 'Resync Escalation',
-  retry_amplification: 'Retry Amplification',
-  error_replies: 'Error Replies',
-  replication_divergence: 'Replication Divergence',
-};
-
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
 export function formatRelatedCount(group: { anomalies: unknown[]; truncated?: boolean }): string {
   return `${group.anomalies.length}${group.truncated ? '+' : ''}`;
 }
+
+const INCIDENT_LIST_LIMIT = 200;
+const INCIDENT_POLL_MS = 30_000;
 
 export function AnomalyDashboard() {
   const { currentConnection } = useConnection();
   const { hasFeature } = useLicense();
   const captureActionEnabled =
     hasFeature(Feature.MONITOR_ANOMALY_TRIGGER) && !!currentConnection?.id;
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = searchParams.get('tab') === 'incidents' ? 'incidents' : 'overview';
+  const overviewOpen = tab === 'overview';
+  const setTab = (value: string) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (value === 'incidents') next.set('tab', 'incidents');
+        else next.delete('tab');
+        return next;
+      },
+      { replace: true },
+    );
+  };
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [captureContext, setCaptureContext] = useState<CaptureOnNextContext | undefined>();
   const [captureModalOpen, setCaptureModalOpen] = useState(false);
@@ -212,38 +135,56 @@ export function AnomalyDashboard() {
     setCaptureContext({
       connectionId: currentConnection.id,
       metricType: anomaly.metricType,
-      metricLabel: METRIC_LABELS[anomaly.metricType] ?? anomaly.metricType,
+      metricLabel: metricLabel(anomaly.metricType),
       anomalyType: anomaly.anomalyType,
       source,
     });
     setCaptureModalOpen(true);
   }
 
-  // Time filter — initialise from URL ?start=&end= (epoch ms)
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
-    const s = searchParams.get('start');
-    const e = searchParams.get('end');
-    if (s && e) {
-      const from = new Date(Number(s));
-      const to = new Date(Number(e));
-      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
-    }
-    return undefined;
-  });
+  const startParam = searchParams.get('start');
+  const endParam = searchParams.get('end');
+  const dateRange = useMemo(
+    () => dateRangeFromParams(startParam, endParam),
+    [startParam, endParam],
+  );
 
   const startTime = dateRange?.from ? dateRange.from.getTime() : undefined;
   const endTime = dateRange?.to ? dateRange.to.getTime() : undefined;
+  const rangeQuery = dateRangeQuery(startTime, endTime);
+  const rangeKey = `${currentConnection?.id ?? ''}:${startTime ?? ''}:${endTime ?? ''}`;
+
+  const changeDateRange = (range: DateRange | undefined) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (range?.from && range?.to) {
+          next.set('start', String(range.from.getTime()));
+          next.set('end', String(range.to.getTime()));
+        } else {
+          next.delete('start');
+          next.delete('end');
+        }
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   const { data: summary, error: summaryError } = usePolling<AnomalySummary>({
     fetcher: () => metricsApi.getAnomalySummary({ startTime, endTime }),
     interval: 5000,
-    refetchKey: currentConnection?.id,
+    enabled: overviewOpen,
+    refetchKey: rangeKey,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   const { data: events, error: eventsError } = usePolling<AnomalyEvent[]>({
     fetcher: () => metricsApi.getAnomalyEvents({ startTime, endTime }),
     interval: 5000,
-    refetchKey: currentConnection?.id,
+    enabled: overviewOpen,
+    refetchKey: rangeKey,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   // Data-loss banner must surface active incidents regardless of the chosen
@@ -280,10 +221,34 @@ export function AnomalyDashboard() {
     refetchKey: currentConnection?.id,
   });
 
+  // Which of the selected connection's other primaries the per-node fan-out
+  // reached. Not narrowed by the date picker: a Sentinel without data-node
+  // credentials, or a primary that cannot be reached, is a gap right now.
+  const { data: fanoutCoverage, error: fanoutCoverageError } = usePolling<FanoutCoverage[]>({
+    fetcher: () => (currentConnection?.id ? metricsApi.getAnomalyCoverage() : Promise.resolve([])),
+    interval: 10000,
+    refetchKey: currentConnection?.id,
+  });
+
   const { data: groups, error: groupsError } = usePolling<CorrelatedGroup[]>({
     fetcher: () => metricsApi.getAnomalyGroups({ startTime, endTime }),
     interval: 5000,
-    refetchKey: currentConnection?.id,
+    enabled: overviewOpen,
+    refetchKey: rangeKey,
+    keepPreviousDataFor: currentConnection?.id,
+  });
+
+  const {
+    data: incidents,
+    error: incidentsError,
+    loading: incidentsLoading,
+  } = usePolling<IncidentTimeline[]>({
+    fetcher: (signal) =>
+      metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT + 1 }, signal),
+    interval: INCIDENT_POLL_MS,
+    enabled: tab === 'incidents',
+    refetchKey: rangeKey,
+    keepPreviousDataFor: currentConnection?.id,
   });
 
   const { data: replicationDivergence, error: replicationDivergenceError } = usePolling<
@@ -292,12 +257,14 @@ export function AnomalyDashboard() {
     fetcher: () =>
       currentConnection?.id ? metricsApi.getReplicationDivergence() : Promise.resolve([]),
     interval: 10000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
   const { data: buffers, error: buffersError } = usePolling<MetricBaselineBuffer[]>({
     fetcher: () => metricsApi.getAnomalyBuffers(),
     interval: 10000,
+    enabled: overviewOpen,
     refetchKey: currentConnection?.id,
   });
 
@@ -337,7 +304,7 @@ export function AnomalyDashboard() {
   const metricsData = useMemo(() => {
     if (!summary?.byMetric) return [];
     return Object.entries(summary.byMetric)
-      .map(([metric, count]) => ({ metric: METRIC_LABELS[metric] || metric, count }))
+      .map(([metric, count]) => ({ metric: metricLabel(metric), count }))
       .sort((a, b) => (b.count as number) - (a.count as number))
       .slice(0, 8);
   }, [summary]);
@@ -356,6 +323,10 @@ export function AnomalyDashboard() {
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
+      <FanoutCoverageNotice
+        coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
+        error={fanoutCoverageError}
+      />
 
       {/* Header */}
       <div className="flex justify-between items-center">
@@ -363,381 +334,431 @@ export function AnomalyDashboard() {
           <h1 className="text-3xl font-bold">Anomaly Detection</h1>
           <p className="text-muted-foreground">Real-time monitoring across all metrics</p>
         </div>
-        <DateRangePicker value={dateRange} onChange={setDateRange} />
+        <DateRangePicker
+          value={dateRange}
+          onChange={changeDateRange}
+          placeholder="Past 24 hours (default)"
+        />
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
-              Total Anomalies
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{summary?.totalEvents ?? 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">in selected time range</p>
-          </CardContent>
-        </Card>
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="incidents">Incidents</TabsTrigger>
+        </TabsList>
 
-        <Card className={summary?.bySeverity?.critical ? 'border-destructive/50' : ''}>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-destructive" />
-              Critical
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-destructive">
-              {summary?.bySeverity?.critical ?? 0}
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">require attention</p>
-          </CardContent>
-        </Card>
-
-        <Card className={summary?.bySeverity?.warning ? 'border-yellow-500/50' : ''}>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-yellow-500" />
-              Warnings
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-yellow-500">
-              {summary?.bySeverity?.warning ?? 0}
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">above normal</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
-              <Activity className="w-4 h-4" />
-              Correlated Events
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{summary?.totalGroups ?? 0}</div>
-            <p className="text-xs text-muted-foreground mt-1">pattern groups</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      <ReplicationDivergencePanel
-        replicas={replicationDivergence ?? undefined}
-        error={replicationDivergenceError}
-      />
-
-      {/* Charts Row */}
-      <div className="grid md:grid-cols-2 gap-4">
-        {/* Timeline Chart */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">Anomaly Timeline</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {timelineData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={timelineData}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis dataKey="time" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Tooltip />
-                  <Area
-                    type="monotone"
-                    dataKey="critical"
-                    stackId="1"
-                    stroke="var(--destructive)"
-                    fill="var(--destructive)"
-                    fillOpacity={0.6}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="warning"
-                    stackId="1"
-                    stroke="var(--chart-warning)"
-                    fill="var(--chart-warning)"
-                    fillOpacity={0.6}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="info"
-                    stackId="1"
-                    stroke="var(--chart-info)"
-                    fill="var(--chart-info)"
-                    fillOpacity={0.6}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
-                No anomalies detected in time range
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Metrics Breakdown */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">By Metric Type</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {metricsData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={metricsData} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                  <XAxis type="number" tick={{ fontSize: 10 }} />
-                  <YAxis type="category" dataKey="metric" tick={{ fontSize: 10 }} width={80} />
-                  <Tooltip />
-                  <Bar dataKey="count" fill="var(--primary)" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-[200px] flex items-center justify-center text-muted-foreground">
-                No metric data available
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Correlated Anomaly Groups */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Correlated Events & Diagnoses</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {groups?.length ? (
-            groups.map((group) => {
-              const isExpanded = expandedGroups.has(group.correlationId);
-              const config = SEVERITY_CONFIG[group.severity];
-              const patternConfig = PATTERN_CONFIG[group.pattern] || PATTERN_CONFIG.unknown;
-              const PatternIcon = patternConfig.icon;
-
-              return (
-                <div
-                  key={group.correlationId}
-                  className={`border rounded-lg overflow-hidden ${config.border}`}
-                >
-                  {/* Header */}
-                  <div
-                    className={`p-4 cursor-pointer hover:bg-muted/50 transition-colors ${config.bg}`}
-                    onClick={() => toggleGroup(group.correlationId)}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-lg ${config.bg}`}>
-                          <PatternIcon className={`w-5 h-5 ${config.color}`} />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-semibold">{patternConfig.label}</h3>
-                            <span
-                              className={`px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.color}`}
-                            >
-                              {group.severity.toUpperCase()}
-                            </span>
-                          </div>
-                          <p className="text-sm text-muted-foreground">
-                            {formatTime(group.timestamp)} · {formatRelatedCount(group)} related
-                            anomalies
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {isExpanded ? (
-                          <ChevronDown className="w-5 h-5" />
-                        ) : (
-                          <ChevronRight className="w-5 h-5" />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Expanded Content */}
-                  {isExpanded && (
-                    <div className="border-t p-4 space-y-4">
-                      {/* Diagnosis */}
-                      <div>
-                        <h4 className="text-sm font-semibold mb-2">Diagnosis</h4>
-                        <p className="text-sm text-muted-foreground">{group.diagnosis}</p>
-                      </div>
-
-                      {/* Related Anomalies */}
-                      <div>
-                        <h4 className="text-sm font-semibold mb-2">Affected Metrics</h4>
-                        <div className="grid gap-2">
-                          {group.anomalies.map((anomaly) => (
-                            <div
-                              key={anomaly.id}
-                              className="flex items-center justify-between p-2 bg-muted/30 rounded text-sm"
-                            >
-                              <div className="flex items-center gap-2">
-                                {anomaly.anomalyType === 'spike' ? (
-                                  <TrendingUp className="w-4 h-4 text-destructive" />
-                                ) : (
-                                  <TrendingDown className="w-4 h-4 text-primary" />
-                                )}
-                                <span className="font-medium">
-                                  {METRIC_LABELS[anomaly.metricType] || anomaly.metricType}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-4 text-muted-foreground">
-                                <span>
-                                  {formatValue(anomaly.value, anomaly.metricType)}
-                                  <span className="text-xs ml-1">
-                                    ({anomaly.zScore > 0 ? '+' : ''}
-                                    {anomaly.zScore.toFixed(1)}σ)
-                                  </span>
-                                </span>
-                                <span className="text-xs">
-                                  baseline: {formatValue(anomaly.baseline, anomaly.metricType)}
-                                </span>
-                                {captureActionEnabled && (
-                                  <Button
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openCaptureModal(anomaly, 'group');
-                                    }}
-                                  >
-                                    Capture next
-                                  </Button>
-                                )}
-                                <ThresholdsLink metricType={anomaly.metricType} />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Recommendations */}
-                      <div>
-                        <h4 className="text-sm font-semibold mb-2">Recommendations</h4>
-                        <ul className="space-y-1">
-                          {group.recommendations.map((rec, i) => (
-                            <li key={i} className="flex items-start gap-2 text-sm">
-                              <span className="text-primary mt-0.5">•</span>
-                              <span className="text-muted-foreground">{rec}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
+        <TabsContent value="incidents" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Incidents</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {incidentsError && !incidents ? (
+                <QueryErrorState
+                  error={incidentsError}
+                  fallback={
+                    <EmptyState
+                      variant="inline"
+                      title="Could not load incidents"
+                      description={incidentsError.message}
+                    />
+                  }
+                />
+              ) : (
+                <>
+                  {incidentsError && (
+                    <div className="mb-3">
+                      <IncidentNotice>
+                        Could not refresh incidents: {incidentsError.message}. Showing the last list
+                        loaded.
+                      </IncidentNotice>
                     </div>
                   )}
+                  <IncidentList
+                    incidents={incidents ?? undefined}
+                    loading={incidentsLoading}
+                    limit={INCIDENT_LIST_LIMIT}
+                    linkQuery={rangeQuery}
+                  />
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="overview" className="mt-4 space-y-6">
+          {/* Summary Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                  Total Anomalies
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold">{summary?.totalEvents ?? 0}</div>
+                <p className="text-xs text-muted-foreground mt-1">in selected time range</p>
+              </CardContent>
+            </Card>
+
+            <Card className={summary?.bySeverity?.critical ? 'border-destructive/50' : ''}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-destructive" />
+                  Critical
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold text-destructive">
+                  {summary?.bySeverity?.critical ?? 0}
                 </div>
-              );
-            })
-          ) : (
-            <EmptyState
-              variant="inline"
-              icon={Activity}
-              title="No correlated anomalies detected"
-              description="Events will appear here when patterns are identified"
-            />
-          )}
-        </CardContent>
-      </Card>
+                <p className="text-xs text-muted-foreground mt-1">require attention</p>
+              </CardContent>
+            </Card>
 
-      {/* Recent Individual Anomalies */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Recent Anomaly Events</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {events?.length ? (
-            <div className="space-y-2 max-h-[400px] overflow-y-auto">
-              {events.slice(0, 50).map((event) => {
-                const config = SEVERITY_CONFIG[event.severity];
-                const SeverityIcon = config.icon;
+            <Card className={summary?.bySeverity?.warning ? 'border-yellow-500/50' : ''}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                  Warnings
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold text-yellow-500">
+                  {summary?.bySeverity?.warning ?? 0}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">above normal</p>
+              </CardContent>
+            </Card>
 
-                return (
-                  <div
-                    key={event.id}
-                    className={`flex items-center justify-between p-3 rounded-lg border ${config.border} ${config.bg}`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <SeverityIcon className={`w-4 h-4 ${config.color}`} />
-                      <div>
-                        <p className="text-sm font-medium">{event.message}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {formatTime(event.timestamp)}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <div className="text-right">
-                        <p className="text-sm font-mono">
-                          {formatValue(event.value, event.metricType)}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {event.zScore > 0 ? '+' : ''}
-                          {event.zScore.toFixed(1)}σ from baseline
-                        </p>
-                      </div>
-                      {captureActionEnabled && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => openCaptureModal(event, 'event')}
-                        >
-                          Capture next
-                        </Button>
-                      )}
-                      <ThresholdsLink metricType={event.metricType} />
-                    </div>
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+                  <Activity className="w-4 h-4" />
+                  Correlated Events
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold">{summary?.totalGroups ?? 0}</div>
+                <p className="text-xs text-muted-foreground mt-1">pattern groups</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <ReplicationDivergencePanel
+            replicas={replicationDivergence ?? undefined}
+            error={replicationDivergenceError}
+          />
+
+          {/* Charts Row */}
+          <div className="grid md:grid-cols-2 gap-4">
+            {/* Timeline Chart */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Anomaly Timeline</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {timelineData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <AreaChart data={timelineData}>
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis dataKey="time" tick={{ fontSize: 10 }} />
+                      <YAxis tick={{ fontSize: 10 }} />
+                      <Tooltip />
+                      <Area
+                        type="monotone"
+                        dataKey="critical"
+                        stackId="1"
+                        stroke="var(--destructive)"
+                        fill="var(--destructive)"
+                        fillOpacity={0.6}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="warning"
+                        stackId="1"
+                        stroke="var(--chart-warning)"
+                        fill="var(--chart-warning)"
+                        fillOpacity={0.6}
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="info"
+                        stackId="1"
+                        stroke="var(--chart-info)"
+                        fill="var(--chart-info)"
+                        fillOpacity={0.6}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                    No anomalies detected in time range
                   </div>
-                );
-              })}
-            </div>
-          ) : (
-            <EmptyState
-              variant="inline"
-              icon={Info}
-              title="No anomalies detected"
-              description="System is operating within normal parameters"
-            />
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Metrics Breakdown */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">By Metric Type</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {metricsData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart data={metricsData} layout="vertical">
+                      <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                      <XAxis type="number" tick={{ fontSize: 10 }} />
+                      <YAxis type="category" dataKey="metric" tick={{ fontSize: 10 }} width={80} />
+                      <Tooltip />
+                      <Bar dataKey="count" fill="var(--primary)" radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center text-muted-foreground">
+                    No metric data available
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Correlated Anomaly Groups */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Correlated Events & Diagnoses</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {groups?.length ? (
+                groups.map((group) => {
+                  const isExpanded = expandedGroups.has(group.correlationId);
+                  const config = SEVERITY_CONFIG[group.severity];
+                  const patternConfig = PATTERN_CONFIG[group.pattern] || PATTERN_CONFIG.unknown;
+                  const PatternIcon = patternConfig.icon;
+
+                  return (
+                    <div
+                      key={group.correlationId}
+                      className={`border rounded-lg overflow-hidden ${config.border}`}
+                    >
+                      {/* Header */}
+                      <div
+                        className={`p-4 cursor-pointer hover:bg-muted/50 transition-colors ${config.bg}`}
+                        onClick={() => toggleGroup(group.correlationId)}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className={`p-2 rounded-lg ${config.bg}`}>
+                              <PatternIcon className={`w-5 h-5 ${config.color}`} />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <h3 className="font-semibold">{patternConfig.label}</h3>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-xs font-medium ${config.bg} ${config.color}`}
+                                >
+                                  {group.severity.toUpperCase()}
+                                </span>
+                              </div>
+                              <p className="text-sm text-muted-foreground">
+                                {formatTime(group.timestamp)} · {formatRelatedCount(group)} related
+                                anomalies
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {isExpanded ? (
+                              <ChevronDown className="w-5 h-5" />
+                            ) : (
+                              <ChevronRight className="w-5 h-5" />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Expanded Content */}
+                      {isExpanded && (
+                        <div className="border-t p-4 space-y-4">
+                          {/* Diagnosis */}
+                          <div>
+                            <h4 className="text-sm font-semibold mb-2">Diagnosis</h4>
+                            <p className="text-sm text-muted-foreground">{group.diagnosis}</p>
+                          </div>
+
+                          {/* Related Anomalies */}
+                          <div>
+                            <h4 className="text-sm font-semibold mb-2">Affected Metrics</h4>
+                            <div className="grid gap-2">
+                              {group.anomalies.map((anomaly) => (
+                                <div
+                                  key={anomaly.id}
+                                  className="flex items-center justify-between p-2 bg-muted/30 rounded text-sm"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    {anomaly.anomalyType === 'spike' ? (
+                                      <TrendingUp className="w-4 h-4 text-destructive" />
+                                    ) : (
+                                      <TrendingDown className="w-4 h-4 text-primary" />
+                                    )}
+                                    <span className="font-medium">
+                                      {metricLabel(anomaly.metricType)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-4 text-muted-foreground">
+                                    <span>
+                                      {formatValue(anomaly.value, anomaly.metricType)}
+                                      <span className="text-xs ml-1">
+                                        ({anomaly.zScore > 0 ? '+' : ''}
+                                        {anomaly.zScore.toFixed(1)}σ)
+                                      </span>
+                                    </span>
+                                    <span className="text-xs">
+                                      baseline: {formatValue(anomaly.baseline, anomaly.metricType)}
+                                    </span>
+                                    {captureActionEnabled && (
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openCaptureModal(anomaly, 'group');
+                                        }}
+                                      >
+                                        Capture next
+                                      </Button>
+                                    )}
+                                    <ThresholdsLink metricType={anomaly.metricType} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Recommendations */}
+                          <div>
+                            <h4 className="text-sm font-semibold mb-2">Recommendations</h4>
+                            <ul className="space-y-1">
+                              {group.recommendations.map((rec, i) => (
+                                <li key={i} className="flex items-start gap-2 text-sm">
+                                  <span className="text-primary mt-0.5">•</span>
+                                  <span className="text-muted-foreground">{rec}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <EmptyState
+                  variant="inline"
+                  icon={Activity}
+                  title="No correlated anomalies detected"
+                  description="Events will appear here when patterns are identified"
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Recent Individual Anomalies */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Recent Anomaly Events</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {events?.length ? (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {events.slice(0, 50).map((event) => {
+                    const config = SEVERITY_CONFIG[event.severity];
+                    const SeverityIcon = config.icon;
+
+                    return (
+                      <div
+                        key={event.id}
+                        className={`flex items-center justify-between p-3 rounded-lg border ${config.border} ${config.bg}`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <SeverityIcon className={`w-4 h-4 ${config.color}`} />
+                          <div>
+                            <p className="text-sm font-medium">{event.message}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatTime(event.timestamp)}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="text-right">
+                            <p className="text-sm font-mono">
+                              {formatValue(event.value, event.metricType)}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {event.zScore > 0 ? '+' : ''}
+                              {event.zScore.toFixed(1)}σ from baseline
+                            </p>
+                          </div>
+                          {captureActionEnabled && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => openCaptureModal(event, 'event')}
+                            >
+                              Capture next
+                            </Button>
+                          )}
+                          <ThresholdsLink metricType={event.metricType} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyState
+                  variant="inline"
+                  icon={Info}
+                  title="No anomalies detected"
+                  description="System is operating within normal parameters"
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Buffer Stats (Debug) */}
+          {buffers && buffers.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Metric Baselines (Debug)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
+                  {buffers.map((buffer) => (
+                    <div key={buffer.metricType} className="p-2 bg-muted/30 rounded">
+                      <p className="font-medium truncate">{metricLabel(buffer.metricType)}</p>
+                      <p className="text-muted-foreground">
+                        μ: {formatValue(buffer.mean, buffer.metricType)}
+                      </p>
+                      <p className="text-muted-foreground">
+                        σ: {formatValue(buffer.stdDev, buffer.metricType)}
+                      </p>
+                      <p className={buffer.isReady ? 'text-green-500' : 'text-yellow-500'}>
+                        {buffer.isReady ? '● Ready' : '○ Warming up'}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
           )}
-        </CardContent>
-      </Card>
+        </TabsContent>
+      </Tabs>
 
       <CaptureOnNextModal
         open={captureModalOpen}
         context={captureContext}
         onOpenChange={setCaptureModalOpen}
       />
-
-      {/* Buffer Stats (Debug) */}
-      {buffers && buffers.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">Metric Baselines (Debug)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 text-sm">
-              {buffers.map((buffer) => (
-                <div key={buffer.metricType} className="p-2 bg-muted/30 rounded">
-                  <p className="font-medium truncate">
-                    {METRIC_LABELS[buffer.metricType] || buffer.metricType}
-                  </p>
-                  <p className="text-muted-foreground">
-                    μ: {formatValue(buffer.mean, buffer.metricType)}
-                  </p>
-                  <p className="text-muted-foreground">
-                    σ: {formatValue(buffer.stdDev, buffer.metricType)}
-                  </p>
-                  <p className={buffer.isReady ? 'text-green-500' : 'text-yellow-500'}>
-                    {buffer.isReady ? '● Ready' : '○ Warming up'}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }

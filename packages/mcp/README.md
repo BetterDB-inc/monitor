@@ -105,6 +105,20 @@ Once connected, your AI assistant can query your databases directly:
 - *"Tune the threshold on my faq-cache — propose a change for me to review"*
 - *"Why is the weather_lookup tool's hit rate so low?"*
 
+## Skills
+
+Clients that load skills from a plugin (Connect Apps and other skill-aware clients) pick these up from `skills/<name>/SKILL.md`. They are playbooks for the tools above: which call to make, which arguments a time window needs, and how to read a license sentence or an empty list.
+
+| Skill | Use when |
+|---|---|
+| `betterdb-triage` | "Is this instance healthy?" or any question before an instance is selected |
+| `betterdb-slow-commands` | Slowest commands in a time window |
+| `betterdb-hot-keys` | Hot keys or uneven key access |
+| `betterdb-memory` | Fragmentation, MEMORY DOCTOR, or time to the memory ceiling |
+| `betterdb-latency` | What is slow, fork time, or a latency regression |
+| `betterdb-durability` | What a crash would lose, last save, replicas, or cluster vs standalone |
+| `betterdb-cache-miss` | Cache hit rate, a trace, or vector index health |
+
 ## Configuration
 
 ### Environment Variables

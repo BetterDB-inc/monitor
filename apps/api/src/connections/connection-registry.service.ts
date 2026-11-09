@@ -15,6 +15,8 @@ import { ExternalMetricsStore } from '../external-metrics/external-metrics-store
 import { DiscoveredInstancesStore } from '../external-metrics/discovered-instances.store';
 import { ExternalMetricsAdapter } from '../external-metrics/external-metrics.adapter';
 import { isTrueFlag } from '../config/env-normalize';
+import { isAuthErrorReply } from '../common/utils/auth-error';
+import { dialsDataNodes } from './data-node-reach';
 import type { DesiredNode } from '../topology/membership-diff';
 
 export { ENV_DEFAULT_ID } from './connection.constants';
@@ -328,16 +330,8 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
    * Check if an error message indicates an authentication failure
    */
   private isAuthenticationError(errorMsg: string): boolean {
-    const authErrorPatterns = [
-      /WRONGPASS/i,
-      /NOAUTH/i,
-      /invalid password/i,
-      /authentication failed/i,
-      /ERR AUTH/i,
-      /invalid username-password/i,
-      /NOPERM/i,
-    ];
-    return authErrorPatterns.some(pattern => pattern.test(errorMsg));
+    // Client-side wordings (an SSH or TLS layer) come without a server reply code.
+    return isAuthErrorReply(errorMsg) || /invalid password|authentication failed/i.test(errorMsg);
   }
 
   /** Why an OTLP push (external) request is invalid, or null when it is fine. Shared by test and save. */
@@ -1375,6 +1369,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return id === ENV_DEFAULT_ID;
   }
 
+  /**
+   * True when `id` is a registered connection that `list()` would return: not
+   * deleted and not a retired auto-registered member. Unlike getConfig, an
+   * empty id never resolves to the default connection.
+   */
+  isListed(id: string): boolean {
+    const config = this.configs.get(id);
+    return config !== undefined && !isRetiredAuto(config);
+  }
+
+  /** True when `id` was registered automatically from a cluster or Sentinel seed. */
+  isAutoRegistered(id: string): boolean {
+    return this.configs.get(id)?.membership?.origin === 'auto';
+  }
+
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
       if (isRetiredAuto(config)) continue;
@@ -1423,7 +1432,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   sentinelDataNodeCredentials(seedId: string): { username?: string; password?: string } | null {
     const seed = this.configs.get(seedId);
     if (!seed || seed.membership || seed.sshTunnel?.enabled) return null;
-    if (seed.connectionType === 'external' || seed.host === 'agent') return null;
+    if (!dialsDataNodes(seed)) return null;
     if (seed.credentialStatus === 'decryption_failed' || seed.nodePasswordEncrypted) return null;
     if (seed.nodeUsername === undefined && seed.nodePassword === undefined) return null;
     return { username: seed.nodeUsername, password: seed.nodePassword };

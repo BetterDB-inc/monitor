@@ -609,6 +609,24 @@ describe('IncidentTimelineBuilder', () => {
       expect(cluster.connectionIds).toEqual(['node-1', 'node-2']);
     });
 
+    it('leaves events without a connection out of the connection list', () => {
+      const [incident] = new IncidentTimelineBuilder().build(
+        [
+          event({ connectionId: '', scopeId: 'cluster-x' }),
+          event({
+            connectionId: 'node-1',
+            scopeId: 'cluster-x',
+            metricType: MetricType.CONNECTIONS,
+            timestamp: T0 + 1000,
+          }),
+        ],
+        T0 + MIN,
+        neverRecovers,
+      );
+
+      expect(incident.connectionIds).toEqual(['node-1']);
+    });
+
     it('derives a stable incident id from the scope and first anomaly', () => {
       const first = event();
       const build = () =>
@@ -676,7 +694,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.recoveredAt).toBe(T0 + 90_000);
     });
 
-    it('reports an unknown recovery for a resolved row without resolvedAt', () => {
+    it('treats a resolved row without resolvedAt as an unknown recovery', () => {
       const [incident] = new IncidentTimelineBuilder().build(
         [
           event({ resolved: true }),
@@ -692,13 +710,18 @@ describe('IncidentTimelineBuilder', () => {
         neverRecovers,
       );
 
-      expect(incident.recovery).toEqual({
-        status: 'unknown',
+      expect(incident.recovery).toMatchObject({
         openSignals: [],
         unknownSignals: [MetricType.MEMORY_USED],
         recoveredAt: null,
       });
+      expect(incident.recovery.status).toBe('unknown');
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([null, null, T0 + 3 * MIN]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual([
+        'unknown',
+        'unknown',
+        'recovered',
+      ]);
     });
 
     it('does not ask the probe before the settle time', () => {
@@ -742,6 +765,7 @@ describe('IncidentTimelineBuilder', () => {
         recoveredAt: null,
       });
       expect(incident.entries.map((e) => e.recoveredAt)).toEqual([T0 + MIN, null]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual(['recovered', 'unknown']);
     });
 
     it('keeps an incident with an open signal recovering even if another is unknown', () => {
@@ -757,6 +781,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.recovery.status).toBe('recovering');
       expect(incident.recovery.openSignals).toEqual([MetricType.CONNECTIONS]);
       expect(incident.recovery.unknownSignals).toEqual([MetricType.MEMORY_USED]);
+      expect(incident.entries.map((e) => e.recoveryState)).toEqual(['open', 'unknown']);
     });
 
     it('settles into degraded when signals stay open past the degraded threshold', () => {
@@ -1162,6 +1187,7 @@ describe('IncidentTimelineBuilder', () => {
       expect(incidentStartOf(incident.incidentId)).toBe(T0);
       expect(incident.matchedPatterns).toEqual([escalation.pattern]);
       expect(incident.sequenceMatches[0].anomalyIds).toEqual(['held']);
+      expect(incident.sequenceMatches[0].steps).toEqual([{ anomalyId: 'held', step: 2 }]);
     });
 
     describe('with a step that may come before the step it follows', () => {
@@ -1265,10 +1291,31 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.sequenceMatches[0]).toEqual(
         expect.objectContaining({
           anomalyIds: [conn.id, mem.id],
+          steps: [
+            { anomalyId: conn.id, step: 1 },
+            { anomalyId: mem.id, step: 2 },
+          ],
           severity: AnomalySeverity.CRITICAL,
           diagnosis: escalation.diagnosis,
         }),
       );
+    });
+
+    it('numbers an optional event as no step', () => {
+      const conn = event({ metricType: MetricType.CONNECTIONS });
+      const evicted = event({ metricType: MetricType.EVICTED_KEYS, timestamp: T0 + MIN });
+      const mem = event({ metricType: MetricType.MEMORY_USED, timestamp: T0 + 2 * MIN });
+
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [
+        { ...escalation, optionalMetrics: [MetricType.EVICTED_KEYS] },
+      ]).build([conn, evicted, mem], T0 + 3 * MIN, neverRecovers);
+
+      expect(incident.sequenceMatches[0].anomalyIds).toEqual([conn.id, mem.id, evicted.id]);
+      expect(incident.sequenceMatches[0].steps).toEqual([
+        { anomalyId: conn.id, step: 1 },
+        { anomalyId: mem.id, step: 2 },
+        { anomalyId: evicted.id, step: null },
+      ]);
     });
 
     it('does not match the steps in reverse order', () => {

@@ -102,6 +102,7 @@ function setup(hooks: Webhook[], { pairReplica = true, tier = 'pro' } = {}) {
       slopeBytesPerWindow: 0,
       windowCount: 2,
       correlatedSignals: [],
+      replicaView: null,
       message: 'replica stalled',
       timestamp: 0,
       instance: { host: '10.0.0.1', port: 6379 },

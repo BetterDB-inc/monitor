@@ -176,6 +176,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
   private knownConnections = new Set<string>();
   // Connections whose poll is still running; a later tick skips them.
   private inFlight = new Set<string>();
+  private polledConnections: ReadonlySet<string> = new Set();
 
   constructor(protected readonly connectionRegistry: ConnectionRegistry) {}
 
@@ -342,7 +343,7 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
       const pollExternal = this.supportsExternalConnections();
       const skipUnchanged = this.skipUnchangedSamples();
       const pollSentinels = this.pollsSentinels();
-      const pollPromises = connections
+      const eligible = connections
         .filter((conn) => conn.isConnected || pollDisconnected)
         .filter((conn) => conn.connectionType !== 'external' || pollExternal)
         .filter((conn) => pollSentinels || !this.isSentinelConnection(conn.id))
@@ -350,51 +351,68 @@ export abstract class MultiConnectionPoller implements OnModuleDestroy {
           if (!this.inFlight.has(conn.id)) return true;
           this.logger.debug(`Previous poll of ${conn.name} still running, skipping it this tick`);
           return false;
-        })
-        .map(async (conn) => {
-          const describe = `${conn.name} (${conn.host}:${conn.port})`;
-          this.inFlight.add(conn.id);
-          const poll = (async () => {
-            try {
-              const client = this.connectionRegistry.get(conn.id);
-              const version = client.sampleVersion?.() ?? null;
-              if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
-                return;
-              }
-              await this.pollConnection({
-                connectionId: conn.id,
-                connectionName: conn.name,
-                client,
-                host: conn.host,
-                port: conn.port,
-                connectionType: conn.connectionType,
-              });
-              if (version !== null) {
-                this.lastPolledVersion.set(conn.id, version);
-              }
-            } catch (error) {
-              this.logger.warn(`Poll failed for ${describe}: ${error instanceof Error ? error.message : error}`);
-            } finally {
-              this.inFlight.delete(conn.id);
-              // Removed while this poll ran: its writes landed after the cleanup.
-              if (!this.knownConnections.has(conn.id)) {
-                this.onConnectionRemoved(conn.id);
-                this.lastPolledVersion.delete(conn.id);
-              }
-            }
-          })();
-          const timeoutMs = this.getPollTimeoutMs();
-          await withTimeout(poll, timeoutMs).catch(() => {
-            this.logger.warn(`Poll of ${describe} still running after ${timeoutMs}ms; skipping it until it settles`);
-          });
         });
+      const covered = new Set<string>();
+      const pollPromises = eligible.map(async (conn) => {
+        const describe = `${conn.name} (${conn.host}:${conn.port})`;
+        this.inFlight.add(conn.id);
+        const poll = (async () => {
+          try {
+            const client = this.connectionRegistry.get(conn.id);
+            const version = client.sampleVersion?.() ?? null;
+            if (skipUnchanged && version !== null && this.lastPolledVersion.get(conn.id) === version) {
+              // The version was recorded by a successful poll and the connection
+              // is still connected (fresh, for a pushed one), so it stays covered.
+              covered.add(conn.id);
+              return;
+            }
+            await this.pollConnection({
+              connectionId: conn.id,
+              connectionName: conn.name,
+              client,
+              host: conn.host,
+              port: conn.port,
+              connectionType: conn.connectionType,
+            });
+            if (version !== null) {
+              this.lastPolledVersion.set(conn.id, version);
+            }
+            covered.add(conn.id);
+          } catch (error) {
+            this.logger.warn(`Poll failed for ${describe}: ${error instanceof Error ? error.message : error}`);
+          } finally {
+            this.inFlight.delete(conn.id);
+            // Removed while this poll ran: its writes landed after the cleanup.
+            if (!this.knownConnections.has(conn.id)) {
+              this.onConnectionRemoved(conn.id);
+              this.lastPolledVersion.delete(conn.id);
+            }
+          }
+        })();
+        const timeoutMs = this.getPollTimeoutMs();
+        await withTimeout(poll, timeoutMs).catch(() => {
+          this.logger.warn(`Poll of ${describe} still running after ${timeoutMs}ms; skipping it until it settles`);
+        });
+      });
 
       await Promise.allSettled(pollPromises);
+      // Copy: a poll that outlives the tick must not mark itself covered afterwards.
+      this.polledConnections = new Set(covered);
     } catch (error) {
       this.logger.error(`Tick error: ${error instanceof Error ? error.message : error}`);
     } finally {
       this.polling = false;
     }
+  }
+
+  /**
+   * Ids of the connections the last completed tick covered: polled
+   * successfully, or skipped because their sample was unchanged since a
+   * successful poll. Disconnected, filtered-out and failing connections are
+   * left out.
+   */
+  protected getPolledConnectionIds(): ReadonlySet<string> {
+    return this.polledConnections;
   }
 
   /**

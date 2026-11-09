@@ -340,6 +340,7 @@ describe('observeResyncEscalation', () => {
         severity: AnomalySeverity.WARNING,
         message: '',
         recoveredAt: null,
+        recoveryState: 'open',
       }));
 
       expect(matchSequence(entries, rule)).toHaveLength(2);
@@ -365,6 +366,7 @@ describe('observeResyncEscalation', () => {
         severity: AnomalySeverity.WARNING,
         message: '',
         recoveredAt: null,
+        recoveryState: 'open',
       }));
 
       expect(escalation.occurredAt).toBe(T0 + 1000);
@@ -599,6 +601,7 @@ describe('recovery amplification rule', () => {
     severity: AnomalySeverity.WARNING,
     message: '',
     recoveredAt: null,
+    recoveryState: 'open',
   });
   const rule = () =>
     getSequenceRules().find((r) => r.pattern === AnomalyPattern.RECOVERY_AMPLIFICATION)!;

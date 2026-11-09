@@ -370,6 +370,8 @@ When the primary and the stalled replica are both monitored, a webhook subscribe
 
 An alert only counts once its delivery succeeds, so a failed or dropped delivery never suppresses the other one. Divergences with other reasons are always sent. The anomaly event is still recorded either way.
 
+`replicaView` is what the replica itself reported when the monitor could read it: `gapBytes` from its `slave_repl_offset`, `linkStatus` from `master_link_status`, and `applyBacklogBytes`, the data it has received but not applied (`null` when the server does not report `slave_read_repl_offset`). It is `null` when the replica could not be read. A divergence is not sent when the replica reports its link is up and it is less than 1 MiB behind, except a `not_acking` one: that is still sent, and its message says the replica's acknowledgements are not reaching the primary. See [Replica cross-check](./anomaly-detection.md#replication_divergence).
+
 Detection works on windows of at least 30 seconds, or three poll intervals if that's longer. If polling stops for longer than a window and more than twice the previous gap between polls, the monitor treats it as an outage: every streak restarts, so an alert can take several windows to fire after polling resumes. A divergence that was already open stays open. Polling that stays steadily slower than a window is not an outage, and detection continues on longer windows.
 
 ```json
@@ -383,7 +385,8 @@ Detection works on windows of at least 30 seconds, or three poll intervals if th
   "slopeBytesPerWindow": -1048576,
   "windowCount": 2,
   "correlatedSignals": ["memory_used"],
-  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600 MB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows.",
+  "replicaView": { "gapBytes": 629145600, "linkStatus": "up", "applyBacklogBytes": 524288000 },
+  "message": "CRITICAL: Replica 10.0.0.2:6379 is 600 MB (~600s at the current write rate) behind the primary; it has stayed at least 120s behind for 2 windows. The replica confirms it is 600 MB behind; it has received 500 MB it has not applied yet, so it is slow to apply.",
   "timestamp": 1706457600000,
   "instance": { "host": "10.0.0.1", "port": 6379 },
   "connectionId": "conn-1"
