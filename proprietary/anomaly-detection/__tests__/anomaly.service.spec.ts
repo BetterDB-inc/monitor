@@ -2183,6 +2183,19 @@ describe('AnomalyService', () => {
         expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(3);
       });
 
+      it('does not cache a node write P99 when that node INFO read fails', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') return '# Latencystats\r\nlatency_percentiles_usec_set:p50=10.000,p99=1000.000';
+          throw new Error('LOADING');
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
       it('forgets a node write latency when the node leaves', async () => {
         discover({ b0000000: reshardNode('b', 6000, '', 1000), c0000000: reshardNode('c', 6000, '', 1000) });
         await pollSeed(1, 6000, false);
@@ -8640,6 +8653,31 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('registered primary replication ids', () => {
+    const primaryInfo = (role: string) => ({
+      server: { role },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000' },
+      replication: { role, master_replid: 'c'.repeat(40), master_repl_offset: '100' },
+      stats: { instantaneous_ops_per_sec: '100' },
+    });
+
+    it('records the replication id of a registered primary and forgets it on removal', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('master'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.get('conn-1')).toBe('c'.repeat(40));
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
+    });
+
+    it('does not record a registered replica', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('slave'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
+    });
+  });
+
   // ─── ghost membership: endpoint-identity faults (valkey#1757, valkey#2768) ──
 
   describe('ghost membership — endpoint identity', () => {
@@ -14237,6 +14275,40 @@ describe('AnomalyService', () => {
         } finally {
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
         }
+      });
+
+      it('does not raise a second output-buffer alert when one CLIENT LIST read fails', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.7) };
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL }),
+          expect.objectContaining({ severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('skips a fan-out primary that is registered under another address', async () => {
+        (service as any).registeredPrimaryReplids.set('conn-2', 'b'.repeat(40));
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
       });
 
       it('drops a demoted node output-buffer state', async () => {

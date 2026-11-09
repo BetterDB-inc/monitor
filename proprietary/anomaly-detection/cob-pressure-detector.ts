@@ -141,6 +141,14 @@ function formatBytes(bytes: number): string {
 
 const REMEDY = 'Raise the limit or reduce the write burst.';
 
+function highestAckedLevel(state: CobConnectionState): CobLevel {
+  let highest: CobLevel = 'none';
+  for (const replicaState of state.replicas.values()) {
+    if (LEVEL_RANK[replicaState.ackedLevel] > LEVEL_RANK[highest]) highest = replicaState.ackedLevel;
+  }
+  return highest;
+}
+
 function getReplicaState(
   state: CobConnectionState,
   addr: string,
@@ -289,7 +297,9 @@ export function evaluateCobPressure(
       const ratio = combined > 0 ? input.memClientsSlaves / combined : 0;
       const level: CobLevel =
         ratio >= COB_CRIT_RATIO ? 'critical' : ratio >= COB_WARN_RATIO ? 'warning' : 'none';
+      const inherited = state.replicas.has(AGGREGATE_KEY) ? 'none' : highestAckedLevel(state);
       const replicaState = getReplicaState(state, AGGREGATE_KEY, timestamp);
+      if (LEVEL_RANK[inherited] > LEVEL_RANK[replicaState.ackedLevel]) replicaState.ackedLevel = inherited;
       const assessment: RatioAssessment = {
         level,
         kind: 'aggregate',

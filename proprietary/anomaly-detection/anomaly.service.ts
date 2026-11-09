@@ -691,6 +691,7 @@ export class AnomalyService
   private resyncEscalation = new Map<string, ResyncEscalationState>();
   private pendingNodeOpenEvents = new Map<string, Map<string, PendingNodeEvents>>();
   private restoredCobLevel = new Map<string, 'warning' | 'critical'>();
+  private registeredPrimaryReplids = new Map<string, string>();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -1141,6 +1142,7 @@ export class AnomalyService
     this.sentinelModeLast.delete(connectionId);
     this.sentinelMastersSnapshot.delete(connectionId);
     this.sentinelReplicaAddrs.delete(connectionId);
+    this.registeredPrimaryReplids.delete(connectionId);
     this.sentinelMastersSnapshotAt.delete(connectionId);
     this.sentinelMastersConsumedAt.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
@@ -1304,6 +1306,11 @@ export class AnomalyService
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
+      if (info.role === 'master' && info.master_replid) {
+        this.registeredPrimaryReplids.set(ctx.connectionId, info.master_replid);
+      } else {
+        this.registeredPrimaryReplids.delete(ctx.connectionId);
+      }
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -6022,9 +6029,9 @@ export class AnomalyService
     key: string,
     addr: string,
     timestamp: number,
-  ): Promise<void> {
+  ): Promise<{ readAt: number; value: number | null } | null> {
     if (timestamp - (this.reshardWriteP99.get(key)?.readAt ?? -Infinity) < AnomalyService.RESHARD_P99_REFRESH_MS) {
-      return;
+      return null;
     }
     try {
       const raw = await this.fanoutRead(
@@ -6038,9 +6045,10 @@ export class AnomalyService
       const writes = parseLatencyStatsSection(parsed.latencystats ?? parsed.Latencystats)
         .filter((row) => isWriteCommand(row.command))
         .map((row) => row.p99Us);
-      this.reshardWriteP99.set(key, { readAt: timestamp, value: writes.length > 0 ? Math.max(...writes) : null });
+      return { readAt: timestamp, value: writes.length > 0 ? Math.max(...writes) : null };
     } catch (err) {
       this.logger.debug(`Write P99 read failed for ${addr}: ${err instanceof Error ? err.message : err}`);
+      return null;
     }
   }
 
@@ -9138,7 +9146,7 @@ export class AnomalyService
         );
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
         const deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
-        const [raw, self] = await Promise.all([
+        const [raw, self, writeP99] = await Promise.all([
           this.fanoutRead(
             client,
             stateKey,
@@ -9150,8 +9158,9 @@ export class AnomalyService
             ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
               this.readNodeSelf(client, target.addr, stateKey))
             : Promise.resolve(null),
-          target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : undefined,
+          target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : null,
         ]);
+        if (writeP99) this.reshardWriteP99.set(stateKey, writeP99);
         const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
         const cob = await this.readFanoutCob(client, stateKey, target.addr, info, deadline);
         return { info, self, cob };
@@ -9180,6 +9189,11 @@ export class AnomalyService
         port: target.port,
       };
       const { info, self, cob } = result.value;
+      if (this.isRegisteredPrimary(info)) {
+        this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
+        this.retireNodeDetectors(key);
+        continue;
+      }
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
       await this.detectForkMemoryRisk(info, nodeCtx, timestamp, target.addr);
@@ -9218,6 +9232,11 @@ export class AnomalyService
       ? this.clusterDiscovery!.getNodeConnection(target.nodeId, connectionId)
       : this.clusterDiscovery!.getAddressConnection(target.host, target.port, connectionId));
     return this.convertInfoToRecord(InfoParser.parse(await client.info('replication')));
+  }
+
+  private isRegisteredPrimary(info: Record<string, string>): boolean {
+    if (info.role !== 'master' || !info.master_replid) return false;
+    return [...this.registeredPrimaryReplids.values()].includes(info.master_replid);
   }
 
   private fanoutRead<T>(
