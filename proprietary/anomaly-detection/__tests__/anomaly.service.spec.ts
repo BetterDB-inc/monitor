@@ -26,6 +26,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
+import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
 import {
   RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
   RETRY_AMP_MAX_CAPTURE_ROWS,
@@ -2007,7 +2008,7 @@ describe('AnomalyService', () => {
     });
 
     describe('with only the seed registered', () => {
-      function reshardNode(id: string, ops: number, marker = '') {
+      function reshardNode(id: string, ops: number, marker = '', p99?: number) {
         const nodeId = `${id}0000000`;
         const info = [
           '# Replication',
@@ -2019,8 +2020,14 @@ describe('AnomalyService', () => {
           `instantaneous_ops_per_sec:${ops}`,
         ].join('\r\n');
         const nodesReply = `${nodeId} 10.0.0.${id.charCodeAt(0)}:6379@16379 myself,master - 0 0 1 connected ${marker}`;
+        const latency =
+          p99 === undefined
+            ? ''
+            : ['# Latencystats', `latency_percentiles_usec_set:p50=10.000,p99=${p99}.000,p99.9=${p99 + 10_000}.000`].join(
+                '\r\n',
+              );
         return {
-          info: jest.fn().mockResolvedValue(info),
+          info: jest.fn(async (section?: string) => (section === 'latencystats' ? latency : info)),
           call: jest.fn().mockResolvedValue(nodesReply),
         };
       }
@@ -2108,6 +2115,127 @@ describe('AnomalyService', () => {
         expect(skewEvents()).toHaveLength(0);
       });
 
+      it('marks reshard pressure on a non-seed shard from its own write latency', async () => {
+        storage.getLatencyStatsHistory = jest.fn(async () => [{ command: 'set', p99Us: 1000, capturedAt: BASE }]);
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]', 50_000),
+          c0000000: reshardNode('c', 6000, '', 1000),
+        });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({
+          nodeAddr: '10.0.0.98:6379',
+          syntheticPattern: AnomalyPattern.RESHARD_PRESSURE,
+        });
+      });
+
+      it('reads node latencystats at most every 30s', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        for (let i = 0; i < 6; i += 1) {
+          clock += 10_000;
+          await poll(shardCtx('a', 6000, false));
+        }
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(2);
+      });
+
+      it('keeps a node without latencystats in the reshard view', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({
+          shardId: 'b0000000',
+          writeP99Us: null,
+        });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('keeps a node whose latencystats read fails in the reshard view', async () => {
+        const b = reshardNode('b', 6000);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('keeps the last write P99 when a refresh fails and retries on the next poll', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 30_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: 1000 });
+
+        clock += 1000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(3);
+      });
+
+      it('stops using a node write P99 once it is older than the lookback window', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 121_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+      });
+
+      it('does not cache a node write P99 when that node INFO read fails', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') return '# Latencystats\r\nlatency_percentiles_usec_set:p50=10.000,p99=1000.000';
+          throw new Error('LOADING');
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('forgets a node write latency when the node leaves', async () => {
+        discover({ b0000000: reshardNode('b', 6000, '', 1000), c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+
+        const ctx = shardCtx('a', 6000, false);
+        (ctx.client as any).getClusterNodes.mockResolvedValue(
+          shardNodes('a', false).filter((n) => n.id !== 'b0000000'),
+        );
+        clock += 1000;
+        await poll(ctx);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
       it('sends the alert of an unregistered primary with that primary as its source', async () => {
         discover({
           b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
@@ -2133,7 +2261,7 @@ describe('AnomalyService', () => {
 
         await pollSeed(6, 6000, false);
 
-        expect(b.info).toHaveBeenCalledTimes(6 * 4);
+        expect(b.info.mock.calls.filter(([section]) => section !== 'latencystats')).toHaveLength(6 * 5);
         expect(b.call.mock.calls.length).toBeLessThan(6);
       });
 
@@ -4621,7 +4749,6 @@ describe('AnomalyService', () => {
           .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
 
         expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'errors' });
-        expect(event.message).toContain('Client attribution unavailable.');
         expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
           expect.objectContaining({
             connectionId: 'conn-1',
@@ -4630,6 +4757,21 @@ describe('AnomalyService', () => {
           }),
         );
         expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      });
+
+      it('says client names are unavailable on a fan-out node', async () => {
+        captureClients = growingClients();
+
+        await runRetry({ realEmit: true, nodeAddr: NODE });
+        const [event] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+        expect(event.message.endsWith(NODE_ATTRIBUTION_UNAVAILABLE)).toBe(true);
+        expect(event.message).not.toContain('Client attribution unavailable.');
+        expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+          expect.objectContaining({ topContributors: null }),
+        );
       });
 
       it('judges the node without the seed latency or saturation', async () => {
@@ -8943,6 +9085,28 @@ describe('AnomalyService', () => {
       expect(saturationEvents()).toHaveLength(1);
     });
 
+    it('does not corroborate from a fan-out node event', async () => {
+      await pollSaturated(4);
+      (service as any).recentAnomalies.push({
+        id: 'node-cob-event',
+        timestamp: now - 5_000,
+        metricType: MetricType.REPL_BUFFER_PRESSURE,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.CRITICAL,
+        value: 0,
+        baseline: 1,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'node output buffer',
+        resolved: false,
+        connectionId: 'conn-1',
+        nodeAddr: '10.0.0.2:6379',
+      });
+      await pollSaturated(1);
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
     it('re-arms after CPU recovery and fires again on a new episode', async () => {
       await pollSaturated(5);
       await pollSaturated(1, '1');
@@ -8974,6 +9138,31 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).controlPlaneState.has('conn-1')).toBe(false);
       expect((service as any).cpSatLastConnectedSlaves.has('conn-1')).toBe(false);
+    });
+  });
+
+  describe('registered primary replication ids', () => {
+    const primaryInfo = (role: string) => ({
+      server: { role },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000' },
+      replication: { role, master_replid: 'c'.repeat(40), master_repl_offset: '100' },
+      stats: { instantaneous_ops_per_sec: '100' },
+    });
+
+    it('records the replication id of a registered primary and forgets it on removal', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('master'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.get('conn-1')).toMatchObject({ replid: 'c'.repeat(40) });
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
+    });
+
+    it('does not record a registered replica', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('slave'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
     });
   });
 
@@ -14476,6 +14665,33 @@ describe('AnomalyService', () => {
         expect(resolvedIds()).toEqual(['old-1']);
       });
 
+      it('does not seed its own backlog level from a node-tagged open row', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
+            ? [{ id: 'node-backlog', nodeAddr: '10.0.1.5:6379', severity: AnomalySeverity.CRITICAL }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        expect((service as any).backlogCoverage.get('conn-1')?.level).not.toBe('critical');
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+        expect((service as any).staleBacklogEventIds.get('conn-1') ?? []).not.toContain('node-backlog');
+      });
+
+      it('does not adopt a node-tagged resync row as its own', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [{ id: 'node-resync', nodeAddr: '10.0.1.5:6379', replicaAddr: '10.0.1.6:6379', timestamp: clock }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        const tracked = (service as any).resyncEscalationEvents.get('conn-1') ?? [];
+        expect(tracked.map((e: { id: string }) => e.id)).not.toContain('node-resync');
+      });
+
       it('retries a failed resolve on the next poll', async () => {
         const id = '11111111-1111-4111-8111-111111111111';
         openBacklogRows(id);
@@ -14685,6 +14901,1008 @@ describe('AnomalyService', () => {
       expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogSize: 6144 });
       expect(next!.bytesPerSec).not.toBeNull();
       expect(next!.replicas[0].gapBytes).toBe(500);
+    });
+  });
+
+  describe('detectors on a fan-out node', () => {
+    const NODE = '10.0.1.5:6379';
+    const NODE_KEY = `conn-1@${NODE}`;
+    const target = { addr: NODE, host: '10.0.1.5', port: 6379, nodeId: 'node-b' };
+    let clock: number;
+
+    interface NodeState {
+      offset: number;
+      backlogSize: number;
+      replica: boolean;
+      replicaState: string;
+      syncFull: number;
+      memory: Record<string, string>;
+      persistence: Record<string, string>;
+      role: string;
+      gap: number;
+      cobLimit: string | null;
+      replicaOmem: number;
+    }
+
+    let node: NodeState;
+    const HARD = 256 * 1024 * 1024;
+    const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+    const GB = 1024 ** 3;
+    const FORKING = {
+      memory: { used_memory: String(9 * GB), used_memory_rss: String(9 * GB), total_system_memory: String(10 * GB) },
+      persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+    };
+
+    function section(name: string, fields: Record<string, string | number>): string {
+      return [`# ${name}`, ...Object.entries(fields).map(([k, v]) => `${k}:${v}`)].join('\r\n');
+    }
+
+    function nodeInfo(name?: string): string {
+      const replication =
+        node.role === 'master'
+          ? section('Replication', {
+              role: 'master',
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+              repl_backlog_size: node.backlogSize,
+              connected_slaves: node.replica ? 1 : 0,
+              ...(node.replica
+                ? {
+                    slave0: `ip=10.0.1.6,port=6379,state=${node.replicaState},offset=${node.offset - node.gap},lag=0`,
+                  }
+                : {}),
+            })
+          : section('Replication', {
+              role: 'slave',
+              master_host: '10.0.1.7',
+              master_port: 6379,
+              master_link_status: 'up',
+              slave_repl_offset: node.offset,
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+            });
+      const parts: Record<string, string> = {
+        clients: section('Clients', { connected_clients: 10 }),
+        memory: section('Memory', { used_memory: 1_000_000, ...node.memory }),
+        stats: section('Stats', {
+          instantaneous_ops_per_sec: 100,
+          sync_full: node.syncFull,
+          sync_partial_ok: 0,
+          sync_partial_err: 0,
+        }),
+        replication,
+        persistence: section('Persistence', node.persistence),
+      };
+      return name ? (parts[name] ?? '') : Object.values(parts).join('\r\n');
+    }
+
+    function nodeCall(...args: string[]): Promise<unknown> | unknown {
+      if (args[0] === 'CLUSTER') return `node-b ${NODE}@16379 myself,master - 0 0 1 connected 0-5460\n`;
+      if (args[0] === 'CONFIG') return node.cobLimit === null ? [] : ['client-output-buffer-limit', node.cobLimit];
+      if (args[0] === 'CLIENT') {
+        return node.replica
+          ? `id=7 addr=10.0.1.6:6379 laddr=${NODE} fd=8 name= age=10 idle=0 flags=S db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=${node.replicaOmem} events=r cmd=replconf user=default\n`
+          : '';
+      }
+      throw new Error(`unexpected ${args.join(' ')}`);
+    }
+
+    function nodeClient(call: (...args: string[]) => Promise<unknown> | unknown = nodeCall) {
+      return {
+        info: jest.fn().mockImplementation(async (name?: string) => nodeInfo(name)),
+        call: jest.fn().mockImplementation(async (...args: string[]) => call(...args)),
+        disconnect: jest.fn(),
+      };
+    }
+
+    async function pollNode(
+      update: Partial<NodeState> & { bytes?: number; stepMs?: number } = {},
+      targets: TopologyTarget[] = [target],
+    ): Promise<void> {
+      const { bytes = 2000, stepMs = 1000, ...rest } = update;
+      clock += stepMs;
+      node.offset += bytes;
+      Object.assign(node, rest);
+      await (service as any).detectTopologyAnomalies(mockCtx, {
+        targets,
+        members: new Set(targets.map((t) => t.addr)),
+      });
+    }
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+    const resolvedIds = async () => {
+      await (service as any).drainPersistenceOutbox();
+      return storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id);
+    };
+
+    beforeEach(() => {
+      clock = 1_700_000_000_000;
+      node = {
+        offset: 0,
+        backlogSize: 1_000_000,
+        replica: true,
+        replicaState: 'online',
+        syncFull: 0,
+        memory: {},
+        persistence: {},
+        role: 'master',
+        gap: 0,
+        cobLimit: LIMIT_RAW,
+        replicaOmem: 0,
+      };
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient()),
+      };
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    describe('backlog coverage and resync escalation', () => {
+      async function raiseBacklog(): Promise<void> {
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+      }
+
+      async function raiseResync(): Promise<void> {
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1 });
+        await pollNode();
+      }
+
+      it('raises backlog coverage risk on a fan-out primary with its node address', async () => {
+        await raiseBacklog();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING }),
+        ]);
+        expect((service as any).backlogCoverage.has(NODE_KEY)).toBe(true);
+      });
+
+      it('leaves the seed backlog state alone while a node raises', async () => {
+        await raiseBacklog();
+
+        expect((service as any).backlogCoverage.has('conn-1')).toBe(false);
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+      });
+
+      it('raises resync escalation on a fan-out primary and matches backlog exhaustion per node', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync, ...rest] = events(MetricType.RESYNC_ESCALATION);
+        expect(rest).toEqual([]);
+        expect(resync).toMatchObject({ nodeAddr: NODE, replicaAddr: '10.0.1.6:6379' });
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.BACKLOG_EXHAUSTION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([risk.id, resync.id]);
+      });
+
+      it('closes node backlog and resync events when the node leaves the topology', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([risk.id, resync.id]));
+        for (const map of ['backlogCoverage', 'backlogCoverageEventIds', 'staleBacklogEventIds', 'resyncEscalation', 'resyncEscalationEvents']) {
+          expect((service as any)[map].has(NODE_KEY)).toBe(false);
+        }
+      });
+
+      it('starts clean when a node rejoins after leaving', async () => {
+        await raiseBacklog();
+        await pollNode({}, []);
+        const closed = await resolvedIds();
+
+        for (let i = 0; i < 3; i += 1) await pollNode();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+        expect(await resolvedIds()).toEqual(closed);
+      });
+
+      it('closes node backlog events when the seed connection is removed', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+
+        expect(await resolvedIds()).toContain(risk.id);
+      });
+
+      it('keeps node backlog events open when the seed cannot list topology', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).clearFanoutNodeSignals('conn-1');
+
+        expect(await resolvedIds()).not.toContain(risk.id);
+        expect((service as any).backlogCoverageEventIds.get(NODE_KEY)).toBe(risk.id);
+      });
+    });
+
+    describe('open rows left by an earlier run', () => {
+      const openRows = (rows: Partial<Record<MetricType, Record<string, unknown>[]>>) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          offset === 0 ? (rows[metricType as MetricType] ?? []) : [],
+        );
+      const readsOf = (metricType: MetricType) =>
+        storage.getAnomalyEvents.mock.calls.filter(([q]: [{ metricType: MetricType }]) => q.metricType === metricType).length;
+      const adoptSeed = async () => {
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        await (service as any).adoptOpenEvents(mockCtx, clock);
+      };
+      const OTHER = '10.0.1.9:6379';
+
+      it('re-adopts its own open backlog row after a restart instead of raising again', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([]);
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+
+        for (let i = 0; i < 20; i += 1) await pollNode({ bytes: 2000 });
+
+        expect(await resolvedIds()).toContain('b-1');
+      });
+
+      it('re-adopts its own open resync row and settles it when the replica is back online', async () => {
+        openRows({
+          [MetricType.RESYNC_ESCALATION]: [
+            { id: 'r-1', nodeAddr: NODE, replicaAddr: '10.0.1.6:6379', timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+        await pollNode();
+
+        expect(await resolvedIds()).toContain('r-1');
+      });
+
+      it('ignores open rows that belong to another node', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'other', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('other');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level).toBe('none');
+      });
+
+      it('closes an earlier row of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'gone-b', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.RESYNC_ESCALATION]: [{ id: 'gone-r', nodeAddr: OTHER, replicaAddr: '10.0.1.8:6379', timestamp: clock }],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-b', 'gone-r']));
+      });
+
+      it('keeps the earlier row of an unreachable node until it answers', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toContain('b-1');
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(nodeClient());
+        (service as any).topologyBackoff.clear();
+        await pollNode({ bytes: 30_000 });
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+      });
+
+      it('closes an earlier node row when the seed is removed before the node is read', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.releaseConnection = jest.fn().mockResolvedValue(undefined);
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(await resolvedIds()).toContain('b-1');
+        expect((service as any).pendingNodeOpenEvents.has('conn-1')).toBe(false);
+      });
+
+      it('takes node rows from the seed read without reading storage again', async () => {
+        await adoptSeed();
+        await pollNode();
+        await pollNode();
+        await pollNode();
+
+        expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(1);
+        expect(readsOf(MetricType.RESYNC_ESCALATION)).toBe(1);
+      });
+
+      it('does not re-adopt a closed row when the node comes back', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        await pollNode();
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('b-1');
+
+        await pollNode();
+
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('b-1');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level ?? 'none').toBe('none');
+      });
+
+      it('re-adopts its own open fork row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('f-1');
+      });
+
+      it('re-adopts its own open output-buffer row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('c-1');
+      });
+
+      it('still alerts when a re-adopted node escalates past its earlier output-buffer row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replicaOmem: HARD * 0.95 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.CRITICAL }),
+        ]);
+      });
+
+      it('closes earlier fork and output-buffer rows of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'gone-f', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'gone-c', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-f', 'gone-c']));
+      });
+
+      it('leaves the seed own fork and output-buffer rows alone', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [{ id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock }],
+          [MetricType.REPL_BUFFER_PRESSURE]: [{ id: 'seed-c', severity: AnomalySeverity.WARNING, timestamp: clock }],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-f']));
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-c']));
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('keeps a re-adopted projected fork warning while the write rate is still unknown', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const projected = (changes: number) => ({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '0', rdb_last_cow_size: String(GB), rdb_changes_since_last_save: String(changes) },
+        });
+
+        await pollNode(projected(0));
+        await pollNode(projected(5000));
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('still raises a live fork warning after re-adopting a projected one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8.5 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.WARNING, dedupeKey: 'live-cow-oom' }),
+        ]);
+      });
+
+      it('does not repeat an open live fork critical when a newer projected warning is also open', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-old', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 60_000 },
+            { id: 'f-new', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('still raises a live fork critical over an open live warning and a projected critical row', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.WARNING, timestamp: clock - 60_000 },
+            { id: 'f-2', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 120_000 },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: 'live-cow-oom' }),
+        ]);
+      });
+
+      it('does not let a restored warning of one replica hide another replica after CLIENT LIST recovers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored aggregate output-buffer warning when CLIENT LIST answers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '(aggregate)', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('keeps the oldest of nine open replica output-buffer rows open while it still fires', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: Array.from({ length: 9 }, (_, i) => ({
+            id: `c-${i}`,
+            nodeAddr: NODE,
+            dedupeKey: i === 0 ? '10.0.1.6:6379' : `10.0.2.${i}:6379`,
+            severity: AnomalySeverity.WARNING,
+            timestamp: clock - (9 - i) * 1000,
+          })),
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(await resolvedIds()).not.toContain('c-0');
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'loop-1', nodeAddr: NODE, dedupeKey: 'resync-loop', severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replica: false, syncFull: 1 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE).filter((e) => e.severity === AnomalySeverity.CRITICAL)).toEqual([]);
+      });
+
+      it('restores an output-buffer acknowledgement only for the replica it was raised on', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored output-buffer level until the replicas can be read', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const listing = (service as any).clusterDiscovery.getNodeConnection;
+        listing.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('closes earlier node fork and output-buffer rows when the seed is removed before it adopts them', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+        for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        const resolved = await resolvedIds();
+        expect(resolved).toEqual(expect.arrayContaining(['f-1', 'c-1']));
+        expect(resolved).not.toContain('seed-f');
+      });
+    });
+
+    describe('fork memory and output-buffer pressure', () => {
+      it('raises fork memory risk on a fan-out primary with its node address', async () => {
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('raises output-buffer pressure on a fan-out primary without touching the seed gauge', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, syncFull: 1 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect(prometheusService.updateReplBufferPressure).not.toHaveBeenCalled();
+      });
+
+      it('lists node fork and output-buffer pressure in that node divergence alert', async () => {
+        const hook = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationDivergence = hook;
+        Object.assign(node, FORKING, { replicaOmem: HARD * 0.7 });
+        for (const gap of [2, 4, 6, 8, 10, 12]) {
+          for (let i = 0; i < 3; i += 1) await pollNode({ gap: gap * 1024 * 1024, bytes: 10 * 1024 * 1024, stepMs: 10_000 });
+        }
+
+        expect(hook).toHaveBeenCalled();
+        expect(hook.mock.calls[0][0].correlatedSignals).toEqual(
+          expect.arrayContaining([MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE]),
+        );
+      });
+
+      it('matches recovery amplification on a fan-out node', async () => {
+        await pollNode();
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1, replicaState: 'wait_bgsave' });
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.RECOVERY_AMPLIFICATION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([resync.id, fork.id]);
+      });
+
+      it('still checks a node whose CLIENT LIST is denied', async () => {
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('NOPERM');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+
+        expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('drops the connection of a node whose CLIENT LIST hangs so its next INFO still answers', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          client.info.mockImplementation((name?: string) =>
+            stuck.length > 0 ? new Promise(() => {}) : Promise.resolve(nodeInfo(name)),
+          );
+          client.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode(FORKING);
+          await pollNode(FORKING);
+
+          expect(client.disconnect).toHaveBeenCalled();
+          expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+          expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('does not raise a second output-buffer alert when one CLIENT LIST read fails', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.7) };
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL }),
+          expect.objectContaining({ severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('skips a fan-out primary that is registered under another address', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('checks a fan-out primary again once its registered connection stops polling', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock - 10 * 60_000 });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('checks a fan-out primary again once its registered connection disconnects', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: false }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('does not raise per-replica output-buffer alerts already covered by the aggregate one', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: '(aggregate)' }),
+        ]);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
+      it('does not re-alert a replica seen before CLIENT LIST failed once the aggregate alert covers it', async () => {
+        await pollNode();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.95) }, replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
+      it('retires the fan-out state of a node once it is registered under another address', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(true);
+        prometheusService.clearNodeSignals.mockClear();
+
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        await pollNode();
+
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(false);
+        expect((service as any).divergenceState.has(NODE_KEY)).toBe(false);
+        expect((service as any).reshardSnapshot.has(NODE_KEY)).toBe(false);
+        expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+      });
+
+      it.each([
+        ['INFO latencystats', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          client.info.mockImplementation((name?: string) => (name === 'latencystats' ? hang() : Promise.resolve(nodeInfo(name))));
+        }],
+        ['CLUSTER NODES', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          const call = client.call.getMockImplementation()!;
+          client.call.mockImplementation((...args: string[]) => (args[0] === 'CLUSTER' ? hang() : call(...args)));
+        }],
+      ])('still reads replica output buffers when %s is slow', async (_name, slow) => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (closed) throw new Error('Connection is closed.');
+            return nodeCall(...args);
+          });
+          slow(client, () => new Promise<never>((_, reject) => stuck.push(reject)));
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+            expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+          ]);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('gives CLIENT LIST its own budget after a slow INFO', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        const client = nodeClient();
+        client.info.mockImplementation(async (name?: string) => {
+          clock += timeout;
+          return nodeInfo(name);
+        });
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('drops a hung connection only after its other reads have answered', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (args[0] === 'CLIENT') return new Promise((_, reject) => stuck.push(reject));
+            if (args[0] === 'CLUSTER') {
+              return new Promise((resolve, reject) =>
+                setTimeout(() => (closed ? reject(new Error('Connection is closed.')) : resolve(nodeCall(...args))), 20),
+              );
+            }
+            return nodeCall(...args);
+          });
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode();
+
+          expect((service as any).reshardNodeSelves.has(NODE_KEY)).toBe(true);
+          expect(client.disconnect).toHaveBeenCalledTimes(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('reads a node through a fresh connection after dropping a hung one', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const stuck: Array<(err: Error) => void> = [];
+          const hung = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          hung.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          const replacement = nodeClient();
+          (service as any).clusterDiscovery.getNodeConnection
+            .mockResolvedValueOnce(hung)
+            .mockResolvedValue(replacement);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+          expect(hung.disconnect).toHaveBeenCalled();
+          await pollNode();
+
+          expect(replacement.info).toHaveBeenCalled();
+          expect(replacement.call).toHaveBeenCalledWith('CLIENT', 'LIST', 'TYPE', 'replica');
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('drops a demoted node output-buffer state', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        expect((service as any).cobState.has(NODE_KEY)).toBe(true);
+
+        await pollNode({ role: 'slave' });
+
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('closes node fork and output-buffer events when the node leaves', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [cob] = events(MetricType.REPL_BUFFER_PRESSURE);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([fork.id, cob.id]));
+        expect((service as any).fanoutNodeEventIds.has(NODE_KEY)).toBe(false);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('stops tracking a node event whose save was dropped', async () => {
+        const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [, , onDrop] = addAnomaly.mock.calls.find(([event]) => (event as { id: string }).id === fork.id)!;
+
+        (onDrop as () => void)();
+
+        expect((service as any).fanoutNodeEventIds.get(NODE_KEY)?.has(fork.id) ?? false).toBe(false);
+      });
+
+      it('closes the oldest node events beyond the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
+        const ids = Array.from({ length: 20 }, (_, i) => `node-event-${i}`);
+        for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id, 'replica');
+
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toEqual(ids.slice(-8));
+        expect(close.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 12));
+      });
+
+      it('keeps the latest event of every alert open past the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
+        const ids = Array.from({ length: 9 }, (_, i) => `node-event-${i}`);
+        ids.forEach((id, i) => (service as any).trackFanoutNodeEvent(NODE_KEY, id, `replica-${i}`));
+        (service as any).trackFanoutNodeEvent(NODE_KEY, 'node-event-9', 'replica-3');
+
+        expect(close.mock.calls.map(([id]) => id)).toEqual(['node-event-3']);
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toHaveLength(9);
+      });
     });
   });
 
@@ -15576,7 +16794,7 @@ describe('AnomalyService', () => {
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
-        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication']]);
+        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication'], ['persistence']]);
       });
 
       describe('Sentinel targets', () => {
@@ -16585,7 +17803,7 @@ describe('AnomalyService', () => {
       it('does not queue another INFO on a primary that has not answered the last one', async () => {
         jest.useFakeTimers();
         try {
-          const client = { info: jest.fn(() => new Promise(() => {})) };
+          const client = { info: jest.fn(() => new Promise(() => {})), disconnect: jest.fn() };
           (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
 
           for (let i = 0; i < 3; i++) {
@@ -16594,7 +17812,9 @@ describe('AnomalyService', () => {
             await done;
           }
 
-          expect(client.info).toHaveBeenCalledTimes(4);
+          const calls = client.info.mock.calls as unknown as string[][];
+          expect(calls.filter(([section]) => section !== 'latencystats')).toHaveLength(5);
+          expect(calls.filter(([section]) => section === 'latencystats')).toHaveLength(0);
         } finally {
           jest.useRealTimers();
         }
@@ -16699,7 +17919,9 @@ describe('AnomalyService', () => {
 
         const fanoutWarnings = warn.mock.calls.filter(([msg]) => String(msg).includes('fan-out'));
         expect(fanoutWarnings).toHaveLength(1);
-        expect(String(fanoutWarnings[0][0])).toContain('1/1 primaries unreachable');
+        expect(String(fanoutWarnings[0][0])).toContain(
+          '1/1 primaries unreachable — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.',
+        );
         expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
       });
 
