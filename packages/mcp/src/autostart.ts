@@ -31,7 +31,7 @@ function commandLineOf(pid: number): string | null {
         ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
       )
-    : spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], {
+    : spawnSync('/bin/ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       });
