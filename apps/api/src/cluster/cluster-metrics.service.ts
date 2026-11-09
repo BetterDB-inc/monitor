@@ -31,12 +31,11 @@ const UNREACHABLE_NODE_BACKOFF_MS = 30_000;
 // Part of a slot-stats budget kept back for the fallback to the connection's
 // own node, so it still fits when every primary used its full timeout.
 const SLOT_STATS_FALLBACK_RESERVE_MS = 1_000;
-// A caller that passes less than this cut the budget short of a real attempt,
-// such as the tail of a Prometheus pass. A timeout then says nothing about the
-// node. Prometheus only starts a fan-out once a second remains, and its pass
-// is the same length as the full node timeout, so the budget it passes is
-// always a little under that timeout and still a real attempt.
-const SLOT_STATS_REAL_BUDGET_MS = 1_000;
+
+/** What each node gets of a slot-stats budget, after the fallback reserve. */
+function slotStatsNodeBudget(budgetMs: number): number {
+  return budgetMs - Math.min(SLOT_STATS_FALLBACK_RESERVE_MS, Math.floor(budgetMs / 4));
+}
 
 /** How many SLOTSRANGE reads one node may have in flight at once. */
 const SLOT_RANGE_BATCH_SIZE = 16;
@@ -541,25 +540,37 @@ export class ClusterMetricsService {
     );
   }
 
-  /** Like getClusterSlotStats, plus the primaries that did not answer. */
+  /**
+   * Like getClusterSlotStats, plus the primaries that did not answer.
+   * `timeoutMs` bounds the whole call, discovery included. `fullBudgetMs` is
+   * what the caller's pass gives at its full length (a Prometheus pass passes
+   * what is left of it in `timeoutMs`).
+   */
   async getClusterSlotStatsResult(
     orderBy: SlotStatsOrder = 'key-count',
     limit: number = 100,
     connectionId?: string,
     timeoutMs: number = NODE_COMMAND_TIMEOUT_MS,
+    fullBudgetMs: number = NODE_COMMAND_TIMEOUT_MS,
   ): Promise<ClusterSlotStatsResult> {
     const validLimit = Math.max(1, Math.min(limit, CLUSTER_TOTAL_SLOTS));
-    const owners = (await this.discoveryService.discoverNodes(connectionId)).filter(
-      (node) => node.role === 'master' && node.slots.length > 0,
-    );
-    const primaries = owners.filter((node) => node.healthy);
+    // Discovery counts against the budget too: a fan-out that outlives a
+    // Prometheus pass has every answer thrown away by the next one.
     const budgetEnd = Date.now() + timeoutMs;
-    const nodeTimeoutMs = timeoutMs - Math.min(SLOT_STATS_FALLBACK_RESERVE_MS, Math.floor(timeoutMs / 4));
-    // Compare with the budget the caller passed. A Prometheus pass is only as
-    // long as the full node timeout, so what is left of it is always under
-    // that timeout; it is still the whole budget this call was given. Only a
-    // budget cut below a real attempt is ignored.
-    const fullTimeout = timeoutMs >= SLOT_STATS_REAL_BUDGET_MS;
+    const discovered = await withTimeout(
+      this.discoveryService.discoverNodes(connectionId),
+      timeoutMs,
+      `Cluster discovery did not answer within ${timeoutMs}ms`,
+    );
+    const owners = discovered.filter((node) => node.role === 'master' && node.slots.length > 0);
+    const primaries = owners.filter((node) => node.healthy);
+    const remainingMs = Math.max(0, budgetEnd - Date.now());
+    const nodeTimeoutMs = slotStatsNodeBudget(remainingMs);
+    // A node's timeout says something about it only when this call had at
+    // least what one node gets from the caller's full budget. The tail of a
+    // Prometheus pass gives a node far less, and a cold TLS connect or a
+    // primary with many ranges can miss that without being stuck.
+    const fullTimeout = remainingMs >= slotStatsNodeBudget(fullBudgetMs);
     // Ask for each owned range rather than the node's top N: during a slot move
     // a node still reports the slot it is handing off, which would take one of
     // the N places and push an owned slot out. The merge ranks them instead.
@@ -664,7 +675,7 @@ export class ClusterMetricsService {
       // report that node's slots and leave the other primaries as failed.
       // Its own error is the one to report: a NOPERM or "not supported" here
       // says more than a primary's timeout on an address it cannot reach.
-      const fallbackTimeoutMs = Math.max(timeoutMs - nodeTimeoutMs, budgetEnd - Date.now());
+      const fallbackTimeoutMs = Math.max(remainingMs - nodeTimeoutMs, budgetEnd - Date.now());
       const stats = await withTimeout(
         this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
         fallbackTimeoutMs,

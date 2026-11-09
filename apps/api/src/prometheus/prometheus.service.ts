@@ -2879,6 +2879,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.slotStatsTopN,
           connectionId,
           Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
+          Math.min(NODE_COMMAND_TIMEOUT_MS, this.pollIntervalMs),
         );
       } else {
         result = {

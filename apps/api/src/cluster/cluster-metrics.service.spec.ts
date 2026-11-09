@@ -970,11 +970,70 @@ used_cpu_user:20.3\r
           getClusterSlotStats: jest.fn().mockResolvedValue({}),
         });
 
-        const pending = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
-        await jest.advanceTimersByTimeAsync(3_000);
+        // A 5s pass that spent half a second before the fan-out.
+        const pending = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 4_500, 5_000);
+        await jest.advanceTimersByTimeAsync(4_500);
         await pending;
 
         expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(silent);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('neither drops nor backs off a primary that missed the tail of a Prometheus pass', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+          { id: 'p2', address: '10.0.0.2:6379', role: 'master', healthy: true, slots: [[0, 0]] },
+        ]);
+        const slow = { call: jest.fn(() => new Promise(() => undefined)) };
+        mockDiscoveryService.getNodeConnection.mockImplementation((nodeId: string) =>
+          nodeId === 'p1' ? Promise.resolve(slow) : new Promise(() => undefined),
+        );
+        mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
+
+        // 1.2s left of a 5s pass: each node gets 900ms, short of a real attempt.
+        const first = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 1_200, 5_000);
+        await jest.advanceTimersByTimeAsync(1_200);
+        await first;
+
+        expect(mockDiscoveryService.evictNodeClient).not.toHaveBeenCalled();
+        mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue([[0, ['key-count', 5]]]) });
+        const second = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 1_200, 5_000);
+        // p2's connect was cut short, so it is asked again instead of skipped for 30s.
+        const p2Connects = mockDiscoveryService.getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === 'p2');
+        expect(p2Connects).toHaveLength(2);
+        expect(second.failedNodes).not.toContain('10.0.0.2:6379');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('counts a slow discovery against the budget', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(
+                () => resolve([{ id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] }]),
+                3_000,
+              ),
+            ),
+        );
+        mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn(() => new Promise(() => undefined)) });
+        mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
+
+        let settled = false;
+        const pending = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 5_000).finally(() => {
+          settled = true;
+        });
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        expect(settled).toBe(true);
+        await expect(pending).resolves.toEqual(expect.objectContaining({ failedNodes: ['10.0.0.1:6379'] }));
       } finally {
         jest.useRealTimers();
       }
@@ -989,11 +1048,11 @@ used_cpu_user:20.3\r
         mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
         mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
 
-        const first = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
-        await jest.advanceTimersByTimeAsync(3_000);
+        const first = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 4_500, 5_000);
+        await jest.advanceTimersByTimeAsync(4_500);
         await first;
         mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue([[1, ['key-count', 5]]]) });
-        const second = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
+        const second = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 4_500, 5_000);
 
         expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(1);
         expect(second.failedNodes).toEqual(['10.0.0.1:6379']);

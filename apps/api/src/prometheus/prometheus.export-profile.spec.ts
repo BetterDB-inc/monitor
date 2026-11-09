@@ -459,7 +459,7 @@ describe('PrometheusService slot stats', () => {
     await runSlotStats(harness);
     text = await harness.service.getMetrics();
     expect(text).not.toContain(`slot="9000"`);
-    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith('key-count', 100, 'conn-1', 5_000);
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith('key-count', 100, 'conn-1', 5_000, 5_000);
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
   });
 
