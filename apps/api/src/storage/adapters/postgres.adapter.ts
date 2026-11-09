@@ -37,8 +37,9 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
-  ClientConnectionCaptureRow,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
   CommandLogType,
@@ -135,9 +136,12 @@ import type {
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
+  CLIENT_REOPEN_TOLERANCE_MS,
   clientAddrIp,
+  clientCaptureSummaryFromSql,
   foldClientAnalyticsStats,
   mapClientAnalyticsRollupRow,
+  type ClientCaptureSqlRow,
 } from './client-analytics-stats';
 import { WebhookPostgresRepository } from './repositories/webhook.postgres.repository';
 import { SlowLogPostgresRepository } from './repositories/slowlog.postgres.repository';
@@ -987,58 +991,98 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  async getNewClientConnections(
+  // One statement over idx_client_connection_captured, as in the SQLite
+  // adapter: `bounded` reads the range as two index ranges around the skipped
+  // captures and stops after maxRows + 1 rows, past which only a 'truncated'
+  // row comes back; a connection is a (client_id, addr) and its opening, the
+  // earliest opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row;
+  // the second window gives each connection the name and user of its newest
+  // row in the range, then the rows are grouped per capture and (name, user,
+  // ip), each (client_id, addr) once, and per connection.
+  async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<NewClientConnectionGroup[]> {
+    bounds: ClientCaptureReadBounds,
+  ): Promise<ClientCaptureSummary> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
-    const result = await this.pool.query(
-      `SELECT COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip, COUNT(DISTINCT client_id) AS count
-         FROM client_snapshots
-        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND captured_at - age::bigint * 1000 >= $2
-          AND COALESCE(flags, '') !~ '[SM]'
-        GROUP BY COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
-      [connectionId, since, until],
+    const result = await this.pool.query<ClientCaptureSqlRow>(
+      `WITH bounded AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+         UNION ALL
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+            AND captured_at >= $2 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+          LIMIT $6::bigint + 1
+       ), readings AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name,
+                MIN(captured_at - age::bigint * 1000) OVER (
+                  PARTITION BY client_id, addr ORDER BY captured_at - age::bigint * 1000
+                  RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS}::bigint PRECEDING
+                    AND ${CLIENT_REOPEN_TOLERANCE_MS}::bigint FOLLOWING
+                ) AS opened_at
+           FROM bounded
+          WHERE (SELECT COUNT(*) FROM bounded) <= $6::bigint
+       ), resolved AS (
+         SELECT captured_at, client_id, addr, age, opened_at,
+                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
+                ${PG_CLIENT_IP_EXPR} AS ip
+           FROM readings
+         WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
+       )
+       SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
+              COUNT(DISTINCT client_id || ' ' || addr) AS count, MAX(age) AS oldest_age,
+              MAX(CASE WHEN client_id ~ '^[0-9]+$' THEN client_id::bigint END) AS max_client_id,
+              NULL::bigint AS opened_at
+         FROM resolved
+        GROUP BY captured_at, name, user_name, ip
+       UNION ALL
+       SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
+              NULL, NULL, NULL, opened_at
+         FROM resolved
+        GROUP BY client_id, addr, opened_at, name, user_name, ip
+       UNION ALL
+       SELECT 'truncated', NULL, NULL, NULL, '', '', '', NULL, NULL, NULL, NULL
+        WHERE (SELECT COUNT(*) FROM bounded) > $6::bigint`,
+      [connectionId, since, until, bounds.skipFrom, bounds.skipTo, bounds.maxRows],
     );
-    return result.rows.map((row) => ({
-      name: row.name,
-      user: row.user_name,
-      ip: row.ip,
-      count: Number(row.count),
-    }));
+    return clientCaptureSummaryFromSql(result.rows);
   }
 
-  async getClientConnectionCaptures(
+  // The same two index ranges as getClientCaptureSummary, counted per capture
+  // from idx_client_connection_captured alone.
+  async getClientCaptureRowCounts(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientConnectionCaptureRow[]> {
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query(
-      `SELECT captured_at, COALESCE(name, '') AS name, COALESCE(user_name, '') AS user_name,
-              ${PG_CLIENT_IP_EXPR} AS ip, MAX(age) AS oldest_age,
-              MAX(CASE WHEN client_id::text ~ '^[0-9]+$' THEN client_id::text::bigint END) AS max_client_id
+      `SELECT captured_at, COUNT(*) AS row_count
          FROM client_snapshots
-        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-          AND COALESCE(flags, '') !~ '[SM]'
-        GROUP BY captured_at, COALESCE(name, ''), COALESCE(user_name, ''), ${PG_CLIENT_IP_EXPR}`,
-      [connectionId, since, until],
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+        GROUP BY captured_at
+       UNION ALL
+       SELECT captured_at, COUNT(*)
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+          AND captured_at >= $2 AND captured_at <= $3
+        GROUP BY captured_at
+        ORDER BY captured_at`,
+      [connectionId, since, until, skip.skipFrom, skip.skipTo],
     );
-    return result.rows.map((row) => ({
-      capturedAt: Number(row.captured_at),
-      name: row.name,
-      user: row.user_name,
-      ip: row.ip,
-      oldestAge: Number(row.oldest_age),
-      maxClientId: Number(row.max_client_id ?? 0),
-    }));
+    return result.rows.map((row) => ({ capturedAt: Number(row.captured_at), rows: Number(row.row_count) }));
   }
 
   async getClientTimeSeries(

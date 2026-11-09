@@ -2,8 +2,9 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
-  ClientConnectionCaptureRow,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -96,8 +97,9 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
-  ClientConnectionCaptureRow,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -572,16 +574,35 @@ export interface StoragePort {
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
-  getNewClientConnections(
+  /**
+   * The client snapshots captured in [since, until], replica and master links left out, aggregated
+   * for retry attribution: per capture, the connections per (name, user, ip) with the oldest age and
+   * the highest numeric client id over the whole capture; per connection (client_id, addr), when it
+   * opened (the earliest captured_at - age) and its first capture. Each connection takes the name
+   * and user of its newest row in the range, so a client captured before it ran CLIENT SETNAME
+   * counts under the name it set later. The monitor's own connections are in, like any other.
+   * Captures in [bounds.skipFrom, bounds.skipTo) are not read, so the read is two index ranges;
+   * a read that matches more than bounds.maxRows rows stops there and aggregates nothing
+   * (`truncated`), so its cost does not grow with the range.
+   */
+  getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<NewClientConnectionGroup[]>;
-  getClientConnectionCaptures(
+    bounds: ClientCaptureReadBounds,
+  ): Promise<ClientCaptureSummary>;
+  /**
+   * The client_snapshots rows of each capture that getClientCaptureSummary with the same range and
+   * skipped captures would read, so a caller can pick a range that fits its row bound. Replica and
+   * master links are counted too: it reads only the (connection_id, captured_at) index, and its
+   * counts are an upper bound of the rows the summary aggregates.
+   */
+  getClientCaptureRowCounts(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientConnectionCaptureRow[]>;
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,
