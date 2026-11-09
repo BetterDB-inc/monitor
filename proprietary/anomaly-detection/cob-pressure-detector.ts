@@ -62,7 +62,14 @@ export interface CobConnectionState {
    * addr-keyed gate would never suppress anything.
    */
   resyncFiredAt: number | null;
-  aggregateAlertLevel: CobLevel;
+  aggregateAlert: AggregateAlert | null;
+  inheritedAggregateAlert: AggregateAlert | null;
+}
+
+interface AggregateAlert {
+  finding: CobPressureFinding | null;
+  level: CobLevel;
+  heirs: Map<string, { prior: CobLevel; inherited: CobLevel }>;
 }
 
 export interface CobEvaluationInput {
@@ -97,7 +104,8 @@ export function createCobConnectionState(): CobConnectionState {
     syncFullTimes: [],
     lastConnectedSlaves: null,
     resyncFiredAt: null,
-    aggregateAlertLevel: 'none',
+    aggregateAlert: null,
+    inheritedAggregateAlert: null,
   };
 }
 
@@ -279,15 +287,18 @@ export function evaluateCobPressure(
     if (input.replicas !== null) {
       // Per-replica visibility is back — the degraded-mode aggregate entry is
       // superseded and must not linger as pressure memory.
+      const aggregateAlert = state.aggregateAlert;
       const aggregateLevel = lowerLevel(
         state.replicas.get(AGGREGATE_KEY)?.ackedLevel ?? 'none',
-        state.aggregateAlertLevel,
+        aggregateAlert?.level ?? 'none',
       );
       state.replicas.delete(AGGREGATE_KEY);
-      state.aggregateAlertLevel = 'none';
+      if (aggregateAlert) state.inheritedAggregateAlert = aggregateAlert;
+      state.aggregateAlert = null;
       for (const replica of input.replicas) {
         const replicaState = getReplicaState(state, replica.addr, timestamp);
-        if (LEVEL_RANK[aggregateLevel] > LEVEL_RANK[replicaState.ackedLevel]) {
+        if (aggregateAlert && LEVEL_RANK[aggregateLevel] > LEVEL_RANK[replicaState.ackedLevel]) {
+          aggregateAlert.heirs.set(replica.addr, { prior: replicaState.ackedLevel, inherited: aggregateLevel });
           replicaState.ackedLevel = aggregateLevel;
         }
         const assessment = assessRatio(replica.omem, limit, replicaState, timestamp);
@@ -307,7 +318,7 @@ export function evaluateCobPressure(
       const ratio = combined > 0 ? input.memClientsSlaves / combined : 0;
       const level: CobLevel =
         ratio >= COB_CRIT_RATIO ? 'critical' : ratio >= COB_WARN_RATIO ? 'warning' : 'none';
-      if (!state.replicas.has(AGGREGATE_KEY)) state.aggregateAlertLevel = 'none';
+      if (!state.replicas.has(AGGREGATE_KEY)) state.aggregateAlert = null;
       const inherited = state.replicas.has(AGGREGATE_KEY) ? 'none' : highestAckedLevel(state);
       const replicaState = getReplicaState(state, AGGREGATE_KEY, timestamp);
       if (LEVEL_RANK[inherited] > LEVEL_RANK[replicaState.ackedLevel]) replicaState.ackedLevel = inherited;
@@ -496,7 +507,7 @@ export function acknowledgeCobFinding(
     return;
   }
   replicaState.ackedLevel = finding.level;
-  if (finding.kind === 'aggregate') state.aggregateAlertLevel = finding.level;
+  if (finding.kind === 'aggregate') state.aggregateAlert = { finding, level: finding.level, heirs: new Map() };
 }
 
 export function cobPressureRearm(
@@ -520,17 +531,18 @@ export function cobPressureRearm(
     },
   );
   if (finding.kind !== 'aggregate') return rearmReplica;
-  const rearmAggregate = rearmLevel(
-    LEVEL_RANK,
-    state.aggregateAlertLevel,
-    () => state.aggregateAlertLevel,
-    (level) => {
-      state.aggregateAlertLevel = level;
-    },
-  );
+  const previousAlert = state.aggregateAlert;
   return () => {
     rearmReplica();
-    rearmAggregate();
+    for (const alert of [state.aggregateAlert, state.inheritedAggregateAlert]) {
+      if (alert?.finding !== finding) continue;
+      for (const [addr, heir] of alert.heirs) {
+        const heirState = state.replicas.get(addr);
+        if (heirState?.ackedLevel === heir.inherited) heirState.ackedLevel = heir.prior;
+      }
+      alert.heirs.clear();
+    }
+    if (state.aggregateAlert?.finding === finding) state.aggregateAlert = previousAlert;
   };
 }
 
@@ -595,7 +607,9 @@ export function applyRestoredCobLevels(
 }
 
 function restoreAggregateAlertLevel(state: CobConnectionState, level: AlertLevel | null): void {
-  if (level && LEVEL_RANK[level] > LEVEL_RANK[state.aggregateAlertLevel]) state.aggregateAlertLevel = level;
+  if (level && LEVEL_RANK[level] > LEVEL_RANK[state.aggregateAlert?.level ?? 'none']) {
+    state.aggregateAlert = { finding: null, level, heirs: new Map() };
+  }
 }
 
 function restoreCobAcknowledgedLevel(
