@@ -13151,6 +13151,9 @@ describe('AnomalyService', () => {
           .spyOn(service as any, 'nextFiring')
           .mockImplementation(() => new Promise(() => undefined));
         const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const debug = jest
+          .spyOn((service as any).logger, 'debug')
+          .mockImplementation(() => undefined);
 
         const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
         await jest.advanceTimersByTimeAsync(10_000);
@@ -13159,8 +13162,11 @@ describe('AnomalyService', () => {
         expect(incidents.flatMap((i) => i.entries)).toHaveLength(20);
         expect(next).toHaveBeenCalledTimes(8);
         expect(warn).toHaveBeenCalledTimes(1);
-        expect(warn.mock.calls[0][0]).toContain('20 signals');
+        expect(warn.mock.calls[0][0]).toContain('8 signals');
         expect(warn.mock.calls[0][0]).toContain('lookup budget exhausted');
+        expect(debug.mock.calls.map(([m]) => m)).toContainEqual(
+          expect.stringContaining('Skipped 12 next-firing lookups'),
+        );
       });
 
       const openSignals = (end: number) => {
@@ -13193,7 +13199,23 @@ describe('AnomalyService', () => {
         expect(settled).toBe(true);
         await listed;
         expect(next).toHaveBeenCalledTimes(16);
-        expect(warn.mock.calls[0][0]).toContain('12 signals');
+        expect(warn.mock.calls[0][0]).toContain('8 signals');
+      });
+
+      it('skips a batch when almost none of the budget is left', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        const next = jest
+          .spyOn(service as any, 'nextFiring')
+          .mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(null), 9_900)));
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+
+        expect(next).toHaveBeenCalledTimes(8);
       });
 
       it('looks up the signals skipped by the previous load first', async () => {

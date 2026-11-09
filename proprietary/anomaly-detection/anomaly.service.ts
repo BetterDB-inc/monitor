@@ -427,6 +427,7 @@ const NEXT_FIRING_MISS_TTL_MS = 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
 const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
+const NEXT_FIRING_MIN_REMAINING_MS = 250;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7809,6 +7810,7 @@ export class AnomalyService
     }
     const later: AnomalyEvent[] = [];
     const failures: { key: string; error: unknown }[] = [];
+    let skippedCount = 0;
     const deadline = Date.now() + NEXT_FIRING_BUDGET_MS;
     const ordered = this.skippedLookupsFirst(signals, after);
     for (let i = 0; i < ordered.length; i += NEXT_FIRING_CONCURRENCY) {
@@ -7818,22 +7820,22 @@ export class AnomalyService
           const key = signalKey(signal);
           const cacheKey = `${after}\u0000${key}`;
           const cached = this.cachedNextFiring(cacheKey);
-          const skipped = remaining <= 0 && cached === undefined;
+          const skipped = remaining < NEXT_FIRING_MIN_REMAINING_MS && cached === undefined;
           this.markLookupSkipped(cacheKey, skipped);
-          const lookup =
+          if (skipped) skippedCount++;
+          const stored =
             cached !== undefined
-              ? Promise.resolve(cached)
+              ? cached
               : skipped
-                ? Promise.reject(new Error(NEXT_FIRING_BUDGET_EXHAUSTED))
-                : withTimeout(
+                ? null
+                : await withTimeout(
                     this.nextFiring(signal, after, deadline),
                     remaining,
                     NEXT_FIRING_BUDGET_EXHAUSTED,
-                  );
-          const stored = await lookup.catch((error: unknown) => {
-            failures.push({ key, error });
-            return null;
-          });
+                  ).catch((error: unknown) => {
+                    failures.push({ key, error });
+                    return null;
+                  });
           const live = recent.get(key) ?? null;
           if (!stored || !live) return stored ?? live;
           return live.timestamp < stored.timestamp ? live : stored;
@@ -7842,6 +7844,11 @@ export class AnomalyService
       later.push(...batch.filter((e): e is AnomalyEvent => e !== null));
     }
     if (failures.length > 0) this.warnNextFiringFailures(failures);
+    if (skippedCount > 0) {
+      this.logger.debug(
+        `Skipped ${skippedCount} next-firing lookups after the ${NEXT_FIRING_BUDGET_MS}ms budget`,
+      );
+    }
     return later;
   }
 
@@ -7891,7 +7898,11 @@ export class AnomalyService
         this.nextFiringInFlight.delete(cacheKey);
       }
     });
+    this.nextFiringInFlight.delete(cacheKey);
     this.nextFiringInFlight.set(cacheKey, { lookup, budget, startedAt: Date.now() });
+    if (this.nextFiringInFlight.size > NEXT_FIRING_CACHE_SIZE) {
+      this.nextFiringInFlight.delete(this.nextFiringInFlight.keys().next().value!);
+    }
     return lookup;
   }
 
