@@ -302,11 +302,15 @@ export interface FanoutCoverage {
   unreachable: number;
   /** Primaries that refused the credentials (WRONGPASS, NOAUTH, NOPERM). */
   authFailed: number;
-  /** Primaries past the per-connection cap that no other connection checks. */
+  /** Primaries past the per-connection cap that no other connection reads. */
   skipped: number;
   /** Primaries the topology lists that the connection does not dial (see `reason`). */
   notDialed: number;
-  /** Set when the fan-out cannot dial, or has nothing to check. */
+  /**
+   * Set when the fan-out cannot dial, or has nothing to check. Null while the
+   * connection has primaries to count, even if it dialed none because each is
+   * in backoff or flagged down, so read the counts for gaps too.
+   */
   reason: FanoutCoverageReason | null;
   /** The connection goes through an SSH tunnel, which the per-node reads do not use. */
   tunnelled: boolean;
