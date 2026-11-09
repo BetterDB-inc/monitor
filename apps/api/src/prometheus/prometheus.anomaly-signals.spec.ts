@@ -294,6 +294,99 @@ describe('PrometheusService anomaly signal gauges', () => {
     });
   });
 
+  describe('updateFanoutCoverage', () => {
+    const counts = (overrides: Partial<Record<string, number>> = {}) => ({
+      checked: 0,
+      unreachable: 0,
+      authFailed: 0,
+      skipped: 0,
+      notDialed: 0,
+      ...overrides,
+    });
+    const zeroSeries = (connection: string, checked = 0) => [
+      { connection, state: 'checked', value: checked },
+      { connection, state: 'unreachable', value: 0 },
+      { connection, state: 'auth_failed', value: 0 },
+      { connection, state: 'skipped', value: 0 },
+      { connection, state: 'not_dialed', value: 0 },
+    ];
+
+    it('sets one series per fan-out state', async () => {
+      service.updateFanoutCoverage(
+        'conn-1',
+        counts({ checked: 3, unreachable: 2, authFailed: 4, skipped: 1, notDialed: 5 }),
+      );
+
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([
+        { connection: LABEL, state: 'checked', value: 3 },
+        { connection: LABEL, state: 'unreachable', value: 2 },
+        { connection: LABEL, state: 'auth_failed', value: 4 },
+        { connection: LABEL, state: 'skipped', value: 1 },
+        { connection: LABEL, state: 'not_dialed', value: 5 },
+      ]);
+    });
+
+    it('keeps zero series for a topology that checks nothing', async () => {
+      service.updateFanoutCoverage('conn-1', counts());
+
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual(zeroSeries(LABEL));
+    });
+
+    it('removes the series of a connection the fan-out does not apply to', async () => {
+      service.updateFanoutCoverage('conn-1', counts({ checked: 3 }));
+      service.updateFanoutCoverage('conn-2', counts({ checked: 1 }));
+
+      service.updateFanoutCoverage('conn-1', null);
+
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual(zeroSeries(OTHER_LABEL, 1));
+    });
+
+    it('names the reason the fan-out dialed nothing, so a gap differs from full coverage', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unreadable' });
+      service.updateFanoutCoverage('conn-2', { ...counts(), reason: 'covered_elsewhere' });
+
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([
+        { connection: LABEL, reason: 'topology_unreadable', value: 1 },
+        { connection: OTHER_LABEL, reason: 'covered_elsewhere', value: 1 },
+      ]);
+    });
+
+    it('keeps one gap series per connection as the reason changes, and none once it reads', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unknown' });
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'no_sentinel_credentials' });
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([
+        { connection: LABEL, reason: 'no_sentinel_credentials', value: 1 },
+      ]);
+
+      service.updateFanoutCoverage('conn-1', { ...counts({ checked: 2 }), reason: null });
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
+    });
+
+    it('drops the gap series with the coverage', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'agent_connection' });
+
+      service.updateFanoutCoverage('conn-1', null);
+
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
+    });
+
+    it('ignores a connection that no longer exists', async () => {
+      service.updateFanoutCoverage('deleted', counts({ checked: 3 }));
+
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([]);
+    });
+
+    it('drops the series, and the gap series, when the connection is removed', async () => {
+      service.updateFanoutCoverage('conn-1', { ...counts(), reason: 'topology_unreadable' });
+
+      service.cleanupConnectionMetrics('conn-1');
+      await jest.runAllTimersAsync();
+
+      expect(await series('betterdb_anomaly_fanout_primaries')).toEqual([]);
+      expect(await series('betterdb_anomaly_fanout_gap')).toEqual([]);
+    });
+  });
+
   describe('updateActiveIncidents', () => {
     const incident = (connectionIds: string[], patterns: string[], status: string) => ({
       connectionIds,

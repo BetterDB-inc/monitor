@@ -63,6 +63,7 @@ describe('ClusterDiscoveryService', () => {
     mockConnectionRegistry = {
       get: jest.fn().mockReturnValue(mockDbClient),
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
+      getConfig: jest.fn().mockReturnValue({ id: 'test-connection', host: 'localhost', port: 6379 }),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -553,6 +554,52 @@ describe('ClusterDiscoveryService', () => {
       expect(nodeClient.quit).not.toHaveBeenCalled();
     });
 
+    // iovalkey reports a refused AUTH on the 'error' event, then rejects
+    // connect() with its generic close message.
+    const refusedClient = (reply: string | null) => {
+      const handlers: Record<string, (err: Error) => void> = {};
+      const client = {
+        status: 'end',
+        options: {},
+        connect: jest.fn(async () => {
+          if (reply) handlers.error(new Error(reply));
+          throw new Error('Connection is closed.');
+        }),
+        quit: jest.fn().mockRejectedValue(new Error("Stream isn't writeable and enableOfflineQueue options is false")),
+        disconnect: jest.fn(),
+        on: jest.fn((event: string, fn: (err: Error) => void) => {
+          handlers[event] = fn;
+        }),
+      };
+      jest.mocked(Valkey).mockImplementationOnce((() => client) as never);
+      return client;
+    };
+
+    it('surfaces the WRONGPASS reply behind a rejected first dial', async () => {
+      const nodeClient = refusedClient('WRONGPASS invalid username-password pair or user is disabled.');
+
+      await expect(service.getNodeConnection('node2-id-def456', 'test-connection')).rejects.toThrow(
+        'Failed to connect to 192.168.1.11:6379: WRONGPASS invalid username-password pair or user is disabled.',
+      );
+      expect(nodeClient.disconnect).toHaveBeenCalled();
+    });
+
+    it('surfaces the NOAUTH reply behind a rejected first dial', async () => {
+      refusedClient('NOAUTH Authentication required.');
+
+      await expect(service.getNodeConnection('node2-id-def456', 'test-connection')).rejects.toThrow(
+        /: NOAUTH Authentication required\.$/,
+      );
+    });
+
+    it('keeps the generic rejection when the client reported no error', async () => {
+      refusedClient(null);
+
+      await expect(service.getNodeConnection('node2-id-def456', 'test-connection')).rejects.toThrow(
+        'Connection is closed.',
+      );
+    });
+
     it('disconnects a replaced node client that is not ready', async () => {
       const nodes = await service.discoverNodes('test-connection');
       const target = nodes.find((n) => n.id === 'node2-id-def456')!;
@@ -596,6 +643,17 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('getNodeConnection for an agent connection', () => {
+    it('refuses before discovering nodes or touching the raw client', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+
+      await expect(service.getNodeConnection('node-1', 'test-connection')).rejects.toThrow(
+        'cannot dial node-1 directly',
+      );
+      expect(mockDbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getAddressConnection', () => {
     beforeEach(() => {
       mockConnectionRegistry.sentinelDataNodeCredentials = jest
@@ -615,6 +673,16 @@ describe('ClusterDiscoveryService', () => {
           password: 'node-pass',
         }),
       );
+    });
+
+    it('refuses to dial for a connection reached through the agent', async () => {
+      mockConnectionRegistry.getConfig.mockReturnValue({ id: 'test-connection', host: 'agent', port: 0 });
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      await expect(service.getAddressConnection('10.0.1.5', 6380, 'test-connection')).rejects.toThrow(
+        'cannot dial 10.0.1.5:6380 directly',
+      );
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
     });
 
     it('refuses to dial without data-node credentials', async () => {

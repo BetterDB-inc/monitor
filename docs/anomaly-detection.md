@@ -397,11 +397,13 @@ Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and clos
 
 Replica offsets come from the primary's own `INFO replication`, so detection runs on every connection that reports a primary role, and also on primaries reached through a cluster or Sentinel connection:
 
-- A cluster connection reads `INFO` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. These connections log in with the cluster connection's own username and password. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed.
-- A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. SSH-tunnelled connections are skipped. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
+- A cluster connection reads `INFO` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. These connections log in with the cluster connection's own username and password. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed. SSH-tunnelled cluster connections still read the other primaries, but the per-node connections dial the `CLUSTER NODES` addresses directly, outside the tunnel; when those reads fail, coverage says the connection is tunnelled. Cluster connections reached through the agent do not read other primaries: the monitor cannot dial them itself.
+- A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. Set them under **Data node credentials** when adding the connection (`nodeUsername` and `nodePassword` on `POST /api/connections`). Data nodes that need no `AUTH` still need an explicit setting: tick **Connect to data nodes without a username** and leave the password empty. Without either, none of the Sentinel's primaries are checked; this is logged once per connection and shown as *not covered* (see below), unless every primary is already its own connection or checked by another one. The monitor does not try without credentials: on an authenticated node that would fail on every poll and read as unreachable rather than unconfigured. A data-node password that cannot be decrypted (`ENCRYPTION_KEY` missing or rotated) counts as no credentials. The connection form stores no data-node settings for a certificate-authenticated Sentinel; add one through the API with `nodeUsername` set to `""` to check the data nodes with the client certificate. SSH-tunnelled and agent connections are skipped. When data-node credentials are set but another stored secret (password, TLS key or SSH material) cannot be decrypted, the primaries are not checked either. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
 - Primaries that are already monitored as their own connected connection are skipped. Nodes flagged as failed or down are not read, but their open alerts stay open until they leave the topology. Up to 64 primaries are checked per connection, each with a 2 second timeout. Primaries past that limit are left to another connection that reaches them, and alerts of primaries no connection checks are closed. A primary that can't be reached is retried after 1 poll, then after 2, 4 and up to 8 polls, until a read succeeds. Unreachable primaries are logged once, when the count changes. When several connections reach the same primary, such as two registered nodes of one cluster or two Sentinels, only the first checks it. Another connection takes over when the first can no longer read it, or stops polling for 30 seconds.
 
 Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
+
+**Coverage**: each poll records how many primaries the connection checked, could not reach (flagged down, in retry backoff, or failed to answer), saw refuse the credentials (`WRONGPASS`, `NOAUTH` or `NOPERM`, also while in backoff), skipped past the 64-primary cap, and does not dial at all. A primary the topology flags as down is counted by the one connection that holds it, like a reachable one, so two connections of one topology do not both count it; a connection whose topology still lists that primary as reachable takes it over and reads it, since `fail?` and `s_down` are one seed's view. Only one connection tries such a takeover at a time, and the down holder keeps the primary until that read succeeds, so a takeover read that fails, or is in backoff after one, is not counted by the connection that tried it. Any other primary whose read fails, or that is in backoff after one, is counted unreachable (or as refusing the credentials) by each connection that tried it: a failed read releases the primary so another connection of the topology can take it over on its next poll, and both report it until one reads it. `reason` says why the fan-out dials nothing: `no_sentinel_credentials`, `sentinel_credentials_unreadable` (the data-node password could not be decrypted), `connection_secrets_unreadable` (another stored secret could not be decrypted), `certificate_auth`, `agent_connection` (cluster or Sentinel), `ssh_tunnel` (Sentinel), `fanout_failed` (the cycle failed before the reads, for example on a storage error, or the deployment has no cluster discovery to dial the primaries, which is logged once per connection; these seven count the primaries left unchecked as `notDialed`), `topology_unknown` (`SENTINEL MASTERS` not read yet), `topology_unreadable` (`CLUSTER NODES` or `SENTINEL MASTERS` itself failed on the latest read), `no_targets` (every other primary is its own connection), `covered_elsewhere` (every other primary is claimed by another connection, which reads it or holds it as down; see that connection's coverage) or `not_applicable` (standalone). `reason` is `null` whenever the connection has primaries of its own to count, even if it dialed none of them because each is in backoff or flagged down, so check the counts as well as `reason` for gaps. The counts are recorded as soon as the reads settle, or before the work that precedes them when there is nothing to read. Coverage that no poll has refreshed for 3 poll intervals (at least 30 seconds), such as that of a disconnected connection, is marked stale and its gauges are withdrawn on the next poll of any connection, summary update or API read. The anomaly dashboard shows a notice above the overview when the selected connection's primaries are not, or only partly, covered, when its coverage is stale (unless its last reason is `not_applicable`, `no_targets` or `covered_elsewhere`, which have no per-node checks to stop), or when the coverage cannot be loaded. The counts are returned by [`GET /api/anomaly/coverage`](#get-fan-out-coverage) and exported as `betterdb_anomaly_fanout_primaries{state}` (see [Prometheus metrics](./prometheus-metrics.md#fan-out-coverage-metrics)).
 
 **Replica cross-check**: Before an alert is raised or escalated, the monitor reads `INFO replication` from the replica itself and then from the primary, and compares the replica's `slave_repl_offset` with the primary's `master_repl_offset`. The replica is read through its own connection when it is monitored as one and connected, by node through cluster discovery on a cluster connection, or by address with the data-node credentials on a Sentinel connection that has them. A primary registered from a Sentinel connection uses its Sentinel connection's replica list and credentials. On Sentinel, only replicas listed in `SENTINEL REPLICAS` are dialed, so the credentials never go to an address that only the primary reports. Other replicas are not read.
 
@@ -894,6 +896,37 @@ GET /api/anomaly/buffers
     }
   ]
 }
+```
+
+### Get Fan-out Coverage
+
+```http
+GET /api/anomaly/coverage
+X-Connection-ID: <connection-id>
+```
+
+One entry per polled connection (all connections without the header), with the outcome of its latest per-node fan-out. `reason` is set when the fan-out dials nothing; the values are listed under [REPLICATION_DIVERGENCE](#replication_divergence). `topology` is `cluster`, `sentinel`, or `null` before the mode is known. `tunnelled` is true for a connection behind an SSH tunnel. `targetLimit` is the most primaries one connection checks and `timeoutMs` the per-primary connect and `INFO` timeout. `ageMs` is the age of the entry by the server clock. Entries no poll has refreshed for 3 poll intervals (at least 30 seconds) are kept with `stale: true`, so a stopped fan-out does not read as covered.
+
+**Response**:
+```json
+[
+  {
+    "connectionId": "550e8400-e29b-41d4-a716-446655440000",
+    "topology": "cluster",
+    "checked": 3,
+    "unreachable": 2,
+    "authFailed": 1,
+    "skipped": 0,
+    "notDialed": 0,
+    "reason": null,
+    "tunnelled": false,
+    "targetLimit": 64,
+    "timeoutMs": 2000,
+    "timestamp": 1704067200000,
+    "ageMs": 4200,
+    "stale": false
+  }
+]
 ```
 
 ### Resolve Anomaly or Group

@@ -102,6 +102,19 @@ const ANOMALY_SERIES: ReadonlySet<string> = new Set([
 const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC, ...ANOMALY_SERIES]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
+const FANOUT_STATES = [
+  ['checked', 'checked'],
+  ['unreachable', 'unreachable'],
+  ['auth_failed', 'authFailed'],
+  ['skipped', 'skipped'],
+  ['not_dialed', 'notDialed'],
+] as const;
+
+type FanoutCounts = Record<(typeof FANOUT_STATES)[number][1], number>;
+
+/** Reasons that need no fan-out gap series: nothing is wrong. */
+const FANOUT_NO_GAP: ReadonlySet<string> = new Set(['not_applicable']);
+
 /**
  * Connection id for anomaly events, correlated groups and incidents that
  * belong to no connection. It doubles as their `connection` label value: an
@@ -435,6 +448,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private connectionsReceivedPerSecond: Gauge;
   private connectionChurnPerOp: Gauge;
   private retryAmplificationState: Gauge;
+  private anomalyFanoutPrimaries: Gauge;
+  private anomalyFanoutGap: Gauge;
+  // Reason exported under betterdb_anomaly_fanout_gap, by connection label.
+  private fanoutGapReasons = new Map<string, string>();
   private incidentActive: Gauge;
 
   // Metric Forecasting
@@ -1299,6 +1316,16 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'retry_amplification_state',
       'Retry amplification classification: 0 none, 1 candidate, 2 amplifying',
       ['node'],
+    );
+    this.anomalyFanoutPrimaries = this.createGauge(
+      'anomaly_fanout_primaries',
+      'Primaries the anomaly fan-out checked, could not reach, was refused by, skipped past its cap, or does not dial, in the latest cycle',
+      ['state'],
+    );
+    this.anomalyFanoutGap = this.createGauge(
+      'anomaly_fanout_gap',
+      'Why the anomaly fan-out of a cluster or Sentinel connection dialed no primary in the latest cycle (1 for the current reason)',
+      ['reason'],
     );
     this.incidentActive = this.createGauge(
       'incident_active',
@@ -3922,6 +3949,53 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.connectionsReceivedPerSecond.remove(connLabel, node);
     this.connectionChurnPerOp.remove(connLabel, node);
     this.retryAmplificationState.remove(connLabel, node);
+  }
+
+  /**
+   * Latest per-node fan-out outcome of a connection. `null` removes the series:
+   * the connection has no other primaries to reach (standalone, replica,
+   * external), or its coverage went stale because it is no longer polled. A
+   * cluster or Sentinel connection keeps one series per state, so a topology
+   * it does not dial shows up under `not_dialed` rather than as absent.
+   */
+  updateFanoutCoverage(
+    connectionId: string,
+    coverage: (FanoutCounts & { reason?: string | null }) | null,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    if (coverage === null) {
+      for (const [fanoutState] of FANOUT_STATES) {
+        this.anomalyFanoutPrimaries.remove(connLabel, fanoutState);
+      }
+      this.setFanoutGap(connLabel, null);
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalConnLabel = connLabel;
+    for (const [fanoutState, key] of FANOUT_STATES) {
+      this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[key]);
+    }
+    this.setFanoutGap(connLabel, coverage.reason ?? null);
+  }
+
+  /**
+   * One series for the reason the fan-out dialed nothing, so `topology_unreadable`
+   * and full coverage (`covered_elsewhere`, `no_targets`), which all export zero
+   * counts, can be told apart. Absent while the fan-out reads its primaries.
+   */
+  private setFanoutGap(connLabel: string, reason: string | null): void {
+    const previous = this.fanoutGapReasons.get(connLabel);
+    const next = reason !== null && !FANOUT_NO_GAP.has(reason) ? reason : null;
+    if (previous !== undefined && previous !== next) {
+      this.anomalyFanoutGap.remove(connLabel, previous);
+      this.fanoutGapReasons.delete(connLabel);
+    }
+    if (next === null) return;
+    this.anomalyFanoutGap.labels(connLabel, next).set(1);
+    this.fanoutGapReasons.set(connLabel, next);
   }
 
   /**

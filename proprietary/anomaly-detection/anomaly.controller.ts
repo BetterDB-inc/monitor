@@ -18,6 +18,7 @@ import {
   CorrelatedAnomalyGroup,
   BufferStats,
   AnomalySummary,
+  FanoutCoverage,
   MetricType,
   AnomalyPattern,
 } from './types';
@@ -139,6 +140,14 @@ export class AnomalyController {
   @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
   getBuffers(@ConnectionId() connectionId?: string): BufferStats[] {
     return this.anomalyService.getBufferStats(connectionId);
+  }
+
+  @Get('coverage')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  getCoverage(@ConnectionId() connectionId?: string): FanoutCoverage[] {
+    return this.anomalyService.getFanoutCoverage(connectionId);
   }
 
   @Get('replication-divergence')
