@@ -12973,6 +12973,7 @@ describe('AnomalyService', () => {
       expect(next).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'old' }),
         (load.mock.calls[0][3] as any).tailEnd,
+        expect.any(Number),
       );
     });
 
@@ -12994,7 +12995,11 @@ describe('AnomalyService', () => {
       await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
 
       expect(next).toHaveBeenCalledTimes(1);
-      expect(next).toHaveBeenCalledWith(expect.objectContaining({ id: 'node-a' }), expect.any(Number));
+      expect(next).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'node-a' }),
+        expect.any(Number),
+        expect.any(Number),
+      );
     });
 
     it('returns the next firing of the same node and caches it', async () => {
@@ -13156,6 +13161,94 @@ describe('AnomalyService', () => {
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0][0]).toContain('20 signals');
         expect(warn.mock.calls[0][0]).toContain('lookup budget exhausted');
+      });
+
+      const openSignals = (end: number) => {
+        for (let i = 0; i < 20; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+      };
+
+      it('gives later batches only what is left of the budget', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        let calls = 0;
+        const next = jest.spyOn(service as any, 'nextFiring').mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              if (++calls <= 8) setTimeout(() => resolve(null), 6_000);
+            }),
+        );
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        let settled = false;
+
+        const listed = service
+          .getIncidentTimelines(undefined, end - 60 * MIN, end)
+          .finally(() => (settled = true));
+        await jest.advanceTimersByTimeAsync(10_000);
+
+        expect(settled).toBe(true);
+        await listed;
+        expect(next).toHaveBeenCalledTimes(16);
+        expect(warn.mock.calls[0][0]).toContain('12 signals');
+      });
+
+      it('looks up the signals skipped by the previous load first', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const next = jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        const load = async () => {
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          await listed;
+        };
+
+        await load();
+        const first = next.mock.calls.map(([s]: any[]) => s.id);
+        (service as any).nextFiringInFlight.clear();
+        next.mockClear();
+        await load();
+        const second = next.mock.calls.map(([s]: any[]) => s.id);
+
+        expect(second).toHaveLength(8);
+        expect(second.some((id: string) => first.includes(id))).toBe(false);
+      });
+
+      it('shares a lookup that is still in flight', async () => {
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
+
+        const first = (service as any).nextFiring(signal, after);
+        const second = (service as any).nextFiring(signal, after);
+
+        expect(second).toBe(first);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      it('stops paging past the deadline without caching a miss', async () => {
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        const page = Array.from({ length: 100 }, (_, i) => ({
+          ...anomaly({ id: `o-${i}`, timestamp: after + i + 1, connectionId: 'other' }),
+          anomalyType: 'spike',
+        }));
+        storage.getAnomalyEvents.mockResolvedValue(page);
+
+        await expect((service as any).nextFiring(signal, after, Date.now() - 1)).rejects.toThrow(
+          'lookup budget exhausted',
+        );
+
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+        expect((service as any).nextFiringCache.size).toBe(0);
+        expect((service as any).nextFiringInFlight.size).toBe(0);
       });
     });
 

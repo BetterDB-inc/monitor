@@ -426,6 +426,7 @@ const NEXT_FIRING_MAX_PAGES = 5;
 const NEXT_FIRING_MISS_TTL_MS = 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
 const NEXT_FIRING_BUDGET_MS = 10_000;
+const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7368,6 +7369,8 @@ export class AnomalyService
   private incidentRecoveryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, true);
   private incidentHistoryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, false);
   private nextFiringCache = new Map<string, CachedFiring>();
+  private nextFiringInFlight = new Map<string, Promise<AnomalyEvent | null>>();
+  private skippedNextFirings = new Set<string>();
 
   private probeRecovery(
     signal: Parameters<RecoveryProbe>[0],
@@ -7803,15 +7806,21 @@ export class AnomalyService
     const later: AnomalyEvent[] = [];
     const failures: { key: string; error: unknown }[] = [];
     const deadline = Date.now() + NEXT_FIRING_BUDGET_MS;
-    for (let i = 0; i < signals.length; i += NEXT_FIRING_CONCURRENCY) {
+    const ordered = this.skippedLookupsFirst(signals, after);
+    for (let i = 0; i < ordered.length; i += NEXT_FIRING_CONCURRENCY) {
       const remaining = deadline - Date.now();
       const batch = await Promise.all(
-        signals.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
+        ordered.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
           const key = signalKey(signal);
+          this.markLookupSkipped(`${after}\u0000${key}`, remaining <= 0);
           const lookup =
             remaining > 0
-              ? withTimeout(this.nextFiring(signal, after), remaining, 'lookup budget exhausted')
-              : Promise.reject(new Error('lookup budget exhausted'));
+              ? withTimeout(
+                  this.nextFiring(signal, after, deadline),
+                  remaining,
+                  NEXT_FIRING_BUDGET_EXHAUSTED,
+                )
+              : Promise.reject(new Error(NEXT_FIRING_BUDGET_EXHAUSTED));
           const stored = await lookup.catch((error: unknown) => {
             failures.push({ key, error });
             return null;
@@ -7827,6 +7836,21 @@ export class AnomalyService
     return later;
   }
 
+  private skippedLookupsFirst(signals: AnomalyEvent[], after: number): AnomalyEvent[] {
+    const skipped = (s: AnomalyEvent) =>
+      this.skippedNextFirings.has(`${after}\u0000${signalKey(s)}`) ? 0 : 1;
+    return [...signals].sort((a, b) => skipped(a) - skipped(b));
+  }
+
+  private markLookupSkipped(cacheKey: string, skipped: boolean): void {
+    this.skippedNextFirings.delete(cacheKey);
+    if (!skipped) return;
+    this.skippedNextFirings.add(cacheKey);
+    if (this.skippedNextFirings.size > NEXT_FIRING_CACHE_SIZE) {
+      this.skippedNextFirings.delete(this.skippedNextFirings.values().next().value!);
+    }
+  }
+
   private warnNextFiringFailures(failures: { key: string; error: unknown }[]): void {
     const [first] = failures;
     const reason = first.error instanceof Error ? first.error.message : String(first.error);
@@ -7836,15 +7860,35 @@ export class AnomalyService
     );
   }
 
-  private async nextFiring(signal: AnomalyEvent, after: number): Promise<AnomalyEvent | null> {
-    const key = signalKey(signal);
-    const cacheKey = `${after}\u0000${key}`;
-    const now = Date.now();
+  private nextFiring(
+    signal: AnomalyEvent,
+    after: number,
+    deadline = Infinity,
+  ): Promise<AnomalyEvent | null> {
+    const cacheKey = `${after}\u0000${signalKey(signal)}`;
     const cached = this.nextFiringCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) return cached.event;
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.event);
+    const inFlight = this.nextFiringInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const lookup = this.lookUpNextFiring(signal, after, cacheKey, deadline).finally(() =>
+      this.nextFiringInFlight.delete(cacheKey),
+    );
+    this.nextFiringInFlight.set(cacheKey, lookup);
+    return lookup;
+  }
+
+  private async lookUpNextFiring(
+    signal: AnomalyEvent,
+    after: number,
+    cacheKey: string,
+    deadline: number,
+  ): Promise<AnomalyEvent | null> {
+    const key = signalKey(signal);
+    const now = Date.now();
     let event: AnomalyEvent | null = null;
     let cursor: AnomalyEventCursor | undefined;
     for (let page = 0; page < NEXT_FIRING_MAX_PAGES && !event; page++) {
+      if (page > 0 && Date.now() >= deadline) throw new Error(NEXT_FIRING_BUDGET_EXHAUSTED);
       const rows = await this.storage.getAnomalyEvents({
         startTime: after + 1,
         metricType: signal.metricType,
