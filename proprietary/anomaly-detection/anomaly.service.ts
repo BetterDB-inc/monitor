@@ -7371,9 +7371,10 @@ export class AnomalyService
   private nextFiringCache = new Map<string, CachedFiring>();
   private nextFiringInFlight = new Map<
     string,
-    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number } }
+    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number }; startedAt: number }
   >();
-  private skippedNextFirings = new Set<string>();
+  private skippedNextFirings = new Map<string, number>();
+  private skipSequence = 0;
 
   private probeRecovery(
     signal: Parameters<RecoveryProbe>[0],
@@ -7845,17 +7846,20 @@ export class AnomalyService
   }
 
   private skippedLookupsFirst(signals: AnomalyEvent[], after: number): AnomalyEvent[] {
-    const skipped = (s: AnomalyEvent) =>
-      this.skippedNextFirings.has(`${after}\u0000${signalKey(s)}`) ? 0 : 1;
-    return [...signals].sort((a, b) => skipped(a) - skipped(b));
+    const skippedSince = (s: AnomalyEvent) =>
+      this.skippedNextFirings.get(`${after}\u0000${signalKey(s)}`) ?? Infinity;
+    return [...signals].sort((a, b) => skippedSince(a) - skippedSince(b));
   }
 
   private markLookupSkipped(cacheKey: string, skipped: boolean): void {
-    this.skippedNextFirings.delete(cacheKey);
-    if (!skipped) return;
-    this.skippedNextFirings.add(cacheKey);
+    if (!skipped) {
+      this.skippedNextFirings.delete(cacheKey);
+      return;
+    }
+    if (this.skippedNextFirings.has(cacheKey)) return;
+    this.skippedNextFirings.set(cacheKey, this.skipSequence++);
     if (this.skippedNextFirings.size > NEXT_FIRING_CACHE_SIZE) {
-      this.skippedNextFirings.delete(this.skippedNextFirings.values().next().value!);
+      this.skippedNextFirings.delete(this.skippedNextFirings.keys().next().value!);
     }
   }
 
@@ -7877,15 +7881,17 @@ export class AnomalyService
     const cached = this.cachedNextFiring(cacheKey);
     if (cached !== undefined) return Promise.resolve(cached);
     const inFlight = this.nextFiringInFlight.get(cacheKey);
-    if (inFlight) {
+    if (inFlight && Date.now() - inFlight.startedAt < NEXT_FIRING_BUDGET_MS) {
       inFlight.budget.deadline = Math.max(inFlight.budget.deadline, deadline);
       return inFlight.lookup;
     }
     const budget = { deadline };
-    const lookup = this.lookUpNextFiring(signal, after, cacheKey, budget).finally(() =>
-      this.nextFiringInFlight.delete(cacheKey),
-    );
-    this.nextFiringInFlight.set(cacheKey, { lookup, budget });
+    const lookup = this.lookUpNextFiring(signal, after, cacheKey, budget).finally(() => {
+      if (this.nextFiringInFlight.get(cacheKey)?.budget === budget) {
+        this.nextFiringInFlight.delete(cacheKey);
+      }
+    });
+    this.nextFiringInFlight.set(cacheKey, { lookup, budget, startedAt: Date.now() });
     return lookup;
   }
 
@@ -7920,6 +7926,7 @@ export class AnomalyService
       const last = rows[rows.length - 1];
       cursor = { timestamp: last.timestamp, id: last.id };
     }
+    if (this.nextFiringInFlight.get(cacheKey)?.budget !== budget) return event;
     this.nextFiringCache.delete(cacheKey);
     this.nextFiringCache.set(cacheKey, {
       event,

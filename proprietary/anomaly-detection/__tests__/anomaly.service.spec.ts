@@ -13221,6 +13221,52 @@ describe('AnomalyService', () => {
         expect(second.some((id: string) => first.includes(id))).toBe(false);
       });
 
+      it('serves the longest-skipped signals first across loads', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const next = jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        const load = async () => {
+          next.mockClear();
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          await listed;
+          return next.mock.calls.map(([s]: any[]) => s.id);
+        };
+
+        await load();
+        await load();
+        const third = await load();
+
+        expect(third.slice(0, 4).sort()).toEqual(['c-16', 'c-17', 'c-18', 'c-19']);
+      });
+
+      it('starts a fresh lookup once a shared one outlives the budget', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        const firing = { ...anomaly({ id: 'a-again', timestamp: after + MIN }), anomalyType: 'spike' };
+        let releaseStale!: (rows: any[]) => void;
+        storage.getAnomalyEvents
+          .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
+          .mockResolvedValueOnce([firing]);
+
+        const stale = (service as any).nextFiring(signal, after);
+        await jest.advanceTimersByTimeAsync(10_000);
+        const fresh = (service as any).nextFiring(signal, after);
+
+        await expect(fresh).resolves.toMatchObject({ id: 'a-again' });
+        releaseStale([]);
+        await expect(stale).resolves.toBeNull();
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+        await expect((service as any).nextFiring(signal, after)).resolves.toMatchObject({
+          id: 'a-again',
+        });
+      });
+
       it('shares a lookup that is still in flight', async () => {
         const after = Date.now() - 24 * 60 * MIN;
         const signal = anomaly({ id: 'a', timestamp: after - MIN });
