@@ -616,6 +616,27 @@ used_cpu_user:20.3\r
       ]);
     });
 
+    it("stops waiting for the connection's own node when it does not answer", async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        mockClient.call.mockImplementation(() => new Promise(() => undefined));
+        jest.spyOn((service as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
+
+        let settled = false;
+        const pending = service.getSlotMigrations('conn-1').finally(() => {
+          settled = true;
+        });
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        expect(settled).toBe(true);
+        await expect(pending).resolves.toEqual([]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('should handle errors gracefully', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Connection failed'));
 

@@ -895,7 +895,13 @@ export class ClusterMetricsService {
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
       const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        await readNode(self, this.connectionRegistry.get(connectionId).getClient());
+        // The connection's own client is shared, so a reply that never comes
+        // is left queued on it rather than disconnecting it; only the wait ends.
+        await withTimeout(
+          readNode(self, this.connectionRegistry.get(connectionId).getClient()),
+          NODE_COMMAND_TIMEOUT_MS,
+          `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+        );
       } catch (error) {
         this.logger.error(
           `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
