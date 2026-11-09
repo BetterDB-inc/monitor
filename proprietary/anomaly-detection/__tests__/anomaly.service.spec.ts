@@ -26,6 +26,7 @@ import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
+import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
 import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_PERSIST_BACKLOG,
@@ -4654,7 +4655,6 @@ describe('AnomalyService', () => {
           .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
 
         expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'errors' });
-        expect(event.message).toContain('Client attribution unavailable.');
         expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
           expect.objectContaining({
             connectionId: 'conn-1',
@@ -4663,6 +4663,21 @@ describe('AnomalyService', () => {
           }),
         );
         expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      });
+
+      it('says client names are unavailable on a fan-out node', async () => {
+        captureClients = growingClients();
+
+        await runRetry({ realEmit: true, nodeAddr: NODE });
+        const [event] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+        expect(event.message.endsWith(NODE_ATTRIBUTION_UNAVAILABLE)).toBe(true);
+        expect(event.message).not.toContain('Client attribution unavailable.');
+        expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+          expect.objectContaining({ topContributors: null }),
+        );
       });
 
       it('judges the node without the seed latency or saturation', async () => {
