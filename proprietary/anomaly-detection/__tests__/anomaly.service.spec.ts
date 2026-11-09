@@ -13313,6 +13313,33 @@ describe('AnomalyService', () => {
         expect(resolvedIds()).toEqual(['old-1']);
       });
 
+      it('does not seed its own backlog level from a node-tagged open row', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
+            ? [{ id: 'node-backlog', nodeAddr: '10.0.1.5:6379', severity: AnomalySeverity.CRITICAL }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        expect((service as any).backlogCoverage.get('conn-1')?.level).not.toBe('critical');
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+        expect((service as any).staleBacklogEventIds.get('conn-1') ?? []).not.toContain('node-backlog');
+      });
+
+      it('does not adopt a node-tagged resync row as its own', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [{ id: 'node-resync', nodeAddr: '10.0.1.5:6379', replicaAddr: '10.0.1.6:6379', timestamp: clock }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        const tracked = (service as any).resyncEscalationEvents.get('conn-1') ?? [];
+        expect(tracked.map((e: { id: string }) => e.id)).not.toContain('node-resync');
+      });
+
       it('retries a failed resolve on the next poll', async () => {
         const id = '11111111-1111-4111-8111-111111111111';
         openBacklogRows(id);

@@ -2162,15 +2162,9 @@ export class AnomalyService
         this.clientSaturationEventIds.set(connectionId, [...tracked, ...untracked]);
       }
       this.seedClientSaturationLevel(connectionId, rows(MetricType.CLIENT_SATURATION));
-      this.seedBacklogCoverageLevel(connectionId, rows(MetricType.BACKLOG_COVERAGE_RISK));
-
-      const current = this.backlogCoverageEventIds.get(connectionId);
-      const stale = rows(MetricType.BACKLOG_COVERAGE_RISK)
-        .map((e) => e.id)
-        .filter((id) => id !== current);
-      if (stale.length > 0) this.staleBacklogEventIds.set(connectionId, stale);
-
-      this.adoptResyncEvents(connectionId, rows(MetricType.RESYNC_ESCALATION));
+      const seedRows = (metricType: MetricType) => rows(metricType).filter((e) => !e.nodeAddr);
+      this.adoptBacklogEvents(connectionId, seedRows(MetricType.BACKLOG_COVERAGE_RISK));
+      this.adoptResyncEvents(connectionId, seedRows(MetricType.RESYNC_ESCALATION));
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
@@ -2204,6 +2198,13 @@ export class AnomalyService
     if (AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[current]) {
       this.clientSaturationLevel.set(connectionId, level);
     }
+  }
+
+  private adoptBacklogEvents(key: string, open: StoredAnomalyEvent[]): void {
+    this.seedBacklogCoverageLevel(key, open);
+    const current = this.backlogCoverageEventIds.get(key);
+    const stale = open.map((e) => e.id).filter((id) => id !== current);
+    if (stale.length > 0) this.staleBacklogEventIds.set(key, stale);
   }
 
   private seedBacklogCoverageLevel(connectionId: string, open: StoredAnomalyEvent[]): void {
