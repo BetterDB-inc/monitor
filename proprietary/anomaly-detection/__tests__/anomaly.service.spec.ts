@@ -13289,6 +13289,27 @@ describe('AnomalyService', () => {
         });
       });
 
+      it('keeps a pending replacement when the stale lookup settles first', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        let releaseStale!: (rows: any[]) => void;
+        storage.getAnomalyEvents
+          .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
+          .mockImplementationOnce(() => new Promise(() => undefined));
+
+        const stale = (service as any).nextFiring(signal, after);
+        await jest.advanceTimersByTimeAsync(10_000);
+        const fresh = (service as any).nextFiring(signal, after);
+        releaseStale([]);
+        await stale;
+        const third = (service as any).nextFiring(signal, after);
+
+        expect(third).toBe(fresh);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+        expect((service as any).nextFiringCache.size).toBe(0);
+      });
+
       it('shares a lookup that is still in flight', async () => {
         const after = Date.now() - 24 * 60 * MIN;
         const signal = anomaly({ id: 'a', timestamp: after - MIN });
