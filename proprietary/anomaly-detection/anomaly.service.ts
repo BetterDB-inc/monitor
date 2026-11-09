@@ -4209,7 +4209,6 @@ export class AnomalyService
   ): Promise<RetryAmplificationContributor[] | null> {
     const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
     let summary: ClientCaptureSummary = { captures: [], connections: [] };
-    let baselineRead = false;
     let snapshotsLoaded = true;
     const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
     const baselineStart =
@@ -4219,19 +4218,22 @@ export class AnomalyService
     // One storage read spans the whole attribution range, so a connection
     // carries one identity (the name of its newest reading) in the baseline,
     // the episode and the newest capture alike; the span is split into
-    // baseline and episode here.
+    // baseline and episode here. It is the only read: if it fails or hangs,
+    // the ranking by command rate still stands.
     try {
-      [summary, baselineRead] = await withTimeout(
-        Promise.all([
-          this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until),
-          this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
-        ]),
+      summary = await withTimeout(
+        this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
+    // Every capture lists the monitor's own connection, so a baseline with
+    // client readings has a capture group in it.
+    const baselineRead = summary.captures.some(
+      (row) => row.capturedAt >= baselineStart && row.capturedAt < episodeStart,
+    );
     const capture = latestCaptureGroups(summary, episodeStart);
     const reconnectsKnown =
       snapshotsLoaded &&
@@ -4261,20 +4263,6 @@ export class AnomalyService
     });
     if (ranked.length > 0) return ranked;
     return reconnectsKnown && ratesKnown ? [] : null;
-  }
-
-  private async hasClientReadings(
-    connectionId: string,
-    startTime: number,
-    endTime: number,
-  ): Promise<boolean> {
-    const readings = await this.storage.getClientSnapshots({
-      connectionId,
-      startTime,
-      endTime,
-      limit: 1,
-    });
-    return readings.length > 0;
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {

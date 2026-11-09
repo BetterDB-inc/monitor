@@ -4892,9 +4892,8 @@ describe('AnomalyService', () => {
 
       const { recorded } = await runRetry();
 
-      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ connectionId: 'conn-1', limit: 1 }),
-      );
+      // The baseline's client readings come from the capture summary.
+      expect(storage.getClientSnapshots).not.toHaveBeenCalled();
       expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
       expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
         expect.objectContaining({ key: 'checkout', keyKind: 'name' }),
@@ -4948,6 +4947,47 @@ describe('AnomalyService', () => {
       });
     });
 
+    describe('when the client snapshot read fails', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const attribute = () =>
+        (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
+
+      beforeEach(() => {
+        storage.getClientCaptureSummary = jest.fn().mockResolvedValue(
+          summarizeClientCaptures([
+            // Captured in the baseline too, so it has client readings.
+            ...pooled(worker, 590_000),
+            ...pooled(worker, 780_000),
+            ...opened(worker, 60, 650_000, 680_000, 780_000),
+          ]),
+        );
+      });
+
+      it('still ranks reconnects after a rejected read', async () => {
+        storage.getClientSnapshots = jest.fn().mockRejectedValue(new Error('slow'));
+
+        expect(await attribute()).toEqual([
+          expect.objectContaining({ key: 'worker', newConnections: 60 }),
+        ]);
+      });
+
+      it('still ranks reconnects after a read that hangs', async () => {
+        jest.useFakeTimers();
+        try {
+          storage.getClientSnapshots = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+          const attribution = attribute();
+          await jest.advanceTimersByTimeAsync(5_000);
+
+          await expect(attribution).resolves.toEqual([
+            expect.objectContaining({ key: 'worker', newConnections: 60 }),
+          ]);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+    });
+
     it('leaves command growth out when the pre-episode readings fall in the previous episode', async () => {
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
       const reading = (takenAt: number, totalCommands: number) => ({
@@ -4981,6 +5021,8 @@ describe('AnomalyService', () => {
         storage.getClientCaptureSummary = jest
           .fn()
           .mockResolvedValue(summarizeClientCaptures([
+            // Captured in the baseline left after the previous episode.
+            ...pooled(worker, 590_000),
             ...pooled(worker, 660_000),
             ...opened(worker, reconnects, 650_000, 660_000),
           ]));
@@ -5191,9 +5233,6 @@ describe('AnomalyService', () => {
       const ranked = await (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
 
       expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
-      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ startTime: 420_000, endTime: 599_999, limit: 1 }),
-      );
       // 25 reconnects during the episode against 20 in the span before it.
       expect(ranked).toBeNull();
     });
@@ -5228,9 +5267,6 @@ describe('AnomalyService', () => {
       );
 
       expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
-      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ startTime: 510_000, endTime: 599_999 }),
-      );
       expect(ranked).toEqual([]);
     });
 
@@ -5333,8 +5369,10 @@ describe('AnomalyService', () => {
         .mockResolvedValue(summarizeClientCaptures([
           ...pooled(worker, 780_000),
           ...opened(worker, 1, 650_000, 680_000, 780_000),
-          // The highest ids at two captures, the first one before the cut.
+          // The highest ids at three captures, the first one before the cut;
+          // the growth is counted from the last one before the episode.
           numbered(worker, 100, 500, 505_000),
+          numbered(worker, 100, 585, 590_000),
           numbered(worker, 130, 1, 650_000),
         ]));
 
@@ -5438,7 +5476,9 @@ describe('AnomalyService', () => {
       ]);
       storage.getClientCaptureSummary = jest
         .fn()
-        .mockImplementation(async (_id: string, _since: number, until: number) => summarizeClientCaptures([
+        .mockImplementation(async (_id: string, since: number, until: number) => summarizeClientCaptures([
+          // Captured at the start of the span, so the baseline has client readings.
+          ...pooled(worker, since + 100_000),
           ...pooled(worker, until),
           // Three reconnects during the episode, two of them gone by the newest capture.
           ...opened(worker, 2, until - 2_000, until - 1_000),
@@ -5447,10 +5487,7 @@ describe('AnomalyService', () => {
 
       await runRetry();
 
-      expect(storage.getClientSnapshots).toHaveBeenCalledTimes(1);
-      expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-        expect.objectContaining({ limit: 1 }),
-      );
+      expect(storage.getClientSnapshots).not.toHaveBeenCalled();
       expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
         expect.objectContaining({ key: 'worker', connections: 2, newConnections: 3 }),
       ]);
@@ -5466,7 +5503,9 @@ describe('AnomalyService', () => {
       ]);
       storage.getClientCaptureSummary = jest
         .fn()
-        .mockImplementation(async (_id: string, _since: number, until: number) => summarizeClientCaptures([
+        .mockImplementation(async (_id: string, since: number, until: number) => summarizeClientCaptures([
+          // Captured at the start of the span, so the baseline has client readings.
+          ...pooled(worker, since + 100_000),
           ...pooled(worker, until),
           ...opened(worker, 3, until - 1_000, until),
         ]));
@@ -5825,9 +5864,6 @@ describe('AnomalyService', () => {
         await emitAfterGap();
 
         expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 140_000, 500_000);
-        expect(storage.getClientSnapshots).toHaveBeenCalledWith(
-          expect.objectContaining({ startTime: 140_000, endTime: 319_999 }),
-        );
       });
 
       it('dates the event at the end of the episode', async () => {
