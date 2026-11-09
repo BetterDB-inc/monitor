@@ -524,17 +524,18 @@ describe('PrometheusService slot stats', () => {
     expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
   });
 
-  function asMemberOfSeed(harness: Harness, seedExported: boolean): { coveredBySeed: jest.Mock } {
+  function asMemberOfSeed(
+    harness: Harness,
+    seedExported: boolean,
+  ): { coveredBySeed: jest.Mock; getClusterSlotStatsResult: jest.Mock; usesClusterWideSlotStats: jest.Mock } {
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
     const clusterMetrics = {
       getClusterSlotStatsResult: jest.fn(),
-      usesClusterWideSlotStats: jest.fn(() => false),
-      coveredBySeed: jest.fn(() => true),
+      usesClusterWideSlotStats: jest.fn((id: string) => id === 'seed'),
+      coveredBySeed: jest.fn((id: string) => id === 'conn-1'),
     };
     const service = harness.service as unknown as {
       clusterMetricsService: unknown;
-      metricsPassId: number;
-      slotStatsPass: Map<string, number>;
       connectionRegistry: { getConfig: jest.Mock };
     };
     service.clusterMetricsService = clusterMetrics;
@@ -549,9 +550,67 @@ describe('PrometheusService slot stats', () => {
       if (id === 'seed') return { host: '10.0.0.2', port: 6379 };
       return null;
     });
-    if (seedExported) service.slotStatsPass.set('seed', service.metricsPassId);
+    if (seedExported) seedSlotsSeenAt(harness, Date.now());
     return clusterMetrics;
   }
+
+  function seedSlotsSeenAt(harness: Harness, at: number): void {
+    const seedState = harness.service['getConnectionState']('seed');
+    seedState.currentClusterSlotLabels = new Set(['1']);
+    seedState.clusterSlotSeenAt = new Map([['1', at]]);
+  }
+
+  it('exports no slot series for a member whose seed is still reading the cluster', async () => {
+    const harness = buildService();
+    const clusterMetrics = asMemberOfSeed(harness, false);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+    // The seed's fan-out is under way: it exports this node's slots when it returns.
+    let finishFanOut!: (result: unknown) => void;
+    clusterMetrics.getClusterSlotStatsResult.mockReturnValue(new Promise((resolve) => (finishFanOut = resolve)));
+    const seedClient = {
+      ...harness.client,
+      getCapabilities: jest.fn().mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true }),
+    };
+    const seedPass = harness.service['updateSlotStatsMetrics'](
+      seedClient as never,
+      'seed',
+      '10.0.0.2:6379',
+      harness.service['getConnectionState']('seed'),
+      harness.service['currentEpoch']('seed'),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await runSlotStats(harness);
+    finishFanOut({ stats: { '1': slot(7) }, failedNodes: [], failedSlotRanges: [] });
+    await seedPass;
+
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+    expect(await harness.service.getMetrics()).not.toContain(`betterdb_cluster_slot_keys{connection="${LABEL}"`);
+    expect(await harness.service.getMetrics()).toContain('betterdb_cluster_slot_keys{connection="10.0.0.2:6379",slot="1"} 7');
+  });
+
+  it('exports no slot series for a member whose seed kept its last series this pass', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    // The seed's pass ran out of time and kept the series it read a pass ago.
+    seedSlotsSeenAt(harness, Date.now() - 5_000);
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
+  });
+
+  it('exports a member\'s own slots once its seed\'s series are older than the staleness bound', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    seedSlotsSeenAt(harness, Date.now() - stalenessMs - 1);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
+  });
 
   it('exports no slot series for a member whose seed exported them this pass', async () => {
     const harness = buildService();
@@ -564,7 +623,7 @@ describe('PrometheusService slot stats', () => {
     expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_slot_keys{');
   });
 
-  it('keeps a member exporting its own slots when its seed did not export this pass', async () => {
+  it('keeps a member exporting its own slots when its seed holds no slot series', async () => {
     const harness = buildService();
     asMemberOfSeed(harness, false);
     harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });

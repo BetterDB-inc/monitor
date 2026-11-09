@@ -242,11 +242,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private perConnectionState = new Map<string, ConnectionMetricState>();
   // When the current INFO pass of each connection is abandoned by its bound.
   private passDeadlines = new Map<string, number>();
-  // One id per poll tick, shared by every connection in that tick. A member's
-  // slot series are dropped only when its seed published slots under this id.
-  private metricsPassId = 0;
-  private metricsPassActive = 0;
-  private slotStatsPass = new Map<string, number>();
+  // Seeds whose cluster-wide slot-stats fan-out is running. Their members
+  // export no slot series of their own meanwhile.
+  private slotStatsFanOuts = new Set<string>();
   // Metric-type and pattern labels last published per anomaly summary label.
   // Keyed by label rather than connection id, so connections that share a
   // host:port share one summary instead of overwriting each other.
@@ -574,18 +572,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
-    // Connections in one tick start together, before any of them awaits, so
-    // the first one opens the pass and the rest share it.
-    if (this.metricsPassActive === 0) this.metricsPassId += 1;
-    this.metricsPassActive += 1;
-    try {
-      await this.pollConnectionPass(ctx);
-    } finally {
-      this.metricsPassActive -= 1;
-    }
-  }
-
-  private async pollConnectionPass(ctx: ConnectionContext): Promise<void> {
     // One tick gets one interval in total. The base class waits for every
     // connection before the next tick, so stacking a second full bound here
     // would push healthy connections past their own staleness bound.
@@ -2847,13 +2833,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     // Its seed exports the whole cluster, this node's slots included; a second
     // copy here would count them twice in any sum across connections. Skip
-    // only when that seed published slots on this pass. A seed that is down,
-    // has no slot stats, or ran out of pass time exported nothing, and
-    // clearing here would drop the slots from Prometheus entirely.
+    // while that seed's fan-out runs or it holds series fresher than the
+    // staleness bound. A seed without slot stats holds none, nor does one that
+    // is down or keeps running out of pass time once its series are older than
+    // that; clearing here then would drop the slots from Prometheus entirely.
     if (
       client.getCapabilities().clusterEnabled &&
       this.clusterMetricsService?.coveredBySeed(connectionId) &&
-      this.seedExportedSlotStatsThisPass(connectionId)
+      this.seedHoldsSlotStats(connectionId)
     ) {
       this.clearSlotSeries(connLabel, state);
       return;
@@ -2874,13 +2861,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         if (remainingMs < SLOT_STATS_MIN_BUDGET_MS) {
           return;
         }
-        result = await this.clusterMetricsService.getClusterSlotStatsResult(
-          'key-count',
-          this.slotStatsTopN,
-          connectionId,
-          Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
-          Math.min(NODE_COMMAND_TIMEOUT_MS, this.pollIntervalMs),
-        );
+        this.slotStatsFanOuts.add(connectionId);
+        try {
+          result = await this.clusterMetricsService.getClusterSlotStatsResult(
+            'key-count',
+            this.slotStatsTopN,
+            connectionId,
+            Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
+            Math.min(NODE_COMMAND_TIMEOUT_MS, this.pollIntervalMs),
+          );
+        } finally {
+          this.slotStatsFanOuts.delete(connectionId);
+        }
       } else {
         result = {
           stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN),
@@ -2919,7 +2911,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       state.currentClusterSlotLabels = newSlotLabels;
-      this.slotStatsPass.set(connectionId, this.metricsPassId);
     } catch (slotStatsError) {
       const disabled = this.runtimeCapabilityTracker.recordFailure(
         connectionId,
@@ -2933,11 +2924,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
   }
 
-  /** The seed published slot stats during the pass this connection is in. */
-  private seedExportedSlotStatsThisPass(connectionId: string): boolean {
+  /**
+   * The member's seed is reading the cluster's slot stats now, or holds slot
+   * series read within the staleness bound.
+   */
+  private seedHoldsSlotStats(connectionId: string): boolean {
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     if (membership?.seedId === undefined || membership.retiredAt !== undefined) return false;
-    return this.slotStatsPass.get(membership.seedId) === this.metricsPassId;
+    if (this.slotStatsFanOuts.has(membership.seedId)) return true;
+    const now = Date.now();
+    const seenAt = this.perConnectionState.get(membership.seedId)?.clusterSlotSeenAt.values() ?? [];
+    for (const at of seenAt) {
+      if (now - at <= this.stalenessMs) return true;
+    }
+    return false;
   }
 
   private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
