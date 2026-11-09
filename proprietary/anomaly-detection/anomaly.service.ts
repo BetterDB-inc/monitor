@@ -428,6 +428,7 @@ const NEXT_FIRING_CACHE_SIZE = 2_000;
 const NEXT_FIRING_BUDGET_MS = 10_000;
 const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
 const NEXT_FIRING_MIN_REMAINING_MS = 250;
+const NEXT_FIRING_SKIP_TTL_MS = 10 * 60_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7375,7 +7376,6 @@ export class AnomalyService
     { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number } }
   >();
   private skippedNextFirings = new Map<string, number>();
-  private skipSequence = 0;
 
   private probeRecovery(
     signal: Parameters<RecoveryProbe>[0],
@@ -7864,8 +7864,14 @@ export class AnomalyService
       return;
     }
     if (this.skippedNextFirings.has(cacheKey)) return;
-    if (this.skippedNextFirings.size >= NEXT_FIRING_CACHE_SIZE) return;
-    this.skippedNextFirings.set(cacheKey, this.skipSequence++);
+    const now = Date.now();
+    if (this.skippedNextFirings.size >= NEXT_FIRING_CACHE_SIZE) {
+      for (const [key, since] of this.skippedNextFirings) {
+        if (now - since > NEXT_FIRING_SKIP_TTL_MS) this.skippedNextFirings.delete(key);
+      }
+      if (this.skippedNextFirings.size >= NEXT_FIRING_CACHE_SIZE) return;
+    }
+    this.skippedNextFirings.set(cacheKey, now);
   }
 
   private warnNextFiringFailures(failures: { key: string; error: unknown }[]): void {

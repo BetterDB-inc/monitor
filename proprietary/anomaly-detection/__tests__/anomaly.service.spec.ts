@@ -13334,6 +13334,19 @@ describe('AnomalyService', () => {
         expect(skipped.size).toBe(2_000);
       });
 
+      it('makes room in a full skip list by dropping abandoned entries', () => {
+        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+        const now = Date.now();
+        for (let i = 0; i < 2_000; i++) skipped.set(`k-${i}`, i < 10 ? now - 11 * MIN : now);
+
+        (service as any).markLookupSkipped('newest', true);
+
+        expect(skipped.has('k-0')).toBe(false);
+        expect(skipped.has('k-10')).toBe(true);
+        expect(skipped.has('newest')).toBe(true);
+        expect(skipped.size).toBe(1_991);
+      });
+
       it('keeps a pending replacement when the stale lookup settles first', async () => {
         jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
         const after = Date.now() - 24 * 60 * MIN;
