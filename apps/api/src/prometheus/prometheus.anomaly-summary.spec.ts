@@ -398,6 +398,34 @@ describe('PrometheusService updateAnomalySummaries', () => {
     });
   });
 
+  it('keeps shared series when the label is released by a polled connection the survivor shares', async () => {
+    jest.useFakeTimers();
+    try {
+      const unlisted = new Set<string>();
+      const service = buildService(unlisted);
+      // Only the deleted connection is polled by this service; the survivor on
+      // the same host:port has anomaly series but no freshness entry.
+      service['freshness'].observe(SAME_HOST_CONNECTION_ID, CONNECTION_LABEL, Date.now());
+      publish(service, [
+        [CONNECTION_ID, busySummary],
+        [SAME_HOST_CONNECTION_ID, busySummary],
+      ]);
+      service.updateActiveIncidents([
+        { connectionIds: [CONNECTION_ID], patterns: ['retry_storm'], status: 'active' },
+      ]);
+
+      unlisted.add(SAME_HOST_CONNECTION_ID);
+      service.cleanupConnectionMetrics(SAME_HOST_CONNECTION_ID);
+      await jest.runAllTimersAsync();
+
+      for (const name of [...SUMMARY_GAUGES, 'betterdb_incident_active']) {
+        expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('ignores a connection deleted between polls when deciding whether a label is still shared', async () => {
     const unlisted = new Set<string>();
     const service = buildService(unlisted);

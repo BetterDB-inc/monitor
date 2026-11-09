@@ -91,8 +91,7 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
 
-const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
-  POLL_STALE_METRIC,
+const ANOMALY_SERIES: ReadonlySet<string> = new Set([
   'betterdb_anomaly_events_current',
   'betterdb_anomaly_by_severity',
   'betterdb_anomaly_by_metric',
@@ -100,6 +99,7 @@ const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
   'betterdb_correlated_groups_by_pattern',
   'betterdb_incident_active',
 ]);
+const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC, ...ANOMALY_SERIES]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
 
 /**
@@ -4335,7 +4335,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private dropSeriesForRemovedLabel(label: string): void {
-    this.removeSeriesForLabels(new Set([label]), NO_EXCLUSIONS).catch((error) => {
+    // A listed connection this service does not poll (a Sentinel, or one not
+    // polled yet) can still own the anomaly series under the label.
+    const excluded = this.hasAnomalyLabel(label) ? ANOMALY_SERIES : NO_EXCLUSIONS;
+    this.removeSeriesForLabels(new Set([label]), excluded).catch((error) => {
       this.logger.warn(
         `Failed to remove series for ${label}: ${error instanceof Error ? error.message : error}`,
       );
