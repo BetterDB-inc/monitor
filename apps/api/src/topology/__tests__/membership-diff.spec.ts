@@ -111,6 +111,15 @@ describe('seedIsAlias', () => {
     }
   });
 
+  it('matches an IPv6 address whatever form DNS or the node spells it in', () => {
+    const ipv6Nodes = [
+      node('a', '[fd00:0:0:0:0:0:0:1]:6379@16379', ['myself', 'master']),
+      node('b', '[FD00::2]:6379@16379', ['slave']),
+    ];
+    expect(seedIsAlias(seed, ['fd00::1'], ipv6Nodes)).toBe(false);
+    expect(seedIsAlias(seed, ['fd00:0000::2'], ipv6Nodes)).toBe(true);
+  });
+
   it('ignores addresses on another port', () => {
     expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBeNull();
   });

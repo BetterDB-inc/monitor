@@ -1,4 +1,5 @@
 import type { TopologyKind, TopologyMembership, TopologyRole } from '@betterdb/shared';
+import { isIP } from 'node:net';
 import type { DiscoveredNode } from '../cluster/cluster-discovery.service';
 
 export interface DesiredNode {
@@ -82,18 +83,29 @@ const GHOST_FLAGS = ['fail', 'fail?', 'noaddr', 'handshake'];
  * An announced hostname is not enough on its own: any node can announce a name
  * that a Service in front of several nodes also answers to.
  */
+/** Lowercased, with an IPv6 address in its compressed form, so either spelling matches. */
+function comparableHost(host: string): string {
+  const lower = host.toLowerCase();
+  if (isIP(lower) !== 6) return lower;
+  try {
+    return new URL(`http://[${lower}]/`).hostname.slice(1, -1);
+  } catch {
+    return lower;
+  }
+}
+
 export function seedIsAlias(
   seed: { host: string; port: number },
   seedAddresses: string[],
   nodes: DiscoveredNode[],
 ): boolean | null {
-  const seedHosts = new Set([seed.host, ...seedAddresses].map((address) => address.toLowerCase()));
+  const seedHosts = new Set([seed.host, ...seedAddresses].map(comparableHost));
   const matched = nodes.filter((node) => {
     // A failed or suspected-failed node, or a handshake, left behind on a reused IP is not a node
     // the seed reaches; only `myself` counts whatever its flags.
     if (!node.flags.includes('myself') && node.flags.some((flag) => GHOST_FLAGS.includes(flag))) return false;
     const parsed = parseNodeAddress(node.address);
-    return parsed !== null && parsed.port === seed.port && seedHosts.has(parsed.host.toLowerCase());
+    return parsed !== null && parsed.port === seed.port && seedHosts.has(comparableHost(parsed.host));
   });
   if (matched.length === 0) return null;
   return !(matched.length === 1 && matched[0].flags.includes('myself'));
