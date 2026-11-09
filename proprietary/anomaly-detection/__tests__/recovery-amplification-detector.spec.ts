@@ -660,6 +660,21 @@ describe('recovery amplification rule', () => {
     ]);
   });
 
+  it('attaches reconnect churn to every repeat it falls within', () => {
+    const entries = [
+      entry(MetricType.RESYNC_ESCALATION, T0),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 60_000),
+      entry(MetricType.CONNECTION_CHURN, T0 + 90_000),
+      entry(MetricType.RESYNC_ESCALATION, T0 + 120_000),
+      entry(MetricType.FORK_MEMORY_RISK, T0 + 180_000),
+    ];
+
+    expect(matchSequences(entries, rule()).map((m) => m.map((e) => e.timestamp))).toEqual([
+      [T0, T0 + 60_000, T0 + 90_000],
+      [T0 + 120_000, T0 + 180_000, T0 + 90_000],
+    ]);
+  });
+
   it('ignores a cost on another connection', () => {
     const entries = [
       entry(MetricType.RESYNC_ESCALATION, T0),

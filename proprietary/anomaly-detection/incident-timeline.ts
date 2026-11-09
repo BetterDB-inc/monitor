@@ -175,6 +175,10 @@ export function stepNumberOf(rule: SequenceRule, matched: readonly RuleStepEvent
   return position < rule.steps.length - opened ? position + opened + 1 : null;
 }
 
+export function requiredOf<E extends RuleStepEvent>(rule: SequenceRule, matched: readonly E[]): E[] {
+  return matched.slice(0, rule.steps.length - (opensAt(rule, matched[0]) ?? 0));
+}
+
 export function matchSequence<E extends RuleStepEvent>(
   entries: E[],
   rule: SequenceRule,
@@ -297,7 +301,7 @@ export function matchSequences<E extends RuleStepEvent>(
     matched = matchSequence(remaining, rule, accept)
   ) {
     matches.push(matched);
-    const used = matched;
+    const used = requiredOf(rule, matched);
     remaining = remaining.filter((e) => !used.includes(e));
   }
   return matches;
@@ -585,15 +589,17 @@ export class IncidentTimelineBuilder {
   }
 
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
-    return this.rules().some((rule) =>
-      rule.steps.some(
-        (step, i) =>
-          fills(rule, step, event) &&
-          (i === 0
-            ? precedesLeadStep(current, event, rule)
-            : reachesStep(current, event, rule, i) ||
-              (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
-      ),
+    return this.rules().some(
+      (rule) =>
+        rule.steps.some(
+          (step, i) =>
+            fills(rule, step, event) &&
+            (i === 0
+              ? precedesLeadStep(current, event, rule)
+              : reachesStep(current, event, rule, i) ||
+                (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
+        ) ||
+        (fills(rule, rule.optionalMetrics, event) && reachesStep(current, event, rule, rule.steps.length)),
     );
   }
 
@@ -685,12 +691,14 @@ export class IncidentTimelineBuilder {
         });
       }
     }
-    const superseded = ({ match, matched }: (typeof found)[number]) =>
-      found.some(
+    const superseded = ({ rule, match, matched }: (typeof found)[number]) => {
+      const required = requiredOf(rule, matched);
+      return found.some(
         (other) =>
           other.rule.supersedes?.includes(match.pattern) &&
-          other.matched.some((e) => matched.includes(e)),
+          requiredOf(other.rule, other.matched).some((e) => required.includes(e)),
       );
+    };
     const sequenceMatches: IncidentSequenceMatch[] = [];
     const recommendedBy = new Map<string, AnomalyPattern>();
     for (const { match } of found.filter((f) => !superseded(f))) {

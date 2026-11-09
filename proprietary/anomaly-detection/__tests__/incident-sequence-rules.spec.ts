@@ -414,6 +414,23 @@ describe('incident sequence rules', () => {
       },
     );
 
+    it('keeps saturation that follows the retry amplification after a quiet gap in the storm', () => {
+      const saturation = event(MetricType.REJECTED_CONNECTIONS, 4 * MIN);
+      const incidents = incidentsOf(
+        [event(MetricType.COMMAND_P99, 0), event(MetricType.RETRY_AMPLIFICATION, MIN), saturation],
+        [ruleFor(retryStorm)],
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].sequenceMatches[0].anomalyIds).toContain(saturation.id);
+    });
+
+    it('keeps saturation after a quiet gap in a churn-triggered storm', () => {
+      const retries = { ...event(MetricType.RETRY_AMPLIFICATION, 0), retryTrigger: 'churn' as const };
+
+      expect(incidentsOf([retries, event(MetricType.CLIENT_SATURATION, 4 * MIN)], [ruleFor(retryStorm)])).toHaveLength(1);
+    });
+
     it('does not match a churn drop followed by retry amplification', () => {
       const events = [drop(MetricType.CONNECTION_CHURN, 0), event(MetricType.RETRY_AMPLIFICATION, 2 * MIN)];
 

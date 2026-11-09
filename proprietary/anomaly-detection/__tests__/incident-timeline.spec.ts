@@ -1574,6 +1574,59 @@ describe('IncidentTimelineBuilder', () => {
 
       expect(incident.matchedPatterns).toEqual([AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE]);
     });
+
+    it('keeps a match that shares only an optional event with the compound match', () => {
+      const ops: SequenceRule = {
+        ...escalation,
+        pattern: AnomalyPattern.RESHARD_UNDER_WRITES,
+        steps: [[MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+      };
+      const withOptional: SequenceRule = {
+        ...compound,
+        steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
+        optionalMetrics: [MetricType.OPS_PER_SEC],
+      };
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [ops, withOptional]).build(
+        [
+          event({ metricType: MetricType.RESHARD_SHARD_SKEW }),
+          event({ timestamp: T0 + MIN, metricType: MetricType.REPLICATION_DIVERGENCE }),
+          event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC }),
+          event({ timestamp: T0 + 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+        AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
+      ]);
+    });
+  });
+
+  describe('an optional signal after a quiet gap', () => {
+    const withOptional: SequenceRule = { ...escalation, optionalMetrics: [MetricType.EVICTED_KEYS] };
+    const build = (...earlier: MetricType[]) =>
+      new IncidentTimelineBuilder({}, undefined, () => [withOptional]).build(
+        [
+          ...earlier.map((metricType, i) => event({ timestamp: T0 + i * MIN, metricType })),
+          event({ timestamp: T0 + 5 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+    it('joins an incident in which its rule matched within the span', () => {
+      expect(build(MetricType.CONNECTIONS, MetricType.MEMORY_USED)).toHaveLength(1);
+    });
+
+    it('does not join an incident in which its rule only started', () => {
+      expect(build(MetricType.CONNECTIONS)).toHaveLength(2);
+    });
+
+    it('does not join an incident without its rule', () => {
+      expect(build(MetricType.FRAGMENTATION_RATIO)).toHaveLength(2);
+    });
   });
 
   describe('mergeRuleSteps', () => {
