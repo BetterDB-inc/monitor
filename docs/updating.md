@@ -121,9 +121,12 @@ connection or storage setting that was applied only with `--set`, and the
 upgrade then drops it:
 
 ```bash
-helm get values betterdb-monitor -n betterdb -o yaml > betterdb-values.yaml
-helm upgrade betterdb-monitor betterdb/betterdb-monitor \
-  --namespace betterdb -f betterdb-values.yaml
+# The overrides can hold credentials: mktemp creates a file only you can read.
+values="$(mktemp)"
+helm get values betterdb-monitor -n betterdb -o yaml > "$values" &&
+  helm upgrade betterdb-monitor betterdb/betterdb-monitor \
+    --namespace betterdb -f "$values"
+rm -f "$values"
 ```
 
 Don't override `image.tag` to update — leave it empty and let the chart's
@@ -178,9 +181,12 @@ logged them (its `run_id`), not only by the address they were read from. The
 first start after updating rebuilds the unique keys of `slow_log_entries` and
 `command_log_entries` before the API is ready, and drops the old keys. On a
 large database this counts against the startup probe. The chart allows 10
-minutes for it; an install upgraded with `--reuse-values` keeps the old 150
-seconds, so upgrade with `--reset-then-reuse-values` or set
-`startupProbe.failureThreshold` (e.g. `--set startupProbe.failureThreshold=120`).
+minutes for it. An install upgraded with `--reuse-values` keeps the old 150
+seconds, and so does one whose stored values set the threshold (a release
+installed from a full copy of the chart's `values.yaml`), whichever way it is
+upgraded. Check with `helm get values betterdb-monitor -n betterdb`, and
+upgrade with `--reset-then-reuse-values`, adding
+`--set startupProbe.failureThreshold=120` when the stored values set it.
 
 - **Stop the previous version first.** Do not roll this change through a
   deployment that still has the previous version running. Startup drops the

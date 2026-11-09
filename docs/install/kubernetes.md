@@ -133,10 +133,20 @@ file. A values file written by hand can omit a connection or storage setting
 that was applied only with `--set`, and the upgrade then drops it:
 
 ```bash
-helm get values betterdb-monitor -n betterdb -o yaml > betterdb-values.yaml
-helm upgrade betterdb-monitor betterdb/betterdb-monitor \
-  --namespace betterdb -f betterdb-values.yaml
+# The overrides can hold credentials: mktemp creates a file only you can read.
+values="$(mktemp)"
+helm get values betterdb-monitor -n betterdb -o yaml > "$values" &&
+  helm upgrade betterdb-monitor betterdb/betterdb-monitor \
+    --namespace betterdb -f "$values"
+rm -f "$values"
 ```
+
+Either way, an override stored on the release wins over the new default. A
+release installed from a full copy of the chart's `values.yaml` stores the old
+`startupProbe.failureThreshold` (30, 150 seconds), which a long first start
+after an update can exceed, restarting the pod again and again. Check with
+`helm get values betterdb-monitor -n betterdb`, and if it is set, add
+`--set startupProbe.failureThreshold=120` to the upgrade.
 
 The default image tag is pinned to the chart's `appVersion` (the `-no-ai`
 variant), so `helm upgrade` after a `repo update` moves you to the release the
