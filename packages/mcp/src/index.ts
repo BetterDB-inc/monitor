@@ -110,12 +110,23 @@ function switchTo(url: string, remember: boolean): void {
   activeInstanceId = instanceFor(url);
 }
 
+const replacedTargets = new WeakMap<MonitorTarget, MonitorTarget>();
+
+function currentTargetFor(from: MonitorTarget): MonitorTarget {
+  let to = from;
+  for (let next = replacedTargets.get(to); next && next !== from; next = replacedTargets.get(to)) {
+    to = next;
+  }
+  return to;
+}
+
 function restoreSessionAfterStop(): MonitorTarget | null {
   if (!sessionBeforeLocalMonitor) return null;
   const stopped = target;
   target = sessionBeforeLocalMonitor.target;
   activeInstanceId = sessionBeforeLocalMonitor.instanceId;
   sessionBeforeLocalMonitor = null;
+  replacedTargets.set(stopped, target);
   return stopped;
 }
 
@@ -148,16 +159,19 @@ function isJsonResponse(res: Response): boolean {
 }
 
 async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
+  let reachable = true;
   for (const prefix of API_PREFIXES) {
     try {
       const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
       if (res.ok && isJsonResponse(res)) {
+        to.prefix = prefix;
         return prefix;
       }
     } catch {
-      // network error — try next prefix
+      reachable = false;
     }
   }
+  if (reachable) to.prefix = '/api';
   return '/api';
 }
 
@@ -187,10 +201,8 @@ async function requestTo(
   body?: unknown,
   timeoutMs = 30_000,
 ): Promise<unknown> {
-  if (to.prefix === null) {
-    to.prefix = await detectPrefix(to, timeoutMs);
-  }
-  const res = await fetch(`${to.url}${to.prefix}${path}`, {
+  const prefix = to.prefix ?? (await detectPrefix(to, timeoutMs));
+  const res = await fetch(`${to.url}${prefix}${path}`, {
     method,
     headers: authHeaders(to, body !== undefined),
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -326,7 +338,7 @@ async function withTelemetry(
     error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     throw err;
   } finally {
-    const creditTarget = credit === 'switched' ? target : callTarget;
+    const creditTarget = credit === 'switched' ? target : currentTargetFor(callTarget);
     trackToolCall(creditTarget, { toolName, success, durationMs: Date.now() - start, error });
   }
 }
@@ -2272,6 +2284,17 @@ server.tool(
 );
 
 try {
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await stopTelemetry();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.stdin.on('end', shutdown);
+
   if (AUTOSTART) {
     const { startMonitor } = await import('./autostart.js');
     const result = await startMonitor({
@@ -2283,17 +2306,6 @@ try {
   }
 
   initTelemetry(sendTelemetry);
-
-  let shuttingDown = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await stopTelemetry();
-    process.exit(0);
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-  process.stdin.on('end', shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

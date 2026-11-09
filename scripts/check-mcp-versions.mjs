@@ -85,11 +85,21 @@ if (!pluginPin || !EXACT_VERSION.test(pluginPin)) {
   );
 }
 
+function mergeBase(ref) {
+  try {
+    return execFileSync('git', ['merge-base', ref, 'HEAD'], { cwd: repoRoot, encoding: 'utf8', stdio: 'pipe' }).trim();
+  } catch {
+    console.error(`no merge base between ${ref} and HEAD; fetch more history`);
+    process.exit(1);
+  }
+}
+
 if (baseRef) {
-  const baseManifest = readAtRef(baseRef, PLUGIN_MANIFEST);
+  const base = mergeBase(baseRef);
+  const baseManifest = readAtRef(base, PLUGIN_MANIFEST);
   if (baseManifest) {
     const baseVersion = JSON.parse(baseManifest).version;
-    const changed = changedSince(baseRef, PLUGIN_DIR);
+    const changed = changedSince(base, PLUGIN_DIR);
     if (changed.length > 0 && baseVersion === readJson(PLUGIN_MANIFEST).version) {
       problems.push(
         `${PLUGIN_DIR} changed (${changed.join(', ')}) but ${PLUGIN_MANIFEST} version is still ${baseVersion}`,

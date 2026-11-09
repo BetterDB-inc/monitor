@@ -60,6 +60,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref }}
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -70,7 +71,7 @@ jobs:
         run: node scripts/check-env-negatives.mjs
 
       - name: Fetch the base branch
-        run: git fetch --no-tags --depth=1 origin "$BASE_REF"
+        run: git fetch --no-tags origin "$BASE_REF"
         env:
           BASE_REF: ${{ github.base_ref || 'master' }}
 

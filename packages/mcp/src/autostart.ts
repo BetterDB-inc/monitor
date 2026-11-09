@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 const isWindows = process.platform === 'win32';
+const MONITOR_PACKAGE = '@betterdb/monitor';
 const npxCmd = isWindows ? 'npx.cmd' : 'npx';
 
 export const BETTERDB_DIR = path.join(os.homedir(), '.betterdb');
@@ -23,12 +24,33 @@ function terminate(pid: number | undefined): void {
   try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
 }
 
+function commandLineOf(pid: number): string {
+  const result = isWindows
+    ? spawnSync(
+        path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      )
+    : spawnSync('/bin/ps', ['-o', 'command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+  return result.stdout ?? '';
+}
+
+function isMonitorProcess(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  return commandLineOf(pid).includes(MONITOR_PACKAGE);
+}
+
 function registerEphemeralHandlers(): void {
   if (signalHandlersRegistered) return;
   signalHandlersRegistered = true;
   process.once('exit', () => { terminate(ephemeralChild?.pid); });
-  process.once('SIGTERM', () => { terminate(ephemeralChild?.pid); process.exit(0); });
-  process.once('SIGINT', () => { terminate(ephemeralChild?.pid); process.exit(0); });
 }
 
 const MCP_ENV = new Set([
@@ -52,12 +74,24 @@ export function monitorEnv(
     if (value === undefined || MCP_ENV.has(upperKey)) continue;
     if (upperKey.startsWith(MONITOR_ENV_PREFIX)) {
       const name = key.slice(MONITOR_ENV_PREFIX.length);
-      if (name && !RESERVED_MONITOR_ENV.has(name.toUpperCase())) overrides[name] = value;
+      if (name && !RESERVED_MONITOR_ENV.has(name.toUpperCase())) setEnv(overrides, name, value);
     } else {
-      inherited[key] = value;
+      setEnv(inherited, key, value);
     }
   }
-  return { ...inherited, ...defaults, ...overrides };
+  const env = inherited;
+  for (const [key, value] of [...Object.entries(defaults), ...Object.entries(overrides)]) {
+    setEnv(env, key, value);
+  }
+  return env;
+}
+
+function setEnv(env: Record<string, string>, key: string, value: string): void {
+  const upperKey = key.toUpperCase();
+  for (const existing of Object.keys(env)) {
+    if (existing.toUpperCase() === upperKey) delete env[existing];
+  }
+  env[key] = value;
 }
 
 async function checkHealth(port: number): Promise<boolean> {
@@ -106,15 +140,7 @@ export async function startMonitor(opts: {
     if (pid === null) {
       fs.unlinkSync(PID_FILE);
     } else {
-      let processAlive = false;
-      try {
-        process.kill(pid, 0);
-        processAlive = true;
-      } catch {
-        // Process not running
-      }
-
-      if (processAlive) {
+      if (isMonitorProcess(pid)) {
         if (await checkHealth(existingPort)) {
           return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
         }
@@ -151,7 +177,7 @@ export async function startMonitor(opts: {
   if (opts.persist) {
     // Persistent mode: detached, PID file written
     fs.mkdirSync(BETTERDB_DIR, { recursive: true });
-    child = spawn(npxCmd, ['--yes', '@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['--yes', MONITOR_PACKAGE, '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: 'ignore',
       detached: true,
@@ -173,7 +199,7 @@ export async function startMonitor(opts: {
     }
   } else {
     // Ephemeral mode: attached, cleaned up on exit
-    child = spawn(npxCmd, ['--yes', '@betterdb/monitor', '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
+    child = spawn(npxCmd, ['--yes', MONITOR_PACKAGE, '--no-setup', '--port', String(opts.port), '--storage-type', opts.storage], {
       env,
       stdio: ['ignore', 'ignore', 'pipe'],
       shell: isWindows,
@@ -219,14 +245,8 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
     try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
     return { stopped: true, message: 'Removed corrupted PID file.', url };
   }
-  let wasRunning = false;
-  try {
-    process.kill(pid, 0);
-    wasRunning = true;
-    terminate(pid);
-  } catch {
-    // Process not running — stale PID file
-  }
+  const wasRunning = isMonitorProcess(pid);
+  if (wasRunning) terminate(pid);
 
   if (wasRunning) {
     // Wait for process to actually exit (up to 5s)
@@ -240,5 +260,5 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
   try { fs.unlinkSync(PID_FILE); } catch { /* already removed */ }
   return wasRunning
     ? { stopped: true, message: `Stopped monitor (PID ${pid}).`, url }
-    : { stopped: true, message: `Removed stale PID file (process ${pid} was not running).`, url };
+    : { stopped: true, message: `Removed stale PID file (process ${pid} is not a running monitor).`, url };
 }
