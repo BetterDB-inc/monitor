@@ -10422,6 +10422,7 @@ describe('AnomalyService', () => {
       (service as any).recentAnomalies = [];
       (service as any).recentAnomaliesByConnection = new Map();
       (service as any).summaryAnomalies = new Map();
+      (service as any).summaryEventCount = 0;
       for (const event of events) (service as any).addRecentAnomaly(event);
     }
 
@@ -10608,6 +10609,26 @@ describe('AnomalyService', () => {
       expect(summaryFor('conn-1')).toEqual(expect.objectContaining({ bySeverity: { info: max } }));
     });
 
+    it('caps the summary window in total by trimming the connection with the most events', () => {
+      (service as any).maxSummaryEvents = 5;
+      const quiet = anomaly('conn-2', AnomalySeverity.CRITICAL);
+      recent(quiet, ...Array.from({ length: 10 }, () => anomaly('conn-1', AnomalySeverity.INFO)));
+
+      const windows: Map<string, AnomalyEvent[]> = (service as any).summaryAnomalies;
+      expect(windows.get('conn-2')).toEqual([quiet]);
+      expect(windows.get('conn-1')).toHaveLength(4);
+      expect((service as any).summaryEventCount).toBe(5);
+    });
+
+    it('drops expired anomalies of a connection when it records a new one', () => {
+      const old = { ...anomaly('conn-1', AnomalySeverity.WARNING), timestamp: Date.now() - 2 * 3600000 };
+      const fresh = anomaly('conn-1', AnomalySeverity.WARNING);
+      recent(old, fresh);
+
+      expect((service as any).summaryAnomalies.get('conn-1')).toEqual([fresh]);
+      expect((service as any).summaryEventCount).toBe(1);
+    });
+
     it('drops anomalies older than an hour from the summary', async () => {
       polled();
       const old = { ...anomaly('conn-1', AnomalySeverity.WARNING), timestamp: Date.now() - 2 * 3600000 };
@@ -10617,6 +10638,7 @@ describe('AnomalyService', () => {
 
       expect(publishedIds()).toEqual([]);
       expect((service as any).summaryAnomalies.size).toBe(0);
+      expect((service as any).summaryEventCount).toBe(0);
     });
 
     it('stops publishing connection-less events once they age out', async () => {

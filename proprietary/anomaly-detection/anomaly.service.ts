@@ -724,10 +724,12 @@ export class AnomalyService
   private readonly retryAmplificationReports = new Map<string, Promise<void>>();
   private recentAnomaliesByConnection = new Map<string, AnomalyEvent[]>();
   // The anomalies the Prometheus summary counts, keyed like the summary
-  // (NO_CONNECTION_ID for connection-less events). Capped per connection
-  // rather than shared like recentAnomalies, so a noisy connection cannot push
-  // a quiet or down connection's last hour out early.
+  // (NO_CONNECTION_ID for connection-less events). Capped per connection and
+  // in total; the total cap trims the connection with the most events, so a
+  // noisy connection cannot push a quiet or down connection's last hour out
+  // early the way it can in the shared recentAnomalies buffer.
   private summaryAnomalies = new Map<string, AnomalyEvent[]>();
+  private summaryEventCount = 0;
   private retryAmplificationDispatched = new Map<
     string,
     { episodeStart: number; level: RetryAmplificationFinding['level'] }
@@ -811,6 +813,7 @@ export class AnomalyService
   // group member's snapshot lags a poll behind its peers.
   private activeConfigDriftSignatures = new Set<string>();
   private readonly maxRecentEvents = 1000;
+  private readonly maxSummaryEvents = 10_000;
   private readonly maxRecentGroups = 100;
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
@@ -1052,7 +1055,7 @@ export class AnomalyService
   }
 
   protected onConnectionRemoved(connectionId: string): void {
-    this.summaryAnomalies.delete(connectionId);
+    this.setSummaryEvents(connectionId, []);
     this.buffers.delete(connectionId);
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
@@ -4153,10 +4156,7 @@ export class AnomalyService
   }
 
   private addRecentAnomaly(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
-    const summaryId = connectionId || NO_CONNECTION_ID;
-    const summaryEvents = this.summaryAnomalies.get(summaryId);
-    if (summaryEvents === undefined) this.summaryAnomalies.set(summaryId, [anomaly]);
-    else if (summaryEvents.push(anomaly) > this.maxRecentEvents) summaryEvents.shift();
+    this.addSummaryAnomaly(anomaly, connectionId || NO_CONNECTION_ID);
 
     this.recentAnomalies.push(anomaly);
     if (anomaly.connectionId !== undefined) {
@@ -4185,10 +4185,44 @@ export class AnomalyService
     }
     this.recentAnomaliesByConnection = byConnection;
     for (const [connectionId, events] of this.summaryAnomalies) {
-      const kept = events.filter(keep);
-      if (kept.length === 0) this.summaryAnomalies.delete(connectionId);
-      else this.summaryAnomalies.set(connectionId, kept);
+      this.setSummaryEvents(connectionId, events.filter(keep));
     }
+  }
+
+  private addSummaryAnomaly(anomaly: AnomalyEvent, connectionId: string): void {
+    let events = this.summaryAnomalies.get(connectionId);
+    if (events === undefined) {
+      events = [];
+      this.summaryAnomalies.set(connectionId, events);
+    }
+    // Events arrive roughly in time order, so the expired ones are at the front.
+    const oneHourAgo = Date.now() - 3600000;
+    let dropped = 0;
+    while (dropped < events.length && events[dropped].timestamp < oneHourAgo) dropped++;
+    dropped = Math.max(dropped, events.length + 1 - this.maxRecentEvents);
+    if (dropped > 0) events.splice(0, dropped);
+    events.push(anomaly);
+    this.summaryEventCount += 1 - dropped;
+
+    while (this.summaryEventCount > this.maxSummaryEvents) {
+      let largestId = connectionId;
+      let largest = events;
+      for (const [id, list] of this.summaryAnomalies) {
+        if (list.length > largest.length) {
+          largestId = id;
+          largest = list;
+        }
+      }
+      largest.shift();
+      this.summaryEventCount--;
+      if (largest.length === 0) this.summaryAnomalies.delete(largestId);
+    }
+  }
+
+  private setSummaryEvents(connectionId: string, events: AnomalyEvent[]): void {
+    this.summaryEventCount += events.length - (this.summaryAnomalies.get(connectionId)?.length ?? 0);
+    if (events.length === 0) this.summaryAnomalies.delete(connectionId);
+    else this.summaryAnomalies.set(connectionId, events);
   }
 
   private refreshClientSnapshots(
@@ -9811,11 +9845,8 @@ export class AnomalyService
 
     for (const [connectionId, events] of this.summaryAnomalies) {
       const inWindow = events.filter((a) => a.timestamp >= oneHourAgo);
-      if (inWindow.length === 0) {
-        this.summaryAnomalies.delete(connectionId);
-        continue;
-      }
-      this.summaryAnomalies.set(connectionId, inWindow);
+      this.setSummaryEvents(connectionId, inWindow);
+      if (inWindow.length === 0) continue;
       const { bySeverity, byMetric, unresolvedBySeverity } = summaryFor(connectionId);
       for (const a of inWindow) {
         bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
