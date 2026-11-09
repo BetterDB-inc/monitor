@@ -24,7 +24,7 @@ function terminate(pid: number | undefined): void {
   try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
 }
 
-function commandLineOf(pid: number): string {
+function commandLineOf(pid: number): string | null {
   const result = isWindows
     ? spawnSync(
         path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
@@ -35,16 +35,19 @@ function commandLineOf(pid: number): string {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-  return result.stdout ?? '';
+  const commandLine = result.status === 0 ? result.stdout?.trim() : '';
+  return commandLine ? commandLine.replace(/\\/g, '/') : null;
 }
 
-function isMonitorProcess(pid: number): boolean {
+async function isMonitorProcess(pid: number, port: number | null): Promise<boolean> {
   try {
     process.kill(pid, 0);
   } catch {
     return false;
   }
-  return commandLineOf(pid).includes(MONITOR_PACKAGE);
+  const commandLine = commandLineOf(pid);
+  if (commandLine !== null) return commandLine.includes(MONITOR_PACKAGE);
+  return port !== null && (await checkHealth(port));
 }
 
 function registerEphemeralHandlers(): void {
@@ -140,7 +143,7 @@ export async function startMonitor(opts: {
     if (pid === null) {
       fs.unlinkSync(PID_FILE);
     } else {
-      if (isMonitorProcess(pid)) {
+      if (await isMonitorProcess(pid, existingPort)) {
         if (await checkHealth(existingPort)) {
           return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
         }
@@ -156,6 +159,10 @@ export async function startMonitor(opts: {
 
       fs.unlinkSync(PID_FILE);
     }
+  }
+
+  if (await checkHealth(opts.port)) {
+    return { url, alreadyRunning: true };
   }
 
   const defaults: Record<string, string> = {
@@ -245,7 +252,7 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
     try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
     return { stopped: true, message: 'Removed corrupted PID file.', url };
   }
-  const wasRunning = isMonitorProcess(pid);
+  const wasRunning = await isMonitorProcess(pid, port);
   if (wasRunning) terminate(pid);
 
   if (wasRunning) {
