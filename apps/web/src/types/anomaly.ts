@@ -122,6 +122,7 @@ export interface IncidentTimelineEntry {
   message: string;
   recoveredAt: number | null;
   recoveryState: IncidentEntryRecovery;
+  values?: RecommendationValue[];
 }
 
 export interface IncidentSequenceStep {

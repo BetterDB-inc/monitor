@@ -14601,34 +14601,51 @@ describe('AnomalyService', () => {
       expect(forkEntry(aged)?.values).toEqual(expected);
     });
 
-    it('keeps values for a live event whose connection has left the scope', async () => {
-      const values = [{ setting: 'repl-backlog-size', current: 1, target: 2.2, unit: 'MB' }];
-      const event = {
-        id: 'aged-backlog',
-        timestamp: clock,
-        metricType: MetricType.BACKLOG_COVERAGE_RISK,
-        anomalyType: 'drop',
-        severity: 'warning',
-        value: 30,
-        baseline: 60,
-        stdDev: 0,
-        zScore: 0,
-        threshold: 60,
-        message: 'backlog',
-        resolved: false,
-        connectionId: 'left-conn',
-        scopeId: 'conn-1',
-        values,
-      };
-      (service as any).incidentEventsById.set(event.id, event);
+    it('keeps values after the emitting connection leaves the scope', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'keeper' }]);
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: 30_000,
+          bytesPerSecEwma: 30_000,
+          replBacklogSize: 1_000_000,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+      const [live] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(live.scopeId).toBe('seed');
+
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed'
+          ? { id: 'seed' }
+          : id === 'conn-1'
+            ? undefined
+            : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'keeper' }]);
       (service as any).recentAnomalies = [];
-      storage.getAnomalyEvents.mockResolvedValue([
-        (service as any).toStoredAnomalyEvent(event, { ...mockCtx, connectionId: 'left-conn' }),
-      ]);
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [(service as any).toStoredAnomalyEvent(live, mockCtx)],
+      );
 
-      const loaded = await (service as any).loadIncidentEvents('conn-1', 0, undefined);
+      const [timeline] = await service.getIncidentTimelines('keeper');
 
-      expect(loaded.find((item: { id: string }) => item.id === event.id).values).toEqual(values);
+      expect(timeline.entries.find((entry) => entry.anomalyId === live.id)?.values).toEqual(
+        live.values,
+      );
     });
 
     it('stays quiet when a short disconnect is covered by the backlog', async () => {

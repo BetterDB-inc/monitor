@@ -207,6 +207,40 @@ describe('IncidentTimelineView', () => {
     expect(screen.queryByText(/→/)).not.toBeInTheDocument();
   });
 
+  it('shows a fork RAM target on the event when the matched recommendations do not name it', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries: [
+            entry({
+              anomalyId: 'fork',
+              metricType: 'fork_memory_risk',
+              message: 'Fork may exhaust RAM',
+              values: [
+                { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
+              ],
+            }),
+          ],
+          sequenceMatches: [
+            {
+              pattern: 'divergence_under_pressure',
+              anomalyIds: ['fork'],
+              steps: [{ anomalyId: 'fork', step: 1 }],
+              diagnosis: 'Writes diverged under pressure',
+              recommendations: [
+                'Watch fork memory and replica output buffers until the resync completes',
+              ],
+              severity: 'critical',
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText('total_system_memory: 10240 → 13166 MB')).toBeInTheDocument();
+  });
+
   it('shows every rule step of an event that matched more than one rule', () => {
     render(
       <IncidentTimelineView
