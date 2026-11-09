@@ -6,6 +6,7 @@ import type {
   NewClientConnectionGroup,
 } from '@betterdb/shared';
 import {
+  CLIENT_REOPEN_TOLERANCE_MS,
   clientAddrIp,
   clientConnectionKey,
   connectionOpenedAt,
@@ -91,6 +92,8 @@ export interface AttributionInput extends EpisodeClientSnapshots {
   capture: ClientGroupCount[];
   newConnections: NewClientConnectionGroup[];
   baselineConnections?: NewClientConnectionGroup[];
+  /** The connections of the stored captures, whose identity the readings take. */
+  storedConnections?: ClientConnectionRow[];
   limit?: number;
 }
 
@@ -181,18 +184,53 @@ function connectionKeys(snapshots: ClientCommandSnapshot[]): Map<ClientCommandCo
   return keys;
 }
 
+// The stored connection that opened closest to `openedAt`, within
+// CLIENT_REOPEN_TOLERANCE_MS of it.
+function closestOpening(
+  rows: readonly ClientConnectionRow[],
+  openedAt: number,
+): ClientConnectionRow | undefined {
+  let match: ClientConnectionRow | undefined;
+  for (const row of rows) {
+    const distance = Math.abs(row.openedAt - openedAt);
+    if (distance > CLIENT_REOPEN_TOLERANCE_MS) continue;
+    if (match === undefined || distance < Math.abs(match.openedAt - openedAt)) match = row;
+  }
+  return match;
+}
+
 // A connection is one identity across snapshots: its newest reading names it,
 // so a client caught before CLIENT SETNAME ran is counted under the name it set
 // later. `snapshots` are in chronological order, so a later reading overwrites
-// an earlier one.
+// an earlier one. A stored connection with the same client id and address,
+// opened within CLIENT_REOPEN_TOLERANCE_MS of the reading's opening, names it
+// instead: the stored captures include the ones the readings skip (they are at
+// least 30s apart), up to the end of the episode, so the rates, the reconnects
+// and the newest capture count one connection under one identity.
 function latestIdentities(
   snapshots: ClientCommandSnapshot[],
   keys: Map<ClientCommandCount, string>,
+  stored: readonly ClientConnectionRow[],
 ): Map<string, ClientIdentity> {
+  const storedByKey = new Map<string, ClientConnectionRow[]>();
+  for (const row of stored) {
+    const key = clientConnectionKey(row.clientId, row.addr);
+    const rows = storedByKey.get(key);
+    if (rows === undefined) storedByKey.set(key, [row]);
+    else rows.push(row);
+  }
   const identities = new Map<string, ClientIdentity>();
   for (const snapshot of snapshots) {
-    for (const client of snapshot.clients.values()) {
-      identities.set(keys.get(client)!, { key: client.key, keyKind: client.keyKind });
+    for (const [clientId, client] of snapshot.clients) {
+      const openedAt = client.openedAt ?? null;
+      const candidates = storedByKey.get(clientConnectionKey(clientId, client.addr)) ?? [];
+      const match = openedAt === null ? undefined : closestOpening(candidates, openedAt);
+      identities.set(
+        keys.get(client)!,
+        match === undefined
+          ? { key: client.key, keyKind: client.keyKind }
+          : hostKey(match.name, match.user, match.ip),
+      );
     }
   }
   return identities;
@@ -285,9 +323,10 @@ function addCommandGrowth(
   before: ClientCommandSnapshot,
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
+  stored: readonly ClientConnectionRow[],
 ): void {
   const keys = connectionKeys([before, first, latest]);
-  const identities = latestIdentities([before, first, latest], keys);
+  const identities = latestIdentities([before, first, latest], keys, stored);
   for (const { identity, rate } of commandRates(before, first, keys, identities)) {
     accumulatorFor(map, identity).preEpisodeRate += rate;
   }
@@ -409,7 +448,7 @@ export function rankRetryAmplificationContributors(
 ): RetryAmplificationContributor[] {
   const map = new Map<string, ContributorAccumulator>();
   if (hasRatePair(input)) {
-    addCommandGrowth(map, input.before, input.first, input.latest);
+    addCommandGrowth(map, input.before, input.first, input.latest, input.storedConnections ?? []);
   }
   addReconnects(map, input.newConnections, input.capture, input.baselineConnections ?? []);
   for (const [id, acc] of map) {

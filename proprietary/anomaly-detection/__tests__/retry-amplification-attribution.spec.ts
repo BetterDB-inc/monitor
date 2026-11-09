@@ -470,6 +470,66 @@ describe('retry amplification attribution', () => {
       expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
     });
 
+    it('ranks the rate of a connection under the name a stored capture newer than the readings gives it', () => {
+      const worker = { id: '7', addr: '10.0.0.5:4001' };
+      const before = snapshot(0, [client({ ...worker, age: '600', 'tot-cmds': '1000' })]);
+      const first = snapshot(60_000, [client({ ...worker, age: '660', 'tot-cmds': '1600' })]);
+      // The newest reading still lists it unnamed; a capture after it, stored
+      // but skipped by the readings, lists it after CLIENT SETNAME.
+      const latest = snapshot(120_000, [client({ ...worker, age: '720', 'tot-cmds': '4600' })]);
+      const stored: ClientConnectionRow = {
+        clientId: '7',
+        addr: '10.0.0.5:4001',
+        name: 'worker',
+        user: 'default',
+        ip: '10.0.0.5',
+        openedAt: -600_000,
+        firstCapturedAt: 0,
+      };
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [{ name: 'worker', user: 'default', ip: '10.0.0.5', count: 1 }],
+        newConnections: [{ name: 'worker', user: 'default', ip: '10.0.0.5', count: 4 }],
+        storedConnections: [stored],
+      });
+
+      // One contributor, not the IP for the rate and the name for the reconnects.
+      expect(ranked).toEqual([
+        { key: 'worker', keyKind: 'name', commandRateGrowth: 5, newConnections: 4, connections: 1 },
+      ]);
+    });
+
+    it('keeps the identity of the readings for a stored connection that opened at another time', () => {
+      const worker = { id: '7', addr: '/run/valkey.sock:0' };
+      const before = snapshot(0, [client({ ...worker, age: '600', 'tot-cmds': '1000' })]);
+      const first = snapshot(60_000, [client({ ...worker, age: '660', 'tot-cmds': '1600' })]);
+      const latest = snapshot(120_000, [client({ ...worker, age: '720', 'tot-cmds': '4600' })]);
+      // Id 7 on the socket after a restart: another connection.
+      const stored: ClientConnectionRow = {
+        clientId: '7',
+        addr: '/run/valkey.sock:0',
+        name: 'jobs',
+        user: 'default',
+        ip: '/run/valkey.sock',
+        openedAt: 100_000,
+        firstCapturedAt: 110_000,
+      };
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+        storedConnections: [stored],
+      });
+
+      expect(ranked.map((c) => [c.key, c.keyKind])).toEqual([['/run/valkey.sock', 'ip']]);
+    });
+
     it('keeps an application whose name only starts with the monitor name', () => {
       const ranked = rankRetryAmplificationContributors({
         before: null,

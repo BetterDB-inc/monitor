@@ -4270,6 +4270,7 @@ export class AnomalyService
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
+      storedConnections: summary.connections,
       newConnections: reconnectsKnown
         ? estimateNewConnections(
             newConnectionsBetween(summary.connections, recentStart, until),

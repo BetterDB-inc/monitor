@@ -5756,6 +5756,37 @@ describe('AnomalyService', () => {
         expect(ranked).toBeNull();
       });
 
+      it('ranks the rate and the reconnects of one connection under the name its newest stored capture gives it', async () => {
+        const worker = (id: number, name: string, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
+        await history.saveClientSnapshot([worker(7, '', 190, 590_000)], 'conn-1');
+        // A capture the readings skipped: id 7 has run CLIENT SETNAME, and four
+        // more worker connections opened.
+        await history.saveClientSnapshot(
+          [worker(7, 'worker', 360, 760_000), ...[8, 9, 10, 11].map((id) => worker(id, 'worker', 1, 760_000))],
+          'conn-1',
+        );
+        // The readings list id 7 unnamed, by its IP; 1,000/s before, 5,000/s during.
+        const reading = (takenAt: number, totalCommands: number) => ({
+          takenAt,
+          clients: new Map([
+            ['7', { key: '10.0.0.5', keyKind: 'ip', addr: '10.0.0.5:4007', openedAt: 400_000, totalCommands }],
+          ]),
+        });
+        const unnamed = [reading(520_000, 0), reading(580_000, 60_000), reading(700_000, 660_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          unnamed,
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toEqual([
+          { key: 'worker', keyKind: 'name', commandRateGrowth: 5, newConnections: 4, connections: 5 },
+        ]);
+      });
+
       it('keeps the monitor and its key-scan clients out without crediting their ids to the application', async () => {
         const app = (id: number, name: string, age: number, capturedAt: number) =>
           stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
