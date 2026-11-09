@@ -9346,14 +9346,14 @@ export class AnomalyService
   ): Promise<Record<string, string> | Error | null> {
     const address = splitHostPort(replicaAddr);
     if (!address) return null;
-    const readReplica = this.replicaReader(ctx, address.host, address.port, ownPrimary);
-    if (!readReplica) return null;
-    const inFlight = `${ctx.connectionId}:${replicaAddr}`;
+    const reader = this.replicaReader(ctx, address.host, address.port, ownPrimary);
+    if (!reader) return null;
+    const inFlight = `${ctx.connectionId}:${replicaAddr}:${reader.via}`;
     try {
       const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
       if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
       this.replicaReadsInFlight.add(inFlight);
-      const pending = readReplica(budget);
+      const pending = reader.read(budget);
       const release = () => {
         this.replicaReadsInFlight.delete(inFlight);
       };
@@ -9385,7 +9385,7 @@ export class AnomalyService
     host: string,
     port: number,
     ownPrimary: boolean,
-  ): ((budgetMs: number) => Promise<Record<string, string>>) | null {
+  ): { via: string; read: (budgetMs: number) => Promise<Record<string, string>> } | null {
     const connectionId = ctx.connectionId;
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
     if (
@@ -9393,7 +9393,7 @@ export class AnomalyService
       registeredId !== connectionId &&
       this.connectionRegistry.list().some((c) => c.id === registeredId && c.isConnected)
     ) {
-      return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
+      return { via: registeredId, read: () => this.readReplicationInfo(this.connectionRegistry.get(registeredId)) };
     }
     const discovery = this.clusterDiscovery;
     if (!discovery || !this.dialsDataNodes(connectionId)) return null;
@@ -9410,8 +9410,9 @@ export class AnomalyService
         throw err;
       }
     };
+    const discovered = (read: (budgetMs: number) => Promise<Record<string, string>>) => ({ via: 'discovered', read });
     if (this.clusterViews.has(connectionId)) {
-      return async (budgetMs) => {
+      return discovered(async (budgetMs) => {
         const nodes = await discovery.discoverNodes(connectionId);
         const node = nodes.find((n) => {
           const nodeAddress = splitHostPort(n.address);
@@ -9419,7 +9420,7 @@ export class AnomalyService
         });
         if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
         return readNode(discovery.getNodeConnection(node.id, connectionId), budgetMs);
-      };
+      });
     }
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     const seedId = membership?.source === 'sentinel' ? membership.seedId : connectionId;
@@ -9427,11 +9428,12 @@ export class AnomalyService
     const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
     const sentinelAddress = reported ? splitHostPort(reported) : null;
     if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
-      return (budgetMs) =>
-        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), budgetMs);
+      return discovered((budgetMs) =>
+        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), budgetMs),
+      );
     }
     if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
-      return async (budgetMs) => {
+      return discovered(async (budgetMs) => {
         const [peers, addresses] = await Promise.all([
           ctx.client.getClients({ type: 'replica' }),
           this.resolveHost(host),
@@ -9442,7 +9444,7 @@ export class AnomalyService
         });
         if (!connectedFrom) throw new Error(`no replica is connected to the primary from ${host}`);
         return readNode(discovery.getReplicaConnection(host, port, connectionId), budgetMs);
-      };
+      });
     }
     return null;
   }
@@ -10196,9 +10198,8 @@ export class AnomalyService
 
   private async closeRestoredDisagreements(key: string, events: StoredAnomalyEvent[]): Promise<void> {
     for (const event of events) {
-      const replica = event.replicaAddr ?? 'unknown';
       await this.resolveAnomalyOutcome(event.id, () => {
-        this.retryDroppedDivergenceClose(key, replica, event.id);
+        this.retireDivergenceEvent(connectionOfStateKey(key), event.id);
       });
     }
   }
@@ -10537,7 +10538,7 @@ export class AnomalyService
     key: string,
   ): Promise<void> {
     await this.resolveAnomalyOutcome(outcome.eventId, () => {
-      this.retryDroppedDivergenceClose(key, outcome.addr, outcome.eventId);
+      this.retireDivergenceEvent(connectionOfStateKey(key), outcome.eventId);
     });
     acknowledgeViewAgreement(state, outcome.addr, outcome.eventId);
   }

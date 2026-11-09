@@ -16639,6 +16639,30 @@ describe('AnomalyService', () => {
         expect(second.get(ADDR)).toMatchObject({ status: 'unreachable' });
       });
 
+      it('reads a replica through its own connection once registered, while a discovered dial still hangs', async () => {
+        getReplicaConnection.mockReturnValueOnce(new Promise(() => undefined));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        const registry = (service as any).connectionRegistry;
+        registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.0.2' ? 'conn-r' : null));
+        registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+        const getInfoParsed = jest.fn().mockResolvedValue({
+          replication: {
+            role: 'slave',
+            master_replid: REPLID,
+            master_link_status: 'up',
+            slave_repl_offset: String(1_000 * MiB),
+          },
+        });
+        registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+        (service as any).crossCheckDeadline.set('conn-1', null);
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(samples.get(ADDR)).toMatchObject({ status: 'ok' });
+      });
+
       it('dials a replica announced by hostname when it is connected from an address the name resolves to', async () => {
         const named = 'replica-0.cache.svc:6379';
         jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.2']));
@@ -16677,6 +16701,32 @@ describe('AnomalyService', () => {
         expect(recoveredHook).not.toHaveBeenCalled();
         const [history] = await divergenceHistory();
         expect(history.level).not.toBe('behind');
+      });
+
+      it('retries a dropped close of a restored disagreement without opening a divergence orphan', async () => {
+        storage.getAnomalyEvents.mockResolvedValueOnce([
+          {
+            id: 'views-1',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            resolved: false,
+            message: 'WARNING: views disagree',
+            replicaAddr: ADDR,
+            dedupeKey: 'replica-views',
+          },
+        ]);
+        const retire = jest.spyOn(service as any, 'retireDivergenceEvent');
+        jest.spyOn(service as any, 'resolveAnomalyOutcome').mockImplementation(async (...args: unknown[]) => {
+          (args[1] as () => void)?.();
+          return 'retry';
+        });
+
+        await feed([0, 0, 0], T0);
+
+        const orphaned = [...(service as any).divergenceOrphans.values()].flatMap((orphans: Map<string, unknown>) => [
+          ...orphans.keys(),
+        ]);
+        expect(orphaned).not.toContain(ADDR);
+        expect(retire).toHaveBeenCalledWith('conn-1', 'views-1');
       });
 
       it('holds back recovery while the replica still reports it is behind', async () => {
