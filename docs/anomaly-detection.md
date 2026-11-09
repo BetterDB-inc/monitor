@@ -377,6 +377,8 @@ BetterDB's own connections are recognised by name: `BetterDB-Monitor`, `BetterDB
 
 The stored captures are read for at most the newest 30 minutes of the episode, as long as the detector's own baseline of 30 windows, and for as long a span before the episode; the captures in between are not read, so a long episode is attributed over its newest 30 minutes and compared with the 30 minutes before it started. A read that would aggregate more than 250,000 rows (two 30-minute spans of 60s captures of about 4,000 clients) stops there: the finding then ranks by command rate only, and reconnects are not ranked. On SQLite the read runs synchronously; the bound holds it to about 2-3 seconds (244,000 rows took 2.2-3.0s on a busy 16-core host), and a read past it stops after 250,001 rows, in about 0.15s.
 
+The client ids consumed between two captures by connections that no capture lists are split evenly between the identities whose connections all opened in that interval. Each id is counted once: when the connection holding the highest id closes, the ids up to it are not counted again, and only a capture in which every connection opened after the previous one, with a lower highest id, is a server restart from which counting starts over.
+
 **Recommended actions**:
 - Add exponential backoff with jitter and a retry budget
 - Put a circuit breaker in front of the instance

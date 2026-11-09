@@ -356,12 +356,20 @@ export function estimateNewConnections(
   );
   const shares = new Map<string, { row: ClientConnectionCaptureRow; share: number }>();
   const times = [...byCapture.keys()].sort((a, b) => a - b);
+  // The highest id seen so far, not only in the previous capture: when the
+  // connection holding it closes, the next capture's highest id drops, and the
+  // ids up to it were already counted. Only a capture in which every connection
+  // opened after the previous one (a server restart) starts it over.
+  let highest = highestClientId(byCapture.get(times[0]) ?? []);
   for (let i = 1; i < times.length; i++) {
     const capturedAt = times[i];
-    if (capturedAt < since || capturedAt > until) continue;
     const rows = byCapture.get(capturedAt) ?? [];
-    const previous = byCapture.get(times[i - 1]) ?? [];
-    const growth = highestClientId(rows) - highestClientId(previous);
+    const current = highestClientId(rows);
+    const restarted = rows.every((row) => capturedAt - row.oldestAge * 1000 >= times[i - 1]);
+    if (current < highest && restarted) highest = current;
+    const growth = current - highest;
+    highest = Math.max(highest, current);
+    if (capturedAt < since || capturedAt > until) continue;
     if (growth <= 0) continue;
     const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= times[i - 1]);
     for (const row of fresh) {

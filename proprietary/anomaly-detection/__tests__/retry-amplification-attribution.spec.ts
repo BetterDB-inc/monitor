@@ -789,6 +789,42 @@ describe('estimateNewConnections', () => {
     ]);
   });
 
+  it('does not count the ids again after the connection holding the highest one closed', () => {
+    // A key-scan client holds id 110 at 60s and is gone at 120s; the
+    // application's one new connection at 180s takes id 111.
+    const captures = [
+      capture(0, 100, 500, 'pool'),
+      capture(60_000, 100, 560, 'pool'),
+      capture(60_000, 110, 5, 'BetterDB-Monitor-keyscan'),
+      capture(120_000, 100, 620, 'pool'),
+      capture(180_000, 100, 680, 'pool'),
+      capture(180_000, 111, 1, 'storm'),
+    ];
+
+    expect(
+      estimateNewConnections([{ ...identity, name: 'storm', count: 1 }], captures, 0, 180_000),
+    ).toEqual([
+      { ...identity, name: 'storm', count: 1 },
+      { ...identity, name: 'BetterDB-Monitor-keyscan', count: 10 },
+    ]);
+  });
+
+  it('counts the ids from the start after a restart in which the highest one closed', () => {
+    // At 120s every connection is new and the highest id dropped: the server
+    // restarted, so the growth after it starts from that capture.
+    const captures = [
+      capture(0, 100, 500, 'pool'),
+      capture(60_000, 110, 560, 'pool'),
+      capture(120_000, 4, 10, 'pool'),
+      capture(180_000, 4, 70, 'pool'),
+      capture(180_000, 9, 1),
+    ];
+
+    expect(estimateNewConnections([], captures, 120_000, 180_000)).toEqual([
+      { ...identity, count: 5 },
+    ]);
+  });
+
   it('ignores the drop in ids after a server restart', () => {
     const captures = [capture(0, 5_000, 5), capture(60_000, 12, 1)];
 
