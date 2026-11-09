@@ -14,6 +14,7 @@ const FLUSH_INTERVAL_MS = 30_000;
 const MAX_BUFFER_SIZE = 50;
 
 const buffers = new Map<MonitorTarget, TelemetryEvent[]>();
+const retired = new WeakSet<MonitorTarget>();
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let sendFn: SendFn | null = null;
 let disabled = false;
@@ -51,7 +52,7 @@ export function initTelemetry(send: SendFn): void {
 }
 
 export function trackToolCall(target: MonitorTarget, event: Omit<TelemetryEvent, 'timestamp'>): void {
-  if (disabled) return;
+  if (disabled || retired.has(target)) return;
   const events = buffers.get(target) ?? [];
   events.push({ ...event, timestamp: Date.now() });
   buffers.set(target, events);
@@ -60,11 +61,9 @@ export function trackToolCall(target: MonitorTarget, event: Omit<TelemetryEvent,
   }
 }
 
-export function moveTelemetry(from: MonitorTarget, to: MonitorTarget): void {
-  const events = buffers.get(from);
-  if (!events) return;
-  buffers.delete(from);
-  buffers.set(to, [...(buffers.get(to) ?? []), ...events]);
+export function dropTelemetry(target: MonitorTarget): void {
+  retired.add(target);
+  buffers.delete(target);
 }
 
 export async function stopTelemetry(): Promise<void> {

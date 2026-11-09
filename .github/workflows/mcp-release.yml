@@ -86,6 +86,9 @@ jobs:
           test -f packages/mcp/dist/index.js
           node --check packages/mcp/dist/index.js
 
+      - name: Test MCP server
+        run: pnpm --filter @betterdb/mcp test
+
       - name: Prepare for publishing
         run: |
           cd packages/mcp

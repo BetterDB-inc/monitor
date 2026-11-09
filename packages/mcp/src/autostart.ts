@@ -22,7 +22,11 @@ function terminate(pid: number | undefined): void {
     spawnSync(taskkill, ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
     return;
   }
-  try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+  try {
+    process.kill(-pid, 'SIGTERM');
+  } catch {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+  }
 }
 
 function commandLineOf(pid: number): string | null {
@@ -41,15 +45,31 @@ function commandLineOf(pid: number): string | null {
   return commandLine ? commandLine.replace(/\\/g, '/') : null;
 }
 
-async function isMonitorProcess(pid: number, port: number | null): Promise<boolean> {
+export type ProcessIdentity = 'monitor' | 'other' | 'unknown';
+
+export function identifyProcess(pid: number): ProcessIdentity {
   try {
     process.kill(pid, 0);
   } catch {
-    return false;
+    return 'other';
   }
   const commandLine = commandLineOf(pid);
-  if (commandLine !== null) return commandLine.includes(MONITOR_PACKAGE);
-  return port !== null && (await checkHealth(port));
+  if (commandLine === null) return 'unknown';
+  return commandLine.includes(MONITOR_PACKAGE) ? 'monitor' : 'other';
+}
+
+export async function isBetterDbMonitor(port: number): Promise<boolean> {
+  for (const prefix of ['/api', '']) {
+    try {
+      const res = await fetch(`http://localhost:${port}${prefix}/mcp/instances`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok && (res.headers.get('content-type') ?? '').includes('application/json')) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function registerEphemeralHandlers(): void {
@@ -142,28 +162,22 @@ export async function startMonitor(opts: {
     const pid = readValidPid(PID_FILE);
     const existingPort = portStr ? Number(portStr) : opts.port;
 
-    if (pid === null) {
-      fs.unlinkSync(PID_FILE);
-    } else {
-      if (await isMonitorProcess(pid, existingPort)) {
-        if (await checkHealth(existingPort)) {
-          return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: true };
-        }
-        // Process is alive but unhealthy — terminate it before re-spawning
-        terminate(pid);
-        // Wait for the port to be released (up to 5s)
-        const killDeadline = Date.now() + 5_000;
-        while (Date.now() < killDeadline) {
-          try { process.kill(pid, 0); } catch { break; } // process exited
-          await new Promise(resolve => setTimeout(resolve, 250));
-        }
+    const identity = pid === null ? 'other' : identifyProcess(pid);
+    if (pid !== null && identity === 'monitor') {
+      if (await isBetterDbMonitor(existingPort)) {
+        return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: true };
       }
-
-      fs.unlinkSync(PID_FILE);
+      terminate(pid);
+      const killDeadline = Date.now() + 5_000;
+      while (Date.now() < killDeadline) {
+        try { process.kill(pid, 0); } catch { break; }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
     }
+    if (identity !== 'unknown') fs.unlinkSync(PID_FILE);
   }
 
-  if (await checkHealth(opts.port)) {
+  if (await isBetterDbMonitor(opts.port)) {
     return { url, alreadyRunning: true, owned: false };
   }
 
@@ -243,18 +257,32 @@ function readPidPort(file: string): number | null {
   }
 }
 
-export async function stopMonitor(): Promise<{ stopped: boolean; message: string; url?: string }> {
+export async function stopMonitor(): Promise<{
+  stopped: boolean;
+  identified: boolean;
+  message: string;
+  url?: string;
+}> {
   if (!fs.existsSync(PID_FILE)) {
-    return { stopped: false, message: 'No persisted monitor found.' };
+    return { stopped: false, identified: true, message: 'No persisted monitor found.' };
   }
   const pid = readValidPid(PID_FILE);
   const port = readPidPort(PID_FILE);
   const url = port === null ? undefined : `http://localhost:${port}`;
   if (pid === null) {
     try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
-    return { stopped: true, message: 'Removed corrupted PID file.', url };
+    return { stopped: true, identified: true, message: 'Removed corrupted PID file.', url };
   }
-  const wasRunning = await isMonitorProcess(pid, port);
+  const identity = identifyProcess(pid);
+  if (identity === 'unknown') {
+    return {
+      stopped: false,
+      identified: false,
+      message: `Could not read the command line of process ${pid}, so it was left running and the PID file was kept.`,
+      url,
+    };
+  }
+  const wasRunning = identity === 'monitor';
   if (wasRunning) terminate(pid);
 
   if (wasRunning) {
@@ -268,6 +296,11 @@ export async function stopMonitor(): Promise<{ stopped: boolean; message: string
 
   try { fs.unlinkSync(PID_FILE); } catch { /* already removed */ }
   return wasRunning
-    ? { stopped: true, message: `Stopped monitor (PID ${pid}).`, url }
-    : { stopped: true, message: `Removed stale PID file (process ${pid} is not a running monitor).`, url };
+    ? { stopped: true, identified: true, message: `Stopped monitor (PID ${pid}).`, url }
+    : {
+        stopped: true,
+        identified: true,
+        message: `Removed stale PID file (process ${pid} is not a running monitor).`,
+        url,
+      };
 }
