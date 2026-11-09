@@ -14877,6 +14877,25 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
         });
 
+        it('takes over every down-held primary it read even when detection on one throws', async () => {
+          discovery();
+          const members = new Set([NODE, other.addr]);
+          await poll([], 1, T0, members);
+          jest.spyOn(service as any, 'detectRetryAmplification').mockRejectedValueOnce(new Error('detector bug'));
+
+          await expect(
+            (service as any).detectTopologyAnomalies(
+              { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+              { targets: [target, other], members },
+            ),
+          ).rejects.toThrow('detector bug');
+
+          const claims = (service as any).topologyTargetClaims;
+          expect(claims.heldByOther('conn-1', NODE, T0, 30_000)).toBe(true);
+          expect(claims.heldByOther('conn-1', other.addr, T0, 30_000)).toBe(true);
+          expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(false);
+        });
+
         it('counts a primary past the cap as skipped when another connection holds it only as down', async () => {
           discovery();
           jest.spyOn(Date, 'now').mockReturnValue(T0);

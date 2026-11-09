@@ -155,6 +155,40 @@ describe('topology targets', () => {
       expect(claims.heldByOther('a', target.addr, 2_000, 30_000)).toBe(false);
     });
 
+    it('lets one connection at a time take over a down-held primary', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+
+      expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([target]);
+      expect(claims.isFreeFor('c', target.addr, 1_000, 30_000)).toBe(false);
+      expect(claims.claim('c', [target], 1_000, 30_000)).toEqual([]);
+      // The down holder refreshing its claim keeps the reservation.
+      claims.claim('a', [], 2_000, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+      expect(claims.claim('c', [target], 2_000, 30_000)).toEqual([]);
+      // Only the reserving connection can confirm.
+      claims.confirm('c', target.addr, 2_000);
+      expect(claims.heldByOther('b', target.addr, 2_000, 30_000)).toBe(true);
+      expect(claims.heldByOther('c', target.addr, 2_000, 30_000)).toBe(true);
+
+      claims.releaseTarget('b', target.addr);
+      expect(claims.claim('c', [target], 3_000, 30_000)).toEqual([target]);
+      expect(claims.heldByOther('c', target.addr, 3_000, 30_000)).toBe(true);
+    });
+
+    it('frees a takeover when the reserving connection stops claiming it or is removed', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+
+      claims.claim('b', [target], 1_000, 30_000);
+      claims.claim('b', [], 2_000, 30_000);
+      expect(claims.isFreeFor('c', target.addr, 2_000, 30_000)).toBe(true);
+
+      claims.claim('b', [target], 3_000, 30_000);
+      claims.release('b');
+      expect(claims.isFreeFor('c', target.addr, 3_000, 30_000)).toBe(true);
+      expect(claims.heldByOther('c', target.addr, 3_000, 30_000)).toBe(true);
+    });
+
     it('treats a primary held only as down as free', () => {
       const claims = new TopologyTargetClaims();
       claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);

@@ -9193,6 +9193,10 @@ export class AnomalyService
     // Recorded as soon as the reads settle: detection below can throw.
     coverage(checked, unreachable - authFailed + down, authFailed);
     for (const [i, result] of results.entries()) {
+      const addr = targets[i].addr;
+      if (result.status === 'fulfilled' && takeovers.has(addr)) this.topologyTargetClaims.confirm(ctx.connectionId, addr, now);
+    }
+    for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
         this.clearNodeSignals(ctx.connectionId, key);
@@ -9205,7 +9209,6 @@ export class AnomalyService
       }
       this.topologyBackoff.delete(key);
       const target = targets[i];
-      if (takeovers.has(target.addr)) this.topologyTargetClaims.confirm(ctx.connectionId, target.addr, now);
       const nodeCtx: ConnectionContext = {
         ...ctx,
         connectionName: `${ctx.connectionName} (${target.addr})`,

@@ -86,8 +86,16 @@ function scopeOf(reachable: Map<string, TopologyTarget>, down: Set<string>): Top
   return { targets, members: new Set([...targets.map((t) => t.addr), ...unreachable]) };
 }
 
+interface TargetOwner {
+  connectionId: string;
+  at: number;
+  down: boolean;
+  /** The one connection reading a down-held primary until it confirms or lets go. */
+  takeover?: { connectionId: string; at: number };
+}
+
 export class TopologyTargetClaims {
-  private owners = new Map<string, { connectionId: string; at: number; down: boolean }>();
+  private owners = new Map<string, TargetOwner>();
 
   /**
    * Claims up to `limit` free targets, and every free `down` address: a
@@ -96,8 +104,9 @@ export class TopologyTargetClaims {
    * down is free to a connection whose topology still reaches it (`fail?` and
    * `s_down` are one seed's view), so that connection reads it instead. The
    * down claim stays until that read succeeds (`confirm`), so a takeover whose
-   * read fails or backs off does not hand the primary back and forth.
-   * Returns the claimed targets.
+   * read fails or backs off does not hand the primary back and forth. The
+   * takeover is reserved for one connection at a time, until it confirms or
+   * lets the primary go. Returns the claimed targets.
    */
   claim(
     connectionId: string,
@@ -110,28 +119,45 @@ export class TopologyTargetClaims {
     const free = targets.filter((target) => this.isFreeFor(connectionId, target.addr, now, staleMs));
     const claimed = free.slice(0, limit);
     const freeDown = [...down].filter((addr) => !this.heldByOther(connectionId, addr, now, staleMs));
-    const wanted = new Map<string, boolean>([
-      ...claimed
-        .filter((t) => !this.heldByOther(connectionId, t.addr, now, staleMs))
-        .map((t): [string, boolean] => [t.addr, false]),
-      ...freeDown.map((addr): [string, boolean] => [addr, true]),
-    ]);
+    const takeovers = new Set<string>();
+    const wanted = new Map<string, boolean>(freeDown.map((addr): [string, boolean] => [addr, true]));
+    for (const t of claimed) {
+      if (this.heldByOther(connectionId, t.addr, now, staleMs)) takeovers.add(t.addr);
+      else wanted.set(t.addr, false);
+    }
     for (const [addr, owner] of this.owners) {
       if (owner.connectionId === connectionId && !wanted.has(addr)) this.owners.delete(addr);
+      else if (owner.takeover?.connectionId === connectionId && !takeovers.has(addr)) delete owner.takeover;
     }
-    for (const [addr, isDown] of wanted) this.owners.set(addr, { connectionId, at: now, down: isDown });
+    for (const [addr, isDown] of wanted) {
+      const previous = this.owners.get(addr);
+      const takeover = isDown && previous?.connectionId === connectionId ? previous.takeover : undefined;
+      this.owners.set(addr, { connectionId, at: now, down: isDown, takeover });
+    }
+    for (const addr of takeovers) this.owners.get(addr)!.takeover = { connectionId, at: now };
     return claimed;
   }
 
-  /** Takes over a primary claimed from a down holder once it was read. */
+  /**
+   * Takes over a primary claimed from a down holder once it was read, unless
+   * another connection has taken it in the meantime.
+   */
   confirm(connectionId: string, addr: string, now: number): void {
+    const owner = this.owners.get(addr);
+    if (owner && owner.connectionId !== connectionId && owner.takeover?.connectionId !== connectionId) return;
     this.owners.set(addr, { connectionId, at: now, down: false });
   }
 
-  /** Whether the connection may read the primary: no one else holds it, or only as down. */
+  /**
+   * Whether the connection may read the primary: no one else holds it, or
+   * only as down with no other connection already taking it over.
+   */
   isFreeFor(connectionId: string, addr: string, now: number, staleMs: number): boolean {
     const owner = this.otherOwner(connectionId, addr, now, staleMs);
-    return !owner || owner.down;
+    if (!owner) return true;
+    if (!owner.down) return false;
+    const takeover = owner.takeover;
+    return !takeover || takeover.connectionId === connectionId || now - takeover.at > staleMs;
   }
 
   heldByOther(connectionId: string, addr: string, now: number, staleMs: number): boolean {
@@ -144,12 +170,15 @@ export class TopologyTargetClaims {
   }
 
   releaseTarget(connectionId: string, addr: string): void {
-    if (this.owners.get(addr)?.connectionId === connectionId) this.owners.delete(addr);
+    const owner = this.owners.get(addr);
+    if (owner?.connectionId === connectionId) this.owners.delete(addr);
+    else if (owner?.takeover?.connectionId === connectionId) delete owner.takeover;
   }
 
   release(connectionId: string): void {
     for (const [addr, owner] of this.owners) {
       if (owner.connectionId === connectionId) this.owners.delete(addr);
+      else if (owner.takeover?.connectionId === connectionId) delete owner.takeover;
     }
   }
 }
