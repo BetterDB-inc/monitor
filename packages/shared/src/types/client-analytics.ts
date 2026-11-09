@@ -54,7 +54,11 @@ export interface ClientCaptureGroupRow extends ClientConnectionCaptureRow {
   count: number;
 }
 
-/** One connection, a (clientId, addr) pair, seen in a range of client snapshots. */
+/**
+ * One connection seen in a range of client snapshots: a (clientId, addr) pair
+ * and its opening, so an id and addr reused after a server restart (every
+ * client of a Unix socket shares the addr) is another connection.
+ */
 export interface ClientConnectionRow {
   clientId: string;
   addr: string;
@@ -69,7 +73,7 @@ export interface ClientConnectionRow {
 
 /**
  * A range of client snapshots aggregated for retry attribution, replica and
- * master links left out. Each (clientId, addr) carries the name and user of its
+ * master links left out. Each connection carries the name and user of its
  * newest row in the range, in its groups and as a connection, so a client
  * captured before it ran CLIENT SETNAME counts under the name it set later.
  */

@@ -5418,7 +5418,8 @@ describe('AnomalyService', () => {
         reads += 1;
         const pooled = { addr: '10.0.0.1:1', name: 'storm', user: 'default', age: 1000 };
         return reads <= 13
-          ? [{ ...pooled, id: '1', 'tot-cmds': String(600 * reads) }]
+          ? // The age grows with the 60 s between reads, as on a server.
+            [{ ...pooled, id: '1', age: 1000 + 60 * reads, 'tot-cmds': String(600 * reads) }]
           : [{ ...pooled, id: String(100 + reads), age: 1, 'tot-cmds': String(6000 * (reads - 13)) }];
       });
       storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
@@ -5558,6 +5559,56 @@ describe('AnomalyService', () => {
 
         // Six reconnects against five in the baseline is steady churn, not a
         // client that stands out; under two identities it would be six against none.
+        expect(ranked).toEqual([]);
+      });
+
+      it('counts the reconnects that reuse ids on a Unix socket after a server restart', async () => {
+        const worker = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), '/run/valkey.sock:0', 'worker', age, capturedAt);
+        // Ids 12-14 on the socket, open for an hour before the episode.
+        for (const capturedAt of [530_000, 590_000]) {
+          await history.saveClientSnapshot(
+            [12, 13, 14].map((id) => worker(id, (capturedAt - 530_000) / 1000 + 3_600, capturedAt)),
+            'conn-1',
+          );
+        }
+        // The server restarted at 630 s and the workers reconnected under the same ids.
+        for (const capturedAt of [650_000, 710_000]) {
+          await history.saveClientSnapshot(
+            [12, 13, 14].map((id) => worker(id, (capturedAt - 630_000) / 1000, capturedAt)),
+            'conn-1',
+          );
+        }
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 3 })]);
+      });
+
+      it('compares reconnects by opening time when the last baseline capture is close to the episode', async () => {
+        // 60 s polls, the last baseline capture 55 s before a 60 s episode, and
+        // a pool that opens one connection a second and keeps it.
+        const pool = (capturedAt: number) =>
+          Array.from({ length: (capturedAt - 480_000) / 1000 + 1 }, (_, i) =>
+            stored(String(480 + i), `10.0.0.7:${480 + i}`, 'pool', (capturedAt - 480_000) / 1000 - i, capturedAt),
+          );
+        await history.saveClientSnapshot(pool(545_000), 'conn-1');
+        await history.saveClientSnapshot(pool(605_000), 'conn-1');
+        const steadyReadings = [steady(520_000, 0), steady(580_000, 60_000), steady(640_000, 120_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          steadyReadings,
+          600_000,
+          660_000,
+        );
+
+        // Split by first capture it would be 60 reconnects against 6.
         expect(ranked).toEqual([]);
       });
 

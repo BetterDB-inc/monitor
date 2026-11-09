@@ -595,6 +595,38 @@ describePostgres('client analytics rollups — postgres', () => {
       expect(summary).toEqual(sorted(await memory.getClientCaptureSummary(connectionId, since, until)));
     });
 
+    it('matches the memory adapter for an id and Unix socket address reused after a server restart', async () => {
+      const connectionId = 'conn-restart';
+      const [template] = rows;
+      const row = { ...template, id: 0, user: 'default', flags: 'N', clientId: '12', addr: '/run/valkey.sock:0', connectionId };
+      const batch = [
+        { ...row, name: 'worker', age: 3_600, capturedAt: since },
+        { ...row, name: 'worker', age: 3_660, capturedAt: since + 60_000 },
+        // A new connection given id 12 on the same socket after the restart.
+        { ...row, name: '', age: 5, capturedAt: since + 120_000 },
+        { ...row, name: 'jobs', age: 65, capturedAt: since + 180_000 },
+      ];
+      await pg.saveClientSnapshot(batch, connectionId);
+      await memory.saveClientSnapshot(batch, connectionId);
+
+      const summary = await pg.getClientCaptureSummary(connectionId, since, until);
+      expect(
+        [...summary.connections]
+          .sort((a, b) => a.openedAt - b.openedAt)
+          .map((c) => [c.name, c.openedAt - since, c.firstCapturedAt - since]),
+      ).toEqual([
+        ['worker', -3_600_000, 0],
+        ['jobs', 115_000, 120_000],
+      ]);
+      const byOpening = ({ captures, connections }: ClientCaptureSummary) => ({
+        captures: sorted({ captures, connections }).captures,
+        connections: [...connections].sort((a, b) => a.openedAt - b.openedAt),
+      });
+      expect(byOpening(summary)).toEqual(
+        byOpening(await memory.getClientCaptureSummary(connectionId, since, until)),
+      );
+    });
+
     it('takes the newest row of a connection by captured_at, then by insertion', async () => {
       const connectionId = 'conn-newest';
       const [template] = rows;

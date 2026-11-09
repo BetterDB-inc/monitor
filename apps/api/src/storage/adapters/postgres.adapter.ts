@@ -134,6 +134,7 @@ import type {
 import { PostgresDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
+  CLIENT_REOPEN_TOLERANCE_MS,
   clientAddrIp,
   clientCaptureSummaryFromSql,
   foldClientAnalyticsStats,
@@ -989,9 +990,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // One statement over idx_client_connection_captured, as in the SQLite
-  // adapter: the window gives each (client_id, addr) the name and user of its
-  // newest row in the range, then the rows are grouped per capture and
-  // (name, user, ip) and per connection.
+  // adapter: a connection is a (client_id, addr) and its opening, the earliest
+  // opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row; the second
+  // window gives each connection the name and user of its newest row in the
+  // range, then the rows are grouped per capture and (name, user, ip) and per
+  // connection.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
@@ -1001,15 +1004,23 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query<ClientCaptureSqlRow>(
-      `WITH resolved AS (
-         SELECT captured_at, client_id, addr, age,
-                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
-                FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
-                ${PG_CLIENT_IP_EXPR} AS ip
+      `WITH readings AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name,
+                MIN(captured_at - age::bigint * 1000) OVER (
+                  PARTITION BY client_id, addr ORDER BY captured_at - age::bigint * 1000
+                  RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS}::bigint PRECEDING
+                    AND ${CLIENT_REOPEN_TOLERANCE_MS}::bigint FOLLOWING
+                ) AS opened_at
            FROM client_snapshots
           WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
             AND COALESCE(flags, '') !~ '[SM]'
-         WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)
+       ), resolved AS (
+         SELECT captured_at, client_id, addr, age, opened_at,
+                FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                FIRST_VALUE(COALESCE(user_name, '')) OVER w AS user_name,
+                ${PG_CLIENT_IP_EXPR} AS ip
+           FROM readings
+         WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
        )
        SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
               COUNT(*) AS count, MAX(age) AS oldest_age,
@@ -1019,9 +1030,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         GROUP BY captured_at, name, user_name, ip
        UNION ALL
        SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
-              NULL, NULL, NULL, MIN(captured_at - age::bigint * 1000)
+              NULL, NULL, NULL, opened_at
          FROM resolved
-        GROUP BY client_id, addr, name, user_name, ip`,
+        GROUP BY client_id, addr, opened_at, name, user_name, ip`,
       [connectionId, since, until],
     );
     return clientCaptureSummaryFromSql(result.rows);

@@ -137,6 +137,7 @@ import type {
 import { SqliteDialect, RowMappers } from './base-sql.adapter';
 import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/shared';
 import {
+  CLIENT_REOPEN_TOLERANCE_MS,
   clientAddrIp,
   clientCaptureSummaryFromSql,
   foldClientAnalyticsStats,
@@ -1318,11 +1319,14 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  // One statement over idx_client_connection_captured. The window gives each
-  // (client_id, addr) the name and user of its newest row in the range; the
-  // rows are then grouped twice, per capture and (name, user, ip) and per
-  // connection, so the result has a row per group and per connection, not
-  // per client per capture.
+  // One statement over idx_client_connection_captured. A connection is a
+  // (client_id, addr) and its opening: the earliest opening estimate within
+  // CLIENT_REOPEN_TOLERANCE_MS of each row's (connectionOpenedAt), so a new
+  // connection given the id and addr of one from before a server restart is
+  // another connection. The second window gives each connection the name and
+  // user of its newest row in the range; the rows are then grouped twice, per
+  // capture and (name, user, ip) and per connection, so the result has a row
+  // per group and per connection, not per client per capture.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
@@ -1333,15 +1337,23 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     }
     const rows = this.db
       .prepare(
-        `WITH resolved AS (
-           SELECT captured_at, client_id, addr, age,
-                  FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
-                  FIRST_VALUE(COALESCE(user, '')) OVER w AS user_name,
-                  ${SQLITE_CLIENT_IP_EXPR} AS ip
+        `WITH readings AS (
+           SELECT id, captured_at, client_id, addr, age, name, user,
+                  MIN(captured_at - age * 1000) OVER (
+                    PARTITION BY client_id, addr ORDER BY captured_at - age * 1000
+                    RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS} PRECEDING
+                      AND ${CLIENT_REOPEN_TOLERANCE_MS} FOLLOWING
+                  ) AS opened_at
              FROM client_snapshots
             WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
               AND COALESCE(flags, '') NOT GLOB '*[SM]*'
-           WINDOW w AS (PARTITION BY client_id, addr ORDER BY captured_at DESC, id DESC)
+         ), resolved AS (
+           SELECT captured_at, client_id, addr, age, opened_at,
+                  FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
+                  FIRST_VALUE(COALESCE(user, '')) OVER w AS user_name,
+                  ${SQLITE_CLIENT_IP_EXPR} AS ip
+             FROM readings
+           WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
          )
          SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
                 COUNT(*) AS count, MAX(age) AS oldest_age,
@@ -1352,9 +1364,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           GROUP BY captured_at, name, user_name, ip
          UNION ALL
          SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
-                NULL, NULL, NULL, MIN(captured_at - age * 1000)
+                NULL, NULL, NULL, opened_at
            FROM resolved
-          GROUP BY client_id, addr, name, user_name, ip`,
+          GROUP BY client_id, addr, opened_at, name, user_name, ip`,
       )
       .all(connectionId, since, until) as ClientCaptureSqlRow[];
     return clientCaptureSummaryFromSql(rows);

@@ -4244,7 +4244,7 @@ export class AnomalyService
       capture,
       newConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(summary.connections, episodeStart, until, baselineStart),
+            newConnectionsBetween(summary.connections, episodeStart, until),
             summary.captures,
             episodeStart,
             until,
@@ -4252,12 +4252,7 @@ export class AnomalyService
         : [],
       baselineConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(
-              summary.connections,
-              baselineStart,
-              episodeStart - 1,
-              baselineStart,
-            ),
+            newConnectionsBetween(summary.connections, baselineStart, episodeStart - 1),
             summary.captures.filter((row) => row.capturedAt >= baselineStart),
             baselineStart,
             episodeStart - 1,

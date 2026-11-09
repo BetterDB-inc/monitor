@@ -165,6 +165,32 @@ export function clientConnectionKey(clientId: string, addr: string): string {
   return `${clientId} ${addr}`;
 }
 
+/**
+ * How far apart, at most, two opening estimates (`captured_at - age * 1000`)
+ * of one (client_id, addr) are for the same connection. A Unix socket gives
+ * every client the same addr, so after a server restart a new connection can
+ * carry the id and addr of one from before it; it opened later, by more than
+ * this. The SQL adapters use the same value as their RANGE frame.
+ */
+export const CLIENT_REOPEN_TOLERANCE_MS = 30_000;
+
+/**
+ * The opening of the connection behind `estimate`, among the ascending opening
+ * estimates of one (client_id, addr): the earliest within
+ * CLIENT_REOPEN_TOLERANCE_MS of it, as the SQL adapters' MIN over
+ * `RANGE BETWEEN CLIENT_REOPEN_TOLERANCE_MS PRECEDING AND ... FOLLOWING`.
+ */
+export function connectionOpenedAt(sortedEstimates: readonly number[], estimate: number): number {
+  let low = 0;
+  let high = sortedEstimates.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (sortedEstimates[mid] < estimate - CLIENT_REOPEN_TOLERANCE_MS) low = mid + 1;
+    else high = mid;
+  }
+  return sortedEstimates[low] ?? estimate;
+}
+
 /** The client_snapshots columns retry attribution aggregates. */
 export type ClientCaptureRow = Pick<
   StoredClientSnapshot,
@@ -224,20 +250,36 @@ export function clientCaptureSummaryFromSql(rows: ClientCaptureSqlRow[]): Client
 /**
  * The memory adapter's getClientCaptureSummary: the aggregation the SQL
  * adapters run in SQL, over rows already narrowed to one connection, the range
- * and no replica or master links, in insertion order. Each (clientId, addr)
- * takes the name and user of its newest row, the later insert on a tie.
+ * and no replica or master links, in insertion order. A connection is a
+ * (clientId, addr) and its opening (connectionOpenedAt); it takes the name and
+ * user of its newest row, the later insert on a tie.
  */
 export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): ClientCaptureSummary {
-  const newest = new Map<string, ClientCaptureRow>();
+  const estimates = new Map<string, number[]>();
   for (const row of rows) {
     const key = clientConnectionKey(row.clientId, row.addr);
+    const known = estimates.get(key);
+    if (known === undefined) estimates.set(key, [row.capturedAt - row.age * 1000]);
+    else known.push(row.capturedAt - row.age * 1000);
+  }
+  for (const known of estimates.values()) known.sort((a, b) => a - b);
+  const openedAtOf = (row: ClientCaptureRow) =>
+    connectionOpenedAt(
+      estimates.get(clientConnectionKey(row.clientId, row.addr))!,
+      row.capturedAt - row.age * 1000,
+    );
+  const connectionOf = (row: ClientCaptureRow) =>
+    `${clientConnectionKey(row.clientId, row.addr)} ${openedAtOf(row)}`;
+  const newest = new Map<string, ClientCaptureRow>();
+  for (const row of rows) {
+    const key = connectionOf(row);
     const known = newest.get(key);
     if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
   }
   const groups = new Map<string, ClientCaptureGroupRow>();
   const connections = new Map<string, ClientConnectionRow>();
   for (const row of rows) {
-    const key = clientConnectionKey(row.clientId, row.addr);
+    const key = connectionOf(row);
     const { name, user } = newest.get(key)!;
     const ip = clientAddrIp(row.addr);
     // Ids are decimal; anything else has no bearing on the growth.
@@ -259,7 +301,6 @@ export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): Clie
       group.oldestAge = Math.max(group.oldestAge, row.age);
       group.maxClientId = Math.max(group.maxClientId, clientId);
     }
-    const openedAt = row.capturedAt - row.age * 1000;
     const connection = connections.get(key);
     if (connection === undefined) {
       connections.set(key, {
@@ -268,11 +309,10 @@ export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): Clie
         name,
         user,
         ip,
-        openedAt,
+        openedAt: openedAtOf(row),
         firstCapturedAt: row.capturedAt,
       });
     } else {
-      connection.openedAt = Math.min(connection.openedAt, openedAt);
       connection.firstCapturedAt = Math.min(connection.firstCapturedAt, row.capturedAt);
     }
   }

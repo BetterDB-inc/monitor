@@ -423,7 +423,7 @@ describe('retry amplification attribution', () => {
         first: null,
         latest: null,
         capture: [],
-        newConnections: newConnectionsBetween(connections, 600_000, 780_000, 420_000),
+        newConnections: newConnectionsBetween(connections, 600_000, 780_000),
       });
 
       // Under the IP they were first listed by, they would rank as 3 reconnects.
@@ -436,6 +436,26 @@ describe('retry amplification attribution', () => {
       // After a restart the same id names a new connection: its whole counter
       // is this episode's, not the growth over the old connection's counter.
       const latest = snapshot(120_000, [client({ id: '5', name: 'api', addr: '10.0.0.1:2', 'tot-cmds': '3000' })]);
+
+      const ranked = rankRetryAmplificationContributors({
+        before,
+        first,
+        latest,
+        capture: [],
+        newConnections: [],
+      });
+
+      expect(ranked.map((c) => c.key)).toEqual(['api']);
+      // 10/s before the episode, 50/s during it on the new connection.
+      expect(ranked[0].commandRateGrowth).toBeCloseTo(5, 5);
+    });
+
+    it('starts the command count of an id reused on the same Unix socket after a restart from zero', () => {
+      const socket = { id: '12', name: 'api', addr: '/run/valkey.sock:0' };
+      const before = snapshot(0, [client({ ...socket, age: '3600', 'tot-cmds': '100000' })]);
+      const first = snapshot(60_000, [client({ ...socket, age: '3660', 'tot-cmds': '100600' })]);
+      // The server restarted and gave a new connection id 12 on the same socket.
+      const latest = snapshot(120_000, [client({ ...socket, age: '30', 'tot-cmds': '3000' })]);
 
       const ranked = rankRetryAmplificationContributors({
         before,
@@ -549,16 +569,16 @@ describe('retry amplification attribution', () => {
         connection({ clientId: '6', name: '', ip: '10.0.0.2', openedAt: 610_000, firstCapturedAt: 650_000 }),
       ];
 
-      expect(newConnectionsBetween(connections, 420_000, 599_999, 420_000)).toEqual([
+      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([
         { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
       ]);
-      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([
+      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([
         { name: 'storm', user: 'default', ip: '10.0.0.1', count: 2 },
         { name: '', user: 'default', ip: '10.0.0.2', count: 1 },
       ]);
     });
 
-    it('counts a connection in the part of the span that first captured it', () => {
+    it('counts a connection once, in the part of the span it opened in', () => {
       const connections = [
         // Opened 300 ms before the episode, first listed 40 s into it.
         connection({ clientId: '1', openedAt: 599_700, firstCapturedAt: 640_000 }),
@@ -566,18 +586,16 @@ describe('retry amplification attribution', () => {
         connection({ clientId: '2', openedAt: 550_000, firstCapturedAt: 560_000 }),
       ];
 
-      expect(newConnectionsBetween(connections, 420_000, 599_999, 420_000)).toEqual([
-        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
+      expect(newConnectionsBetween(connections, 420_000, 599_999)).toEqual([
+        { name: 'api', user: 'default', ip: '10.0.0.1', count: 2 },
       ]);
-      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([
-        { name: 'api', user: 'default', ip: '10.0.0.1', count: 1 },
-      ]);
+      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([]);
     });
 
     it('does not count a connection that was open before the span', () => {
       const connections = [connection({ clientId: '1', openedAt: 100_000, firstCapturedAt: 650_000 })];
 
-      expect(newConnectionsBetween(connections, 600_000, 780_000, 420_000)).toEqual([]);
+      expect(newConnectionsBetween(connections, 600_000, 780_000)).toEqual([]);
     });
   });
 

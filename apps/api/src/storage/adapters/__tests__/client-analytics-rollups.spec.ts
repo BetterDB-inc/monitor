@@ -258,6 +258,34 @@ describe.each([
       ]);
     });
 
+    it('splits an id and Unix socket address reused after a server restart into two connections', async () => {
+      const socket = { addr: '/run/valkey.sock:0', user: 'default' };
+      await save(
+        h.storage,
+        rows([
+          // Id 12 on the socket, open for an hour, captured twice before the restart.
+          { clientId: '12', name: 'worker', ...socket, age: 3_600, capturedAt: since },
+          { clientId: '12', name: 'worker', ...socket, age: 3_660, capturedAt: since + 60_000 },
+          // After it a new connection is given id 12 on the same socket, named later.
+          { clientId: '12', name: '', ...socket, age: 5, capturedAt: since + 120_000 },
+          { clientId: '12', name: 'jobs', ...socket, age: 65, capturedAt: since + 180_000 },
+        ]),
+      );
+
+      const { captures, connections } = await read();
+      const identity = { clientId: '12', addr: '/run/valkey.sock:0', user: 'default', ip: '/run/valkey.sock' };
+      expect([...connections].sort((x, y) => x.openedAt - y.openedAt)).toEqual([
+        { ...identity, name: 'worker', openedAt: since - 3_600_000, firstCapturedAt: since },
+        { ...identity, name: 'jobs', openedAt: since + 115_000, firstCapturedAt: since + 120_000 },
+      ]);
+      expect(captures.map((c) => [c.capturedAt - since, c.name])).toEqual([
+        [0, 'worker'],
+        [60_000, 'worker'],
+        [120_000, 'jobs'],
+        [180_000, 'jobs'],
+      ]);
+    });
+
     it("keeps the monitor's own connections in: the ranking leaves them out by name", async () => {
       await save(
         h.storage,

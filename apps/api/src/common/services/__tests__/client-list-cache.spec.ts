@@ -28,6 +28,7 @@ describe('ClientListCache', () => {
           name: 'api',
           user: 'default',
           flags: 'N',
+          age: 10,
           'tot-cmds': '42',
         },
       ],

@@ -5,7 +5,11 @@ import type {
   ClientSnapshotGroupRow,
   NewClientConnectionGroup,
 } from '@betterdb/shared';
-import { clientAddrIp, clientConnectionKey } from '@app/storage/adapters/client-analytics-stats';
+import {
+  clientAddrIp,
+  clientConnectionKey,
+  connectionOpenedAt,
+} from '@app/storage/adapters/client-analytics-stats';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
@@ -38,6 +42,7 @@ export interface ClientListEntry {
   addr: string;
   name: string;
   user: string;
+  age?: unknown;
   'tot-cmds'?: unknown;
 }
 
@@ -45,6 +50,8 @@ interface ClientCommandCount {
   key: string;
   keyKind: ContributorKeyKind;
   addr: string;
+  /** takenAt - age * 1000, null without an age. */
+  openedAt: number | null;
   totalCommands: number;
 }
 
@@ -99,7 +106,7 @@ export function contributorKey(client: { name: string; user: string; addr: strin
   return hostKey(client.name, client.user, clientAddrIp(client.addr));
 }
 
-function parseTotalCommands(value: unknown): number | null {
+function parseCount(value: unknown): number | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
@@ -112,11 +119,13 @@ export function readClientCommandCounts(
   const counts = new Map<string, ClientCommandCount>();
   for (const client of clients) {
     if (/[SM]/.test(client.flags ?? '')) continue;
-    const totalCommands = parseTotalCommands(client['tot-cmds']);
+    const totalCommands = parseCount(client['tot-cmds']);
     if (totalCommands === null) continue;
+    const age = parseCount(client.age);
     counts.set(client.id, {
       ...contributorKey(client),
       addr: client.addr,
+      openedAt: age === null ? null : takenAt - age * 1000,
       totalCommands,
     });
   }
@@ -125,19 +134,47 @@ export function readClientCommandCounts(
 
 type ClientIdentity = Pick<ClientCommandCount, 'key' | 'keyKind'>;
 
-// A connection is one identity across snapshots: the newest reading of a
-// client id on the same address names it, so a client caught before CLIENT
-// SETNAME ran is counted under the name it set later. A reused id on another
-// address is a different connection. `snapshots` are in chronological order,
-// so a later reading overwrites an earlier one.
-function latestIdentities(snapshots: ClientCommandSnapshot[]): Map<string, ClientIdentity> {
-  const identities = new Map<string, ClientIdentity>();
+// The connection behind each reading: its client id, address and opening, as
+// in the stored captures (connectionOpenedAt), so an id reused on another
+// address, or on the same Unix socket after a server restart, is another
+// connection.
+function connectionKeys(snapshots: ClientCommandSnapshot[]): Map<ClientCommandCount, string> {
+  const estimates = new Map<string, number[]>();
   for (const snapshot of snapshots) {
     for (const [clientId, client] of snapshot.clients) {
-      identities.set(clientConnectionKey(clientId, client.addr), {
-        key: client.key,
-        keyKind: client.keyKind,
-      });
+      const openedAt = client.openedAt ?? null;
+      if (openedAt === null) continue;
+      const key = clientConnectionKey(clientId, client.addr);
+      const known = estimates.get(key);
+      if (known === undefined) estimates.set(key, [openedAt]);
+      else known.push(openedAt);
+    }
+  }
+  for (const known of estimates.values()) known.sort((a, b) => a - b);
+  const keys = new Map<ClientCommandCount, string>();
+  for (const snapshot of snapshots) {
+    for (const [clientId, client] of snapshot.clients) {
+      const key = clientConnectionKey(clientId, client.addr);
+      const estimate = client.openedAt ?? null;
+      const openedAt = estimate === null ? null : connectionOpenedAt(estimates.get(key)!, estimate);
+      keys.set(client, `${key} ${openedAt}`);
+    }
+  }
+  return keys;
+}
+
+// A connection is one identity across snapshots: its newest reading names it,
+// so a client caught before CLIENT SETNAME ran is counted under the name it set
+// later. `snapshots` are in chronological order, so a later reading overwrites
+// an earlier one.
+function latestIdentities(
+  snapshots: ClientCommandSnapshot[],
+  keys: Map<ClientCommandCount, string>,
+): Map<string, ClientIdentity> {
+  const identities = new Map<string, ClientIdentity>();
+  for (const snapshot of snapshots) {
+    for (const client of snapshot.clients.values()) {
+      identities.set(keys.get(client)!, { key: client.key, keyKind: client.keyKind });
     }
   }
   return identities;
@@ -205,20 +242,22 @@ export function selectClientSnapshots(
 function commandRates(
   from: ClientCommandSnapshot,
   to: ClientCommandSnapshot,
+  keys: Map<ClientCommandCount, string>,
   identities: Map<string, ClientIdentity>,
 ): Array<{ identity: ClientIdentity; rate: number }> {
   const dtSec = (to.takenAt - from.takenAt) / 1000;
   if (dtSec <= 0) return [];
   const rates: Array<{ identity: ClientIdentity; rate: number }> = [];
   for (const [clientId, client] of to.clients) {
-    // The earlier reading counts only for the same connection: an id reused on
-    // another address after a server restart starts from zero.
+    // The earlier reading counts only for the same connection: an id reused
+    // after a server restart starts from zero.
+    const key = keys.get(client)!;
     const previous = from.clients.get(clientId);
-    const earlier = previous?.addr === client.addr ? previous.totalCommands : 0;
+    const earlier =
+      previous !== undefined && keys.get(previous) === key ? previous.totalCommands : 0;
     if (client.totalCommands < earlier) continue;
     // Every reading of `to` is in `identities` (built from `to` among others).
-    const identity = identities.get(clientConnectionKey(clientId, client.addr))!;
-    rates.push({ identity, rate: (client.totalCommands - earlier) / dtSec });
+    rates.push({ identity: identities.get(key)!, rate: (client.totalCommands - earlier) / dtSec });
   }
   return rates;
 }
@@ -229,22 +268,21 @@ function addCommandGrowth(
   first: ClientCommandSnapshot,
   latest: ClientCommandSnapshot,
 ): void {
-  const identities = latestIdentities([before, first, latest]);
-  for (const { identity, rate } of commandRates(before, first, identities)) {
+  const keys = connectionKeys([before, first, latest]);
+  const identities = latestIdentities([before, first, latest], keys);
+  for (const { identity, rate } of commandRates(before, first, keys, identities)) {
     accumulatorFor(map, identity).preEpisodeRate += rate;
   }
-  for (const { identity, rate } of commandRates(first, latest, identities)) {
+  for (const { identity, rate } of commandRates(first, latest, keys, identities)) {
     accumulatorFor(map, identity).episodeRate += rate;
   }
 }
 
 /**
- * New connections per (name, user, ip) first captured in [since, until],
- * among those that opened at or after `openedSince` (the start of the
- * baseline: older ones were open before it, or opened during a previous
- * episode the baseline was cut after). Each connection is counted in the
- * part of the span that first listed it, so one that opened just before the
- * episode and was first captured during it counts once, in the episode.
+ * New connections per (name, user, ip) that opened in [since, until]. The
+ * baseline and the episode are split by opening time alone, so each part
+ * counts the connections opened in it whichever capture first listed them,
+ * and one that opened just before the episode counts once, in the baseline.
  * `connections` come from one storage read over the whole attribution span,
  * so a connection keeps the same identity whichever part it is counted in.
  */
@@ -252,11 +290,10 @@ export function newConnectionsBetween(
   connections: ClientConnectionRow[],
   since: number,
   until: number,
-  openedSince: number,
 ): NewClientConnectionGroup[] {
   const groups = new Map<string, NewClientConnectionGroup>();
-  for (const { name, user, ip, openedAt, firstCapturedAt } of connections) {
-    if (openedAt < openedSince || firstCapturedAt < since || firstCapturedAt > until) continue;
+  for (const { name, user, ip, openedAt } of connections) {
+    if (openedAt < since || openedAt > until) continue;
     const key = JSON.stringify([name, user, ip]);
     const group = groups.get(key) ?? { name, user, ip, count: 0 };
     group.count += 1;
