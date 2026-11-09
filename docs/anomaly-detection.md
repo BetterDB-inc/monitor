@@ -860,10 +860,12 @@ Three detectors work out a target for the setting their recommendation names. Th
 | Event | Setting | Target |
 | --- | --- | --- |
 | `backlog_coverage_risk` | `repl-backlog-size` | The size that covers 75s of writes (the 60s warning plus 25%) at the write rate the coverage was measured with |
-| `repl_buffer_pressure` | `client-output-buffer-limit replica hard` (or `soft` for a sustained soft-limit breach) | Twice the replica's observed output buffer, so the same burst sits at 50% of the limit |
+| `repl_buffer_pressure` | `client-output-buffer-limit replica hard`, and `soft` when the soft limit is enabled and this buffer is already past 60% of it (a sustained soft-limit breach carries `soft` only) | Twice the replica's observed output buffer, so the same burst sits at 50% of each of those limits |
 | `fork_memory_risk` | `total_system_memory` | The RAM at which the projected fork peak sits at 70%, ten points under the 80% warning |
 
-Values are rounded up to whole MB. When an input is unknown (no backlog size, or no per-replica buffer because `CLIENT LIST` was denied or the finding is a resync loop), `values` is left out and the text stays as it is. Values are kept in memory only, for the anomaly cache TTL (1 hour by default). After that, incidents rebuilt from stored events, and groups read from storage, have the text without `values`. The events endpoint returns the stored copy of a saved event, so it does not include them, and neither do webhook payloads.
+Targets are rounded up to whole MB. The current value is rounded to the nearest MB. When an input is unknown (no backlog size, or no per-replica buffer because `CLIENT LIST` was denied or the finding is a resync loop), `values` is left out and the text stays as it is. A group or sequence match keeps the larger target for each setting on each node, and sets `nodeAddr` when the event names one, so a later smaller replica does not replace a larger one and two nodes do not share a single target.
+
+Values are kept in memory only. A group read back from storage still includes them while that group is in memory, and an incident rebuilt from storage keeps them while the event is still in the live incident buffer, including after it has left the 1,000-event recent list. Once those copies age out, the text remains and `values` is absent. The events endpoint returns the stored copy of a saved event, so it does not include them, and neither do webhook payloads.
 
 For retry amplification, the group's "Throttle or inspect the clients whose command rate grew the most" recommendation names the top clients and their growth (`Top clients: name checkout (cmds 4.2×, 12 reconnects)`), and keeps the fixed text when attribution is unavailable or no client stood out.
 

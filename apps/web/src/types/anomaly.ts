@@ -134,6 +134,7 @@ export interface RecommendationValue {
   current: number;
   target: number;
   unit: string;
+  nodeAddr?: string;
 }
 
 export interface IncidentSequenceMatch {

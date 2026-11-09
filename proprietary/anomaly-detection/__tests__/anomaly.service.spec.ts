@@ -8784,6 +8784,28 @@ describe('AnomalyService', () => {
           target: 359,
           unit: 'MB',
         },
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 359,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('sizes the replica soft limit at twice the observed buffer', async () => {
+      const omem = 64 * MB * 0.7;
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(omem));
+      await poll();
+      now += 61_000;
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 90,
+          unit: 'MB',
+        },
       ]);
     });
 
@@ -10717,6 +10739,29 @@ describe('AnomalyService', () => {
       metricTypes: [],
       connectionId: 'node-1',
       ...over,
+    });
+
+    it('keeps in-memory values when a stored group is read back', async () => {
+      const values = [{ setting: 'repl-backlog-size', current: 1, target: 3, unit: 'MB' }];
+      (service as any).recentGroups.push({
+        correlationId: 'grp-1',
+        timestamp: 1_000_000,
+        pattern: 'memory_pressure',
+        severity: 'warning',
+        diagnosis: 'cached',
+        recommendations: ['cached'],
+        anomalies: [],
+        values,
+      });
+      storage.getCorrelatedGroups.mockResolvedValue([
+        storedGroup('grp-1', 1_000_000, { diagnosis: 'stored', recommendations: ['stored'] }),
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(1);
+
+      expect(group.diagnosis).toBe('stored');
+      expect(group.recommendations).toEqual(['stored']);
+      expect(group.values).toEqual(values);
     });
 
     it('reads groups and members in one query each, whatever the group count', async () => {
@@ -14520,6 +14565,12 @@ describe('AnomalyService', () => {
       storage.getAnomalyEvents.mockResolvedValue(stored);
       const [timeline] = await service.getIncidentTimelines('conn-1');
       expect(timeline.sequenceMatches[0].values).toEqual(expected);
+
+      (service as any).recentAnomalies = (service as any).recentAnomalies.filter(
+        (event: { metricType: MetricType }) => event.metricType !== MetricType.FORK_MEMORY_RISK,
+      );
+      const [aged] = await service.getIncidentTimelines('conn-1');
+      expect(aged.sequenceMatches[0].values).toEqual(expected);
     });
 
     it('stays quiet when a short disconnect is covered by the backlog', async () => {

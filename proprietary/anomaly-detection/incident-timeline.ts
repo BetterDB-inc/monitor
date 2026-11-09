@@ -6,6 +6,7 @@ import {
   AnomalySeverity,
   MetricType,
   RecommendationValue,
+  mergeRecommendationValues,
 } from './types';
 import { SequenceRule, leadOf } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
@@ -655,10 +656,9 @@ export class IncidentTimelineBuilder {
         matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
       for (const matched of matchSequences(candidates, rule, holdsStep)) {
         const held = matched.filter((e) => !dropped.includes(e));
-        // One value per setting, the latest event's.
-        const values = [
-          ...new Map(held.flatMap((e) => e.values ?? []).map((v) => [v.setting, v])).values(),
-        ];
+        const values = mergeRecommendationValues(
+          [...held].sort((a, b) => a.timestamp - b.timestamp || a.anomalyId.localeCompare(b.anomalyId)),
+        );
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),

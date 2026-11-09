@@ -367,6 +367,7 @@ import {
   FanoutCoverageReason,
   SpikeDetectorConfig,
   AnomalyEventSink,
+  RecommendationValue,
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
@@ -414,6 +415,33 @@ interface ConnectionPersistenceState {
 
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
 const MB = 1024 * 1024;
+
+/** Twice the observed buffer, so that burst sits at 50% of the limit. */
+function outputBufferValues(
+  limit: { hardBytes: number; softBytes: number; softSeconds: number },
+  omem: number,
+  kind: string,
+): RecommendationValue[] | undefined {
+  if (kind !== 'hard-approach' && kind !== 'soft-sustained') return undefined;
+  const target = Math.ceil((2 * omem) / MB);
+  const value = (setting: string, bytes: number): RecommendationValue => ({
+    setting,
+    current: Math.round(bytes / MB),
+    target,
+    unit: 'MB',
+  });
+  const values: RecommendationValue[] = [];
+  if (kind === 'hard-approach' && limit.hardBytes > 0) {
+    values.push(value('client-output-buffer-limit replica hard', limit.hardBytes));
+  }
+  const softApplies =
+    limit.softSeconds > 0 && limit.softBytes > 0 && omem >= limit.softBytes * COB_WARN_RATIO;
+  if (softApplies && (kind === 'soft-sustained' || kind === 'hard-approach')) {
+    values.push(value('client-output-buffer-limit replica soft', limit.softBytes));
+  }
+  return values.length > 0 ? values : undefined;
+}
+
 const SEED_RETRY_BASE_MS = 30_000;
 const SEED_RETRY_MAX_MS = 5 * 60_000;
 const OPEN_EVENTS_MAX_RETRY_MS = 60_000;
@@ -4929,20 +4957,14 @@ export class AnomalyService
 
     for (const finding of findings) {
       // Twice the replica's observed buffer, so the same burst sits at 50% of
-      // the limit, under the 60% warning. Only a per-replica ratio finding has
-      // an observed buffer; the aggregate and resync-loop findings keep the text.
+      // the limit, under the 60% warning. A hard-limit finding also raises the
+      // soft limit when this buffer is already past the soft warning, because
+      // the hard check runs first and would otherwise hide that disconnect.
+      // Aggregate and resync-loop findings have no per-replica buffer.
       const omem = replicas?.find((r) => r.addr === finding.replicaAddr)?.omem;
-      const soft = finding.kind === 'soft-sustained';
       const values =
         limit !== null && omem !== undefined && finding.ratio !== null
-          ? [
-              {
-                setting: `client-output-buffer-limit replica ${soft ? 'soft' : 'hard'}`,
-                current: Math.round((soft ? limit.softBytes : limit.hardBytes) / MB),
-                target: Math.ceil((2 * omem) / MB),
-                unit: 'MB',
-              },
-            ]
+          ? outputBufferValues(limit, omem, finding.kind)
           : undefined;
       const isCritical = finding.level === 'critical';
       const event: AnomalyEvent = {
@@ -8259,9 +8281,23 @@ export class AnomalyService
           e.scopeId === scope.id ||
           (e.connectionId !== undefined && members.has(e.connectionId))),
     );
-    // Computed values live only in memory: keep them when storage wins on id.
-    const valuesOf = new Map(cached.map((e) => [e.id, e.values]));
-    const kept = stored.map((e) => (valuesOf.get(e.id) ? { ...e, values: valuesOf.get(e.id) } : e));
+    // Computed values live only in memory. recentAnomalies holds the newest
+    // 1,000; incidentEvents still has values for a live incident after that.
+    const valuesOf = new Map<string, RecommendationValue[]>();
+    const rememberValues = (event: AnomalyEvent) => {
+      if (event.values && event.values.length > 0) valuesOf.set(event.id, event.values);
+    };
+    for (const event of cached) rememberValues(event);
+    const live = scope
+      ? [...members].flatMap((id) => this.incidentEvents.get(id) ?? [])
+      : [...this.incidentEventsById.values()];
+    for (const event of live) {
+      if (!valuesOf.has(event.id)) rememberValues(event);
+    }
+    const kept = stored.map((event) => {
+      const values = valuesOf.get(event.id);
+      return values ? { ...event, values } : event;
+    });
     return [...new Map([...cached, ...kept].map((e) => [e.id, e])).values()];
   }
 
@@ -8573,8 +8609,12 @@ export class AnomalyService
       (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
     );
 
+    const cachedValues = new Map(
+      this.recentGroups.flatMap((group) => (group.values ? [[group.correlationId, group.values] as const] : [])),
+    );
     return stored.map((s) => {
       const ids = new Set(s.anomalyIds);
+      const values = cachedValues.get(s.correlationId);
       return {
         correlationId: s.correlationId,
         timestamp: s.timestamp,
@@ -8583,6 +8623,7 @@ export class AnomalyService
         diagnosis: s.diagnosis,
         recommendations: s.recommendations,
         anomalies: ordered.filter((a) => a.correlationId === s.correlationId || ids.has(a.id)),
+        ...(values ? { values } : {}),
         ...(truncated.has(s.correlationId) ? { truncated: true } : {}),
       };
     });

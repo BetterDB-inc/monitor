@@ -167,6 +167,35 @@ export interface RecommendationValue {
   current: number;
   target: number;
   unit: string;
+  /** Set when the value belongs to one node of a group. */
+  nodeAddr?: string;
+}
+
+/**
+ * One value per node and setting. A later reading replaces an earlier one
+ * only when its target is at least as large, so a smaller replica cannot
+ * shrink the limit a larger one still needs. Node identity is `nodeAddr`,
+ * then the connection, so two nodes in one group each keep their own value.
+ */
+export function mergeRecommendationValues(
+  events: readonly {
+    nodeAddr?: string;
+    connectionId?: string;
+    values?: readonly RecommendationValue[];
+  }[],
+): RecommendationValue[] {
+  const best = new Map<string, RecommendationValue>();
+  for (const event of events) {
+    for (const value of event.values ?? []) {
+      const nodeAddr = value.nodeAddr ?? event.nodeAddr;
+      const identity = nodeAddr ?? event.connectionId ?? '';
+      const stamped: RecommendationValue = nodeAddr ? { ...value, nodeAddr } : { ...value };
+      const key = `${identity}\0${stamped.setting}`;
+      const held = best.get(key);
+      if (!held || stamped.target >= held.target) best.set(key, stamped);
+    }
+  }
+  return [...best.values()];
 }
 
 export interface AnomalyEvent {

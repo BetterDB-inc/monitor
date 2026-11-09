@@ -6,6 +6,7 @@ import {
   AnomalySeverity,
   MetricType,
   AnomalyType,
+  mergeRecommendationValues,
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
 import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
@@ -571,10 +572,7 @@ export class Correlator {
     const maxSeverity = anomalies.reduce((max, a) => {
       return severityOrder[a.severity] > severityOrder[max] ? a.severity : max;
     }, AnomalySeverity.INFO);
-    // One value per setting, the latest event's.
-    const values = [
-      ...new Map(anomalies.flatMap((a) => a.values ?? []).map((v) => [v.setting, v])).values(),
-    ];
+    const values = mergeRecommendationValues(anomalies);
 
     return {
       correlationId,
