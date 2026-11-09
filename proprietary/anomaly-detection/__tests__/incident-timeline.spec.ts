@@ -1575,6 +1575,37 @@ describe('IncidentTimelineBuilder', () => {
       expect(incident.matchedPatterns).toEqual([AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE]);
     });
 
+    it('matches a live step against dropped steps from the same node', () => {
+      const node = '10.0.0.9:6379';
+      const sameNode: SequenceRule = { ...compound, sameConnection: true };
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [sameNode]).build(
+        [event({ id: 'buf', timestamp: T0 + MIN, metricType: MetricType.REPL_BUFFER_PRESSURE, nodeAddr: node })],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.RESHARD_SHARD_SKEW,
+            connectionId: 'conn-a',
+            members: [
+              {
+                metricType: MetricType.RESHARD_SHARD_SKEW,
+                anomalyType: AnomalyType.SPIKE,
+                connectionId: 'conn-a',
+                nodeAddr: node,
+                timestamp: T0,
+              },
+            ],
+          },
+        ],
+        new Map([['conn-a', T0]]),
+      );
+
+      expect(incident.matchedPatterns).toEqual([AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE]);
+    });
+
     it('keeps a match that shares only an optional event with the compound match', () => {
       const ops: SequenceRule = {
         ...escalation,
@@ -1626,6 +1657,28 @@ describe('IncidentTimelineBuilder', () => {
 
     it('does not join an incident without its rule', () => {
       expect(build(MetricType.FRAGMENTATION_RATIO)).toHaveLength(2);
+    });
+
+    it('measures the span from the first step, not from an earlier lead step', () => {
+      const led: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED], [MetricType.FRAGMENTATION_RATIO]],
+        optionalMetrics: [MetricType.EVICTED_KEYS],
+        leadMs: { 2: 10 * MIN },
+      };
+      const incidents = new IncidentTimelineBuilder({}, undefined, () => [led]).build(
+        [
+          event({ metricType: MetricType.FRAGMENTATION_RATIO }),
+          event({ timestamp: T0 + 8 * MIN, metricType: MetricType.CONNECTIONS }),
+          event({ timestamp: T0 + 9 * MIN, metricType: MetricType.MEMORY_USED }),
+          event({ timestamp: T0 + 15 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([escalation.pattern]);
     });
   });
 

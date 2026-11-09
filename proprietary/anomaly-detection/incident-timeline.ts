@@ -268,6 +268,17 @@ export function reachesStep(
   });
 }
 
+export function matchedBefore(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+): boolean {
+  const pool = earlier.filter(
+    (e) => e.timestamp <= event.timestamp && (!rule.sameConnection || sameSource(e, event)),
+  );
+  return matchSequence(pool, rule, (matched) => event.timestamp - matched[0].timestamp <= rule.maxSpanMs) !== null;
+}
+
 export function precedesLeadStep(
   earlier: readonly RuleStepEvent[],
   event: RuleStepEvent,
@@ -599,7 +610,7 @@ export class IncidentTimelineBuilder {
               : reachesStep(current, event, rule, i) ||
                 (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
         ) ||
-        (fills(rule, rule.optionalMetrics, event) && reachesStep(current, event, rule, rule.steps.length)),
+        (fills(rule, rule.optionalMetrics, event) && matchedBefore(current, event, rule)),
     );
   }
 
@@ -652,6 +663,7 @@ export class IncidentTimelineBuilder {
         connectionId: step.connectionId ?? '',
         timestamp: step.timestamp,
         metricType: step.metricType,
+        ...(step.nodeAddr ? { nodeAddr: step.nodeAddr } : {}),
         ...(step.anomalyType ? { anomalyType: step.anomalyType } : {}),
         ...(step.retryTrigger ? { retryTrigger: step.retryTrigger } : {}),
         severity: AnomalySeverity.INFO,

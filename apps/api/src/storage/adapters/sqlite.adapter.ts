@@ -831,6 +831,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (!anomalyEventInfo.some((col) => col.name === 'event_sequence')) {
       this.db.exec('ALTER TABLE anomaly_events ADD COLUMN event_sequence INTEGER');
     }
+    if (!anomalyEventInfo.some((col) => col.name === 'retry_trigger')) {
+      this.db.exec('ALTER TABLE anomaly_events ADD COLUMN retry_trigger TEXT');
+    }
     if (!anomalyEventInfo.some((col) => col.name === 'kind')) {
       const db = this.db;
       db.transaction(() => {
@@ -1955,6 +1958,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         commands TEXT,
         event_sequence INTEGER,
         kind TEXT,
+        retry_trigger TEXT,
         resolved INTEGER DEFAULT 0,
         resolved_at INTEGER,
         duration_ms INTEGER,
@@ -2847,9 +2851,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
@@ -2860,6 +2864,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         kind = COALESCE(anomaly_events.kind, excluded.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, excluded.retry_trigger),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2885,6 +2890,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       event.commands ? JSON.stringify(event.commands) : null,
       event.eventSequence ?? null,
       event.kind ?? null,
+      event.retryTrigger ?? null,
       event.resolved ? 1 : 0,
       event.resolvedAt || null,
       event.durationMs || null,
@@ -2905,9 +2911,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         correlation_id = COALESCE(excluded.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(excluded.related_metrics, anomaly_events.related_metrics),
@@ -2918,6 +2924,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         commands = COALESCE(anomaly_events.commands, excluded.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, excluded.event_sequence),
         kind = COALESCE(anomaly_events.kind, excluded.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, excluded.retry_trigger),
         resolved = MAX(anomaly_events.resolved, excluded.resolved),
         resolved_at = COALESCE(anomaly_events.resolved_at, excluded.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, excluded.duration_ms)
@@ -2945,6 +2952,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           event.commands ? JSON.stringify(event.commands) : null,
           event.eventSequence ?? null,
           event.kind ?? null,
+          event.retryTrigger ?? null,
           event.resolved ? 1 : 0,
           event.resolvedAt || null,
           event.durationMs || null,

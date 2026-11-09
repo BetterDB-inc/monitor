@@ -273,6 +273,58 @@ describe('AnomalyService', () => {
       );
     });
 
+    it('reads back the trigger of a stored retry amplification event', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        {
+          id: 'retry-1',
+          timestamp: Date.now() - 60_000,
+          metricType: 'retry_amplification',
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 3,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 2,
+          message: 'retries',
+          retryTrigger: 'churn',
+          resolved: false,
+          connectionId: 'c1',
+        },
+      ]);
+
+      const [event] = await service.getRecentAnomalies(
+        Date.now() - 120_000,
+        undefined,
+        undefined,
+        MetricType.RETRY_AMPLIFICATION,
+        10,
+        'c1',
+      );
+
+      expect(event.retryTrigger).toBe('churn');
+    });
+
+    it('stores the trigger of a retry amplification event', () => {
+      const stored = (service as any).toStoredAnomalyEvent({
+        id: 'retry-1',
+        timestamp: Date.now(),
+        metricType: MetricType.RETRY_AMPLIFICATION,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 3,
+        baseline: 1,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 2,
+        message: 'retries',
+        retryTrigger: 'churn',
+        resolved: false,
+      });
+
+      expect(stored.retryTrigger).toBe('churn');
+    });
+
     it('unions storage-only events with cached events on unfiltered recent reads', async () => {
       const storedEvent = {
         id: 'stored-1',
@@ -11799,6 +11851,63 @@ describe('AnomalyService', () => {
       expect((service as any).liveIncidents[0].matchedPatterns).toEqual([
         AnomalyPattern.MEMORY_PRESSURE,
       ]);
+    });
+
+    describe('matches sharing an optional event', () => {
+      const withOptional = { ...rule, optionalMetrics: [MetricType.EVICTED_KEYS] };
+      const live = (now: number) => [
+        anomaly({ id: 'a', timestamp: now - 6 * MIN }),
+        anomaly({ id: 'b', timestamp: now - 5 * MIN, metricType: MetricType.MEMORY_USED }),
+        anomaly({ id: 'opt', timestamp: now - 4.5 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        anomaly({ id: 'c', timestamp: now - 4 * MIN }),
+        anomaly({ id: 'd', timestamp: now - 3 * MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+
+      beforeEach(() => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([withOptional]);
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+          withOptional,
+        ]);
+      });
+
+      it('emits a group for each match', async () => {
+        const now = Date.now();
+        (service as any).recentAnomalies.push(...live(now));
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup.mock.calls.map(([g]: any[]) => g.anomalyIds)).toEqual([
+          ['a', 'b', 'opt'],
+          ['c', 'd', 'opt'],
+        ]);
+      });
+
+      it('emits the second match after a restart that stored only the first', async () => {
+        const now = Date.now();
+        const members = live(now);
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 6 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 3,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED, MetricType.EVICTED_KEYS],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b', 'opt'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(members.map((m) => ({ ...m, anomalyType: 'spike' })));
+        (service as any).recentAnomalies.push(...members);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup.mock.calls.map(([g]: any[]) => g.anomalyIds)).toEqual([
+          ['c', 'd', 'opt'],
+        ]);
+      });
     });
 
     it('does not re-emit a sequence group stored before a restart', async () => {

@@ -161,6 +161,12 @@ export enum AnomalyPattern {
 
 export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
 
+const RETRY_AMPLIFICATION_TRIGGERS: ReadonlySet<string> = new Set<RetryAmplificationTrigger>(['latency', 'errors', 'churn']);
+
+export function isRetryTrigger(value: unknown): value is RetryAmplificationTrigger {
+  return typeof value === 'string' && RETRY_AMPLIFICATION_TRIGGERS.has(value);
+}
+
 export interface AnomalyEvent {
   id: string;
   timestamp: number;

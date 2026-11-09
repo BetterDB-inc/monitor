@@ -173,6 +173,7 @@ export interface StoredAnomalyEvent {
   commands?: string[];
   eventSequence?: number;
   kind?: AnomalyKind;
+  retryTrigger?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;

@@ -206,6 +206,7 @@ export class RowMappers {
       nodeAddr: row.node_addr ?? undefined,
       dedupeKey: row.dedupe_key ?? undefined,
       kind: row.kind ?? undefined,
+      retryTrigger: row.retry_trigger ?? undefined,
       commands: row.commands ? this.dialect.fromArray(row.commands) : undefined,
       eventSequence: row.event_sequence == null ? undefined : Number(row.event_sequence),
       resolved: this.dialect.fromBoolean(row.resolved),
