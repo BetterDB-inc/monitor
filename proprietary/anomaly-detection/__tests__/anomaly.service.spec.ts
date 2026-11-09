@@ -12299,7 +12299,12 @@ describe('AnomalyService', () => {
         ctx,
       );
       await (service as any).addAnomaly(
-        anomaly({ id: 'step', timestamp: now - MIN, metricType: MetricType.CONNECTIONS }),
+        anomaly({
+          id: 'step',
+          timestamp: now - MIN,
+          metricType: MetricType.CONNECTIONS,
+          anomalyType: AnomalyType.DROP,
+        }),
         ctx,
       );
 
@@ -12317,7 +12322,7 @@ describe('AnomalyService', () => {
             },
             {
               metricType: MetricType.CONNECTIONS,
-              anomalyType: AnomalyType.SPIKE,
+              anomalyType: AnomalyType.DROP,
               connectionId: 'conn-1',
               timestamp: now - MIN,
             },

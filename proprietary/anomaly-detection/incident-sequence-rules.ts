@@ -72,6 +72,7 @@ registerSequenceRule({
   },
   maxSpanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
   leadMs: { 2: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
+  sameConnection: true,
   supersedes: [AnomalyPattern.RESHARD_UNDER_WRITES, AnomalyPattern.DIVERGENCE_UNDER_PRESSURE],
   diagnosis:
     'A reshard loaded one shard, its replicas fell behind, and the primary ran short of memory or replica buffer room, each slowing the others\' recovery. ' +
@@ -103,6 +104,7 @@ registerSequenceRule({
   },
   maxSpanMs: RETRY_STORM_MAX_SPAN_MS,
   sameConnection: true,
+  carriesFirstStep: (event) => event.retryTrigger === 'churn',
   diagnosis:
     'Slow commands, failing commands or a wave of reconnects made clients retry, and the retries multiplied the load. Saturation in the same window means the server had no headroom left to absorb them.',
   recommendations: [

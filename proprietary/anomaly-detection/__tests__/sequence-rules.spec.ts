@@ -65,6 +65,29 @@ describe('sequence rule registry', () => {
     ).toThrow(/supersede itself/);
   });
 
+  it('rejects carriesFirstStep on a one-step rule', () => {
+    expect(() =>
+      registry.registerSequenceRule({ ...rule, steps: [[MetricType.OPS_PER_SEC]], carriesFirstStep: () => true }),
+    ).toThrow(/second step/);
+  });
+
+  describe('opensAt', () => {
+    const carried = { ...rule, carriesFirstStep: (e: { retryTrigger?: string }) => e.retryTrigger === 'churn' };
+
+    it('opens at the first step on a first-step metric', () => {
+      expect(registry.opensAt(carried, { metricType: MetricType.OPS_PER_SEC })).toBe(0);
+    });
+
+    it('opens at the second step on a second-step event that carries the first', () => {
+      expect(registry.opensAt(carried, { metricType: MetricType.MEMORY_USED, retryTrigger: 'churn' })).toBe(1);
+    });
+
+    it('does not open on a second-step event that does not carry the first', () => {
+      expect(registry.opensAt(carried, { metricType: MetricType.MEMORY_USED, retryTrigger: 'latency' })).toBeNull();
+      expect(registry.opensAt(rule, { metricType: MetricType.MEMORY_USED, retryTrigger: 'churn' })).toBeNull();
+    });
+  });
+
   describe('fills', () => {
     const directed = { ...rule, directions: { [MetricType.OPS_PER_SEC]: 'rise' as const } };
 

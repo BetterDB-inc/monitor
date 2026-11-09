@@ -64,7 +64,16 @@ interface RuleCase {
   spanMs: number;
   lead?: { step: number; ms: number };
   sameConnection: boolean;
+  rising: MetricType[];
 }
+
+const WRITE_AND_MEMORY_RISES = [
+  MetricType.OPS_PER_SEC,
+  MetricType.INPUT_KBPS,
+  MetricType.MEMORY_USED,
+  MetricType.EVICTED_KEYS,
+  MetricType.EVICTED_CLIENTS,
+];
 
 const cases: RuleCase[] = [
   {
@@ -79,6 +88,7 @@ const cases: RuleCase[] = [
     spanMs: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: DIVERGENCE_UNDER_PRESSURE_MAX_SPAN_MS },
     sameConnection: true,
+    rising: WRITE_AND_MEMORY_RISES,
   },
   {
     pattern: AnomalyPattern.RESHARD_UNDER_WRITES,
@@ -87,6 +97,7 @@ const cases: RuleCase[] = [
     optional: MetricType.COMMAND_P99,
     spanMs: RESHARD_UNDER_WRITES_MAX_SPAN_MS,
     sameConnection: false,
+    rising: [],
   },
   {
     pattern: AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
@@ -99,7 +110,8 @@ const cases: RuleCase[] = [
     optional: MetricType.INPUT_KBPS,
     spanMs: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS,
     lead: { step: 2, ms: RESHARD_DIVERGENCE_PRESSURE_MAX_SPAN_MS },
-    sameConnection: false,
+    sameConnection: true,
+    rising: WRITE_AND_MEMORY_RISES,
   },
   {
     pattern: AnomalyPattern.RETRY_STORM,
@@ -111,6 +123,7 @@ const cases: RuleCase[] = [
     optional: MetricType.CLIENT_LOCKOUT_RISK,
     spanMs: RETRY_STORM_MAX_SPAN_MS,
     sameConnection: true,
+    rising: [MetricType.COMMAND_P99, MetricType.ERROR_REPLIES, MetricType.CONNECTION_CHURN],
   },
   {
     pattern: AnomalyPattern.BACKLOG_EXHAUSTION,
@@ -119,6 +132,7 @@ const cases: RuleCase[] = [
     spanMs: BACKLOG_EXHAUSTION_MAX_SPAN_MS,
     lead: { step: 1, ms: RESYNC_ESCALATION_WINDOW_MS },
     sameConnection: true,
+    rising: [],
   },
 ];
 
@@ -134,7 +148,9 @@ describe('incident sequence rules', () => {
     expect(rule.recommendations.length).toBeGreaterThan(0);
   });
 
-  describe.each(cases)('$pattern', ({ pattern, steps, alternatives, optional, spanMs, lead, sameConnection }) => {
+  describe.each(cases)(
+    '$pattern',
+    ({ pattern, steps, alternatives, optional, spanMs, lead, sameConnection, rising }) => {
     const inOrder = (gapMs = MIN) => steps.map((metric, i) => event(metric, i * gapMs));
 
     it('matches its steps in order', () => {
@@ -205,10 +221,15 @@ describe('incident sequence rules', () => {
       });
     }
 
+    it('requires a rise on exactly the expected metrics', () => {
+      const directions = ruleFor(pattern).directions ?? {};
+
+      expect(Object.keys(directions).sort()).toEqual([...rising].sort());
+      expect(Object.values(directions).every((d) => d === 'rise')).toBe(true);
+    });
+
     const directed = alternatives.flatMap((metrics, stepIndex) =>
-      metrics
-        .filter((metric) => ruleFor(pattern).directions?.[metric] === 'rise')
-        .map((metric) => ({ stepIndex, metric })),
+      metrics.filter((metric) => rising.includes(metric)).map((metric) => ({ stepIndex, metric })),
     );
     if (directed.length > 0) {
       it.each(directed)('does not take a drop in $metric as step $stepIndex', ({ stepIndex, metric }) => {
@@ -220,9 +241,7 @@ describe('incident sequence rules', () => {
       });
     }
 
-    const directedOptional = (ruleFor(pattern).optionalMetrics ?? []).filter(
-      (metric) => ruleFor(pattern).directions?.[metric] === 'rise',
-    );
+    const directedOptional = rising.filter((metric) => !alternatives.flat().includes(metric));
     if (directedOptional.length > 0) {
       it.each(directedOptional)('does not take in a drop in optional %s', (metric) => {
         const events = [...inOrder(), drop(metric, steps.length * MIN)];
@@ -255,7 +274,8 @@ describe('incident sequence rules', () => {
         expect(patternsOf(spread, pattern, () => 'cluster')).toEqual(sameConnection ? [] : [pattern]);
       },
     );
-  });
+  },
+  );
 
   describe('overlapping reshard, divergence and memory pressure', () => {
     const allRules = () => getSequenceRules();
@@ -275,6 +295,30 @@ describe('incident sequence rules', () => {
       expect(incident.sequenceMatches[0].anomalyIds).toEqual(
         expect.arrayContaining(events.map((e) => e.id)),
       );
+    });
+
+    it('does not combine a reshard skew on one primary with divergence on another', () => {
+      const events = [
+        event(MetricType.RESHARD_SHARD_SKEW, 0, 'conn-b'),
+        event(MetricType.REPLICATION_DIVERGENCE, MIN, 'conn-a'),
+        event(MetricType.REPL_BUFFER_PRESSURE, 2 * MIN, 'conn-a'),
+      ];
+
+      expect(incidentsOf(events, allRules(), () => 'cluster')[0].matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+      ]);
+    });
+
+    it('does not combine divergence and pressure from different primaries', () => {
+      const events = [
+        event(MetricType.RESHARD_SHARD_SKEW, 0, 'conn-a'),
+        event(MetricType.REPLICATION_DIVERGENCE, MIN, 'conn-a'),
+        event(MetricType.REPL_BUFFER_PRESSURE, 2 * MIN, 'conn-b'),
+      ];
+
+      expect(incidentsOf(events, allRules(), () => 'cluster')[0].matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+      ]);
     });
 
     it('leaves divergence_under_pressure alone without a reshard', () => {
@@ -348,6 +392,27 @@ describe('incident sequence rules', () => {
 
       expect(patternsOf([churn, retries], retryStorm)).toEqual([retryStorm]);
     });
+
+    it('matches a churn-triggered retry amplification without a separate churn event', () => {
+      const retries = { ...event(MetricType.RETRY_AMPLIFICATION, 0), retryTrigger: 'churn' as const };
+      const saturation = event(MetricType.CLIENT_SATURATION, MIN);
+      const [incident] = incidentsOf([retries, saturation], [ruleFor(retryStorm)]);
+
+      expect(incident.matchedPatterns).toEqual([retryStorm]);
+      expect(incident.sequenceMatches[0].steps).toEqual([
+        { anomalyId: retries.id, step: 2 },
+        { anomalyId: saturation.id, step: null },
+      ]);
+    });
+
+    it.each(['latency', 'errors'] as const)(
+      'does not match a %s-triggered retry amplification without its trigger event',
+      (retryTrigger) => {
+        const retries = { ...event(MetricType.RETRY_AMPLIFICATION, 0), retryTrigger };
+
+        expect(patternsOf([retries], retryStorm)).toEqual([]);
+      },
+    );
 
     it('does not match a churn drop followed by retry amplification', () => {
       const events = [drop(MetricType.CONNECTION_CHURN, 0), event(MetricType.RETRY_AMPLIFICATION, 2 * MIN)];

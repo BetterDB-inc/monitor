@@ -10,12 +10,14 @@ export interface SequenceRule {
   maxSpanMs: number;
   leadMs?: Readonly<Record<number, number>>;
   sameConnection?: boolean;
+  carriesFirstStep?: (event: StepEvidence) => boolean;
   supersedes?: readonly AnomalyPattern[];
   diagnosis: string;
   recommendations: string[];
 }
 
-export type DirectedEvent = Pick<AnomalyEvent, 'metricType'> & Partial<Pick<AnomalyEvent, 'anomalyType'>>;
+export type StepEvidence = Pick<AnomalyEvent, 'metricType'> &
+  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger'>>;
 
 const DIRECTION_OF: Record<AnomalyType, StepDirection> = {
   [AnomalyType.SPIKE]: 'rise',
@@ -46,6 +48,9 @@ export function registerSequenceRule(rule: SequenceRule): void {
       throw new Error(`Sequence rule ${rule.pattern} sets a direction on ${metric}, which it does not use`);
     }
   }
+  if (rule.carriesFirstStep && rule.steps.length < 2) {
+    throw new Error(`Sequence rule ${rule.pattern} needs a second step to carry its first step`);
+  }
   if (rule.supersedes?.includes(rule.pattern)) {
     throw new Error(`Sequence rule ${rule.pattern} cannot supersede itself`);
   }
@@ -62,11 +67,17 @@ export function leadOf(rule: SequenceRule, stepIndex: number): number {
 export function fills(
   rule: SequenceRule,
   metrics: readonly MetricType[] | undefined,
-  event: DirectedEvent,
+  event: StepEvidence,
 ): boolean {
   if (!metrics?.includes(event.metricType)) return false;
   const wanted = rule.directions?.[event.metricType];
   return !wanted || event.anomalyType === undefined || DIRECTION_OF[event.anomalyType] === wanted;
+}
+
+export function opensAt(rule: SequenceRule, event: StepEvidence): number | null {
+  if (fills(rule, rule.steps[0], event)) return 0;
+  if (rule.carriesFirstStep?.(event) && fills(rule, rule.steps[1], event)) return 1;
+  return null;
 }
 
 export function getSequenceRules(): readonly SequenceRule[] {
