@@ -16446,7 +16446,7 @@ describe('AnomalyService', () => {
       const REPLID = 'b'.repeat(40);
       const ADDR = '10.0.0.2:6379';
       let primaryGap: number;
-      let replica: { info: jest.Mock };
+      let replica: { info: jest.Mock; disconnect: jest.Mock };
       let getReplicaConnection: jest.Mock;
 
       function replicaReply(gap: number, replid = REPLID) {
@@ -16470,7 +16470,7 @@ describe('AnomalyService', () => {
           },
         }));
         (dbClient as any).getClients = jest.fn().mockResolvedValue([{ addr: '10.0.0.2:51234' }]);
-        replica = { info: jest.fn().mockResolvedValue(replicaReply(0)) };
+        replica = { info: jest.fn().mockResolvedValue(replicaReply(0)), disconnect: jest.fn() };
         getReplicaConnection = jest.fn().mockResolvedValue(replica);
         (service as any).clusterDiscovery = { getReplicaConnection };
       });
@@ -16587,7 +16587,7 @@ describe('AnomalyService', () => {
       });
 
       it('keeps the primary re-read when another replica hangs', async () => {
-        const other = { info: jest.fn().mockReturnValue(new Promise(() => undefined)) };
+        const other = { info: jest.fn().mockReturnValue(new Promise(() => undefined)), disconnect: jest.fn() };
         getReplicaConnection.mockImplementation(async (host: string) => (host === '10.0.0.3' ? other : replica));
         (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '10.0.0.2:51234' }, { addr: '10.0.0.3:51234' }]);
         (service as any).crossCheckDeadline.set('conn-1', Date.now() + 700);
@@ -16601,25 +16601,61 @@ describe('AnomalyService', () => {
         expect(samples.get('10.0.0.3:6379')).toMatchObject({ status: 'unreachable' });
       });
 
-      it('does not stack a read on a replica whose last read has not returned', async () => {
-        let answer: (reply: string) => void = () => undefined;
-        replica.info.mockReturnValue(new Promise<string>((resolve) => (answer = resolve)));
-        const readPrimary = async () => ({ master_repl_offset: String(1_000 * MiB), master_replid: REPLID });
+      const readPrimary = async () => ({ master_repl_offset: String(1_000 * MiB), master_replid: REPLID });
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+      it('drops the connection of a replica whose read hangs and reads it afresh next time', async () => {
+        replica.info.mockReturnValueOnce(new Promise(() => undefined));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+
+        const first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+        await settle();
+        (service as any).crossCheckDeadline.set('conn-1', null);
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.disconnect).toHaveBeenCalledTimes(1);
+        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+      });
+
+      it('keeps the connection when the replica refuses the read', async () => {
+        replica.info.mockRejectedValueOnce(new Error('NOPERM'));
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(samples.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('does not dial a replica again while the last dial has not returned', async () => {
+        getReplicaConnection.mockReturnValueOnce(new Promise(() => undefined));
         (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
 
         await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
         (service as any).crossCheckDeadline.set('conn-1', null);
         const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
 
-        expect(replica.info).toHaveBeenCalledTimes(1);
+        expect(getReplicaConnection).toHaveBeenCalledTimes(1);
         expect(second.get(ADDR)).toMatchObject({ status: 'unreachable' });
+      });
 
-        answer(replicaReply(0));
-        await new Promise((resolve) => setImmediate(resolve));
-        (service as any).crossCheckDeadline.set('conn-1', null);
-        replica.info.mockResolvedValue(replicaReply(0));
-        const third = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
-        expect(third.get(ADDR)).toMatchObject({ status: 'ok' });
+      it('dials a replica announced by hostname when it is connected from an address the name resolves to', async () => {
+        const named = 'replica-0.cache.svc:6379';
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.2']));
+        (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '::ffff:10.0.0.2:51234' }]);
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [named], true, readPrimary);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('replica-0.cache.svc', 6379, 'conn-1');
+        expect(samples.get(named)).toMatchObject({ status: 'ok' });
+      });
+
+      it('does not dial a hostname that resolves away from every connected replica', async () => {
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.9']));
+
+        await (service as any).sampleReplicas(mockCtx, ['replica-0.cache.svc:6379'], true, readPrimary);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
       });
 
       it('closes a disagreement left open by a restart without a recovery webhook', async () => {

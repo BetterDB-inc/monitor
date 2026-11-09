@@ -87,6 +87,7 @@ export interface ReplicaDivergenceState {
   announced: boolean;
   disagreeWindows: number;
   disagreeSince: number | null;
+  disagreeLastWindow: DivergenceWindow | null;
   unconfirmedWindows: number;
   disagreeEventId: string | null;
 }
@@ -105,6 +106,7 @@ export interface DivergenceConnectionState {
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, StaleAckAccumulator>;
+  staleAckWindows: Map<string, DivergenceWindow>;
   rateHistory: number[];
   replid: string | null;
   replicas: Map<string, ReplicaDivergenceState>;
@@ -184,6 +186,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
+    staleAckWindows: new Map(),
     rateHistory: [],
     replid: null,
     replicas: new Map(),
@@ -235,6 +238,7 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     announced: false,
     disagreeWindows: 0,
     disagreeSince: null,
+    disagreeLastWindow: null,
     unconfirmedWindows: 0,
     disagreeEventId: null,
   };
@@ -448,6 +452,7 @@ function clearStaleStreak(replica: ReplicaDivergenceState): void {
 function clearDisagreementStreak(replica: ReplicaDivergenceState): void {
   replica.disagreeWindows = 0;
   replica.disagreeSince = null;
+  replica.disagreeLastWindow = null;
   replica.unconfirmedWindows = 0;
 }
 
@@ -492,6 +497,7 @@ function closeWindow(
   const outcomes: DivergenceOutcome[] = [];
   state.closedWindowCount++;
   state.lastWindowEnd = end;
+  state.staleAckWindows = new Map();
   state.windowsHeldSince ??= start;
   if (rate !== null) {
     state.rateHistory.push(rate);
@@ -508,6 +514,8 @@ function closeWindow(
     if (gapBytes === null) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
+    const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
+    state.staleAckWindows.set(addr, { start, end, gapBytes, bytesPerSec: rate, secondsBehind });
     const finding = staleAckFinding(replica, gapBytes, start, rate);
     if (finding) outcomes.push(finding);
   }
@@ -563,6 +571,7 @@ export function observeDivergence(
     state.lastRateEwma = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
+    state.staleAckWindows = new Map();
     state.observed = new Set();
     state.staleAcks = new Set();
     state.replid = null;
@@ -759,9 +768,10 @@ function trackDisagreement(
   reading: ReplicaViewReading | undefined,
 ): DivergenceOutcome | null {
   if (window && reading && viewsDisagree(reading, window.bytesPerSec) === true) {
-    const previous = replica.windows[replica.windows.length - 2];
+    const previous = replica.disagreeLastWindow;
     if (!previous || !contiguous(previous, window)) replica.disagreeWindows = 0;
     if (replica.disagreeWindows === 0) replica.disagreeSince = window.start;
+    replica.disagreeLastWindow = window;
     replica.disagreeWindows++;
     replica.unconfirmedWindows = 0;
     if (replica.disagreeEventId !== null || replica.disagreeWindows < DIVERGENCE_DISAGREE_WINDOWS) return null;
@@ -777,6 +787,7 @@ function trackDisagreement(
   }
   replica.disagreeWindows = 0;
   replica.disagreeSince = null;
+  replica.disagreeLastWindow = null;
   if (replica.disagreeEventId === null) return null;
   replica.unconfirmedWindows++;
   if (replica.unconfirmedWindows < DIVERGENCE_RECOVERED_WINDOWS) return null;
@@ -790,8 +801,10 @@ export function applyReplicaViews(
 ): DivergenceOutcome[] {
   const end = state.lastWindowEnd;
   const currentWindow = (replica: ReplicaDivergenceState | undefined) => {
-    const last = replica?.windows[replica.windows.length - 1];
-    return last !== undefined && last.end === end ? last : null;
+    if (!replica) return null;
+    const last = replica.windows[replica.windows.length - 1];
+    if (last !== undefined && last.end === end) return last;
+    return state.staleAckWindows.get(replica.addr) ?? null;
   };
   const applied = outcomes.filter((outcome) => {
     if (outcome.kind !== 'recovered') return true;
@@ -817,7 +830,8 @@ export function replicasToSample(state: DivergenceConnectionState, outcomes: Div
   const end = state.lastWindowEnd;
   const windowed = [...state.replicas.values()]
     .filter((replica) => replica.windows[replica.windows.length - 1]?.end === end)
-    .map((replica) => replica.addr);
+    .map((replica) => replica.addr)
+    .concat([...state.staleAckWindows.keys()]);
   const alerting = outcomes
     .filter((outcome) => outcome.kind === 'divergence' || outcome.kind === 'recovered')
     .map((outcome) => outcome.addr);

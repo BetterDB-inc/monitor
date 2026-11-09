@@ -1477,6 +1477,22 @@ describe("the replica's own view", () => {
     ]);
   });
 
+  it('tracks the disagreement while the primary gets no acknowledgements', () => {
+    const h = new ViewHarness();
+    h.reading = ok(0, 0);
+    h.viewWindows(2, { gap: 0, rate: MiB });
+
+    h.reading = ok(0, 200 * MiB);
+    const stale = h.viewWindows(DIVERGENCE_DISAGREE_WINDOWS + 3, { gap: 200 * MiB, rate: MiB, lagSec: 60 });
+
+    expect(replicasToSample(h.state, [])).toEqual([ADDR]);
+    expect(stale.filter((o) => o.kind === 'views_disagree')).toEqual([
+      expect.objectContaining({ addr: ADDR, primaryGapBytes: 200 * MiB, replicaGapBytes: 0 }),
+    ]);
+    expect(kinds(stale)).not.toContain('views_agree');
+    expect(h.state.replicas.get(ADDR)!.disagreeEventId).toBe('evt-views');
+  });
+
   it('samples every replica with a fresh window', () => {
     const h = new ViewHarness();
     h.viewWindows(2, { gap: 0, rate: MiB });

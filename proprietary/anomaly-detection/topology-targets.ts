@@ -42,6 +42,10 @@ export function splitHostPort(addr: string): { host: string; port: number } | nu
   return { host, port };
 }
 
+export function normalizeIp(host: string): string {
+  return host.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+}
+
 export function clusterTargets(nodes: ClusterNode[], isRegistered: RegisteredAddress): TopologyScope {
   const targets = new Map<string, TopologyTarget>();
   const down = new Set<string>();

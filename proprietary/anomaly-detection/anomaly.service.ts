@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -294,6 +296,7 @@ import {
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
+  normalizeIp,
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
@@ -6924,6 +6927,7 @@ export class AnomalyService
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
   private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
+  private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
   /**
@@ -9349,7 +9353,7 @@ export class AnomalyService
       const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
       if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
       this.replicaReadsInFlight.add(inFlight);
-      const pending = readReplica();
+      const pending = readReplica(budget);
       const release = () => {
         this.replicaReadsInFlight.delete(inFlight);
       };
@@ -9381,7 +9385,7 @@ export class AnomalyService
     host: string,
     port: number,
     ownPrimary: boolean,
-  ): (() => Promise<Record<string, string>>) | null {
+  ): ((budgetMs: number) => Promise<Record<string, string>>) | null {
     const connectionId = ctx.connectionId;
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
     if (
@@ -9393,17 +9397,28 @@ export class AnomalyService
     }
     const discovery = this.clusterDiscovery;
     if (!discovery || !this.dialsDataNodes(connectionId)) return null;
-    const readNode = async (client: Promise<{ info(section: string): Promise<string> }>) =>
-      this.convertInfoToRecord(InfoParser.parse(await (await client).info('replication')));
+    const readNode = async (
+      pending: Promise<{ info(section: string): Promise<string>; disconnect(): void }>,
+      budgetMs: number,
+    ) => {
+      const client = await pending;
+      try {
+        const reply = await withTimeout(client.info('replication'), budgetMs, AnomalyService.REPLICA_READ_TIMED_OUT);
+        return this.convertInfoToRecord(InfoParser.parse(reply));
+      } catch (err) {
+        if (err instanceof Error && err.message === AnomalyService.REPLICA_READ_TIMED_OUT) client.disconnect();
+        throw err;
+      }
+    };
     if (this.clusterViews.has(connectionId)) {
-      return async () => {
+      return async (budgetMs) => {
         const nodes = await discovery.discoverNodes(connectionId);
         const node = nodes.find((n) => {
           const nodeAddress = splitHostPort(n.address);
           return n.role === 'replica' && nodeAddress?.host === host && nodeAddress.port === port;
         });
         if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
-        return readNode(discovery.getNodeConnection(node.id, connectionId));
+        return readNode(discovery.getNodeConnection(node.id, connectionId), budgetMs);
       };
     }
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
@@ -9412,17 +9427,30 @@ export class AnomalyService
     const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
     const sentinelAddress = reported ? splitHostPort(reported) : null;
     if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
-      return () => readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId));
+      return (budgetMs) =>
+        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), budgetMs);
     }
     if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
-      return async () => {
-        const peers = await ctx.client.getClients({ type: 'replica' });
-        const connectedFrom = peers.some((peer) => splitHostPort(peer.addr)?.host.toLowerCase() === host.toLowerCase());
+      return async (budgetMs) => {
+        const [peers, addresses] = await Promise.all([
+          ctx.client.getClients({ type: 'replica' }),
+          this.resolveHost(host),
+        ]);
+        const connectedFrom = peers.some((peer) => {
+          const peerHost = splitHostPort(peer.addr)?.host;
+          return peerHost !== undefined && addresses.has(normalizeIp(peerHost));
+        });
         if (!connectedFrom) throw new Error(`no replica is connected to the primary from ${host}`);
-        return readNode(discovery.getReplicaConnection(host, port, connectionId));
+        return readNode(discovery.getReplicaConnection(host, port, connectionId), budgetMs);
       };
     }
     return null;
+  }
+
+  private async resolveHost(host: string): Promise<Set<string>> {
+    if (isIP(host)) return new Set([normalizeIp(host)]);
+    const resolved = await lookup(host, { all: true });
+    return new Set(resolved.map(({ address }) => normalizeIp(address)));
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
