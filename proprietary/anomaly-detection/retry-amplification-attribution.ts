@@ -1,4 +1,5 @@
 import type {
+  ClientCaptureRowCount,
   ClientCaptureSummary,
   ClientConnectionCaptureRow,
   ClientConnectionRow,
@@ -33,7 +34,7 @@ export const RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS = RETRY_AMP_BASELINE_WINDOWS * RE
  * captures, so this holds about 4,000 clients. better-sqlite3 runs the read
  * synchronously, before the attribution timeout can fire; this many rows take
  * 2-3s there, under RETRY_AMP_ATTRIBUTION_TIMEOUT_MS. A read past it stops
- * after this many rows, and the finding ranks by command rate only.
+ * after this many rows, and the span is shortened to fit (fitAttributionSpan).
  */
 export const RETRY_AMP_MAX_CAPTURE_ROWS = 250_000;
 // Names of the connections BetterDB itself opens: the monitor (and its
@@ -372,6 +373,57 @@ export function latestCaptureGroups(
   return summary.captures
     .filter((row) => row.capturedAt === newest)
     .map(({ name, user, ip, count }) => ({ name, user, ip, count }));
+}
+
+/**
+ * The longest attribution span, at most `span`, whose captures hold at most
+ * `maxRows` rows: the newest `D` of the episode and max(D,
+ * RETRY_AMP_WINDOW_MS) before episodeStart, the same span on both sides, so
+ * the episode keeps its newest captures and the baseline the ones nearest the
+ * episode. Every capture inside the span is read whole. `counts` are the rows
+ * per capture of the full span. null when even
+ * min(span, RETRY_AMP_WINDOW_MS) does not fit.
+ */
+export function fitAttributionSpan(
+  counts: readonly ClientCaptureRowCount[],
+  episodeStart: number,
+  until: number,
+  span: number,
+  maxRows: number,
+): number | null {
+  const shortest = Math.min(span, RETRY_AMP_WINDOW_MS);
+  // The shortest span that reads each capture. A baseline capture within one
+  // window of the episode is read at any span.
+  const reads = counts
+    .map(({ capturedAt, rows }) => {
+      const before = episodeStart - capturedAt;
+      const from =
+        capturedAt >= episodeStart
+          ? until - capturedAt
+          : before <= RETRY_AMP_WINDOW_MS
+            ? 0
+            : before;
+      return { from, rows };
+    })
+    .sort((a, b) => a.from - b.from);
+  let rows = 0;
+  for (const read of reads) {
+    rows += read.rows;
+    if (rows <= maxRows) continue;
+    return read.from <= shortest ? null : Math.min(span, read.from - 1);
+  }
+  return span;
+}
+
+/** A span in whole minutes, at least one. */
+export function attributionSpanMinutes(spanMs: number): number {
+  return Math.max(1, Math.round(spanMs / 60_000));
+}
+
+/** A note on the reconnect ranking when the row cap shortened its span. */
+export function describeAttributionSpan(coveredMs: number | null): string {
+  if (coveredMs === null) return 'Reconnects not ranked: too many client captures.';
+  return `Reconnects ranked over the newest ${attributionSpanMinutes(coveredMs)} min only.`;
 }
 
 function highestClientId(rows: ClientConnectionCaptureRow[]): number {

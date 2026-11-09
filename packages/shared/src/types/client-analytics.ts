@@ -97,6 +97,12 @@ export interface ClientCaptureReadBounds {
   maxRows: number;
 }
 
+/** The client_snapshots rows of one capture. */
+export interface ClientCaptureRowCount {
+  capturedAt: number;
+  rows: number;
+}
+
 export interface ClientTimeSeriesPoint {
   timestamp: number;
   totalConnections: number;

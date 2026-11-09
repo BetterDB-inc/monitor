@@ -3,6 +3,7 @@ export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
   ClientCaptureReadBounds,
+  ClientCaptureRowCount,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -97,6 +98,7 @@ import type {
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
   ClientCaptureReadBounds,
+  ClientCaptureRowCount,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
@@ -589,6 +591,18 @@ export interface StoragePort {
     until: number,
     bounds: ClientCaptureReadBounds,
   ): Promise<ClientCaptureSummary>;
+  /**
+   * The client_snapshots rows of each capture that getClientCaptureSummary with the same range and
+   * skipped captures would read, so a caller can pick a range that fits its row bound. Replica and
+   * master links are counted too: it reads only the (connection_id, captured_at) index, and its
+   * counts are an upper bound of the rows the summary aggregates.
+   */
+  getClientCaptureRowCounts(
+    connectionId: string,
+    since: number,
+    until: number,
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,

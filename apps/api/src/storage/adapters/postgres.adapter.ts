@@ -38,6 +38,7 @@ import {
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
   ClientCaptureReadBounds,
+  ClientCaptureRowCount,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
@@ -1054,6 +1055,34 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       [connectionId, since, until, bounds.skipFrom, bounds.skipTo, bounds.maxRows],
     );
     return clientCaptureSummaryFromSql(result.rows);
+  }
+
+  // The same two index ranges as getClientCaptureSummary, counted per capture
+  // from idx_client_connection_captured alone.
+  async getClientCaptureRowCounts(
+    connectionId: string,
+    since: number,
+    until: number,
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    const result = await this.pool.query(
+      `SELECT captured_at, COUNT(*) AS row_count
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+        GROUP BY captured_at
+       UNION ALL
+       SELECT captured_at, COUNT(*)
+         FROM client_snapshots
+        WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+          AND captured_at >= $2 AND captured_at <= $3
+        GROUP BY captured_at
+        ORDER BY captured_at`,
+      [connectionId, since, until, skip.skipFrom, skip.skipTo],
+    );
+    return result.rows.map((row) => ({ capturedAt: Number(row.captured_at), rows: Number(row.row_count) }));
   }
 
   async getClientTimeSeries(

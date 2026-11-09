@@ -7,6 +7,7 @@ import {
   contributorKey,
   describeRetryAmplificationContributors,
   estimateNewConnections,
+  fitAttributionSpan,
   latestCaptureGroups,
   newConnectionsBetween,
   pushClientSnapshot,
@@ -1007,5 +1008,53 @@ describe('estimateNewConnections', () => {
         newConnections,
       }).map((c) => [c.key, c.newConnections]),
     ).toEqual([['storm', 3]]);
+  });
+});
+
+describe('fitAttributionSpan', () => {
+  const minute = RETRY_AMP_WINDOW_MS;
+  const episodeStart = 100 * minute;
+  const until = episodeStart + 60 * minute;
+  const span = 30 * minute;
+  // A capture of `rows` rows every minute, 30 s off the minute, over the
+  // newest 30 minutes of the episode and the 30 minutes before it.
+  const counts = (rows: number) =>
+    Array.from({ length: 30 }, (_, i) => [
+      { capturedAt: episodeStart - 30_000 - i * minute, rows },
+      { capturedAt: until - 30_000 - i * minute, rows },
+    ]).flat();
+
+  it('keeps the whole span when its captures fit', () => {
+    expect(fitAttributionSpan(counts(4_000), episodeStart, until, span, 250_000)).toBe(span);
+  });
+
+  it('shortens both sides to the same span, dropping the oldest captures of each', () => {
+    // 10,000 rows a capture: 25 would fit, but the 13th capture of each side
+    // enters the read at the same span as the other's, so 12 on each side do.
+    const fitted = fitAttributionSpan(counts(10_000), episodeStart, until, span, 250_000);
+
+    expect(fitted).toBe(12 * minute + 30_000 - 1);
+    const read = counts(10_000).filter(({ capturedAt }) =>
+      capturedAt >= episodeStart
+        ? capturedAt >= until - fitted!
+        : capturedAt >= episodeStart - Math.max(fitted!, minute),
+    );
+    expect(read.reduce((rows, c) => rows + c.rows, 0)).toBeLessThanOrEqual(250_000);
+    expect(read.filter((c) => c.capturedAt < episodeStart)).toHaveLength(12);
+    expect(read.filter((c) => c.capturedAt >= episodeStart)).toHaveLength(12);
+  });
+
+  it('gives up when not even one window on each side fits', () => {
+    expect(fitAttributionSpan(counts(200_000), episodeStart, until, span, 250_000)).toBeNull();
+  });
+
+  it('does not shorten an episode shorter than one window', () => {
+    const short = [
+      { capturedAt: episodeStart - 30_000, rows: 100 },
+      { capturedAt: episodeStart + 20_000, rows: 100 },
+    ];
+
+    expect(fitAttributionSpan(short, episodeStart, episodeStart + 40_000, 40_000, 200)).toBe(40_000);
+    expect(fitAttributionSpan(short, episodeStart, episodeStart + 40_000, 40_000, 199)).toBeNull();
   });
 });

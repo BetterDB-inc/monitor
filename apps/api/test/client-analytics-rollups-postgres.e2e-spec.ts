@@ -657,6 +657,13 @@ describePostgres('client analytics rollups — postgres', () => {
       );
     });
 
+    it.each(CONNECTIONS)('counts the rows per capture as the memory adapter does for %s', async (connectionId) => {
+      const skip = { skipFrom: T0 + 2 * BATCH_MS, skipTo: T0 + 4 * BATCH_MS };
+      const counts = await pg.getClientCaptureRowCounts(connectionId, since, until, skip);
+      expect(counts.length).toBeGreaterThan(0);
+      expect(counts).toEqual(await memory.getClientCaptureRowCounts(connectionId, since, until, skip));
+    });
+
     it('stops at the row bound as the memory adapter does', async () => {
       const [connectionId] = CONNECTIONS;
       const read = (maxRows: number) => ({ skipFrom: since, skipTo: since, maxRows });

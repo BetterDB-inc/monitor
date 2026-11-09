@@ -318,6 +318,9 @@ import {
   ClientCommandSnapshot,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
+  attributionSpanMinutes,
+  describeAttributionSpan,
+  fitAttributionSpan,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   estimateNewConnections,
@@ -725,6 +728,12 @@ export class AnomalyService
   private retryAmplificationContributors = new Map<
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
+  >();
+  // The episode whose attribution the capture row cap shortened, and the span
+  // its newest attribution covered (noteAttributionCap).
+  private retryAmplificationCapped = new Map<
+    string,
+    { episodeStart: number; coveredMs: number | null | undefined }
   >();
   private retryNodeChurnReadings = new Map<string, ConnectionChurnReading>();
   private latencyDegraded = new Map<string, { degraded: boolean; reportedAt: number }>();
@@ -3907,6 +3916,7 @@ export class AnomalyService
       this.retryAmplificationClients,
       this.retryAmplificationDispatched,
       this.retryAmplificationContributors,
+      this.retryAmplificationCapped,
       this.retryNodeChurnReadings,
     ]) {
       for (const key of map.keys()) {
@@ -3922,6 +3932,7 @@ export class AnomalyService
     this.retryAmplificationClients.delete(key);
     this.retryAmplificationDispatched.delete(key);
     this.retryAmplificationContributors.delete(key);
+    this.retryAmplificationCapped.delete(key);
     this.retryNodeChurnReadings.delete(key);
   }
 
@@ -4085,6 +4096,11 @@ export class AnomalyService
       episodeStart: attributionStart,
       contributors,
     });
+    const capped = nodeAddr ? undefined : this.retryAmplificationCapped.get(ctx.connectionId);
+    const spanNote =
+      capped?.episodeStart === attributionStart && capped.coveredMs !== undefined
+        ? ` ${describeAttributionSpan(capped.coveredMs)}`
+        : '';
 
     const severity =
       finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
@@ -4099,7 +4115,7 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
-      message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}`,
+      message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}${spanNote}`,
       relatedMetrics: finding.relatedMetrics,
       retryTrigger: finding.trigger,
       resolved: false,
@@ -4216,38 +4232,54 @@ export class AnomalyService
     // RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS of the episode and as long a span
     // before it, so the read does not grow with the episode; the captures in
     // between are skipped. For a shorter episode the two are contiguous.
-    const attributedSpan = Math.min(until - episodeStart, RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS);
-    const recentStart = until - attributedSpan;
-    const fullBaselineStart = episodeStart - Math.max(attributedSpan, RETRY_AMP_WINDOW_MS);
-    const baselineStart =
-      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
-    const baselineScale =
-      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
+    const fullSpan = Math.min(until - episodeStart, RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS);
+    let attributedSpan = fullSpan;
+    let cappedSpan: number | null | undefined;
+    const spanStart = (span: number) => episodeStart - Math.max(span, RETRY_AMP_WINDOW_MS);
+    const readSpan = (span: number) =>
+      this.storage.getClientCaptureSummary(ctx.connectionId, spanStart(span), until, {
+        skipFrom: episodeStart,
+        skipTo: until - span,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
     // One storage read spans the whole attribution range, so a connection
     // carries one identity (the name of its newest reading) in the baseline,
     // the episode and the newest capture alike; the span is split into
-    // baseline and episode here. It is the only read: if it fails, hangs or
-    // holds more than RETRY_AMP_MAX_CAPTURE_ROWS rows, the ranking by command
-    // rate still stands. better-sqlite3 runs it synchronously, before the
-    // timeout can fire, so the row bound is what keeps it short there.
+    // baseline and episode here. A read past RETRY_AMP_MAX_CAPTURE_ROWS stops
+    // early; the rows per capture then give the longest span that fits, the
+    // same on both sides, and that span is read instead. If the reads fail,
+    // hang or not even the shortest span fits, the ranking by command rate
+    // still stands. better-sqlite3 runs them synchronously, before the timeout
+    // can fire, so the row bound is what keeps them short there.
     try {
-      summary = await withTimeout(
-        this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until, {
-          skipFrom: episodeStart,
-          skipTo: recentStart,
-          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
-        }),
+      ({ summary, span: attributedSpan, capped: cappedSpan } = await withTimeout(
+        (async () => {
+          const full = await readSpan(fullSpan);
+          if (!full.truncated) return { summary: full, span: fullSpan, capped: undefined };
+          const counts = await this.storage.getClientCaptureRowCounts(
+            ctx.connectionId,
+            spanStart(fullSpan),
+            until,
+            { skipFrom: episodeStart, skipTo: until - fullSpan },
+          );
+          const span = fitAttributionSpan(counts, episodeStart, until, fullSpan, RETRY_AMP_MAX_CAPTURE_ROWS);
+          if (span === null || span === fullSpan) return { summary: full, span: fullSpan, capped: null };
+          const shortened = await readSpan(span);
+          return { summary: shortened, span, capped: shortened.truncated ? null : span };
+        })(),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
-      );
+      ));
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    if (summary.truncated) {
-      this.logger.debug(
-        `Client snapshots for ${ctx.connectionName} exceed ${RETRY_AMP_MAX_CAPTURE_ROWS} rows; reconnects not ranked`,
-      );
-    }
+    this.noteAttributionCap(ctx, episodeStart, cappedSpan);
+    const recentStart = until - attributedSpan;
+    const fullBaselineStart = spanStart(attributedSpan);
+    const baselineStart =
+      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
+    const baselineScale =
+      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
     // Every capture lists the monitor's own connection, so a baseline with
     // client readings has a capture group in it.
     const baselineRead = summary.captures.some(
@@ -4298,6 +4330,31 @@ export class AnomalyService
     });
     if (ranked.length > 0) return ranked;
     return reconnectsKnown && ratesKnown ? [] : null;
+  }
+
+  // `coveredMs` is the span the row cap shortened this attribution to, null
+  // when no span fitted, undefined when the cap did not apply. The warning is
+  // logged once per episode; the span of the newest attribution is kept for
+  // the finding's message.
+  private noteAttributionCap(
+    ctx: ConnectionContext,
+    episodeStart: number,
+    coveredMs: number | null | undefined,
+  ): void {
+    const known = this.retryAmplificationCapped.get(ctx.connectionId);
+    if (coveredMs === undefined) {
+      if (known !== undefined) known.coveredMs = undefined;
+      return;
+    }
+    if (known?.episodeStart !== episodeStart) {
+      const cap = `Client captures for ${ctx.connectionName} exceed ${RETRY_AMP_MAX_CAPTURE_ROWS} rows`;
+      this.logger.warn(
+        coveredMs === null
+          ? `${cap} even over the shortest span; reconnects not ranked for this retry amplification episode`
+          : `${cap}; reconnects ranked over the newest ${attributionSpanMinutes(coveredMs)} min of this retry amplification episode and as long before it`,
+      );
+    }
+    this.retryAmplificationCapped.set(ctx.connectionId, { episodeStart, coveredMs });
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {

@@ -96,6 +96,7 @@ describe('AnomalyService', () => {
       getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
       getClientCaptureSummary: jest.fn().mockResolvedValue({ captures: [], connections: [], truncated: false }),
+      getClientCaptureRowCounts: jest.fn().mockResolvedValue([]),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       getCorrelatedGroupMembers: jest.fn().mockResolvedValue([]),
@@ -5583,6 +5584,9 @@ describe('AnomalyService', () => {
           (...args: Parameters<MemoryAdapter['getClientCaptureSummary']>) =>
             history.getClientCaptureSummary(...args),
         );
+        storage.getClientCaptureRowCounts = jest.fn((...args: unknown[]) =>
+          (history as any).getClientCaptureRowCounts(...args),
+        );
       });
 
       it('keeps one identity for a client that set its name after the baseline captured it', async () => {
@@ -5758,18 +5762,94 @@ describe('AnomalyService', () => {
         expect(ranked).toEqual([expect.objectContaining({ key: 'storm', newConnections: 5 })]);
       });
 
-      it('ranks by command rate only when the captures hold more rows than the bound', async () => {
+      // Each stored row stands for `rows` rows of a large instance, so the row
+      // cap is RETRY_AMP_MAX_CAPTURE_ROWS / rows stored rows.
+      const scaleRows = (rows: number) => {
+        storage.getClientCaptureSummary = jest.fn(
+          (connectionId: string, since: number, until: number, bounds: { maxRows: number }) =>
+            history.getClientCaptureSummary(connectionId, since, until, {
+              ...bounds,
+              maxRows: bounds.maxRows / rows,
+            } as any),
+        );
+        storage.getClientCaptureRowCounts = jest.fn(async (...args: unknown[]) =>
+          ((await (history as any).getClientCaptureRowCounts(...args)) as { rows: number }[]).map(
+            (count) => ({ ...count, rows: count.rows * rows }),
+          ),
+        );
+      };
+
+      it('ranks reconnects over the newest span that fits when the captures exceed the row cap', async () => {
+        const pool = (capturedAt: number) =>
+          stored('1', '10.0.0.3:9', 'pool', (capturedAt - 300_000) / 1000, capturedAt);
+        const storm = (id: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', 1, capturedAt);
+        for (const capturedAt of [450_000, 510_000, 570_000]) {
+          await history.saveClientSnapshot([pool(capturedAt)], 'conn-1');
+        }
+        // Four new storm connections at every capture of the episode.
+        for (const capturedAt of [630_000, 690_000, 750_000]) {
+          const ids = [0, 1, 2, 3].map((i) => capturedAt / 1000 + i);
+          await history.saveClientSnapshot(
+            [pool(capturedAt), ...ids.map((id) => storm(id, capturedAt))],
+            'conn-1',
+          );
+        }
+        // 18 rows over a cap of 10: the newest capture on each side fits (6
+        // rows), the next one on each side (90 s before the episode and before
+        // its end) would make 12.
+        scaleRows(RETRY_AMP_MAX_CAPTURE_ROWS / 10);
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+        const saved: any[] = [];
+        jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (event: any) => {
+          saved.push(event);
+        });
+        const state = jest
+          .requireActual('../retry-amplification-detector')
+          .createRetryAmplificationState();
+        (service as any).retryAmplificationState.set('conn-1', state);
+        const report = () =>
+          (service as any).reportRetryAmplification({
+            ctx: mockCtx,
+            key: 'conn-1',
+            state,
+            finding: { level: 'warning', trigger: 'churn', windows: 2, loadRatio: 2, message: 'm' },
+            clientSnapshots: readings,
+            attributionStart: 600_000,
+            closedAt: undefined,
+            timestamp: 780_000,
+            rearm: () => undefined,
+          });
+
+        await report();
+        await report();
+
+        expect(storage.getClientCaptureSummary).toHaveBeenLastCalledWith('conn-1', 510_001, 780_000, {
+          skipFrom: 600_000,
+          skipTo: 690_001,
+          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+        });
+        // The storm's four connections of the newest capture against none in the
+        // baseline's newest capture.
+        expect(saved[0].message).toBe(
+          'm Top clients: name storm (4 reconnects). Reconnects ranked over the newest 1 min only.',
+        );
+        const capped = warn.mock.calls.filter(([message]) => /exceed .* rows/.test(String(message)));
+        expect(capped).toEqual([[expect.stringContaining('newest 1 min')]]);
+      });
+
+      it('ranks by command rate only when not even the newest minute fits the row cap', async () => {
         const worker = (id: number, age: number, capturedAt: number) =>
           stored(String(id), `10.0.0.5:${4000 + id}`, 'worker', age, capturedAt);
         await history.saveClientSnapshot([worker(1, 600, 590_000)], 'conn-1');
         await history.saveClientSnapshot(
-          [worker(1, 660, 650_000), ...[2, 3, 4, 5].map((id) => worker(id, 1, 650_000))],
+          [worker(1, 760, 750_000), ...[2, 3, 4, 5].map((id) => worker(id, 1, 750_000))],
           'conn-1',
         );
-        storage.getClientCaptureSummary = jest.fn(
-          (connectionId: string, since: number, until: number, bounds: { maxRows: number }) =>
-            history.getClientCaptureSummary(connectionId, since, until, { ...bounds, maxRows: 5 } as any),
-        );
+        // A cap of 5 rows; the newest minute of the episode and the minute
+        // before it hold 6.
+        scaleRows(RETRY_AMP_MAX_CAPTURE_ROWS / 5);
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
 
         const ranked = await (service as any).attributeRetryAmplification(
           mockCtx,
@@ -5778,10 +5858,12 @@ describe('AnomalyService', () => {
           780_000,
         );
 
-        // Four reconnects against none would rank with the six rows read;
-        // past the bound the reconnects are unknown and the steady rate alone
-        // does not stand out.
+        // Four reconnects against none would rank with the six rows read; past
+        // the cap the reconnects are unknown and the steady rate alone does not
+        // stand out.
         expect(ranked).toBeNull();
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('reconnects not ranked'));
       });
 
       it('ranks the rate and the reconnects of one connection under the name its newest stored capture gives it', async () => {

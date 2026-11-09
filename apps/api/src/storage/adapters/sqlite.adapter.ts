@@ -36,6 +36,7 @@ import {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
   ClientCaptureReadBounds,
+  ClientCaptureRowCount,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -1391,6 +1392,39 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       )
       .all({ connectionId, since, until, ...bounds }) as ClientCaptureSqlRow[];
     return clientCaptureSummaryFromSql(rows);
+  }
+
+  // The same two index ranges as getClientCaptureSummary, counted per capture
+  // from idx_client_connection_captured alone.
+  async getClientCaptureRowCounts(
+    connectionId: string,
+    since: number,
+    until: number,
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]> {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT captured_at, COUNT(*) AS row_count
+           FROM client_snapshots
+          WHERE connection_id = @connectionId AND captured_at >= @since
+            AND captured_at < @skipFrom AND captured_at <= @until
+          GROUP BY captured_at
+         UNION ALL
+         SELECT captured_at, COUNT(*)
+           FROM client_snapshots
+          WHERE connection_id = @connectionId AND captured_at >= MAX(@skipFrom, @skipTo)
+            AND captured_at >= @since AND captured_at <= @until
+          GROUP BY captured_at
+          ORDER BY captured_at`,
+      )
+      .all({ connectionId, since, until, skipFrom: skip.skipFrom, skipTo: skip.skipTo }) as {
+      captured_at: number;
+      row_count: number;
+    }[];
+    return rows.map((row) => ({ capturedAt: row.captured_at, rows: row.row_count }));
   }
 
   async getClientTimeSeries(

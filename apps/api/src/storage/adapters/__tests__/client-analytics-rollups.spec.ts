@@ -356,6 +356,40 @@ describe.each([
       expect((await read(bounds(3))).connections.map((c) => c.clientId)).toEqual(['1', '2']);
     });
 
+    it('counts the rows of each capture the read would take, replica links included', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '1', capturedAt: since - 60_000 },
+          { clientId: '1', capturedAt: since },
+          { clientId: '2', capturedAt: since, flags: 'S' },
+          { clientId: '1', capturedAt: since + 60_000 },
+          { clientId: '1', capturedAt: since + 120_000 },
+          { clientId: '2', capturedAt: since + 120_000 },
+          { clientId: '1', capturedAt: until },
+          { clientId: '1', capturedAt: until + 1 },
+        ]),
+      );
+      await save(h.storage, rows([{ clientId: '9', capturedAt: since }]), 'conn-other');
+
+      await expect(
+        h.storage.getClientCaptureRowCounts('conn-x', since, until, {
+          skipFrom: since + 60_000,
+          skipTo: since + 120_000,
+        }),
+      ).resolves.toEqual([
+        { capturedAt: since, rows: 2 },
+        { capturedAt: since + 120_000, rows: 2 },
+        { capturedAt: until, rows: 1 },
+      ]);
+      await expect(
+        h.storage.getClientCaptureRowCounts('conn-x', since, since + 60_000, { skipFrom: since, skipTo: since }),
+      ).resolves.toEqual([
+        { capturedAt: since, rows: 2 },
+        { capturedAt: since + 60_000, rows: 1 },
+      ]);
+    });
+
     it("keeps the monitor's own connections in: the ranking leaves them out by name", async () => {
       await save(
         h.storage,
