@@ -104,21 +104,47 @@ describe('ClusterTopologySource', () => {
     expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
   });
 
-  it('clears an alias once a twice-replaced node settles behind one address', async () => {
-    const view = (self: string) =>
-      ['n1', 'n2', 'n3'].map((id, i) => ({
-        ...nodes[0],
-        id,
-        address: `10.0.0.${i + 1}:6379@16379`,
-        flags: id === self ? ['myself', 'master'] : ['master'],
-      }));
-    const source = unmatchedSource(view('n1'), view('n2'), view('n3'), view('n3'), view('n3'));
+  const threeNodeView = (self: string) =>
+    ['n1', 'n2', 'n3'].map((id, i) => ({
+      ...nodes[0],
+      id,
+      address: `10.0.0.${i + 1}:6379@16379`,
+      flags: id === self ? ['myself', 'master'] : ['master'],
+    }));
+
+  it('clears an alias for a twice-replaced node only after the longer hold', async () => {
+    // Three different nodes look like a VIP; a VIP can land on one node three
+    // syncs in a row, so only ten in a row make that node the seed's node.
+    const source = unmatchedSource(
+      threeNodeView('n1'),
+      threeNodeView('n2'),
+      ...Array.from({ length: 10 }, () => threeNodeView('n3')),
+    );
 
     expect(ids(await source.discover(vip as never, 10_000))).toHaveLength(2);
     await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
-    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
-    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
+    for (let sync = 0; sync < 9; sync++) {
+      expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
+    }
     expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+  });
+
+  it('keeps the alias of a VIP that lands on one node three syncs in a row', async () => {
+    const source = unmatchedSource(
+      threeNodeView('n1'),
+      threeNodeView('n2'),
+      threeNodeView('n3'),
+      threeNodeView('n1'),
+      threeNodeView('n1'),
+      threeNodeView('n1'),
+      threeNodeView('n2'),
+    );
+
+    expect(ids(await source.discover(vip as never, 10_000))).toHaveLength(2);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    for (let sync = 0; sync < 5; sync++) {
+      expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
+    }
   });
 
   it('treats a failback after a settled move as another move, not as a VIP', async () => {

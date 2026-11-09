@@ -102,11 +102,15 @@ export class ClusterTopologySource implements TopologySource {
         answered.length >= count && answered.slice(-count).every((id) => id === current);
       const returned = previous !== undefined && current !== previous && answered.slice(0, -2).includes(current);
       const wasAlias = prior ? prior.alias : initial;
-      // A failback (A, B, A) or two replacements (A, B, C) look like a VIP
-      // before the new node has answered a few syncs in a row. Leaving that
-      // alias in place registers the node as its own child. Once it has
-      // settled, it is the seed's node, and the nodes before it no longer count.
-      if (settled(SETTLED_ANSWERS)) {
+      // A failback (A, B, A) looks like a VIP before A has answered a few syncs
+      // in a row. Leaving that alias in place registers A as its own child, so
+      // once it has settled it is the seed's node, and the nodes before it no
+      // longer count. Any other alias (three different nodes, a restart) may be
+      // a VIP that landed on one node a few times in a row, so it holds until
+      // the same node has answered RECENT_ANSWERS syncs in a row.
+      const changes = answered.filter((id, i) => i > 0 && id !== answered[i - 1]).length;
+      const failedBack = changes === 2 && answered[0] === current;
+      if (settled(SETTLED_ANSWERS) && (!wasAlias || failedBack || settled(RECENT_ANSWERS))) {
         alias = false;
         verdict = false;
         undecided = false;

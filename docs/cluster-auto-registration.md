@@ -66,10 +66,13 @@ is registered. One node behind NAT keeps answering as itself, and after a
 failover or replacement as the new node: once that node has answered three
 syncs in a row, it is the seed's node, and the nodes before it no longer count,
 so a later failback is treated as another move. Membership is left as it is
-while that is still unclear, which lasts at most a few syncs. A failback or
-two quick replacements can look like several nodes before the new one has
-answered three syncs in a row. Once it has, the seed is that one node again,
-so it is not registered as its own child.
+while that is still unclear, which lasts at most a few syncs. A failback (one
+node, another, then the first again) can look like several nodes before the
+first one has answered three syncs in a row. Once it has, the seed is that one
+node again, so it is not registered as its own child. A seed treated as
+fronting several nodes for any other reason, such as two quick replacements,
+goes back to one node only after ten syncs in a row are answered by the same
+node, because a VIP can land on one node a few syncs in a row.
 
 Slow log and command log entries collected through such a seed are stored
 against the node that served them, not the seed's hostname, so history stays
