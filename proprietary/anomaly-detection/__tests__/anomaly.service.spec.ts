@@ -13038,7 +13038,7 @@ describe('AnomalyService', () => {
       expect(next).not.toHaveBeenCalled();
     });
 
-    it('looks up at most eight later firings at a time', async () => {
+    it('looks up at most five later firings at a time', async () => {
       const now = Date.now();
       const end = now - 24 * 60 * MIN;
       for (let i = 0; i < 20; i++) {
@@ -13059,7 +13059,7 @@ describe('AnomalyService', () => {
       await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
 
       expect(next).toHaveBeenCalledTimes(20);
-      expect(peak).toBe(8);
+      expect(peak).toBe(5);
     });
 
     describe('when a later-firing lookup fails', () => {
@@ -13160,12 +13160,12 @@ describe('AnomalyService', () => {
         const incidents = await listed;
 
         expect(incidents.flatMap((i) => i.entries)).toHaveLength(20);
-        expect(next).toHaveBeenCalledTimes(8);
+        expect(next).toHaveBeenCalledTimes(5);
         expect(warn).toHaveBeenCalledTimes(1);
-        expect(warn.mock.calls[0][0]).toContain('8 signals');
+        expect(warn.mock.calls[0][0]).toContain('5 signals');
         expect(warn.mock.calls[0][0]).toContain('lookup budget exhausted');
         expect(debug.mock.calls.map(([m]) => m)).toContainEqual(
-          expect.stringContaining('Skipped 12 next-firing lookups'),
+          expect.stringContaining('Skipped 15 next-firing lookups'),
         );
       });
 
@@ -13185,7 +13185,7 @@ describe('AnomalyService', () => {
         const next = jest.spyOn(service as any, 'nextFiring').mockImplementation(
           () =>
             new Promise((resolve) => {
-              if (++calls <= 8) setTimeout(() => resolve(null), 6_000);
+              if (++calls <= 5) setTimeout(() => resolve(null), 6_000);
             }),
         );
         const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
@@ -13198,8 +13198,8 @@ describe('AnomalyService', () => {
 
         expect(settled).toBe(true);
         await listed;
-        expect(next).toHaveBeenCalledTimes(16);
-        expect(warn.mock.calls[0][0]).toContain('8 signals');
+        expect(next).toHaveBeenCalledTimes(10);
+        expect(warn.mock.calls[0][0]).toContain('5 signals');
       });
 
       it('skips a batch when almost none of the budget is left', async () => {
@@ -13215,7 +13215,7 @@ describe('AnomalyService', () => {
         await jest.advanceTimersByTimeAsync(10_000);
         await listed;
 
-        expect(next).toHaveBeenCalledTimes(8);
+        expect(next).toHaveBeenCalledTimes(5);
       });
 
       it('looks up the signals skipped by the previous load first', async () => {
@@ -13289,6 +13289,41 @@ describe('AnomalyService', () => {
           id: 'a-again',
         });
         expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      it('looks up every signal of a load when storage answers', async () => {
+        const end = Date.now() - 24 * 60 * MIN;
+        const tailEnd = end + 30 * MIN;
+        for (let i = 0; i < 8; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+        storage.getAnomalyEvents.mockImplementation(async (q: any) =>
+          q.order === 'asc'
+            ? [
+                {
+                  ...anomaly({
+                    id: `${q.connectionId}-again`,
+                    timestamp: tailEnd + 5 * MIN,
+                    connectionId: q.connectionId,
+                  }),
+                  anomalyType: 'spike',
+                },
+              ]
+            : [],
+        );
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+        const bounded = new Set(
+          recovery.mock.calls
+            .filter((call: any[]) => call[2] === tailEnd + 5 * MIN)
+            .map(([event]: any[]) => event.id),
+        );
+        expect(bounded.size).toBe(8);
+        expect((service as any).skippedNextFirings.size).toBe(0);
       });
 
       const hangNextFiringReads = () => {
