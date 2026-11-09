@@ -286,6 +286,17 @@ describe.each([
       ]);
     });
 
+    it('counts a client listed twice in one capture once', async () => {
+      // Two polls stored with the same timestamp list the same connection twice.
+      const twice = { clientId: '7', name: 'api', addr: '10.0.0.1:1', age: 5 };
+      await save(h.storage, rows([twice, { clientId: '8', name: 'api', addr: '10.0.0.1:2', age: 5 }]));
+      await save(h.storage, rows([twice]));
+
+      expect((await read()).captures).toEqual([
+        { capturedAt: since, name: 'api', user: 'default', ip: '10.0.0.1', count: 2, oldestAge: 5, maxClientId: 8 },
+      ]);
+    });
+
     it("keeps the monitor's own connections in: the ranking leaves them out by name", async () => {
       await save(
         h.storage,

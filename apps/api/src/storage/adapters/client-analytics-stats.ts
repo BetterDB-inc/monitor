@@ -252,7 +252,9 @@ export function clientCaptureSummaryFromSql(rows: ClientCaptureSqlRow[]): Client
  * adapters run in SQL, over rows already narrowed to one connection, the range
  * and no replica or master links, in insertion order. A connection is a
  * (clientId, addr) and its opening (connectionOpenedAt); it takes the name and
- * user of its newest row, the later insert on a tie.
+ * user of its newest row, the later insert on a tie. A (clientId, addr) listed
+ * twice in one capture (two polls stored with the same timestamp) counts once
+ * in its group, as the SQL adapters' COUNT(DISTINCT).
  */
 export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): ClientCaptureSummary {
   const estimates = new Map<string, number[]>();
@@ -277,6 +279,7 @@ export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): Clie
     if (known === undefined || row.capturedAt >= known.capturedAt) newest.set(key, row);
   }
   const groups = new Map<string, ClientCaptureGroupRow>();
+  const members = new Map<string, Set<string>>();
   const connections = new Map<string, ClientConnectionRow>();
   for (const row of rows) {
     const key = connectionOf(row);
@@ -296,8 +299,11 @@ export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): Clie
         oldestAge: row.age,
         maxClientId: clientId,
       });
+      members.set(groupKey, new Set([clientConnectionKey(row.clientId, row.addr)]));
     } else {
-      group.count += 1;
+      const listed = members.get(groupKey)!;
+      listed.add(clientConnectionKey(row.clientId, row.addr));
+      group.count = listed.size;
       group.oldestAge = Math.max(group.oldestAge, row.age);
       group.maxClientId = Math.max(group.maxClientId, clientId);
     }

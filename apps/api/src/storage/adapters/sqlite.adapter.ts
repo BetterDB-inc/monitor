@@ -1326,7 +1326,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
   // another connection. The second window gives each connection the name and
   // user of its newest row in the range; the rows are then grouped twice, per
   // capture and (name, user, ip) and per connection, so the result has a row
-  // per group and per connection, not per client per capture.
+  // per group and per connection, not per client per capture. A (client_id,
+  // addr) stored twice in one capture counts once.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
@@ -1356,7 +1357,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
            WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
          )
          SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
-                COUNT(*) AS count, MAX(age) AS oldest_age,
+                COUNT(DISTINCT client_id || ' ' || addr) AS count, MAX(age) AS oldest_age,
                 MAX(CASE WHEN client_id <> '' AND client_id NOT GLOB '*[^0-9]*'
                          THEN CAST(client_id AS INTEGER) END) AS max_client_id,
                 NULL AS opened_at

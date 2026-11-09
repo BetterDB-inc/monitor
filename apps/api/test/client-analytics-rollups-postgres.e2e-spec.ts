@@ -638,7 +638,8 @@ describePostgres('client analytics rollups — postgres', () => {
       await memory.saveClientSnapshot([{ ...row, name: 'second', age: 0, capturedAt: since }], connectionId);
 
       const summary = await pg.getClientCaptureSummary(connectionId, since, until);
-      expect(summary.captures.map((c) => [c.name, c.count])).toEqual([['second', 2]]);
+      // The connection is counted once in its capture.
+      expect(summary.captures.map((c) => [c.name, c.count])).toEqual([['second', 1]]);
       expect(summary.connections.map((c) => c.name)).toEqual(['second']);
       expect(summary).toEqual(await memory.getClientCaptureSummary(connectionId, since, until));
     });

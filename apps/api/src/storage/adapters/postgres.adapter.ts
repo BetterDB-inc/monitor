@@ -993,8 +993,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   // adapter: a connection is a (client_id, addr) and its opening, the earliest
   // opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row; the second
   // window gives each connection the name and user of its newest row in the
-  // range, then the rows are grouped per capture and (name, user, ip) and per
-  // connection.
+  // range, then the rows are grouped per capture and (name, user, ip), each
+  // (client_id, addr) once, and per connection.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
@@ -1023,7 +1023,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
          WINDOW w AS (PARTITION BY client_id, addr, opened_at ORDER BY captured_at DESC, id DESC)
        )
        SELECT 'group' AS kind, captured_at, NULL AS client_id, NULL AS addr, name, user_name, ip,
-              COUNT(*) AS count, MAX(age) AS oldest_age,
+              COUNT(DISTINCT client_id || ' ' || addr) AS count, MAX(age) AS oldest_age,
               MAX(CASE WHEN client_id ~ '^[0-9]+$' THEN client_id::bigint END) AS max_client_id,
               NULL::bigint AS opened_at
          FROM resolved
