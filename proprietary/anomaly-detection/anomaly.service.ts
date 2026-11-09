@@ -9098,7 +9098,7 @@ export class AnomalyService
     if (unreachable !== previous) {
       if (unreachable > 0) {
         this.logger.warn(
-          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — replication divergence, retry amplification and reshard skew are not checked on them.`,
+          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.`,
         );
       } else {
         this.logger.log(

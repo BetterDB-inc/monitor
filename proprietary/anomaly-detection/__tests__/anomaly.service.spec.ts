@@ -15303,7 +15303,9 @@ describe('AnomalyService', () => {
 
         const fanoutWarnings = warn.mock.calls.filter(([msg]) => String(msg).includes('fan-out'));
         expect(fanoutWarnings).toHaveLength(1);
-        expect(String(fanoutWarnings[0][0])).toContain('1/1 primaries unreachable');
+        expect(String(fanoutWarnings[0][0])).toContain(
+          '1/1 primaries unreachable — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.',
+        );
         expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
       });
 

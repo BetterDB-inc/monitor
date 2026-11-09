@@ -13,6 +13,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [How It Works](#how-it-works)
 - [Detected Patterns](#detected-patterns)
 - [Incident Sequence Rules](#incident-sequence-rules)
+- [Per-node coverage](#per-node-coverage)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -461,6 +462,23 @@ Why each span is that long:
 - **backlog_exhaustion**: a coverage warning can be raised well before the disconnect that exhausts it, so this rule allows the full incident span from the warning to the resync. A resync escalation is stamped with the time the replica disconnected, up to five minutes before it is raised, so it may be stamped up to five minutes before the coverage warning.
 
 `reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
+
+## Per-node coverage
+
+When a cluster or Sentinel group is registered through one connection (the seed), the seed runs every detector. Every other primary it reaches, up to 64, is read in parallel on each poll and runs:
+
+- replication divergence
+- retry amplification, without client names: the alert says client names are not available because the node is not a registered connection
+- backlog coverage risk and resync escalation
+- fork memory risk
+- replica output-buffer pressure, without the per-replica Prometheus gauge
+- reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+
+Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
+
+A node's events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Open backlog coverage and resync escalation events are picked up again per node after a restart, so they close normally once the condition clears instead of raising a duplicate.
+
+A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them.
 
 ## Severity Levels
 
