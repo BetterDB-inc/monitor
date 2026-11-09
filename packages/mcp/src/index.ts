@@ -158,11 +158,15 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
-const PREFIX_RETRY_MS = 30_000;
+const PREFIX_RETRY_MS = 10_000;
 const prefixRetryAt = new WeakMap<MonitorTarget, number>();
 
 async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
-  if ((prefixRetryAt.get(to) ?? 0) > Date.now()) return '/api';
+  const retryAt = prefixRetryAt.get(to) ?? 0;
+  if (retryAt > Date.now()) {
+    const seconds = Math.ceil((retryAt - Date.now()) / 1000);
+    throw new Error(`Cannot reach BetterDB at ${to.url}; retrying in ${seconds}s`);
+  }
   for (const prefix of API_PREFIXES) {
     try {
       const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
@@ -170,9 +174,10 @@ async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<strin
         to.prefix = prefix;
         return prefix;
       }
-    } catch {
+    } catch (err) {
       prefixRetryAt.set(to, Date.now() + PREFIX_RETRY_MS);
-      return '/api';
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`Cannot reach BetterDB at ${to.url}: ${reason}`);
     }
   }
   to.prefix = '/api';
