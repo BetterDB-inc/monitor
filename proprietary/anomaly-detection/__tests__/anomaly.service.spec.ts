@@ -13874,6 +13874,11 @@ describe('AnomalyService', () => {
         );
       const readsOf = (metricType: MetricType) =>
         storage.getAnomalyEvents.mock.calls.filter(([q]: [{ metricType: MetricType }]) => q.metricType === metricType).length;
+      const adoptSeed = async () => {
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        await (service as any).adoptOpenEvents(mockCtx, clock);
+      };
+      const OTHER = '10.0.1.9:6379';
 
       it('re-adopts its own open backlog row after a restart instead of raising again', async () => {
         openRows({
@@ -13881,6 +13886,7 @@ describe('AnomalyService', () => {
             { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
           ],
         });
+        await adoptSeed();
 
         for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
 
@@ -13898,6 +13904,7 @@ describe('AnomalyService', () => {
             { id: 'r-1', nodeAddr: NODE, replicaAddr: '10.0.1.6:6379', timestamp: clock },
           ],
         });
+        await adoptSeed();
 
         await pollNode();
         await pollNode();
@@ -13908,9 +13915,10 @@ describe('AnomalyService', () => {
       it('ignores open rows that belong to another node', async () => {
         openRows({
           [MetricType.BACKLOG_COVERAGE_RISK]: [
-            { id: 'other', nodeAddr: '10.0.1.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'other', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
           ],
         });
+        await adoptSeed();
 
         await pollNode();
 
@@ -13918,24 +13926,56 @@ describe('AnomalyService', () => {
         expect((service as any).backlogCoverage.get(NODE_KEY)?.level).toBe('none');
       });
 
-      it('retries node adoption after a failed read', async () => {
-        let failed = false;
-        storage.getAnomalyEvents.mockImplementation(async ({ metricType }) => {
-          if (metricType === MetricType.BACKLOG_COVERAGE_RISK && !failed) {
-            failed = true;
-            throw new Error('storage down');
-          }
-          return [];
+      it('closes an earlier row of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'gone-b', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.RESYNC_ESCALATION]: [{ id: 'gone-r', nodeAddr: OTHER, replicaAddr: '10.0.1.8:6379', timestamp: clock }],
         });
+        await adoptSeed();
 
         await pollNode();
-        expect((service as any).nodeEventsAdopted.has(NODE_KEY)).toBe(false);
 
-        await pollNode();
-        expect((service as any).nodeEventsAdopted.has(NODE_KEY)).toBe(true);
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-b', 'gone-r']));
       });
 
-      it('adopts each address once', async () => {
+      it('keeps the earlier row of an unreachable node until it answers', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toContain('b-1');
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(nodeClient());
+        (service as any).topologyBackoff.clear();
+        await pollNode({ bytes: 30_000 });
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+      });
+
+      it('closes an earlier node row when the seed is removed before the node is read', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.releaseConnection = jest.fn().mockResolvedValue(undefined);
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(await resolvedIds()).toContain('b-1');
+        expect((service as any).pendingNodeOpenEvents.has('conn-1')).toBe(false);
+      });
+
+      it('takes node rows from the seed read without reading storage again', async () => {
+        await adoptSeed();
         await pollNode();
         await pollNode();
         await pollNode();
@@ -13944,12 +13984,21 @@ describe('AnomalyService', () => {
         expect(readsOf(MetricType.RESYNC_ESCALATION)).toBe(1);
       });
 
-      it('sweeps a node again after it left and came back', async () => {
+      it('does not re-adopt a closed row when the node comes back', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
         await pollNode();
         await pollNode({}, []);
+        expect(await resolvedIds()).toContain('b-1');
+
         await pollNode();
 
-        expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(2);
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('b-1');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level ?? 'none').toBe('none');
       });
     });
 

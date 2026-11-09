@@ -675,7 +675,10 @@ export class AnomalyService
   private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
-  private nodeEventsAdopted = new Set<string>();
+  private pendingNodeOpenEvents = new Map<
+    string,
+    Map<string, { backlog: StoredAnomalyEvent[]; resync: StoredAnomalyEvent[] }>
+  >();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -1070,6 +1073,7 @@ export class AnomalyService
     this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
     this.adoptedNodeReshardEventIds.delete(connectionId);
+    this.pendingNodeOpenEvents.delete(connectionId);
     this.legacyReplicaSlotEvents.delete(connectionId);
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
@@ -2176,6 +2180,7 @@ export class AnomalyService
       const seedRows = (metricType: MetricType) => rows(metricType).filter((e) => !e.nodeAddr);
       this.adoptBacklogEvents(connectionId, seedRows(MetricType.BACKLOG_COVERAGE_RISK));
       this.adoptResyncEvents(connectionId, seedRows(MetricType.RESYNC_ESCALATION));
+      this.holdNodeOpenEvents(connectionId, rows(MetricType.BACKLOG_COVERAGE_RISK), rows(MetricType.RESYNC_ESCALATION));
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
@@ -2211,21 +2216,47 @@ export class AnomalyService
     }
   }
 
-  private async adoptNodeOpenEvents(ctx: ConnectionContext, key: string, nodeAddr: string): Promise<void> {
-    if (this.nodeEventsAdopted.has(key)) return;
-    try {
-      const own = async (metricType: MetricType) =>
-        (await this.readOpenEvents(ctx.connectionId, metricType)).filter((e) => e.nodeAddr === nodeAddr);
-      const backlog = await own(MetricType.BACKLOG_COVERAGE_RISK);
-      const resync = await own(MetricType.RESYNC_ESCALATION);
-      this.adoptBacklogEvents(key, backlog);
-      this.adoptResyncEvents(key, resync);
-      this.nodeEventsAdopted.add(key);
-    } catch (err) {
-      this.logger.warn(
-        `Failed to read open events of ${ctx.connectionName}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+  private holdNodeOpenEvents(
+    connectionId: string,
+    backlog: StoredAnomalyEvent[],
+    resync: StoredAnomalyEvent[],
+  ): void {
+    const byNode = new Map<string, { backlog: StoredAnomalyEvent[]; resync: StoredAnomalyEvent[] }>();
+    const entry = (nodeAddr: string) => {
+      const pending = byNode.get(nodeAddr) ?? { backlog: [], resync: [] };
+      byNode.set(nodeAddr, pending);
+      return pending;
+    };
+    for (const event of backlog) if (event.nodeAddr) entry(event.nodeAddr).backlog.push(event);
+    for (const event of resync) if (event.nodeAddr) entry(event.nodeAddr).resync.push(event);
+    if (byNode.size > 0) this.pendingNodeOpenEvents.set(connectionId, byNode);
+  }
+
+  private adoptNodeOpenEvents(connectionId: string, key: string, nodeAddr: string): void {
+    const byNode = this.pendingNodeOpenEvents.get(connectionId);
+    const pending = byNode?.get(nodeAddr);
+    if (!byNode || !pending) return;
+    byNode.delete(nodeAddr);
+    if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
+    this.adoptBacklogEvents(key, pending.backlog);
+    this.adoptResyncEvents(key, pending.resync);
+  }
+
+  private closePendingNodeEvents(connectionId: string, active: Set<string>): void {
+    const byNode = this.pendingNodeOpenEvents.get(connectionId);
+    if (!byNode) return;
+    for (const [nodeAddr, pending] of [...byNode]) {
+      if (active.has(topologyStateKey(connectionId, nodeAddr))) continue;
+      for (const event of [...pending.backlog, ...pending.resync]) this.closeLater(event.id);
+      byNode.delete(nodeAddr);
     }
+    if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
+  }
+
+  private pendingNodeEventIds(connectionId: string): string[] {
+    return [...(this.pendingNodeOpenEvents.get(connectionId)?.values() ?? [])].flatMap((pending) =>
+      [...pending.backlog, ...pending.resync].map((event) => event.id),
+    );
   }
 
   private adoptBacklogEvents(key: string, open: StoredAnomalyEvent[]): void {
@@ -8799,7 +8830,6 @@ export class AnomalyService
 
   private forgetNodeDetectors(key: string): void {
     for (const map of this.nodeDetectorMaps()) map.delete(key);
-    this.nodeEventsAdopted.delete(key);
   }
 
   private clearFanoutNodeSignals(connectionId: string): void {
@@ -9005,6 +9035,7 @@ export class AnomalyService
       const key = topologyStateKey(ctx.connectionId, addr);
       if (!read.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
     }
+    this.closePendingNodeEvents(ctx.connectionId, active);
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
       if (active.has(topologyStateKey(ctx.connectionId, nodeAddr))) continue;
       const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
@@ -9080,7 +9111,7 @@ export class AnomalyService
       };
       const { info, self, cob } = result.value;
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
-      await this.adoptNodeOpenEvents(nodeCtx, key, target.addr);
+      this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
       await this.detectForkMemoryRisk(info, nodeCtx, timestamp, target.addr);
       await this.detectCobPressure(info, nodeCtx, timestamp, target.addr, cob);
       const sample = this.replicationStream.observe(key, info, timestamp);
@@ -9508,6 +9539,7 @@ export class AnomalyService
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
       ...this.nodeDetectorKeysOf(connectionId).flatMap((key) => this.nodeDetectorEventIds(key)),
+      ...this.pendingNodeEventIds(connectionId),
       ...divergenceKeys.flatMap((key) => [
         ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
         ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
