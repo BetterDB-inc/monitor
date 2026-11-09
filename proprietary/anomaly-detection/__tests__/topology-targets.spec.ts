@@ -166,13 +166,24 @@ describe('topology targets', () => {
       claims.claim('a', [], 2_000, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
       expect(claims.claim('c', [target], 2_000, 30_000)).toEqual([]);
       // Only the reserving connection can confirm.
-      claims.confirm('c', target.addr, 2_000);
+      expect(claims.confirm('c', target.addr, 2_000)).toBe(false);
       expect(claims.heldByOther('b', target.addr, 2_000, 30_000)).toBe(true);
       expect(claims.heldByOther('c', target.addr, 2_000, 30_000)).toBe(true);
 
       claims.releaseTarget('b', target.addr);
       expect(claims.claim('c', [target], 3_000, 30_000)).toEqual([target]);
       expect(claims.heldByOther('c', target.addr, 3_000, 30_000)).toBe(true);
+    });
+
+    it('refuses the confirmation once the down holder claims the primary as reachable again', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+      claims.claim('b', [target], 1_000, 30_000);
+
+      claims.claim('a', [target], 2_000, 30_000);
+
+      expect(claims.confirm('b', target.addr, 2_000)).toBe(false);
+      expect(claims.heldByOther('b', target.addr, 2_000, 30_000)).toBe(true);
     });
 
     it('frees a takeover when the reserving connection stops claiming it or is removed', () => {

@@ -14896,7 +14896,7 @@ describe('AnomalyService', () => {
           expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(false);
         });
 
-        it('counts a primary past the cap as skipped when another connection holds it only as down', async () => {
+        it('leaves a primary past the cap to the connection holding it as down, not skipped', async () => {
           discovery();
           jest.spyOn(Date, 'now').mockReturnValue(T0);
           (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, TOPOLOGY_TARGET_LIMIT, [other.addr]);
@@ -14909,7 +14909,27 @@ describe('AnomalyService', () => {
 
           await poll([...targets, other], 1, T0);
 
-          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: 1 });
+          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: 0 });
+        });
+
+        it('neither counts nor checks a takeover whose holder reclaimed the primary mid-read', async () => {
+          const claims = (service as any).topologyTargetClaims;
+          discovery().mockImplementation(async () => {
+            claims.claim('conn-1', [other], T0, 30_000);
+            return nodeClient([2]);
+          });
+          const detect = jest.spyOn(service as any, 'detectRetryAmplification');
+          const members = new Set([other.addr]);
+          await poll([], 1, T0, members);
+
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [other], members },
+          );
+
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+          expect(detect).not.toHaveBeenCalled();
+          expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(true);
         });
 
         it('counts the primaries past the target cap as skipped', async () => {

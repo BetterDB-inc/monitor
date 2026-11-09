@@ -9040,11 +9040,12 @@ export class AnomalyService
       [...scope.members].filter((addr) => claimedAddrs.has(addr) || !reachable.has(addr)),
     );
     // Primaries past the target cap that no other connection holds either:
-    // nothing checks them until a connection has room.
+    // nothing checks them until a connection has room. One held as down is
+    // counted unreachable by its holder, so it is not counted here as well.
     const skipped = scope.targets.filter(
       (t) =>
         !claimedAddrs.has(t.addr) &&
-        this.topologyTargetClaims.isFreeFor(ctx.connectionId, t.addr, now, staleMs),
+        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
     ).length;
     const down = [...kept].filter(
       (addr) =>
@@ -9189,13 +9190,18 @@ export class AnomalyService
     const failed = results.filter((result, i) => result.status === 'rejected' && counted(i)).length;
     const authFailed = backedOffAuth + refused.filter((r, i) => r && counted(i)).length;
     const unreachable = backedOff + failed;
-    const checked = results.filter((result) => result.status === 'fulfilled').length;
-    // Recorded as soon as the reads settle: detection below can throw.
-    coverage(checked, unreachable - authFailed + down, authFailed);
+    // A takeover whose reservation was lost while the read was in flight stays
+    // with the connection that now holds the primary: it is neither counted
+    // nor checked here.
+    const lost = new Set<string>();
     for (const [i, result] of results.entries()) {
       const addr = targets[i].addr;
-      if (result.status === 'fulfilled' && takeovers.has(addr)) this.topologyTargetClaims.confirm(ctx.connectionId, addr, now);
+      if (result.status !== 'fulfilled' || !takeovers.has(addr)) continue;
+      if (!this.topologyTargetClaims.confirm(ctx.connectionId, addr, now)) lost.add(addr);
     }
+    const checked = results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
+    // Recorded as soon as the reads settle: detection below can throw.
+    coverage(checked, unreachable - authFailed + down, authFailed);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
@@ -9208,6 +9214,10 @@ export class AnomalyService
         continue;
       }
       this.topologyBackoff.delete(key);
+      if (lost.has(targets[i].addr)) {
+        this.clearNodeSignals(ctx.connectionId, key);
+        continue;
+      }
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,

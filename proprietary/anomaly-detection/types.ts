@@ -302,7 +302,7 @@ export interface FanoutCoverage {
   unreachable: number;
   /** Primaries that refused the credentials (WRONGPASS, NOAUTH, NOPERM). */
   authFailed: number;
-  /** Primaries past the per-connection cap that no other connection reads. */
+  /** Primaries past the per-connection cap that no other connection checks. */
   skipped: number;
   /** Primaries the topology lists that the connection does not dial (see `reason`). */
   notDialed: number;

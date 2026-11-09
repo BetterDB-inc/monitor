@@ -140,12 +140,14 @@ export class TopologyTargetClaims {
 
   /**
    * Takes over a primary claimed from a down holder once it was read, unless
-   * another connection has taken it in the meantime.
+   * the reservation was lost in the meantime: another connection took it, or
+   * the holder claimed it as reachable again. Returns whether it took it.
    */
-  confirm(connectionId: string, addr: string, now: number): void {
+  confirm(connectionId: string, addr: string, now: number): boolean {
     const owner = this.owners.get(addr);
-    if (owner && owner.connectionId !== connectionId && owner.takeover?.connectionId !== connectionId) return;
+    if (owner && owner.connectionId !== connectionId && owner.takeover?.connectionId !== connectionId) return false;
     this.owners.set(addr, { connectionId, at: now, down: false });
+    return true;
   }
 
   /**
