@@ -7800,18 +7800,33 @@ export class AnomalyService
       if (!seen || e.timestamp < seen.timestamp) recent.set(key, e);
     }
     const later: AnomalyEvent[] = [];
+    const failures: { key: string; error: unknown }[] = [];
     for (let i = 0; i < signals.length; i += NEXT_FIRING_CONCURRENCY) {
       const batch = await Promise.all(
         signals.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
-          const stored = await this.nextFiring(signal, after);
-          const live = recent.get(signalKey(signal)) ?? null;
+          const key = signalKey(signal);
+          const stored = await this.nextFiring(signal, after).catch((error: unknown) => {
+            failures.push({ key, error });
+            return null;
+          });
+          const live = recent.get(key) ?? null;
           if (!stored || !live) return stored ?? live;
           return live.timestamp < stored.timestamp ? live : stored;
         }),
       );
       later.push(...batch.filter((e): e is AnomalyEvent => e !== null));
     }
+    if (failures.length > 0) this.warnNextFiringFailures(failures);
     return later;
+  }
+
+  private warnNextFiringFailures(failures: { key: string; error: unknown }[]): void {
+    const [first] = failures;
+    const reason = first.error instanceof Error ? first.error.message : String(first.error);
+    const count = failures.length === 1 ? '1 signal' : `${failures.length} signals`;
+    this.logger.warn(
+      `Next-firing lookup failed for ${count}, treating as no later firing (first: ${first.key}): ${reason}`,
+    );
   }
 
   private async nextFiring(signal: AnomalyEvent, after: number): Promise<AnomalyEvent | null> {

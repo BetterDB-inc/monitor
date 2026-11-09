@@ -13057,6 +13057,55 @@ describe('AnomalyService', () => {
       expect(peak).toBe(8);
     });
 
+    describe('when a later-firing lookup fails', () => {
+      const end = Date.now() - 24 * 60 * MIN;
+      const failingLookup = (q: any) =>
+        q.order === 'asc' && q.metricType === MetricType.CONNECTIONS;
+      let warn: jest.SpyInstance;
+
+      beforeEach(() => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'conn', timestamp: end - 10 * MIN }),
+          anomaly({ id: 'mem', timestamp: end - 9 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+          if (failingLookup(q)) throw new Error('pool exhausted');
+          return [];
+        });
+        warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+      });
+
+      it('still lists the incidents, treating the failed lookup as a miss', async () => {
+        const incidents = await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const entries = incidents.flatMap((i) => i.entries);
+        const state = (id: string) => entries.find((e) => e.anomalyId === id)?.recoveryState;
+        expect(entries.map((e) => e.anomalyId)).toEqual(['conn', 'mem']);
+        expect(state('conn')).toBe('unknown');
+        expect(state('conn')).toBe(state('mem'));
+      });
+
+      it('warns once per load with the number of failed lookups', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('1 signal');
+        expect(warn.mock.calls[0][0]).toContain('pool exhausted');
+      });
+
+      it('retries the failed lookup on the next load but not the cached miss', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+        storage.getAnomalyEvents.mockClear();
+
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const lookups = storage.getAnomalyEvents.mock.calls
+          .map(([q]: any[]) => q)
+          .filter((q: any) => q.order === 'asc');
+        expect(lookups.map((q: any) => q.metricType)).toEqual([MetricType.CONNECTIONS]);
+      });
+    });
+
     it('reads incident boundaries once when opening an incident', async () => {
       const now = Date.now();
       (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: now - 2 * MIN }));
