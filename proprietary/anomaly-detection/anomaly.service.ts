@@ -7372,7 +7372,7 @@ export class AnomalyService
   private nextFiringCache = new Map<string, CachedFiring>();
   private nextFiringInFlight = new Map<
     string,
-    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number }; startedAt: number }
+    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number } }
   >();
   private skippedNextFirings = new Map<string, number>();
   private skipSequence = 0;
@@ -7864,10 +7864,8 @@ export class AnomalyService
       return;
     }
     if (this.skippedNextFirings.has(cacheKey)) return;
+    if (this.skippedNextFirings.size >= NEXT_FIRING_CACHE_SIZE) return;
     this.skippedNextFirings.set(cacheKey, this.skipSequence++);
-    if (this.skippedNextFirings.size > NEXT_FIRING_CACHE_SIZE) {
-      this.skippedNextFirings.delete(this.skippedNextFirings.keys().next().value!);
-    }
   }
 
   private warnNextFiringFailures(failures: { key: string; error: unknown }[]): void {
@@ -7888,7 +7886,7 @@ export class AnomalyService
     const cached = this.cachedNextFiring(cacheKey);
     if (cached !== undefined) return Promise.resolve(cached);
     const inFlight = this.nextFiringInFlight.get(cacheKey);
-    if (inFlight && Date.now() - inFlight.startedAt < NEXT_FIRING_BUDGET_MS) {
+    if (inFlight && inFlight.budget.deadline > Date.now()) {
       inFlight.budget.deadline = Math.max(inFlight.budget.deadline, deadline);
       return inFlight.lookup;
     }
@@ -7899,11 +7897,20 @@ export class AnomalyService
       }
     });
     this.nextFiringInFlight.delete(cacheKey);
-    this.nextFiringInFlight.set(cacheKey, { lookup, budget, startedAt: Date.now() });
-    if (this.nextFiringInFlight.size > NEXT_FIRING_CACHE_SIZE) {
-      this.nextFiringInFlight.delete(this.nextFiringInFlight.keys().next().value!);
-    }
+    this.nextFiringInFlight.set(cacheKey, { lookup, budget });
+    if (this.nextFiringInFlight.size > NEXT_FIRING_CACHE_SIZE) this.evictInFlightLookup();
     return lookup;
+  }
+
+  private evictInFlightLookup(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.nextFiringInFlight) {
+      if (entry.budget.deadline <= now) {
+        this.nextFiringInFlight.delete(key);
+        return;
+      }
+    }
+    this.nextFiringInFlight.delete(this.nextFiringInFlight.keys().next().value!);
   }
 
   private cachedNextFiring(cacheKey: string): AnomalyEvent | null | undefined {

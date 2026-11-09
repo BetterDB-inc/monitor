@@ -13266,7 +13266,7 @@ describe('AnomalyService', () => {
         expect(third.slice(0, 4).sort()).toEqual(['c-16', 'c-17', 'c-18', 'c-19']);
       });
 
-      it('starts a fresh lookup once a shared one outlives the budget', async () => {
+      it('starts a fresh lookup once a shared one passes its deadline', async () => {
         jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
         const after = Date.now() - 24 * 60 * MIN;
         const signal = anomaly({ id: 'a', timestamp: after - MIN });
@@ -13276,9 +13276,10 @@ describe('AnomalyService', () => {
           .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
           .mockResolvedValueOnce([firing]);
 
-        const stale = (service as any).nextFiring(signal, after);
+        const budget = () => Date.now() + 10_000;
+        const stale = (service as any).nextFiring(signal, after, budget());
         await jest.advanceTimersByTimeAsync(10_000);
-        const fresh = (service as any).nextFiring(signal, after);
+        const fresh = (service as any).nextFiring(signal, after, budget());
 
         await expect(fresh).resolves.toMatchObject({ id: 'a-again' });
         releaseStale([]);
@@ -13287,6 +13288,50 @@ describe('AnomalyService', () => {
         await expect((service as any).nextFiring(signal, after)).resolves.toMatchObject({
           id: 'a-again',
         });
+      });
+
+      it('keeps sharing a lookup whose deadline a later load extended', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
+
+        const first = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        await jest.advanceTimersByTimeAsync(5_000);
+        (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        await jest.advanceTimersByTimeAsync(7_000);
+        const later = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+
+        expect(later).toBe(first);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      it('evicts an expired in-flight lookup before a live one when full', () => {
+        const inFlight: Map<string, any> = (service as any).nextFiringInFlight;
+        const now = Date.now();
+        inFlight.set('live', { lookup: Promise.resolve(null), budget: { deadline: now + 10_000 } });
+        inFlight.set('expired', { lookup: Promise.resolve(null), budget: { deadline: now - 1 } });
+        for (let i = 0; i < 1_998; i++) {
+          inFlight.set(`k-${i}`, { lookup: Promise.resolve(null), budget: { deadline: now + 10_000 } });
+        }
+        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
+
+        (service as any).nextFiring(anomaly({ id: 'a' }), now - 60 * MIN, now + 10_000);
+
+        expect(inFlight.has('live')).toBe(true);
+        expect(inFlight.has('expired')).toBe(false);
+        expect(inFlight.size).toBe(2_000);
+      });
+
+      it('keeps the longest-skipped signals when the skip list is full', () => {
+        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+        for (let i = 0; i < 2_000; i++) (service as any).markLookupSkipped(`k-${i}`, true);
+
+        (service as any).markLookupSkipped('newest', true);
+
+        expect(skipped.has('k-0')).toBe(true);
+        expect(skipped.has('newest')).toBe(false);
+        expect(skipped.size).toBe(2_000);
       });
 
       it('keeps a pending replacement when the stale lookup settles first', async () => {
@@ -13298,12 +13343,13 @@ describe('AnomalyService', () => {
           .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
           .mockImplementationOnce(() => new Promise(() => undefined));
 
-        const stale = (service as any).nextFiring(signal, after);
+        const budget = () => Date.now() + 10_000;
+        const stale = (service as any).nextFiring(signal, after, budget());
         await jest.advanceTimersByTimeAsync(10_000);
-        const fresh = (service as any).nextFiring(signal, after);
+        const fresh = (service as any).nextFiring(signal, after, budget());
         releaseStale([]);
         await stale;
-        const third = (service as any).nextFiring(signal, after);
+        const third = (service as any).nextFiring(signal, after, budget());
 
         expect(third).toBe(fresh);
         expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
@@ -13341,6 +13387,7 @@ describe('AnomalyService', () => {
       });
 
       it('lets a later caller extend the deadline of a shared lookup', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
         const after = Date.now() - 24 * 60 * MIN;
         const signal = anomaly({ id: 'a', timestamp: after - MIN });
         const page = Array.from({ length: 100 }, (_, i) => ({
@@ -13352,8 +13399,9 @@ describe('AnomalyService', () => {
           .mockImplementationOnce(() => new Promise((resolve) => (releaseFirstPage = resolve)))
           .mockResolvedValue([]);
 
-        const first = (service as any).nextFiring(signal, after, Date.now() - 1);
+        const first = (service as any).nextFiring(signal, after, Date.now() + 1_000);
         const second = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        await jest.advanceTimersByTimeAsync(2_000);
         releaseFirstPage(page);
 
         await expect(second).resolves.toBeNull();
