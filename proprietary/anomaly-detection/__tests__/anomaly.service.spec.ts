@@ -5515,37 +5515,39 @@ describe('AnomalyService', () => {
       expect(recorded[0].message).toContain('Top clients: name worker (3 reconnects).');
     });
 
+    // A stored client_snapshots row of conn-1.
+    const stored = (
+      clientId: string,
+      addr: string,
+      name: string,
+      age: number,
+      capturedAt: number,
+      flags = 'N',
+    ) => ({
+      id: 0,
+      clientId,
+      addr,
+      name,
+      user: 'default',
+      db: 0,
+      cmd: 'get',
+      age,
+      idle: 0,
+      flags,
+      sub: 0,
+      psub: 0,
+      qbuf: 0,
+      qbufFree: 0,
+      obl: 0,
+      oll: 0,
+      omem: 0,
+      capturedAt,
+      sourceHost: 'h',
+      sourcePort: 1,
+      connectionId: 'conn-1',
+    });
+
     describe('with stored captures', () => {
-      const stored = (
-        clientId: string,
-        addr: string,
-        name: string,
-        age: number,
-        capturedAt: number,
-        flags = 'N',
-      ) => ({
-        id: 0,
-        clientId,
-        addr,
-        name,
-        user: 'default',
-        db: 0,
-        cmd: 'get',
-        age,
-        idle: 0,
-        flags,
-        sub: 0,
-        psub: 0,
-        qbuf: 0,
-        qbufFree: 0,
-        obl: 0,
-        oll: 0,
-        omem: 0,
-        capturedAt,
-        sourceHost: 'h',
-        sourcePort: 1,
-        connectionId: 'conn-1',
-      });
       // A steady client, so command rates are known and the ranking is a list.
       const steady = (takenAt: number, totalCommands: number) => ({
         takenAt,
@@ -5708,29 +5710,8 @@ describe('AnomalyService', () => {
 
     it('counts early reconnects next to a later capture of older clients', async () => {
       const history = new MemoryAdapter();
-      const row = (clientId: string, name: string, age: number, capturedAt: number) => ({
-        id: 0,
-        clientId,
-        addr: `10.0.0.1:${clientId}`,
-        name,
-        user: 'default',
-        db: 0,
-        cmd: 'get',
-        age,
-        idle: 0,
-        flags: 'N',
-        sub: 0,
-        psub: 0,
-        qbuf: 0,
-        qbufFree: 0,
-        obl: 0,
-        oll: 0,
-        omem: 0,
-        capturedAt,
-        sourceHost: 'h',
-        sourcePort: 1,
-        connectionId: 'conn-1',
-      });
+      const row = (clientId: string, name: string, age: number, capturedAt: number) =>
+        stored(clientId, `10.0.0.1:${clientId}`, name, age, capturedAt);
       // Seeded from the episode the service attributes, before it reads storage.
       const attribute = (service as any).attributeRetryAmplification.bind(service);
       let seeded = false;
