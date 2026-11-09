@@ -110,8 +110,15 @@ describe.each([
     const until = 2_000_000;
     const rows = (overrides: Array<Partial<ReturnType<typeof client>>>) =>
       overrides.map((o) => ({ ...client(since), ...o }));
-    const read = async () => {
-      const { captures, connections } = await h.storage.getClientCaptureSummary('conn-x', since, until);
+    const everything = { skipFrom: since, skipTo: since, maxRows: 1_000 };
+    const read = async (bounds = everything) => {
+      const { captures, connections, truncated } = await h.storage.getClientCaptureSummary(
+        'conn-x',
+        since,
+        until,
+        bounds,
+      );
+      expect(truncated).toBe(false);
       return {
         captures: [...captures].sort(
           (x, y) => x.capturedAt - y.capturedAt || x.name.localeCompare(y.name) || x.ip.localeCompare(y.ip),
@@ -295,6 +302,58 @@ describe.each([
       expect((await read()).captures).toEqual([
         { capturedAt: since, name: 'api', user: 'default', ip: '10.0.0.1', count: 2, oldestAge: 5, maxClientId: 8 },
       ]);
+    });
+
+    it('skips the captures between the two read ranges and resolves identity across them', async () => {
+      const worker = { clientId: '7', addr: '10.0.0.5:4001', user: 'default' };
+      await save(
+        h.storage,
+        rows([
+          { ...worker, name: '', age: 0, capturedAt: since },
+          { clientId: 'gap', name: 'gap', addr: '10.0.0.6:1', age: 0, capturedAt: since + 60_000 },
+          { ...worker, name: 'worker', age: 120, capturedAt: since + 120_000 },
+        ]),
+      );
+
+      const { captures, connections } = await read({
+        skipFrom: since + 60_000,
+        skipTo: since + 120_000,
+        maxRows: 1_000,
+      });
+      expect(captures.map((c) => [c.capturedAt - since, c.name])).toEqual([
+        [0, 'worker'],
+        [120_000, 'worker'],
+      ]);
+      expect(connections).toEqual([
+        expect.objectContaining({ clientId: '7', name: 'worker', openedAt: since, firstCapturedAt: since }),
+      ]);
+    });
+
+    it('aggregates nothing when the range holds more rows than the bound', async () => {
+      await save(
+        h.storage,
+        rows([
+          { clientId: '1', age: 0, capturedAt: since },
+          { clientId: '2', age: 0, capturedAt: since },
+          { clientId: '1', age: 60, capturedAt: since + 60_000 },
+        ]),
+      );
+      const bounds = (maxRows: number) => ({ skipFrom: since, skipTo: since, maxRows });
+
+      await expect(h.storage.getClientCaptureSummary('conn-x', since, until, bounds(2))).resolves.toEqual({
+        captures: [],
+        connections: [],
+        truncated: true,
+      });
+      // The skipped captures do not count towards the bound.
+      await expect(
+        h.storage.getClientCaptureSummary('conn-x', since, until, {
+          skipFrom: since + 60_000,
+          skipTo: until,
+          maxRows: 2,
+        }),
+      ).resolves.toEqual(expect.objectContaining({ truncated: false }));
+      expect((await read(bounds(3))).connections.map((c) => c.clientId)).toEqual(['1', '2']);
     });
 
     it("keeps the monitor's own connections in: the ranking leaves them out by name", async () => {

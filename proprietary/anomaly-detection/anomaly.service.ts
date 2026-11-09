@@ -326,7 +326,9 @@ import {
   selectClientSnapshots,
   hasRatePair,
   readClientCommandCounts,
+  RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
   RETRY_AMP_MAX_BASELINE_SCALE,
+  RETRY_AMP_MAX_CAPTURE_ROWS,
 } from './retry-amplification-attribution';
 import {
   LargeReplyEntry,
@@ -4208,9 +4210,15 @@ export class AnomalyService
     notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
     const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
-    let summary: ClientCaptureSummary = { captures: [], connections: [] };
+    let summary: ClientCaptureSummary = { captures: [], connections: [], truncated: false };
     let snapshotsLoaded = true;
-    const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
+    // The stored captures are read for at most the newest
+    // RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS of the episode and as long a span
+    // before it, so the read does not grow with the episode; the captures in
+    // between are skipped. For a shorter episode the two are contiguous.
+    const attributedSpan = Math.min(until - episodeStart, RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS);
+    const recentStart = until - attributedSpan;
+    const fullBaselineStart = episodeStart - Math.max(attributedSpan, RETRY_AMP_WINDOW_MS);
     const baselineStart =
       notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
     const baselineScale =
@@ -4218,16 +4226,27 @@ export class AnomalyService
     // One storage read spans the whole attribution range, so a connection
     // carries one identity (the name of its newest reading) in the baseline,
     // the episode and the newest capture alike; the span is split into
-    // baseline and episode here. It is the only read: if it fails or hangs,
-    // the ranking by command rate still stands.
+    // baseline and episode here. It is the only read: if it fails, hangs or
+    // holds more than RETRY_AMP_MAX_CAPTURE_ROWS rows, the ranking by command
+    // rate still stands. better-sqlite3 runs it synchronously, before the
+    // timeout can fire, so the row bound is what keeps it short there.
     try {
       summary = await withTimeout(
-        this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until),
+        this.storage.getClientCaptureSummary(ctx.connectionId, fullBaselineStart, until, {
+          skipFrom: episodeStart,
+          skipTo: recentStart,
+          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+        }),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
       );
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
+    }
+    if (summary.truncated) {
+      this.logger.debug(
+        `Client snapshots for ${ctx.connectionName} exceed ${RETRY_AMP_MAX_CAPTURE_ROWS} rows; reconnects not ranked`,
+      );
     }
     // Every capture lists the monitor's own connection, so a baseline with
     // client readings has a capture group in it.
@@ -4237,18 +4256,25 @@ export class AnomalyService
     const capture = latestCaptureGroups(summary, episodeStart);
     const reconnectsKnown =
       snapshotsLoaded &&
+      !summary.truncated &&
       capture.length > 0 &&
       baselineRead &&
       baselineScale <= RETRY_AMP_MAX_BASELINE_SCALE;
     const ratesKnown = hasRatePair(snapshots);
+    // After skipped captures, the id growth up to the first capture read
+    // again is not the episode's newest span: it starts from that capture.
+    const episodeCaptures =
+      recentStart > episodeStart
+        ? summary.captures.filter((row) => row.capturedAt >= recentStart)
+        : summary.captures;
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
       newConnections: reconnectsKnown
         ? estimateNewConnections(
-            newConnectionsBetween(summary.connections, episodeStart, until),
-            summary.captures,
-            episodeStart,
+            newConnectionsBetween(summary.connections, recentStart, until),
+            episodeCaptures,
+            recentStart,
             until,
           )
         : [],

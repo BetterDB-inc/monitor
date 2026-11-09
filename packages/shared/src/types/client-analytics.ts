@@ -81,6 +81,20 @@ export interface ClientCaptureSummary {
   /** The groups of every capture, in no particular order. */
   captures: ClientCaptureGroupRow[];
   connections: ClientConnectionRow[];
+  /**
+   * The range held more than `maxRows` rows: nothing was aggregated, and
+   * `captures` and `connections` are empty.
+   */
+  truncated: boolean;
+}
+
+/** What a getClientCaptureSummary read leaves out, and how much it reads at most. */
+export interface ClientCaptureReadBounds {
+  /** Captures in [skipFrom, skipTo) are not read; equal values skip nothing. */
+  skipFrom: number;
+  skipTo: number;
+  /** The most rows the read aggregates; a range with more comes back `truncated`. */
+  maxRows: number;
 }
 
 export interface ClientTimeSeriesPoint {

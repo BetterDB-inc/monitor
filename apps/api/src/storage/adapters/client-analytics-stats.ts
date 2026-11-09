@@ -199,12 +199,12 @@ export type ClientCaptureRow = Pick<
 
 /**
  * A row of the SQL adapters' getClientCaptureSummary statement: one (name,
- * user, ip) group of one capture (`kind` 'group'), or one connection with its
- * first capture in `captured_at` (`kind` 'connection'). pg returns BIGINT as a
- * string.
+ * user, ip) group of one capture (`kind` 'group'), one connection with its
+ * first capture in `captured_at` (`kind` 'connection'), or the only row of a
+ * read past its row bound (`kind` 'truncated'). pg returns BIGINT as a string.
  */
 export interface ClientCaptureSqlRow {
-  kind: 'group' | 'connection';
+  kind: 'group' | 'connection' | 'truncated';
   captured_at: number | string;
   client_id: string | null;
   addr: string | null;
@@ -219,8 +219,9 @@ export interface ClientCaptureSqlRow {
 
 /** Maps the rows of the SQL adapters' getClientCaptureSummary statement. */
 export function clientCaptureSummaryFromSql(rows: ClientCaptureSqlRow[]): ClientCaptureSummary {
-  const summary: ClientCaptureSummary = { captures: [], connections: [] };
+  const summary: ClientCaptureSummary = { captures: [], connections: [], truncated: false };
   for (const row of rows) {
+    if (row.kind === 'truncated') return { captures: [], connections: [], truncated: true };
     const { name, user_name: user, ip } = row;
     if (row.kind === 'connection') {
       summary.connections.push({
@@ -322,7 +323,11 @@ export function summarizeClientCaptures(rows: readonly ClientCaptureRow[]): Clie
       connection.firstCapturedAt = Math.min(connection.firstCapturedAt, row.capturedAt);
     }
   }
-  return { captures: [...groups.values()], connections: [...connections.values()] };
+  return {
+    captures: [...groups.values()],
+    connections: [...connections.values()],
+    truncated: false,
+  };
 }
 
 /**

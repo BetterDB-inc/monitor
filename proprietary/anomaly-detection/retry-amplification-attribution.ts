@@ -10,6 +10,7 @@ import {
   clientConnectionKey,
   connectionOpenedAt,
 } from '@app/storage/adapters/client-analytics-stats';
+import { RETRY_AMP_BASELINE_WINDOWS, RETRY_AMP_WINDOW_MS } from './retry-amplification-detector';
 
 export const RETRY_AMP_TOP_CONTRIBUTORS = 5;
 export const RETRY_AMP_CONTRIBUTOR_GROWTH = 1.3;
@@ -17,6 +18,23 @@ export const RETRY_AMP_CLIENT_SNAPSHOTS = 6;
 export const RETRY_AMP_MIN_COMMAND_RATE = 1;
 export const RETRY_AMP_MIN_NEW_CONNECTIONS = 3;
 export const RETRY_AMP_MAX_BASELINE_SCALE = 2;
+/**
+ * The longest part of an episode the stored captures are read for, and the
+ * longest span before it they are compared with: as long as the detector's own
+ * baseline (RETRY_AMP_BASELINE_WINDOWS windows, 30 minutes). A longer episode
+ * is attributed over its newest RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS, so the read
+ * does not grow with the episode.
+ */
+export const RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS = RETRY_AMP_BASELINE_WINDOWS * RETRY_AMP_WINDOW_MS;
+/**
+ * The most client_snapshots rows one attribution aggregates. Two spans of
+ * RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS at the default 60s capture are about 60
+ * captures, so this holds about 4,000 clients. better-sqlite3 runs the read
+ * synchronously, before the attribution timeout can fire; this many rows take
+ * 2-3s there, under RETRY_AMP_ATTRIBUTION_TIMEOUT_MS. A read past it stops
+ * after this many rows, and the finding ranks by command rate only.
+ */
+export const RETRY_AMP_MAX_CAPTURE_ROWS = 250_000;
 // Names of the connections BetterDB itself opens: the monitor (and its
 // -keyscan, -Node-..., -Discovery clients), the agent and the CLI.
 // BetterDB-Migration-* stays visible on purpose.

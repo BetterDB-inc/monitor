@@ -37,6 +37,7 @@ import {
   AuditStats,
   ClientAnalyticsStats,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   CommandLogQueryOptions,
@@ -990,30 +991,44 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   // One statement over idx_client_connection_captured, as in the SQLite
-  // adapter: a connection is a (client_id, addr) and its opening, the earliest
-  // opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row; the second
-  // window gives each connection the name and user of its newest row in the
-  // range, then the rows are grouped per capture and (name, user, ip), each
-  // (client_id, addr) once, and per connection.
+  // adapter: `bounded` reads the range as two index ranges around the skipped
+  // captures and stops after maxRows + 1 rows, past which only a 'truncated'
+  // row comes back; a connection is a (client_id, addr) and its opening, the
+  // earliest opening estimate within CLIENT_REOPEN_TOLERANCE_MS of each row;
+  // the second window gives each connection the name and user of its newest
+  // row in the range, then the rows are grouped per capture and (name, user,
+  // ip), each (client_id, addr) once, and per connection.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
+    bounds: ClientCaptureReadBounds,
   ): Promise<ClientCaptureSummary> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
     const result = await this.pool.query<ClientCaptureSqlRow>(
-      `WITH readings AS (
+      `WITH bounded AS (
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= $2 AND captured_at < $4 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+         UNION ALL
+         SELECT id, captured_at, client_id, addr, age, name, user_name
+           FROM client_snapshots
+          WHERE connection_id = $1 AND captured_at >= GREATEST($4::bigint, $5::bigint)
+            AND captured_at >= $2 AND captured_at <= $3
+            AND COALESCE(flags, '') !~ '[SM]'
+          LIMIT $6::bigint + 1
+       ), readings AS (
          SELECT id, captured_at, client_id, addr, age, name, user_name,
                 MIN(captured_at - age::bigint * 1000) OVER (
                   PARTITION BY client_id, addr ORDER BY captured_at - age::bigint * 1000
                   RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS}::bigint PRECEDING
                     AND ${CLIENT_REOPEN_TOLERANCE_MS}::bigint FOLLOWING
                 ) AS opened_at
-           FROM client_snapshots
-          WHERE connection_id = $1 AND captured_at >= $2 AND captured_at <= $3
-            AND COALESCE(flags, '') !~ '[SM]'
+           FROM bounded
+          WHERE (SELECT COUNT(*) FROM bounded) <= $6::bigint
        ), resolved AS (
          SELECT captured_at, client_id, addr, age, opened_at,
                 FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
@@ -1032,8 +1047,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
        SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
               NULL, NULL, NULL, opened_at
          FROM resolved
-        GROUP BY client_id, addr, opened_at, name, user_name, ip`,
-      [connectionId, since, until],
+        GROUP BY client_id, addr, opened_at, name, user_name, ip
+       UNION ALL
+       SELECT 'truncated', NULL, NULL, NULL, '', '', '', NULL, NULL, NULL, NULL
+        WHERE (SELECT COUNT(*) FROM bounded) > $6::bigint`,
+      [connectionId, since, until, bounds.skipFrom, bounds.skipTo, bounds.maxRows],
     );
     return clientCaptureSummaryFromSql(result.rows);
   }

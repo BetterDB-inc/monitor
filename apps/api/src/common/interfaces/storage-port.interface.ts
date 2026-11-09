@@ -2,6 +2,7 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -95,6 +96,7 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
@@ -577,11 +579,15 @@ export interface StoragePort {
    * opened (the earliest captured_at - age) and its first capture. Each connection takes the name
    * and user of its newest row in the range, so a client captured before it ran CLIENT SETNAME
    * counts under the name it set later. The monitor's own connections are in, like any other.
+   * Captures in [bounds.skipFrom, bounds.skipTo) are not read, so the read is two index ranges;
+   * a read that matches more than bounds.maxRows rows stops there and aggregates nothing
+   * (`truncated`), so its cost does not grow with the range.
    */
   getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
+    bounds: ClientCaptureReadBounds,
   ): Promise<ClientCaptureSummary>;
   getClientTimeSeries(
     startTime: number,

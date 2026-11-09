@@ -511,7 +511,8 @@ describePostgres('client analytics rollups — postgres', () => {
   describe('getClientCaptureSummary', () => {
     const since = T0 + BATCH_MS;
     const until = T0 + 5 * BATCH_MS;
-    const sorted = ({ captures, connections }: ClientCaptureSummary) => ({
+    const all = { skipFrom: since, skipTo: since, maxRows: 1_000_000 };
+    const sorted = ({ captures, connections }: Pick<ClientCaptureSummary, 'captures' | 'connections'>) => ({
       captures: [...captures].sort(
         (a, b) =>
           a.capturedAt - b.capturedAt ||
@@ -523,10 +524,10 @@ describePostgres('client analytics rollups — postgres', () => {
     });
 
     it.each(CONNECTIONS)('matches the memory adapter for %s', async (connectionId) => {
-      const summary = await pg.getClientCaptureSummary(connectionId, since, until);
+      const summary = await pg.getClientCaptureSummary(connectionId, since, until, all);
       expect(summary.captures.length).toBeGreaterThan(0);
       expect(sorted(summary)).toEqual(
-        sorted(await memory.getClientCaptureSummary(connectionId, since, until)),
+        sorted(await memory.getClientCaptureSummary(connectionId, since, until, all)),
       );
     });
 
@@ -538,7 +539,7 @@ describePostgres('client analytics rollups — postgres', () => {
         connectionId,
       );
 
-      const { captures, connections } = await pg.getClientCaptureSummary(connectionId, since, until);
+      const { captures, connections } = await pg.getClientCaptureSummary(connectionId, since, until, all);
       expect(captures).toEqual([
         expect.objectContaining({ capturedAt: since, count: 1, oldestAge: 3_000_000, maxClientId: 77 }),
       ]);
@@ -559,9 +560,10 @@ describePostgres('client analytics rollups — postgres', () => {
         connectionId,
       );
 
-      await expect(pg.getClientCaptureSummary(connectionId, since, until)).resolves.toEqual({
+      await expect(pg.getClientCaptureSummary(connectionId, since, until, all)).resolves.toEqual({
         captures: [],
         connections: [],
+        truncated: false,
       });
     });
 
@@ -579,7 +581,7 @@ describePostgres('client analytics rollups — postgres', () => {
       await pg.saveClientSnapshot(batch, connectionId);
       await memory.saveClientSnapshot(batch, connectionId);
 
-      const summary = sorted(await pg.getClientCaptureSummary(connectionId, since, until));
+      const summary = sorted(await pg.getClientCaptureSummary(connectionId, since, until, all));
       expect(summary.captures).toEqual([
         { capturedAt: since, name: 'api', user: 'default', ip: '10.0.0.1', count: 1, oldestAge: 0, maxClientId: 5 },
         { capturedAt: since, name: 'storm', user: 'default', ip: '10.0.0.5', count: 1, oldestAge: 0, maxClientId: 7 },
@@ -592,7 +594,7 @@ describePostgres('client analytics rollups — postgres', () => {
         ['7', '10.0.0.5:4001', 'storm', 0, 0],
         ['cluster:9', '10.0.0.5:4002', 'storm', 59_000, 60_000],
       ]);
-      expect(summary).toEqual(sorted(await memory.getClientCaptureSummary(connectionId, since, until)));
+      expect(summary).toEqual(sorted(await memory.getClientCaptureSummary(connectionId, since, until, all)));
     });
 
     it('matches the memory adapter for an id and Unix socket address reused after a server restart', async () => {
@@ -609,7 +611,7 @@ describePostgres('client analytics rollups — postgres', () => {
       await pg.saveClientSnapshot(batch, connectionId);
       await memory.saveClientSnapshot(batch, connectionId);
 
-      const summary = await pg.getClientCaptureSummary(connectionId, since, until);
+      const summary = await pg.getClientCaptureSummary(connectionId, since, until, all);
       expect(
         [...summary.connections]
           .sort((a, b) => a.openedAt - b.openedAt)
@@ -623,7 +625,7 @@ describePostgres('client analytics rollups — postgres', () => {
         connections: [...connections].sort((a, b) => a.openedAt - b.openedAt),
       });
       expect(byOpening(summary)).toEqual(
-        byOpening(await memory.getClientCaptureSummary(connectionId, since, until)),
+        byOpening(await memory.getClientCaptureSummary(connectionId, since, until, all)),
       );
     });
 
@@ -637,11 +639,45 @@ describePostgres('client analytics rollups — postgres', () => {
       await memory.saveClientSnapshot([{ ...row, name: 'first', age: 0, capturedAt: since }], connectionId);
       await memory.saveClientSnapshot([{ ...row, name: 'second', age: 0, capturedAt: since }], connectionId);
 
-      const summary = await pg.getClientCaptureSummary(connectionId, since, until);
+      const summary = await pg.getClientCaptureSummary(connectionId, since, until, all);
       // The connection is counted once in its capture.
       expect(summary.captures.map((c) => [c.name, c.count])).toEqual([['second', 1]]);
       expect(summary.connections.map((c) => c.name)).toEqual(['second']);
-      expect(summary).toEqual(await memory.getClientCaptureSummary(connectionId, since, until));
+      expect(summary).toEqual(await memory.getClientCaptureSummary(connectionId, since, until, all));
+    });
+
+    it.each(CONNECTIONS)('matches the memory adapter with captures skipped for %s', async (connectionId) => {
+      const skip = { skipFrom: T0 + 2 * BATCH_MS, skipTo: T0 + 4 * BATCH_MS, maxRows: 1_000_000 };
+      const summary = await pg.getClientCaptureSummary(connectionId, since, until, skip);
+      expect(summary.captures.some((c) => c.capturedAt >= skip.skipFrom && c.capturedAt < skip.skipTo)).toBe(
+        false,
+      );
+      expect(sorted(summary)).toEqual(
+        sorted(await memory.getClientCaptureSummary(connectionId, since, until, skip)),
+      );
+    });
+
+    it('stops at the row bound as the memory adapter does', async () => {
+      const [connectionId] = CONNECTIONS;
+      const read = (maxRows: number) => ({ skipFrom: since, skipTo: since, maxRows });
+      const total = rows.filter(
+        (r) =>
+          r.connectionId === connectionId &&
+          r.capturedAt >= since &&
+          r.capturedAt <= until &&
+          !/[SM]/.test(r.flags),
+      ).length;
+
+      for (const maxRows of [total - 1, total]) {
+        const summary = await pg.getClientCaptureSummary(connectionId, since, until, read(maxRows));
+        expect(summary.truncated).toBe(maxRows < total);
+        expect(sorted(summary)).toEqual(
+          sorted(await memory.getClientCaptureSummary(connectionId, since, until, read(maxRows))),
+        );
+        expect(summary.truncated).toBe(
+          (await memory.getClientCaptureSummary(connectionId, since, until, read(maxRows))).truncated,
+        );
+      }
     });
   });
 });

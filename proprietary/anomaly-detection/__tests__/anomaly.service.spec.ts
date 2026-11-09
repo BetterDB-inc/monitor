@@ -27,6 +27,10 @@ import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
 import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
 import {
+  RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
+  RETRY_AMP_MAX_CAPTURE_ROWS,
+} from '../retry-amplification-attribution';
+import {
   DIVERGENCE_HISTORY_QUERY_WINDOWS,
   DIVERGENCE_PERSIST_BACKLOG,
   OPEN_EVENT_PAGE_SIZE,
@@ -91,7 +95,7 @@ describe('AnomalyService', () => {
       pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
       getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
-      getClientCaptureSummary: jest.fn().mockResolvedValue({ captures: [], connections: [] }),
+      getClientCaptureSummary: jest.fn().mockResolvedValue({ captures: [], connections: [], truncated: false }),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
       getCorrelatedGroupMembers: jest.fn().mockResolvedValue([]),
@@ -5232,7 +5236,11 @@ describe('AnomalyService', () => {
 
       const ranked = await (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
 
-      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
       // 25 reconnects during the episode against 20 in the span before it.
       expect(ranked).toBeNull();
     });
@@ -5266,7 +5274,11 @@ describe('AnomalyService', () => {
         509_999,
       );
 
-      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
       expect(ranked).toEqual([]);
     });
 
@@ -5432,7 +5444,11 @@ describe('AnomalyService', () => {
         780_000,
       );
 
-      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000);
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
       expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
     });
 
@@ -5673,6 +5689,73 @@ describe('AnomalyService', () => {
         expect(ranked).toEqual([]);
       });
 
+      it('reads the newest 30 minutes of a long episode and as long a span before it', async () => {
+        const episodeStart = 10_000_000;
+        const until = episodeStart + 2 * 60 * 60_000;
+        const recentStart = until - RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS;
+        const storm = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', age, capturedAt);
+        const pool = (capturedAt: number) =>
+          stored('1', '10.0.0.3:1', 'pool', (capturedAt - 1_000_000) / 1000, capturedAt);
+        await history.saveClientSnapshot([pool(9_000_000)], 'conn-1');
+        // Forty storm connections opened and listed in the part of the episode
+        // that is skipped, five in its newest 30 minutes.
+        await history.saveClientSnapshot(
+          [pool(12_000_000), ...Array.from({ length: 40 }, (_, i) => storm(100 + i, 1, 12_000_000))],
+          'conn-1',
+        );
+        await history.saveClientSnapshot(
+          [pool(16_000_000), ...Array.from({ length: 5 }, (_, i) => storm(200 + i, 1, 16_000_000))],
+          'conn-1',
+        );
+        const longReadings = [
+          steady(episodeStart - 120_000, 0),
+          steady(episodeStart - 60_000, 60_000),
+          steady(until - 100_000, 60_000 + (until - 100_000 - (episodeStart - 60_000))),
+        ];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          longReadings,
+          episodeStart,
+          until,
+        );
+
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledWith(
+          'conn-1',
+          episodeStart - RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
+          until,
+          { skipFrom: episodeStart, skipTo: recentStart, maxRows: RETRY_AMP_MAX_CAPTURE_ROWS },
+        );
+        expect(ranked).toEqual([expect.objectContaining({ key: 'storm', newConnections: 5 })]);
+      });
+
+      it('ranks by command rate only when the captures hold more rows than the bound', async () => {
+        const worker = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'worker', age, capturedAt);
+        await history.saveClientSnapshot([worker(1, 600, 590_000)], 'conn-1');
+        await history.saveClientSnapshot(
+          [worker(1, 660, 650_000), ...[2, 3, 4, 5].map((id) => worker(id, 1, 650_000))],
+          'conn-1',
+        );
+        storage.getClientCaptureSummary = jest.fn(
+          (connectionId: string, since: number, until: number, bounds: { maxRows: number }) =>
+            history.getClientCaptureSummary(connectionId, since, until, { ...bounds, maxRows: 5 } as any),
+        );
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        // Four reconnects against none would rank with the six rows read;
+        // past the bound the reconnects are unknown and the steady rate alone
+        // does not stand out.
+        expect(ranked).toBeNull();
+      });
+
       it('keeps the monitor and its key-scan clients out without crediting their ids to the application', async () => {
         const app = (id: number, name: string, age: number, capturedAt: number) =>
           stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
@@ -5844,7 +5927,11 @@ describe('AnomalyService', () => {
       it('attributes it to the episode, not the time after the gap', async () => {
         await emitAfterGap();
 
-        expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 140_000, 500_000);
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 140_000, 500_000, {
+          skipFrom: 320_000,
+          skipTo: 320_000,
+          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+        });
       });
 
       it('dates the event at the end of the episode', async () => {

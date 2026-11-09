@@ -35,6 +35,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -1319,35 +1320,51 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     return rows.map((row) => this.mappers.mapClientRow(row));
   }
 
-  // One statement over idx_client_connection_captured. A connection is a
-  // (client_id, addr) and its opening: the earliest opening estimate within
-  // CLIENT_REOPEN_TOLERANCE_MS of each row's (connectionOpenedAt), so a new
-  // connection given the id and addr of one from before a server restart is
-  // another connection. The second window gives each connection the name and
-  // user of its newest row in the range; the rows are then grouped twice, per
-  // capture and (name, user, ip) and per connection, so the result has a row
-  // per group and per connection, not per client per capture. A (client_id,
-  // addr) stored twice in one capture counts once.
+  // One statement over idx_client_connection_captured. `bounded` reads the
+  // range as two index ranges around the skipped captures and stops after
+  // maxRows + 1 rows; past maxRows nothing is aggregated and the only row is
+  // 'truncated', so the sort below never holds more than maxRows rows. A
+  // connection is a (client_id, addr) and its opening: the earliest opening
+  // estimate within CLIENT_REOPEN_TOLERANCE_MS of each row's
+  // (connectionOpenedAt), so a new connection given the id and addr of one from
+  // before a server restart is another connection. The second window gives each
+  // connection the name and user of its newest row in the range; the rows are
+  // then grouped twice, per capture and (name, user, ip) and per connection, so
+  // the result has a row per group and per connection, not per client per
+  // capture. A (client_id, addr) stored twice in one capture counts once.
   async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
+    bounds: ClientCaptureReadBounds,
   ): Promise<ClientCaptureSummary> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
     const rows = this.db
       .prepare(
-        `WITH readings AS (
+        `WITH bounded AS (
+           SELECT id, captured_at, client_id, addr, age, name, user
+             FROM client_snapshots
+            WHERE connection_id = @connectionId AND captured_at >= @since
+              AND captured_at < @skipFrom AND captured_at <= @until
+              AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+           UNION ALL
+           SELECT id, captured_at, client_id, addr, age, name, user
+             FROM client_snapshots
+            WHERE connection_id = @connectionId AND captured_at >= MAX(@skipFrom, @skipTo)
+              AND captured_at >= @since AND captured_at <= @until
+              AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+            LIMIT @maxRows + 1
+         ), readings AS (
            SELECT id, captured_at, client_id, addr, age, name, user,
                   MIN(captured_at - age * 1000) OVER (
                     PARTITION BY client_id, addr ORDER BY captured_at - age * 1000
                     RANGE BETWEEN ${CLIENT_REOPEN_TOLERANCE_MS} PRECEDING
                       AND ${CLIENT_REOPEN_TOLERANCE_MS} FOLLOWING
                   ) AS opened_at
-             FROM client_snapshots
-            WHERE connection_id = ? AND captured_at >= ? AND captured_at <= ?
-              AND COALESCE(flags, '') NOT GLOB '*[SM]*'
+             FROM bounded
+            WHERE (SELECT COUNT(*) FROM bounded) <= @maxRows
          ), resolved AS (
            SELECT captured_at, client_id, addr, age, opened_at,
                   FIRST_VALUE(COALESCE(name, '')) OVER w AS name,
@@ -1367,9 +1384,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
          SELECT 'connection', MIN(captured_at), client_id, addr, name, user_name, ip,
                 NULL, NULL, NULL, opened_at
            FROM resolved
-          GROUP BY client_id, addr, opened_at, name, user_name, ip`,
+          GROUP BY client_id, addr, opened_at, name, user_name, ip
+         UNION ALL
+         SELECT 'truncated', NULL, NULL, NULL, '', '', '', NULL, NULL, NULL, NULL
+          WHERE (SELECT COUNT(*) FROM bounded) > @maxRows`,
       )
-      .all(connectionId, since, until) as ClientCaptureSqlRow[];
+      .all({ connectionId, since, until, ...bounds }) as ClientCaptureSqlRow[];
     return clientCaptureSummaryFromSql(rows);
   }
 

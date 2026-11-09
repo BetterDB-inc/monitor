@@ -16,6 +16,7 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
   ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
@@ -390,16 +391,18 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     connectionId: string,
     since: number,
     until: number,
+    bounds: ClientCaptureReadBounds,
   ): Promise<ClientCaptureSummary> {
-    return summarizeClientCaptures(
-      this.clientSnapshots.filter(
-        (snapshot) =>
-          snapshot.connectionId === connectionId &&
-          snapshot.capturedAt >= since &&
-          snapshot.capturedAt <= until &&
-          !/[SM]/.test(snapshot.flags),
-      ),
+    const rows = this.clientSnapshots.filter(
+      (snapshot) =>
+        snapshot.connectionId === connectionId &&
+        snapshot.capturedAt >= since &&
+        snapshot.capturedAt <= until &&
+        (snapshot.capturedAt < bounds.skipFrom || snapshot.capturedAt >= bounds.skipTo) &&
+        !/[SM]/.test(snapshot.flags),
     );
+    if (rows.length > bounds.maxRows) return { captures: [], connections: [], truncated: true };
+    return summarizeClientCaptures(rows);
   }
 
   async getClientTimeSeries(
