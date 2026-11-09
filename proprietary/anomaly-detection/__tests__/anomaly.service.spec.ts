@@ -8562,6 +8562,28 @@ describe('AnomalyService', () => {
       expect(saturationEvents()).toHaveLength(1);
     });
 
+    it('does not corroborate from a fan-out node event', async () => {
+      await pollSaturated(4);
+      (service as any).recentAnomalies.push({
+        id: 'node-cob-event',
+        timestamp: now - 5_000,
+        metricType: MetricType.REPL_BUFFER_PRESSURE,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.CRITICAL,
+        value: 0,
+        baseline: 1,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'node output buffer',
+        resolved: false,
+        connectionId: 'conn-1',
+        nodeAddr: '10.0.0.2:6379',
+      });
+      await pollSaturated(1);
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
     it('re-arms after CPU recovery and fires again on a new episode', async () => {
       await pollSaturated(5);
       await pollSaturated(1, '1');
@@ -14073,14 +14095,34 @@ describe('AnomalyService', () => {
         const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
         (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
         try {
-          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
-            nodeClient((...args) => (args[0] === 'CLIENT' ? new Promise(() => {}) : nodeCall(...args))),
-          );
+          const client = nodeClient((...args) => (args[0] === 'CLIENT' ? new Promise(() => {}) : nodeCall(...args)));
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
 
           await pollNode(FORKING);
           await pollNode(FORKING);
 
           expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+          expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+          expect(client.call.mock.calls.filter(([command]: string[]) => command === 'CLIENT')).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('skips output-buffer reads once INFO has used the fan-out budget', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 50;
+        try {
+          const client = nodeClient();
+          client.info.mockImplementation(async (name?: string) => {
+            clock += 60;
+            return nodeInfo(name);
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+
+          expect(client.call.mock.calls.filter(([command]: string[]) => command === 'CLIENT')).toHaveLength(0);
           expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
         } finally {
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
@@ -14108,6 +14150,25 @@ describe('AnomalyService', () => {
         expect((service as any).fanoutNodeEventIds.has(NODE_KEY)).toBe(false);
         expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
         expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('stops tracking a node event whose save was dropped', async () => {
+        const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [, , onDrop] = addAnomaly.mock.calls.find(([event]) => (event as { id: string }).id === fork.id)!;
+
+        (onDrop as () => void)();
+
+        expect((service as any).fanoutNodeEventIds.get(NODE_KEY)?.has(fork.id) ?? false).toBe(false);
+      });
+
+      it('tracks only the latest eight event ids per node', async () => {
+        const ids = Array.from({ length: 20 }, (_, i) => `node-event-${i}`);
+        for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id);
+
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY)]).toEqual(ids.slice(-8));
       });
     });
   });

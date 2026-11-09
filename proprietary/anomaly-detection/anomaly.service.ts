@@ -4598,7 +4598,9 @@ export class AnomalyService
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     if (nodeAddr) this.trackFanoutNodeEvent(key, event.id);
-    await this.addLatchedAnomaly(event, ctx, key, forkMemoryRearm(state));
+    await this.addLatchedAnomaly(event, ctx, key, forkMemoryRearm(state), () =>
+      this.untrackFanoutNodeEvent(key, event.id),
+    );
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -4792,6 +4794,7 @@ export class AnomalyService
         ctx,
         `${key}:${cobPressureLatch(finding)}`,
         cobPressureRearm(state, finding),
+        () => this.untrackFanoutNodeEvent(key, event.id),
       );
       acknowledgeCobFinding(state, finding);
     }
@@ -4827,14 +4830,14 @@ export class AnomalyService
     key: string,
     addr: string,
     info: Record<string, string>,
+    deadline: number,
   ): Promise<CobReads> {
     const needed = this.cobReadsNeeded(key, info);
-    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> =>
-      withTimeout(
-        this.fanoutCommand(`${key}#${suffix}`, read),
-        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-        `${what} to ${addr} timed out`,
-      );
+    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return Promise.reject(new Error(`${what} to ${addr} timed out`));
+      return withTimeout(this.fanoutCommand(`${key}#${suffix}`, read), remaining, `${what} to ${addr} timed out`);
+    };
     const [limit, replicas] = await Promise.allSettled([
       needed.limit
         ? send('cob-limit', 'CONFIG GET', async () => {
@@ -4861,7 +4864,17 @@ export class AnomalyService
   private trackFanoutNodeEvent(key: string, id: string): void {
     const ids = this.fanoutNodeEventIds.get(key) ?? new Set<string>();
     ids.add(id);
+    for (const oldest of ids) {
+      if (ids.size <= AnomalyService.FANOUT_NODE_EVENT_LIMIT) break;
+      ids.delete(oldest);
+    }
     this.fanoutNodeEventIds.set(key, ids);
+  }
+
+  private untrackFanoutNodeEvent(key: string, id: string): void {
+    const ids = this.fanoutNodeEventIds.get(key);
+    if (!ids?.delete(id)) return;
+    if (ids.size === 0) this.fanoutNodeEventIds.delete(key);
   }
 
   /**
@@ -5003,6 +5016,7 @@ export class AnomalyService
       .filter((a) => {
         return (
           a.connectionId === ctx.connectionId &&
+          !a.nodeAddr &&
           timestamp - a.timestamp <= SATURATION_CORROBORATION_WINDOW_MS &&
           CONTROL_PLANE_CORROBORATING_METRICS.includes(a.metricType) &&
           isControlPlaneSaturationEvent(a) === false
@@ -6596,6 +6610,7 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+  private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
   /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
@@ -9068,6 +9083,7 @@ export class AnomalyService
           `Connecting to ${target.addr} timed out`,
         );
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
+        const deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
         const [raw, self] = await Promise.all([
           withTimeout(
             this.fanoutCommand(stateKey, () =>
@@ -9083,7 +9099,7 @@ export class AnomalyService
           target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : undefined,
         ]);
         const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
-        const cob = await this.readFanoutCob(client, stateKey, target.addr, info);
+        const cob = await this.readFanoutCob(client, stateKey, target.addr, info, deadline);
         return { info, self, cob };
       }),
     );

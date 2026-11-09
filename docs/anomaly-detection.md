@@ -476,7 +476,7 @@ When a cluster or Sentinel group is registered through one connection (the seed)
 
 Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
 
-A node's events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Open backlog coverage and resync escalation events are picked up again per node after a restart, so they close normally once the condition clears instead of raising a duplicate.
+A node's divergence, backlog coverage, resync escalation, fork memory and output-buffer events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Retry amplification alerts are point events and stay as they are, as on the seed. Open backlog coverage and resync escalation events are picked up again per node after a restart, so they close normally once the condition clears instead of raising a duplicate.
 
 A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them.
 
