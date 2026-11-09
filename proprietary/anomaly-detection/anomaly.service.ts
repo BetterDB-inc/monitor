@@ -30,8 +30,7 @@ import { dialsDataNodes } from '@app/connections/data-node-reach';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
-  ClientConnectionCaptureRow,
-  ClientSnapshotGroupRow,
+  ClientCaptureSummary,
   ReplicationRecoveredData,
   WebhookEventType,
 } from '@betterdb/shared';
@@ -333,13 +332,20 @@ import {
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
   NODE_ATTRIBUTION_UNAVAILABLE,
+  attributionSpanMinutes,
+  describeAttributionSpan,
+  fitAttributionSpan,
   pushClientSnapshot,
   rankRetryAmplificationContributors,
   estimateNewConnections,
+  latestCaptureGroups,
+  newConnectionsBetween,
   selectClientSnapshots,
   hasRatePair,
   readClientCommandCounts,
+  RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
   RETRY_AMP_MAX_BASELINE_SCALE,
+  RETRY_AMP_MAX_CAPTURE_ROWS,
 } from './retry-amplification-attribution';
 import {
   LargeReplyEntry,
@@ -479,11 +485,15 @@ interface LastHourGroup extends Pick<CorrelatedAnomalyGroup, 'timestamp' | 'patt
 
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
-const NEXT_FIRING_CONCURRENCY = 8;
+const NEXT_FIRING_CONCURRENCY = 5;
 const NEXT_FIRING_PAGE_SIZE = 100;
 const NEXT_FIRING_MAX_PAGES = 5;
 const NEXT_FIRING_MISS_TTL_MS = 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
+const NEXT_FIRING_BUDGET_MS = 10_000;
+const NEXT_FIRING_BUDGET_EXHAUSTED = 'lookup budget exhausted';
+const NEXT_FIRING_MIN_REMAINING_MS = 250;
+const NEXT_FIRING_MAX_OUTSTANDING = 5;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -803,6 +813,12 @@ export class AnomalyService
   private retryAmplificationContributors = new Map<
     string,
     { episodeStart: number; contributors: RetryAmplificationContributor[] | null }
+  >();
+  // The episode whose attribution the capture row cap shortened, and the span
+  // its newest attribution covered (noteAttributionCap).
+  private retryAmplificationCapped = new Map<
+    string,
+    { episodeStart: number; coveredMs: number | null | undefined }
   >();
   private retryNodeChurnReadings = new Map<string, ConnectionChurnReading>();
   private latencyDegraded = new Map<string, { degraded: boolean; reportedAt: number }>();
@@ -4122,6 +4138,7 @@ export class AnomalyService
       this.retryAmplificationClients,
       this.retryAmplificationDispatched,
       this.retryAmplificationContributors,
+      this.retryAmplificationCapped,
       this.retryNodeChurnReadings,
     ]) {
       for (const key of map.keys()) {
@@ -4137,6 +4154,7 @@ export class AnomalyService
     this.retryAmplificationClients.delete(key);
     this.retryAmplificationDispatched.delete(key);
     this.retryAmplificationContributors.delete(key);
+    this.retryAmplificationCapped.delete(key);
     this.retryNodeChurnReadings.delete(key);
   }
 
@@ -4300,6 +4318,11 @@ export class AnomalyService
       episodeStart: attributionStart,
       contributors,
     });
+    const capped = nodeAddr ? undefined : this.retryAmplificationCapped.get(ctx.connectionId);
+    const spanNote =
+      capped?.episodeStart === attributionStart && capped.coveredMs !== undefined
+        ? ` ${describeAttributionSpan(capped.coveredMs)}`
+        : '';
 
     const severity =
       finding.level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
@@ -4314,7 +4337,7 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
-      message: `${finding.message} ${nodeAddr ? NODE_ATTRIBUTION_UNAVAILABLE : describeRetryAmplificationContributors(contributors)}`,
+      message: `${finding.message} ${nodeAddr ? NODE_ATTRIBUTION_UNAVAILABLE : describeRetryAmplificationContributors(contributors)}${spanNote}`,
       relatedMetrics: finding.relatedMetrics,
       retryTrigger: finding.trigger,
       resolved: false,
@@ -4466,56 +4489,105 @@ export class AnomalyService
     notBefore: number | null = null,
   ): Promise<RetryAmplificationContributor[] | null> {
     const snapshots = selectClientSnapshots(clientSnapshots, episodeStart, until, notBefore);
-    let capture: ClientSnapshotGroupRow[] = [];
-    let newConnections: Awaited<ReturnType<StoragePort['getNewClientConnections']>> = [];
-    let baselineConnections: typeof newConnections = [];
-    let baselineRead = false;
+    let summary: ClientCaptureSummary = { captures: [], connections: [], truncated: false };
     let snapshotsLoaded = true;
-    const fullBaselineStart = episodeStart - Math.max(until - episodeStart, RETRY_AMP_WINDOW_MS);
-    const baselineStart =
-      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
-    const baselineScale =
-      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
-    const captureRead = withTimeout(
-      this.storage.getClientConnectionCaptures(ctx.connectionId, fullBaselineStart, until),
-      RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
-    ).catch((error): ClientConnectionCaptureRow[] => {
-      this.logger.debug(`Client captures unavailable for ${ctx.connectionName}: ${String(error)}`);
-      return [];
-    });
+    // The stored captures are read for at most the newest
+    // RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS of the episode and as long a span
+    // before it, so the read does not grow with the episode; the captures in
+    // between are skipped. For a shorter episode the two are contiguous.
+    const fullSpan = Math.min(until - episodeStart, RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS);
+    let attributedSpan = fullSpan;
+    let cappedSpan: number | null | undefined;
+    const spanStart = (span: number) => episodeStart - Math.max(span, RETRY_AMP_WINDOW_MS);
+    const readSpan = (span: number) =>
+      this.storage.getClientCaptureSummary(ctx.connectionId, spanStart(span), until, {
+        skipFrom: episodeStart,
+        skipTo: until - span,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
+    // One storage read spans the whole attribution range, so a connection
+    // carries one identity (the name of its newest reading) in the baseline,
+    // the episode and the newest capture alike; the span is split into
+    // baseline and episode here. A read past RETRY_AMP_MAX_CAPTURE_ROWS stops
+    // early; the rows per capture then give the longest span that fits, the
+    // same on both sides, and that span is read instead. If the reads fail,
+    // hang or not even the shortest span fits, the ranking by command rate
+    // still stands. better-sqlite3 runs them synchronously, before the timeout
+    // can fire, so the row bound is what keeps them short there.
     try {
-      [capture, newConnections, baselineConnections, baselineRead] = await withTimeout(
-        Promise.all([
-          this.latestClientCapture(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(ctx.connectionId, episodeStart, until),
-          this.storage.getNewClientConnections(ctx.connectionId, baselineStart, episodeStart - 1),
-          this.hasClientReadings(ctx.connectionId, baselineStart, episodeStart - 1),
-        ]),
+      ({ summary, span: attributedSpan, capped: cappedSpan } = await withTimeout(
+        (async () => {
+          const full = await readSpan(fullSpan);
+          if (!full.truncated) return { summary: full, span: fullSpan, capped: undefined };
+          const counts = await this.storage.getClientCaptureRowCounts(
+            ctx.connectionId,
+            spanStart(fullSpan),
+            until,
+            { skipFrom: episodeStart, skipTo: until - fullSpan },
+          );
+          const span = fitAttributionSpan(counts, episodeStart, until, fullSpan, RETRY_AMP_MAX_CAPTURE_ROWS);
+          if (span === null || span === fullSpan) return { summary: full, span: fullSpan, capped: null };
+          const shortened = await readSpan(span);
+          return { summary: shortened, span, capped: shortened.truncated ? null : span };
+        })(),
         RETRY_AMP_ATTRIBUTION_TIMEOUT_MS,
-      );
+      ));
     } catch (error) {
       snapshotsLoaded = false;
       this.logger.debug(`Client snapshots unavailable for ${ctx.connectionName}: ${String(error)}`);
     }
-    const connectionCaptures = await captureRead;
+    this.noteAttributionCap(ctx, episodeStart, cappedSpan);
+    const recentStart = until - attributedSpan;
+    const fullBaselineStart = spanStart(attributedSpan);
+    const baselineStart =
+      notBefore === null ? fullBaselineStart : Math.max(fullBaselineStart, notBefore + 1);
+    const baselineScale =
+      (episodeStart - fullBaselineStart) / Math.max(episodeStart - baselineStart, 1);
+    // Every capture lists the monitor's own connection, so a baseline with
+    // client readings has a capture group in it.
+    const baselineRead = summary.captures.some(
+      (row) => row.capturedAt >= baselineStart && row.capturedAt < episodeStart,
+    );
+    const capture = latestCaptureGroups(summary, episodeStart);
     const reconnectsKnown =
       snapshotsLoaded &&
+      !summary.truncated &&
       capture.length > 0 &&
       baselineRead &&
       baselineScale <= RETRY_AMP_MAX_BASELINE_SCALE;
     const ratesKnown = hasRatePair(snapshots);
+    // The id growth between the last capture before the episode and the first
+    // one in it is split by time between the baseline and the episode. After
+    // skipped captures there is no such interval: the growth up to the first
+    // capture read again is not the episode's newest span, so each side counts
+    // only between its own captures. The baseline's id growth starts at its
+    // first capture: before a cut baseline that interval holds the previous
+    // episode's churn.
+    const contiguous = recentStart === episodeStart;
+    const episodeCaptures = contiguous
+      ? summary.captures
+      : summary.captures.filter((row) => row.capturedAt >= recentStart);
+    const baselineCaptures = summary.captures.filter(
+      (row) => row.capturedAt >= baselineStart && (contiguous || row.capturedAt < episodeStart),
+    );
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
+      storedConnections: summary.connections,
       newConnections: reconnectsKnown
-        ? estimateNewConnections(newConnections, connectionCaptures, episodeStart, until)
+        ? estimateNewConnections(
+            newConnectionsBetween(summary.connections, recentStart, until),
+            episodeCaptures,
+            recentStart,
+            until,
+          )
         : [],
       baselineConnections: reconnectsKnown
         ? estimateNewConnections(
-            baselineConnections,
-            connectionCaptures.filter((row) => row.capturedAt >= baselineStart),
+            newConnectionsBetween(summary.connections, baselineStart, episodeStart - 1),
+            baselineCaptures,
             baselineStart,
-            episodeStart - 1,
+            episodeStart,
           ).map((group) => ({ ...group, count: group.count * baselineScale }))
         : [],
     });
@@ -4523,37 +4595,29 @@ export class AnomalyService
     return reconnectsKnown && ratesKnown ? [] : null;
   }
 
-  private async hasClientReadings(
-    connectionId: string,
-    startTime: number,
-    endTime: number,
-  ): Promise<boolean> {
-    const readings = await this.storage.getClientSnapshots({
-      connectionId,
-      startTime,
-      endTime,
-      limit: 1,
-    });
-    return readings.length > 0;
-  }
-
-  private async latestClientCapture(
-    connectionId: string,
-    startTime: number,
-    endTime: number,
-  ): Promise<ClientSnapshotGroupRow[]> {
-    const [newest] = await this.storage.getClientSnapshots({
-      connectionId,
-      startTime,
-      endTime,
-      limit: 1,
-    });
-    if (newest === undefined) return [];
-    return this.storage.getClientSnapshotGroups(
-      connectionId,
-      newest.capturedAt - 1,
-      newest.capturedAt,
-    );
+  // `coveredMs` is the span the row cap shortened this attribution to, null
+  // when no span fitted, undefined when the cap did not apply. The warning is
+  // logged once per episode; the span of the newest attribution is kept for
+  // the finding's message.
+  private noteAttributionCap(
+    ctx: ConnectionContext,
+    episodeStart: number,
+    coveredMs: number | null | undefined,
+  ): void {
+    const known = this.retryAmplificationCapped.get(ctx.connectionId);
+    if (coveredMs === undefined) {
+      if (known !== undefined) known.coveredMs = undefined;
+      return;
+    }
+    if (known?.episodeStart !== episodeStart) {
+      const cap = `Client captures for ${ctx.connectionName} exceed ${RETRY_AMP_MAX_CAPTURE_ROWS} rows`;
+      this.logger.warn(
+        coveredMs === null
+          ? `${cap} even over the shortest span; reconnects not ranked for this retry amplification episode`
+          : `${cap}; reconnects ranked over the newest ${attributionSpanMinutes(coveredMs)} min of this retry amplification episode and as long before it`,
+      );
+    }
+    this.retryAmplificationCapped.set(ctx.connectionId, { episodeStart, coveredMs });
   }
 
   getRetryAmplificationContributors(connectionId: string): RetryAmplificationContributor[] | null {
@@ -7776,6 +7840,11 @@ export class AnomalyService
   private incidentRecoveryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, true);
   private incidentHistoryProbe: RecoveryProbe = (signal) => this.probeRecovery(signal, false);
   private nextFiringCache = new Map<string, CachedFiring>();
+  private nextFiringInFlight = new Map<
+    string,
+    { lookup: Promise<AnomalyEvent | null>; budget: { deadline: number } }
+  >();
+  private skippedNextFirings = new Map<string, number>();
 
   private probeRecovery(
     signal: Parameters<RecoveryProbe>[0],
@@ -8206,29 +8275,121 @@ export class AnomalyService
       if (!seen || e.timestamp < seen.timestamp) recent.set(key, e);
     }
     const later: AnomalyEvent[] = [];
-    for (let i = 0; i < signals.length; i += NEXT_FIRING_CONCURRENCY) {
+    const failures: { key: string; error: unknown }[] = [];
+    let skippedCount = 0;
+    const deadline = Date.now() + NEXT_FIRING_BUDGET_MS;
+    const ordered = this.skippedLookupsFirst(signals);
+    for (let i = 0; i < ordered.length; i += NEXT_FIRING_CONCURRENCY) {
+      const remaining = deadline - Date.now();
       const batch = await Promise.all(
-        signals.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
-          const stored = await this.nextFiring(signal, after);
-          const live = recent.get(signalKey(signal)) ?? null;
+        ordered.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
+          const key = signalKey(signal);
+          const cacheKey = `${after}\u0000${key}`;
+          const cached = this.cachedNextFiring(cacheKey);
+          const skipped =
+            cached === undefined &&
+            (remaining < NEXT_FIRING_MIN_REMAINING_MS || !this.canStartNextFiring(cacheKey));
+          this.markLookupSkipped(key, skipped);
+          if (skipped) skippedCount++;
+          const stored =
+            cached !== undefined
+              ? cached
+              : skipped
+                ? null
+                : await withTimeout(
+                    this.nextFiring(signal, after, deadline),
+                    remaining,
+                    NEXT_FIRING_BUDGET_EXHAUSTED,
+                  ).catch((error: unknown) => {
+                    failures.push({ key, error });
+                    return null;
+                  });
+          const live = recent.get(key) ?? null;
           if (!stored || !live) return stored ?? live;
           return live.timestamp < stored.timestamp ? live : stored;
         }),
       );
       later.push(...batch.filter((e): e is AnomalyEvent => e !== null));
     }
+    if (failures.length > 0) this.warnNextFiringFailures(failures);
+    if (skippedCount > 0) {
+      this.logger.debug(
+        `Skipped ${skippedCount} next-firing lookups (budget spent or ${NEXT_FIRING_MAX_OUTSTANDING} reads outstanding)`,
+      );
+    }
     return later;
   }
 
-  private async nextFiring(signal: AnomalyEvent, after: number): Promise<AnomalyEvent | null> {
-    const key = signalKey(signal);
-    const cacheKey = `${after}\u0000${key}`;
-    const now = Date.now();
+  private canStartNextFiring(cacheKey: string): boolean {
+    return (
+      this.nextFiringInFlight.has(cacheKey) ||
+      this.nextFiringInFlight.size < NEXT_FIRING_MAX_OUTSTANDING
+    );
+  }
+
+  private skippedLookupsFirst(signals: AnomalyEvent[]): AnomalyEvent[] {
+    const skippedSince = (s: AnomalyEvent) => this.skippedNextFirings.get(signalKey(s)) ?? Infinity;
+    return [...signals].sort((a, b) => skippedSince(a) - skippedSince(b));
+  }
+
+  private markLookupSkipped(key: string, skipped: boolean): void {
+    if (!skipped) {
+      this.skippedNextFirings.delete(key);
+      return;
+    }
+    if (this.skippedNextFirings.has(key)) return;
+    if (this.skippedNextFirings.size >= NEXT_FIRING_CACHE_SIZE) {
+      this.skippedNextFirings.delete(this.skippedNextFirings.keys().next().value!);
+    }
+    this.skippedNextFirings.set(key, Date.now());
+  }
+
+  private warnNextFiringFailures(failures: { key: string; error: unknown }[]): void {
+    const [first] = failures;
+    const reason = first.error instanceof Error ? first.error.message : String(first.error);
+    const count = failures.length === 1 ? '1 signal' : `${failures.length} signals`;
+    this.logger.warn(
+      `Next-firing lookup failed for ${count}, treating as no later firing (first: ${first.key}): ${reason}`,
+    );
+  }
+
+  private nextFiring(
+    signal: AnomalyEvent,
+    after: number,
+    deadline = Infinity,
+  ): Promise<AnomalyEvent | null> {
+    const cacheKey = `${after}\u0000${signalKey(signal)}`;
+    const cached = this.cachedNextFiring(cacheKey);
+    if (cached !== undefined) return Promise.resolve(cached);
+    const inFlight = this.nextFiringInFlight.get(cacheKey);
+    if (inFlight) {
+      inFlight.budget.deadline = Math.max(inFlight.budget.deadline, deadline);
+      return inFlight.lookup;
+    }
+    const budget = { deadline };
+    const lookup = this.lookUpNextFiring(signal, after, cacheKey, budget).finally(() =>
+      this.nextFiringInFlight.delete(cacheKey),
+    );
+    this.nextFiringInFlight.set(cacheKey, { lookup, budget });
+    return lookup;
+  }
+
+  private cachedNextFiring(cacheKey: string): AnomalyEvent | null | undefined {
     const cached = this.nextFiringCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) return cached.event;
+    return cached && cached.expiresAt > Date.now() ? cached.event : undefined;
+  }
+
+  private async lookUpNextFiring(
+    signal: AnomalyEvent,
+    after: number,
+    cacheKey: string,
+    budget: { deadline: number },
+  ): Promise<AnomalyEvent | null> {
+    const key = signalKey(signal);
     let event: AnomalyEvent | null = null;
     let cursor: AnomalyEventCursor | undefined;
     for (let page = 0; page < NEXT_FIRING_MAX_PAGES && !event; page++) {
+      if (page > 0 && Date.now() >= budget.deadline) throw new Error(NEXT_FIRING_BUDGET_EXHAUSTED);
       const rows = await this.storage.getAnomalyEvents({
         startTime: after + 1,
         metricType: signal.metricType,
@@ -8246,7 +8407,7 @@ export class AnomalyService
     this.nextFiringCache.delete(cacheKey);
     this.nextFiringCache.set(cacheKey, {
       event,
-      expiresAt: event ? Infinity : now + NEXT_FIRING_MISS_TTL_MS,
+      expiresAt: event ? Infinity : Date.now() + NEXT_FIRING_MISS_TTL_MS,
     });
     if (this.nextFiringCache.size > NEXT_FIRING_CACHE_SIZE) {
       this.nextFiringCache.delete(this.nextFiringCache.keys().next().value!);

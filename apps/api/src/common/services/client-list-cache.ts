@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ClientInfo } from '../types/metrics.types';
 
-export type CachedClient = Pick<ClientInfo, 'id' | 'addr' | 'name' | 'user' | 'flags'> & {
+export type CachedClient = Pick<ClientInfo, 'id' | 'addr' | 'name' | 'user' | 'flags' | 'age'> & {
   'tot-cmds'?: unknown;
 };
 
@@ -17,12 +17,13 @@ export class ClientListCache {
   record(connectionId: string, clients: ClientInfo[], takenAt: number): void {
     this.captures.set(connectionId, {
       takenAt,
-      clients: clients.map(({ id, addr, name, user, flags, 'tot-cmds': totalCommands }) => ({
+      clients: clients.map(({ id, addr, name, user, flags, age, 'tot-cmds': totalCommands }) => ({
         id,
         addr,
         name,
         user,
         flags,
+        age,
         'tot-cmds': totalCommands,
       })),
     });

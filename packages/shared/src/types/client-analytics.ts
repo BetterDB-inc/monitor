@@ -49,6 +49,60 @@ export interface ClientConnectionCaptureRow {
   maxClientId: number;
 }
 
+/** One (name, user, ip) group of one capture, with its number of connections. */
+export interface ClientCaptureGroupRow extends ClientConnectionCaptureRow {
+  count: number;
+}
+
+/**
+ * One connection seen in a range of client snapshots: a (clientId, addr) pair
+ * and its opening, so an id and addr reused after a server restart (every
+ * client of a Unix socket shares the addr) is another connection.
+ */
+export interface ClientConnectionRow {
+  clientId: string;
+  addr: string;
+  name: string;
+  user: string;
+  ip: string;
+  /** When it opened: the earliest `capturedAt - age * 1000` over its rows. */
+  openedAt: number;
+  /** The first capture of the range that listed it. */
+  firstCapturedAt: number;
+}
+
+/**
+ * A range of client snapshots aggregated for retry attribution, replica and
+ * master links left out. Each connection carries the name and user of its
+ * newest row in the range, in its groups and as a connection, so a client
+ * captured before it ran CLIENT SETNAME counts under the name it set later.
+ */
+export interface ClientCaptureSummary {
+  /** The groups of every capture, in no particular order. */
+  captures: ClientCaptureGroupRow[];
+  connections: ClientConnectionRow[];
+  /**
+   * The range held more than `maxRows` rows: nothing was aggregated, and
+   * `captures` and `connections` are empty.
+   */
+  truncated: boolean;
+}
+
+/** What a getClientCaptureSummary read leaves out, and how much it reads at most. */
+export interface ClientCaptureReadBounds {
+  /** Captures in [skipFrom, skipTo) are not read; equal values skip nothing. */
+  skipFrom: number;
+  skipTo: number;
+  /** The most rows the read aggregates; a range with more comes back `truncated`. */
+  maxRows: number;
+}
+
+/** The client_snapshots rows of one capture. */
+export interface ClientCaptureRowCount {
+  capturedAt: number;
+  rows: number;
+}
+
 export interface ClientTimeSeriesPoint {
   timestamp: number;
   totalConnections: number;

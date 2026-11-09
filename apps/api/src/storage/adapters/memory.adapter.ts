@@ -16,8 +16,9 @@ import {
   AuditStats,
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
-  NewClientConnectionGroup,
-  ClientConnectionCaptureRow,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   StoredAnomalyEvent,
@@ -106,6 +107,7 @@ import type { ClientAnalyticsRollup, ClientSnapshotGroupRow } from '@betterdb/sh
 import {
   clientAddrIp,
   foldClientAnalyticsStats,
+  summarizeClientCaptures,
   type ClientStatsGroup,
 } from './client-analytics-stats';
 import { WebhookMemoryRepository } from './repositories/webhook.memory.repository';
@@ -386,54 +388,39 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     return filtered.slice(offset, offset + limit);
   }
 
-  async getNewClientConnections(
+  async getClientCaptureSummary(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<NewClientConnectionGroup[]> {
-    const groups = new Map<string, { group: NewClientConnectionGroup; ids: Set<string> }>();
-    for (const snapshot of this.clientSnapshots) {
-      if (snapshot.connectionId !== connectionId) continue;
-      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
-      if (snapshot.capturedAt - snapshot.age * 1000 < since) continue;
-      if (/[SM]/.test(snapshot.flags)) continue;
-      const ip = clientAddrIp(snapshot.addr);
-      const key = JSON.stringify([snapshot.name, snapshot.user, ip]);
-      const entry = groups.get(key) ?? {
-        group: { name: snapshot.name, user: snapshot.user, ip, count: 0 },
-        ids: new Set<string>(),
-      };
-      entry.ids.add(snapshot.clientId);
-      groups.set(key, entry);
-    }
-    return [...groups.values()].map(({ group, ids }) => ({ ...group, count: ids.size }));
+    bounds: ClientCaptureReadBounds,
+  ): Promise<ClientCaptureSummary> {
+    const rows = this.clientSnapshots.filter(
+      (snapshot) =>
+        snapshot.connectionId === connectionId &&
+        snapshot.capturedAt >= since &&
+        snapshot.capturedAt <= until &&
+        (snapshot.capturedAt < bounds.skipFrom || snapshot.capturedAt >= bounds.skipTo) &&
+        !/[SM]/.test(snapshot.flags),
+    );
+    if (rows.length > bounds.maxRows) return { captures: [], connections: [], truncated: true };
+    return summarizeClientCaptures(rows);
   }
 
-  async getClientConnectionCaptures(
+  async getClientCaptureRowCounts(
     connectionId: string,
     since: number,
     until: number,
-  ): Promise<ClientConnectionCaptureRow[]> {
-    const rows = new Map<string, ClientConnectionCaptureRow>();
-    for (const snapshot of this.clientSnapshots) {
-      if (snapshot.connectionId !== connectionId) continue;
-      if (snapshot.capturedAt < since || snapshot.capturedAt > until) continue;
-      if (/[SM]/.test(snapshot.flags)) continue;
-      const ip = clientAddrIp(snapshot.addr);
-      const key = JSON.stringify([snapshot.capturedAt, snapshot.name, snapshot.user, ip]);
-      const row = rows.get(key) ?? {
-        capturedAt: snapshot.capturedAt,
-        name: snapshot.name,
-        user: snapshot.user,
-        ip,
-        oldestAge: snapshot.age,
-        maxClientId: 0,
-      };
-      row.oldestAge = Math.max(row.oldestAge, snapshot.age);
-      row.maxClientId = Math.max(row.maxClientId, Number(snapshot.clientId) || 0);
-      rows.set(key, row);
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]> {
+    const counts = new Map<number, number>();
+    for (const { connectionId: id, capturedAt } of this.clientSnapshots) {
+      if (id !== connectionId || capturedAt < since || capturedAt > until) continue;
+      if (capturedAt >= skip.skipFrom && capturedAt < skip.skipTo) continue;
+      counts.set(capturedAt, (counts.get(capturedAt) ?? 0) + 1);
     }
-    return [...rows.values()];
+    return [...counts]
+      .sort(([a], [b]) => a - b)
+      .map(([capturedAt, rows]) => ({ capturedAt, rows }));
   }
 
   async getClientTimeSeries(
