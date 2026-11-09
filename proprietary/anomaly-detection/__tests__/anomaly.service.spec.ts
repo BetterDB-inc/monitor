@@ -14425,9 +14425,33 @@ describe('AnomalyService', () => {
     it('sizes repl-backlog-size to cover 75s of writes at the measured rate', async () => {
       for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
 
-      // 30,000 B/s x 60s x 1.25 = 2.15 MB, rounded up
+      // 30,000 B/s x 60s x 1.25 = 2.15 MB, one decimal because it is under 10
       expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
-        { setting: 'repl-backlog-size', current: 1, target: 3, unit: 'MB' },
+        { setting: 'repl-backlog-size', current: 1, target: 2.2, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps a sub-megabyte backlog from displaying the same current and target', async () => {
+      const mb = 1024 * 1024;
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: (0.75 * mb) / 75,
+          bytesPerSecEwma: (0.75 * mb) / 75,
+          replBacklogSize: 0.6 * mb,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 0.6, target: 0.8, unit: 'MB' },
       ]);
     });
 
@@ -14556,7 +14580,10 @@ describe('AnomalyService', () => {
         { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
       ];
       expect(events(MetricType.FORK_MEMORY_RISK)[0].values).toEqual(expected);
-      expect((service as any).liveIncidents[0].sequenceMatches[0].values).toEqual(expected);
+      const forkEntry = (incident: { entries: { metricType: string; values?: unknown }[] }) =>
+        incident.entries.find((entry) => entry.metricType === MetricType.FORK_MEMORY_RISK);
+      expect(forkEntry((service as any).liveIncidents[0])?.values).toEqual(expected);
+      expect((service as any).liveIncidents[0].sequenceMatches[0].values).toBeUndefined();
 
       const stored = service
         .getRecentEvents()
@@ -14564,13 +14591,44 @@ describe('AnomalyService', () => {
       expect(stored.some((e: Record<string, unknown>) => 'values' in e)).toBe(false);
       storage.getAnomalyEvents.mockResolvedValue(stored);
       const [timeline] = await service.getIncidentTimelines('conn-1');
-      expect(timeline.sequenceMatches[0].values).toEqual(expected);
+      expect(forkEntry(timeline)?.values).toEqual(expected);
+      expect(timeline.sequenceMatches[0].values).toBeUndefined();
 
       (service as any).recentAnomalies = (service as any).recentAnomalies.filter(
         (event: { metricType: MetricType }) => event.metricType !== MetricType.FORK_MEMORY_RISK,
       );
       const [aged] = await service.getIncidentTimelines('conn-1');
-      expect(aged.sequenceMatches[0].values).toEqual(expected);
+      expect(forkEntry(aged)?.values).toEqual(expected);
+    });
+
+    it('keeps values for a live event whose connection has left the scope', async () => {
+      const values = [{ setting: 'repl-backlog-size', current: 1, target: 2.2, unit: 'MB' }];
+      const event = {
+        id: 'aged-backlog',
+        timestamp: clock,
+        metricType: MetricType.BACKLOG_COVERAGE_RISK,
+        anomalyType: 'drop',
+        severity: 'warning',
+        value: 30,
+        baseline: 60,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 60,
+        message: 'backlog',
+        resolved: false,
+        connectionId: 'left-conn',
+        scopeId: 'conn-1',
+        values,
+      };
+      (service as any).incidentEventsById.set(event.id, event);
+      (service as any).recentAnomalies = [];
+      storage.getAnomalyEvents.mockResolvedValue([
+        (service as any).toStoredAnomalyEvent(event, { ...mockCtx, connectionId: 'left-conn' }),
+      ]);
+
+      const loaded = await (service as any).loadIncidentEvents('conn-1', 0, undefined);
+
+      expect(loaded.find((item: { id: string }) => item.id === event.id).values).toEqual(values);
     });
 
     it('stays quiet when a short disconnect is covered by the backlog', async () => {

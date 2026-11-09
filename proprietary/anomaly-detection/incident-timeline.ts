@@ -656,9 +656,15 @@ export class IncidentTimelineBuilder {
         matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
       for (const matched of matchSequences(candidates, rule, holdsStep)) {
         const held = matched.filter((e) => !dropped.includes(e));
+        const recommendations = rule.recommendations.filter(
+          (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
+        );
         const values = mergeRecommendationValues(
           [...held].sort((a, b) => a.timestamp - b.timestamp || a.anomalyId.localeCompare(b.anomalyId)),
-        );
+        ).filter((value) => {
+          const name = value.setting.split(' ')[0];
+          return recommendations.some((recommendation) => recommendation.includes(name));
+        });
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),
@@ -670,9 +676,7 @@ export class IncidentTimelineBuilder {
             };
           }),
           diagnosis: rule.diagnosis,
-          recommendations: rule.recommendations.filter(
-            (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
-          ),
+          recommendations,
           ...(values.length > 0 ? { values } : {}),
           severity: maxSeverity(held.map((e) => e.severity)),
         });

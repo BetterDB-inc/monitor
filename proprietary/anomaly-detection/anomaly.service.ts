@@ -416,6 +416,18 @@ interface ConnectionPersistenceState {
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
 const MB = 1024 * 1024;
 
+/**
+ * Whole MB at 10 MB and above. Below that, one decimal, so a 0.6 MB backlog
+ * does not display as the same integer as its target.
+ */
+function megabytes(bytes: number, up: boolean): number {
+  const mb = bytes / MB;
+  const scale = mb > 0 && mb < 10 ? 10 : 1;
+  const scaled = mb * scale;
+  const rounded = up ? Math.ceil(scaled - 1e-9) : Math.round(scaled);
+  return rounded / scale;
+}
+
 /** Twice the observed buffer, so that burst sits at 50% of the limit. */
 function outputBufferValues(
   limit: { hardBytes: number; softBytes: number; softSeconds: number },
@@ -423,10 +435,10 @@ function outputBufferValues(
   kind: string,
 ): RecommendationValue[] | undefined {
   if (kind !== 'hard-approach' && kind !== 'soft-sustained') return undefined;
-  const target = Math.ceil((2 * omem) / MB);
+  const target = megabytes(2 * omem, true);
   const value = (setting: string, bytes: number): RecommendationValue => ({
     setting,
-    current: Math.round(bytes / MB),
+    current: megabytes(bytes, false),
     target,
     unit: 'MB',
   });
@@ -4753,9 +4765,10 @@ export class AnomalyService
       ? [
           {
             setting: 'total_system_memory',
-            current: Math.round(systemMemory / MB),
-            target: Math.ceil(
-              (finding.projectedFraction * systemMemory) / (FORK_OOM_WARN_FRACTION - 0.1) / MB,
+            current: megabytes(systemMemory, false),
+            target: megabytes(
+              (finding.projectedFraction * systemMemory) / (FORK_OOM_WARN_FRACTION - 0.1),
+              true,
             ),
             unit: 'MB',
           },
@@ -8294,6 +8307,11 @@ export class AnomalyService
     for (const event of live) {
       if (!valuesOf.has(event.id)) rememberValues(event);
     }
+    for (const event of stored) {
+      if (valuesOf.has(event.id)) continue;
+      const liveEvent = this.incidentEventsById.get(event.id);
+      if (liveEvent) rememberValues(liveEvent);
+    }
     const kept = stored.map((event) => {
       const values = valuesOf.get(event.id);
       return values ? { ...event, values } : event;
@@ -8837,8 +8855,8 @@ export class AnomalyService
         ? [
             {
               setting: 'repl-backlog-size',
-              current: Math.round(sample.replBacklogSize / MB),
-              target: Math.ceil((rate * BACKLOG_COVERAGE_WARNING_SEC * 1.25) / MB),
+              current: megabytes(sample.replBacklogSize, false),
+              target: megabytes(rate * BACKLOG_COVERAGE_WARNING_SEC * 1.25, true),
               unit: 'MB',
             },
           ]
