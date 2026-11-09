@@ -2183,6 +2183,22 @@ describe('AnomalyService', () => {
         expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(3);
       });
 
+      it('stops using a node write P99 once it is older than the lookback window', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 121_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+      });
+
       it('does not cache a node write P99 when that node INFO read fails', async () => {
         const b = reshardNode('b', 6000, '', 1000);
         b.info.mockImplementation(async (section?: string) => {
@@ -8665,7 +8681,7 @@ describe('AnomalyService', () => {
     it('records the replication id of a registered primary and forgets it on removal', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('master'));
       await poll();
-      expect((service as any).registeredPrimaryReplids.get('conn-1')).toBe('c'.repeat(40));
+      expect((service as any).registeredPrimaryReplids.get('conn-1')).toMatchObject({ replid: 'c'.repeat(40) });
 
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
@@ -14103,7 +14119,7 @@ describe('AnomalyService', () => {
       it('re-adopts its own open output-buffer row instead of raising a second one', async () => {
         openRows({
           [MetricType.REPL_BUFFER_PRESSURE]: [
-            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
           ],
         });
         await adoptSeed();
@@ -14119,7 +14135,7 @@ describe('AnomalyService', () => {
       it('still alerts when a re-adopted node escalates past its earlier output-buffer row', async () => {
         openRows({
           [MetricType.REPL_BUFFER_PRESSURE]: [
-            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
           ],
         });
         await adoptSeed();
@@ -14160,6 +14176,95 @@ describe('AnomalyService', () => {
         expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-f']));
         expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-c']));
         expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('keeps a re-adopted projected fork warning while the write rate is still unknown', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const projected = (changes: number) => ({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '0', rdb_last_cow_size: String(GB), rdb_changes_since_last_save: String(changes) },
+        });
+
+        await pollNode(projected(0));
+        await pollNode(projected(5000));
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'loop-1', nodeAddr: NODE, dedupeKey: 'resync-loop', severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replica: false, syncFull: 1 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE).filter((e) => e.severity === AnomalySeverity.CRITICAL)).toEqual([]);
+      });
+
+      it('restores an output-buffer acknowledgement only for the replica it was raised on', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored output-buffer level until the replicas can be read', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const listing = (service as any).clusterDiscovery.getNodeConnection;
+        listing.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('closes earlier node fork and output-buffer rows when the seed is removed before it adopts them', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+        for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        const resolved = await resolvedIds();
+        expect(resolved).toEqual(expect.arrayContaining(['f-1', 'c-1']));
+        expect(resolved).not.toContain('seed-f');
       });
     });
 
@@ -14301,7 +14406,7 @@ describe('AnomalyService', () => {
       });
 
       it('skips a fan-out primary that is registered under another address', async () => {
-        (service as any).registeredPrimaryReplids.set('conn-2', 'b'.repeat(40));
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
 
         await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
         await pollNode(FORKING);
@@ -14309,6 +14414,58 @@ describe('AnomalyService', () => {
         expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
         expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
         expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('checks a fan-out primary again once its registered connection stops polling', async () => {
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock - 10 * 60_000 });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('retires the fan-out state of a node once it is registered under another address', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(true);
+        prometheusService.clearNodeSignals.mockClear();
+
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+        await pollNode();
+
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(false);
+        expect((service as any).divergenceState.has(NODE_KEY)).toBe(false);
+        expect((service as any).reshardSnapshot.has(NODE_KEY)).toBe(false);
+        expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+      });
+
+      it('reads a node through a fresh connection after dropping a hung one', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const stuck: Array<(err: Error) => void> = [];
+          const hung = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          hung.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          const replacement = nodeClient();
+          (service as any).clusterDiscovery.getNodeConnection
+            .mockResolvedValueOnce(hung)
+            .mockResolvedValue(replacement);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+          expect(hung.disconnect).toHaveBeenCalled();
+          await pollNode();
+
+          expect(replacement.info).toHaveBeenCalled();
+          expect(replacement.call).toHaveBeenCalledWith('CLIENT', 'LIST', 'TYPE', 'replica');
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
       });
 
       it('drops a demoted node output-buffer state', async () => {

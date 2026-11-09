@@ -509,7 +509,48 @@ export function cobPressureRearm(
   );
 }
 
-export function restoreCobAcknowledgedLevel(
+export interface RestoredCobLevels {
+  replicas: Map<string, 'warning' | 'critical'>;
+  aggregate: 'warning' | 'critical' | null;
+}
+
+export function createRestoredCobLevels(): RestoredCobLevels {
+  return { replicas: new Map(), aggregate: null };
+}
+
+export function holdRestoredCobFinding(
+  state: CobConnectionState,
+  restored: RestoredCobLevels,
+  latch: string | undefined,
+  level: 'warning' | 'critical',
+  timestamp: number,
+): void {
+  if (latch === 'resync-loop') {
+    state.resyncFiredAt = Math.max(state.resyncFiredAt ?? timestamp, timestamp);
+    return;
+  }
+  if (restored.aggregate === null || LEVEL_RANK[level] > LEVEL_RANK[restored.aggregate]) restored.aggregate = level;
+  if (!latch || latch === AGGREGATE_KEY) return;
+  const held = restored.replicas.get(latch);
+  if (!held || LEVEL_RANK[level] > LEVEL_RANK[held]) restored.replicas.set(latch, level);
+}
+
+export function applyRestoredCobLevels(
+  state: CobConnectionState,
+  restored: RestoredCobLevels,
+  replicasVisible: boolean,
+  timestamp: number,
+): boolean {
+  if (!replicasVisible) {
+    if (restored.aggregate) restoreCobAcknowledgedLevel(state, [null], restored.aggregate, timestamp);
+    restored.aggregate = null;
+    return restored.replicas.size === 0;
+  }
+  for (const [addr, level] of restored.replicas) restoreCobAcknowledgedLevel(state, [addr], level, timestamp);
+  return true;
+}
+
+function restoreCobAcknowledgedLevel(
   state: CobConnectionState,
   replicaAddrs: (string | null)[],
   level: 'warning' | 'critical',

@@ -214,7 +214,10 @@ import {
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
-  restoreCobAcknowledgedLevel,
+  applyRestoredCobLevels,
+  createRestoredCobLevels,
+  holdRestoredCobFinding,
+  type RestoredCobLevels,
 } from './cob-pressure-detector';
 import {
   MemoryOverheadState,
@@ -690,8 +693,8 @@ export class AnomalyService
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
   private pendingNodeOpenEvents = new Map<string, Map<string, PendingNodeEvents>>();
-  private restoredCobLevel = new Map<string, 'warning' | 'critical'>();
-  private registeredPrimaryReplids = new Map<string, string>();
+  private restoredCobLevel = new Map<string, RestoredCobLevels>();
+  private registeredPrimaryReplids = new Map<string, { replid: string; seenAt: number }>();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -1307,7 +1310,7 @@ export class AnomalyService
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
       if (info.role === 'master' && info.master_replid) {
-        this.registeredPrimaryReplids.set(ctx.connectionId, info.master_replid);
+        this.registeredPrimaryReplids.set(ctx.connectionId, { replid: info.master_replid, seenAt: timestamp });
       } else {
         this.registeredPrimaryReplids.delete(ctx.connectionId);
       }
@@ -2277,9 +2280,15 @@ export class AnomalyService
   }
 
   private adoptNodeCobEvents(key: string, open: StoredAnomalyEvent[]): void {
-    const level = this.openEventLevel(open);
-    if (level === 'none') return;
-    this.restoredCobLevel.set(key, level);
+    if (open.length === 0) return;
+    const state = this.cobState.get(key) ?? createCobConnectionState();
+    const restored = createRestoredCobLevels();
+    for (const event of open) {
+      const level = event.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning';
+      holdRestoredCobFinding(state, restored, event.dedupeKey, level, event.timestamp);
+    }
+    this.cobState.set(key, state);
+    if (restored.aggregate) this.restoredCobLevel.set(key, restored);
     this.trackAdoptedNodeEvents(key, open);
   }
 
@@ -4592,9 +4601,11 @@ export class AnomalyService
     // null on the first poll (no baseline yet) so the projected path stays quiet
     // until a rate can be measured.
     let writeRatePerSec: number | null = null;
+    let rateBaselineMissing = false;
     const currentChanges = this.parseNumber(info.rdb_changes_since_last_save);
     if (currentChanges !== null) {
       const prev = this.forkMemLastChanges.get(key);
+      rateBaselineMissing = prev === undefined;
       if (prev !== undefined) {
         const dtSec = (timestamp - prev.ts) / 1000;
         if (dtSec > 0) {
@@ -4607,6 +4618,8 @@ export class AnomalyService
     const usedMemoryRss = this.parseNumber(info.used_memory_rss);
     const usedMemory = this.parseNumber(info.used_memory) ?? usedMemoryRss;
     if (usedMemory === null) return;
+    const saving = info.rdb_bgsave_in_progress === '1' || info.aof_rewrite_in_progress === '1';
+    if (rateBaselineMissing && !saving) return;
 
     const finding = evaluateForkMemoryRisk(state, {
       bgsaveInProgress: info.rdb_bgsave_in_progress === '1',
@@ -4789,14 +4802,8 @@ export class AnomalyService
     }
 
     const restored = this.restoredCobLevel.get(key);
-    if (restored) {
+    if (restored && applyRestoredCobLevels(state, restored, replicas !== null, timestamp)) {
       this.restoredCobLevel.delete(key);
-      restoreCobAcknowledgedLevel(
-        state,
-        replicas === null ? [null] : replicas.map((replica) => replica.addr),
-        restored,
-        timestamp,
-      );
     }
 
     if (!nodeAddr) {
@@ -4842,6 +4849,7 @@ export class AnomalyService
         message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
+        dedupeKey: cobPressureLatch(finding),
         ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -4849,7 +4857,7 @@ export class AnomalyService
       await this.addLatchedAnomaly(
         event,
         ctx,
-        `${key}:${cobPressureLatch(finding)}`,
+        `${key}:${event.dedupeKey}`,
         cobPressureRearm(state, finding),
         () => this.untrackFanoutNodeEvent(key, event.id),
       );
@@ -5898,7 +5906,7 @@ export class AnomalyService
       writeP99Us:
         key === connectionOfStateKey(key)
           ? (previous?.writeP99Us ?? null)
-          : (this.reshardWriteP99.get(key)?.value ?? null),
+          : this.freshNodeWriteP99(key, timestamp),
       timestamp,
     };
   }
@@ -6050,6 +6058,12 @@ export class AnomalyService
       this.logger.debug(`Write P99 read failed for ${addr}: ${err instanceof Error ? err.message : err}`);
       return null;
     }
+  }
+
+  private freshNodeWriteP99(key: string, timestamp: number): number | null {
+    const cached = this.reshardWriteP99.get(key);
+    if (!cached || timestamp - cached.readAt > AnomalyService.RESHARD_P99_LOOKBACK_MS) return null;
+    return cached.value;
   }
 
   private forgetNodeWriteP99(connectionId: string, keep: Set<string> = new Set()): void {
@@ -9189,9 +9203,9 @@ export class AnomalyService
         port: target.port,
       };
       const { info, self, cob } = result.value;
-      if (this.isRegisteredPrimary(info)) {
+      if (this.isRegisteredPrimary(info, now, staleMs)) {
         this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
-        this.retireNodeDetectors(key);
+        this.retireFanoutNode(ctx, key);
         continue;
       }
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
@@ -9234,9 +9248,22 @@ export class AnomalyService
     return this.convertInfoToRecord(InfoParser.parse(await client.info('replication')));
   }
 
-  private isRegisteredPrimary(info: Record<string, string>): boolean {
+  private isRegisteredPrimary(info: Record<string, string>, now: number, staleMs: number): boolean {
     if (info.role !== 'master' || !info.master_replid) return false;
-    return [...this.registeredPrimaryReplids.values()].includes(info.master_replid);
+    return [...this.registeredPrimaryReplids.values()].some(
+      (seen) => seen.replid === info.master_replid && now - seen.seenAt <= staleMs,
+    );
+  }
+
+  private retireFanoutNode(ctx: ConnectionContext, key: string): void {
+    this.retireDivergenceScope(key, ctx);
+    this.forgetRetryAmplification(key);
+    this.retireNodeDetectors(key);
+    this.reshardSnapshot.delete(key);
+    this.reshardMissedReads.delete(key);
+    this.reshardNodeSelves.delete(key);
+    this.reshardWriteP99.delete(key);
+    this.clearNodeSignals(ctx.connectionId, key);
   }
 
   private fanoutRead<T>(
@@ -9573,7 +9600,8 @@ export class AnomalyService
       try {
         const open: StoredAnomalyEvent[] = [];
         for (const metricType of metricTypes) {
-          open.push(...(await this.readOpenEvents(connectionId, metricType)));
+          const rows = await this.readOpenEvents(connectionId, metricType);
+          open.push(...(NODE_ADOPTED_METRICS.includes(metricType) ? rows.filter((e) => e.nodeAddr) : rows));
         }
         if (!this.removedConnectionSweeps.delete(connectionId)) continue;
         for (const event of open) {
@@ -9596,6 +9624,7 @@ export class AnomalyService
     this.removedConnectionSweeps.set(connectionId, [
       MetricType.REPLICATION_DIVERGENCE,
       ...ADOPTED_METRICS,
+      ...NODE_ADOPTED_METRICS,
     ]);
   }
 
@@ -9654,7 +9683,9 @@ export class AnomalyService
       (divergenceKeys.length === 1 || this.divergenceRetiredSwept.has(connectionId));
     this.removedConnectionSweeps.set(connectionId, [
       ...(divergenceSwept ? [] : [MetricType.REPLICATION_DIVERGENCE]),
-      ...(this.openEventsAdopted.has(connectionId) ? [MetricType.RAFT_HEALTH] : ADOPTED_METRICS),
+      ...(this.openEventsAdopted.has(connectionId)
+        ? [MetricType.RAFT_HEALTH]
+        : [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]),
     ]);
     this.closeRemovedEvents(connectionId, ids).catch((err) => {
       this.logger.error('Failed to resolve events of a removed connection', err);
