@@ -68,6 +68,7 @@
           "refId": "connection"
         },
         "includeAll": true,
+        "allValue": ".*",
         "multi": true,
         "refresh": 2,
         "current": {

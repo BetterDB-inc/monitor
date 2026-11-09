@@ -9,7 +9,11 @@ import {
   StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '@app/common/interfaces/storage-port.interface';
-import { PrometheusService } from '@app/prometheus/prometheus.service';
+import {
+  type AnomalySummaryCounts,
+  NO_CONNECTION_ID,
+  PrometheusService,
+} from '@app/prometheus/prometheus.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -442,6 +446,12 @@ interface TrackedResyncEvent {
   since: number;
 }
 
+interface LastHourGroup extends Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'> {
+  // The connection the group is stored under (its first member's), or
+  // NO_CONNECTION_ID. A group is counted once, under this connection only.
+  connectionId: string;
+}
+
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
 const MAX_SCANNED_CALLER_EVENTS = 50_000;
 const NEXT_FIRING_CONCURRENCY = 8;
@@ -530,9 +540,7 @@ export class AnomalyService
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
-  private lastHourGroups: Array<
-    Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
-  > = [];
+  private lastHourGroups: LastHourGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
   // Previous lifetime rejected_connections counter per connection, so we can feed
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
@@ -752,6 +760,13 @@ export class AnomalyService
   private retryAmplificationClients = new Map<string, RetryAmplificationClientHistory>();
   private readonly retryAmplificationReports = new Map<string, Promise<void>>();
   private recentAnomaliesByConnection = new Map<string, AnomalyEvent[]>();
+  // The anomalies the Prometheus summary counts, keyed like the summary
+  // (NO_CONNECTION_ID for connection-less events). Capped per connection and
+  // in total; the total cap trims the connection with the most events, so a
+  // noisy connection cannot push a quiet or down connection's last hour out
+  // early the way it can in the shared recentAnomalies buffer.
+  private summaryAnomalies = new Map<string, AnomalyEvent[]>();
+  private summaryEventCount = 0;
   private retryAmplificationDispatched = new Map<
     string,
     { episodeStart: number; level: RetryAmplificationFinding['level'] }
@@ -835,6 +850,7 @@ export class AnomalyService
   // group member's snapshot lags a poll behind its peers.
   private activeConfigDriftSignatures = new Set<string>();
   private readonly maxRecentEvents = 1000;
+  private readonly maxSummaryEvents = 10_000;
   private readonly maxRecentGroups = 100;
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
@@ -1076,6 +1092,7 @@ export class AnomalyService
   }
 
   protected onConnectionRemoved(connectionId: string): void {
+    this.setSummaryEvents(connectionId, []);
     this.buffers.delete(connectionId);
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
@@ -4216,7 +4233,9 @@ export class AnomalyService
     return this.recentAnomaliesByConnection.get(connectionId) ?? [];
   }
 
-  private addRecentAnomaly(anomaly: AnomalyEvent): void {
+  private addRecentAnomaly(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+    this.addSummaryAnomaly(anomaly, connectionId || NO_CONNECTION_ID);
+
     this.recentAnomalies.push(anomaly);
     if (anomaly.connectionId !== undefined) {
       const events = this.recentAnomaliesByConnection.get(anomaly.connectionId);
@@ -4243,6 +4262,45 @@ export class AnomalyService
       else events.push(anomaly);
     }
     this.recentAnomaliesByConnection = byConnection;
+    for (const [connectionId, events] of this.summaryAnomalies) {
+      this.setSummaryEvents(connectionId, events.filter(keep));
+    }
+  }
+
+  private addSummaryAnomaly(anomaly: AnomalyEvent, connectionId: string): void {
+    let events = this.summaryAnomalies.get(connectionId);
+    if (events === undefined) {
+      events = [];
+      this.summaryAnomalies.set(connectionId, events);
+    }
+    // Events arrive roughly in time order, so the expired ones are at the front.
+    const oneHourAgo = Date.now() - 3600000;
+    let dropped = 0;
+    while (dropped < events.length && events[dropped].timestamp < oneHourAgo) dropped++;
+    dropped = Math.max(dropped, events.length + 1 - this.maxRecentEvents);
+    if (dropped > 0) events.splice(0, dropped);
+    events.push(anomaly);
+    this.summaryEventCount += 1 - dropped;
+
+    while (this.summaryEventCount > this.maxSummaryEvents) {
+      let largestId = connectionId;
+      let largest = events;
+      for (const [id, list] of this.summaryAnomalies) {
+        if (list.length > largest.length) {
+          largestId = id;
+          largest = list;
+        }
+      }
+      largest.shift();
+      this.summaryEventCount--;
+      if (largest.length === 0) this.summaryAnomalies.delete(largestId);
+    }
+  }
+
+  private setSummaryEvents(connectionId: string, events: AnomalyEvent[]): void {
+    this.summaryEventCount += events.length - (this.summaryAnomalies.get(connectionId)?.length ?? 0);
+    if (events.length === 0) this.summaryAnomalies.delete(connectionId);
+    else this.summaryAnomalies.set(connectionId, events);
   }
 
   private refreshClientSnapshots(
@@ -7120,11 +7178,11 @@ export class AnomalyService
     onDrop?: () => void,
   ): Promise<void> {
     this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
-    this.addRecentAnomaly(anomaly);
+    this.addRecentAnomaly(anomaly, ctx?.connectionId || anomaly.connectionId);
     this.rememberIncidentEvent(anomaly);
 
-    this.countAnomaly(anomaly, ctx?.connectionId);
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
+    this.countAnomaly(anomaly, this.anomalyConnectionId(anomaly));
 
     try {
       await this.persistAnomaly(anomaly, ctx);
@@ -7302,6 +7360,12 @@ export class AnomalyService
       this.persistenceOutbox.defer(entry.id, Date.now());
       return false;
     }
+  }
+
+  // The connection an anomaly is stored and counted under: its poll context's,
+  // else its own. The counter and the summary gauges both use this.
+  private anomalyConnectionId(anomaly: AnomalyEvent): string | undefined {
+    return this.anomalyContexts.get(anomaly)?.connectionId || anomaly.connectionId;
   }
 
   private countAnomaly(anomaly: AnomalyEvent, connectionId: string | undefined): void {
@@ -7705,13 +7769,10 @@ export class AnomalyService
     this.logger.warn(
       `Sequence detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
     );
-    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+    const lastHourGroup = this.toLastHourGroup(group);
+    this.countCorrelatedGroup(lastHourGroup);
     this.recentGroups.push(group);
-    this.lastHourGroups.push({
-      timestamp: group.timestamp,
-      pattern: group.pattern,
-      severity: group.severity,
-    });
+    this.lastHourGroups.push(lastHourGroup);
     if (this.recentGroups.length > this.maxRecentGroups) {
       this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
     }
@@ -8070,6 +8131,7 @@ export class AnomalyService
         `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
       );
 
+      const lastHourGroups: LastHourGroup[] = [];
       for (const group of newGroups) {
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
@@ -8092,11 +8154,15 @@ export class AnomalyService
         this.logger.warn(
           `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
         );
-        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+        if (connectionId) {
+          for (const anomaly of group.anomalies) anomaly.connectionId ??= connectionId;
+        }
+        const lastHourGroup = this.toLastHourGroup(group);
+        this.countCorrelatedGroup(lastHourGroup);
+        lastHourGroups.push(lastHourGroup);
 
         if (!connectionId) continue;
         for (const anomaly of group.anomalies) {
-          anomaly.connectionId ??= connectionId;
           try {
             await this.persistAnomaly(anomaly);
           } catch (err) {
@@ -8107,9 +8173,7 @@ export class AnomalyService
       }
 
       this.recentGroups.push(...newGroups);
-      this.lastHourGroups.push(
-        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
-      );
+      this.lastHourGroups.push(...lastHourGroups);
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
       }
@@ -10073,44 +10137,89 @@ export class AnomalyService
   private incidentGaugeFailures = 0;
   private openIncidentSince: number | null = null;
 
+  private toLastHourGroup(group: CorrelatedAnomalyGroup): LastHourGroup {
+    return {
+      timestamp: group.timestamp,
+      pattern: group.pattern,
+      severity: group.severity,
+      connectionId: group.anomalies[0]?.connectionId ?? NO_CONNECTION_ID,
+    };
+  }
+
+  // The counter uses the same single connection as the summary gauges, so a
+  // group spanning several connections is counted once in both and sums over
+  // connections stay exact.
+  private countCorrelatedGroup(group: LastHourGroup): void {
+    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, group.connectionId);
+  }
+
   private async updatePrometheusSummary(): Promise<void> {
     this.sweepStaleFanoutCoverage();
     const oneHourAgo = Date.now() - 3600000;
-    const bySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byMetric: Record<string, number> = {};
-    const unresolvedBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byPattern: Record<string, number> = {};
-    const groupsBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
+    // One summary per connection with an anomaly or group in the window, so a
+    // connection that went down keeps its unresolved anomalies visible. A
+    // user-added connection this service covers is also published when quiet,
+    // so it reads zero rather than no data; auto-registered nodes are not, to
+    // keep their cost off large clusters. NO_CONNECTION_ID collects
+    // connection-less events. The Prometheus service drops retired and deleted
+    // connections and removes the series of anything left out.
+    const summaries = new Map<string, AnomalySummaryCounts>();
+    const summaryFor = (connectionId: string): AnomalySummaryCounts => {
+      let summary = summaries.get(connectionId);
+      if (!summary) {
+        summary = {
+          bySeverity: {},
+          byMetric: {},
+          byPattern: {},
+          groupsBySeverity: {},
+          unresolvedBySeverity: {},
+        };
+        summaries.set(connectionId, summary);
+      }
+      return summary;
+    };
 
-    for (const a of this.recentAnomalies) {
-      if (a.timestamp < oneHourAgo) continue;
-      bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
-      byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
-      if (!a.resolved)
-        unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
+    const polled = this.getPolledConnectionIds();
+    for (const connectionId of polled) {
+      if (!this.connectionRegistry.isAutoRegistered(connectionId)) summaryFor(connectionId);
+    }
+
+    for (const [connectionId, events] of this.summaryAnomalies) {
+      const inWindow = events.filter((a) => a.timestamp >= oneHourAgo);
+      this.setSummaryEvents(connectionId, inWindow);
+      if (inWindow.length === 0) continue;
+      const { bySeverity, byMetric, unresolvedBySeverity } = summaryFor(connectionId);
+      for (const a of inWindow) {
+        bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
+        byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
+        if (!a.resolved)
+          unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
+      }
     }
 
     this.lastHourGroups = this.lastHourGroups.filter((g) => g.timestamp >= oneHourAgo);
     for (const g of this.lastHourGroups) {
+      const { byPattern, groupsBySeverity } = summaryFor(g.connectionId);
       byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
       groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
     }
 
-    this.prometheusService.updateAnomalySummary({
-      bySeverity,
-      byMetric,
-      byPattern,
-      groupsBySeverity,
-      unresolvedBySeverity,
-    });
+    this.prometheusService.updateAnomalySummaries(summaries);
 
-    const bufferStats = this.getBufferStats().map((s) => ({
-      metricType: s.metricType,
-      mean: s.mean,
-      stdDev: s.stdDev,
-      ready: s.isReady,
-    }));
-    this.prometheusService.updateAnomalyBufferStats(bufferStats);
+    // The buffer gauges are published once per instance: the default
+    // connection's baselines while this service covers it, nothing otherwise.
+    const defaultConnectionId = this.connectionRegistry.getDefaultId();
+    if (defaultConnectionId && polled.has(defaultConnectionId)) {
+      const bufferStats = this.getBufferStats(defaultConnectionId).map((s) => ({
+        metricType: s.metricType,
+        mean: s.mean,
+        stdDev: s.stdDev,
+        ready: s.isReady,
+      }));
+      this.prometheusService.updateAnomalyBufferStats(bufferStats, defaultConnectionId);
+    } else {
+      this.prometheusService.updateAnomalyBufferStats([], null);
+    }
 
     await this.updateIncidentGauges(oneHourAgo);
   }
@@ -10121,27 +10230,16 @@ export class AnomalyService
     try {
       const from = Math.min(since, this.openIncidentSince ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS);
       const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
-      const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
+      const open: Array<{ connectionIds: string[]; patterns: string[]; status: string }> = [];
       let oldestOpen: number | null = null;
       for (const timeline of timelines) {
         const status = timeline.recovery.status;
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
         oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
-        const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
-        for (const connectionId of timeline.connectionIds.length > 0 ? timeline.connectionIds : ['']) {
-          const counts = byConnection.get(connectionId) ?? new Map();
-          for (const pattern of patterns) {
-            const label = `${pattern}\u0000${status}`;
-            const entry = counts.get(label) ?? { pattern, status, count: 0 };
-            entry.count++;
-            counts.set(label, entry);
-          }
-          byConnection.set(connectionId, counts);
-        }
+        open.push({ connectionIds: timeline.connectionIds, patterns: timeline.matchedPatterns, status });
       }
-      this.prometheusService.updateActiveIncidents(
-        new Map([...byConnection].map(([connectionId, counts]) => [connectionId, [...counts.values()]])),
-      );
+      // Counted per connection label, once per incident, by the Prometheus service.
+      this.prometheusService.updateActiveIncidents(open);
       this.openIncidentSince = oldestOpen === null ? since : Math.min(since, oldestOpen);
       this.incidentGaugeFailures = 0;
     } catch (err) {
@@ -10157,7 +10255,7 @@ export class AnomalyService
 
   private clearIncidentGauges(): void {
     try {
-      this.prometheusService.updateActiveIncidents(new Map());
+      this.prometheusService.updateActiveIncidents([]);
     } catch (err) {
       this.logger.debug(`Failed to clear incident gauges: ${err instanceof Error ? err.message : err}`);
     }
