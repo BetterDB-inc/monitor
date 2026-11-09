@@ -14214,21 +14214,40 @@ describe('AnomalyService', () => {
         ]);
       });
 
-      it('restores the latest fork kind when older and newer fork rows are open', async () => {
+      it('does not repeat an open live fork critical when a newer projected warning is also open', async () => {
         openRows({
           [MetricType.FORK_MEMORY_RISK]: [
-            { id: 'f-old', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.WARNING, timestamp: clock - 60_000 },
+            { id: 'f-old', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 60_000 },
             { id: 'f-new', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
           ],
         });
         await adoptSeed();
 
         await pollNode({
-          memory: { used_memory: String(8 * GB), used_memory_rss: String(8.5 * GB), total_system_memory: String(10 * GB) },
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
           persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
         });
 
-        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([expect.objectContaining({ dedupeKey: 'live-cow-oom' })]);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('still raises a live fork critical over an open live warning and a projected critical row', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.WARNING, timestamp: clock - 60_000 },
+            { id: 'f-2', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 120_000 },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: 'live-cow-oom' }),
+        ]);
       });
 
       it('does not let a restored warning of one replica hide another replica after CLIENT LIST recovers', async () => {

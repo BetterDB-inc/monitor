@@ -234,6 +234,7 @@ import {
   forkMemoryRearm,
   createForkMemoryState,
   evaluateForkMemoryRisk,
+  forkAlertScore,
 } from './fork-memory-risk-detector';
 import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import { OutboxEntry, PersistenceOutbox } from './anomaly-persistence-outbox';
@@ -2274,11 +2275,13 @@ export class AnomalyService
 
   private adoptNodeForkEvents(key: string, open: StoredAnomalyEvent[]): void {
     if (open.length === 0) return;
-    const latest = open.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
-    this.forkMemoryState.set(key, {
-      ackedLevel: latest.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning',
-      ackedKind: latest.dedupeKey === 'projected-fork-oom' ? 'projected-fork-oom' : 'live-cow-oom',
-    });
+    const restored = open
+      .map((event) => ({
+        ackedLevel: event.severity === AnomalySeverity.CRITICAL ? ('critical' as const) : ('warning' as const),
+        ackedKind: event.dedupeKey === 'projected-fork-oom' ? ('projected-fork-oom' as const) : ('live-cow-oom' as const),
+      }))
+      .reduce((a, b) => (forkAlertScore(b) > forkAlertScore(a) ? b : a));
+    this.forkMemoryState.set(key, restored);
     this.trackAdoptedNodeEvents(key, open);
   }
 
