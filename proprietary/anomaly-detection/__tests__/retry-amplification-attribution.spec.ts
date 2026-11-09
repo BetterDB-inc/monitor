@@ -951,4 +951,48 @@ describe('estimateNewConnections', () => {
       }),
     ).toEqual([]);
   });
+
+  it('pins a known limit: monitor churn split evenly can carry one application connection over the threshold', () => {
+    // The monitor held id 101 at the previous capture and reconnected six
+    // times (102-107), a key-scan client took 108 and 109, and one application
+    // client connected (110). Nine ids over three fresh identities give each
+    // three, so the application reaches RETRY_AMP_MIN_NEW_CONNECTIONS with one
+    // connection. This pins the even split, which predates the identity
+    // changes: the stored captures keep a count, the oldest age and the
+    // highest id per identity, so without a count of the monitor's own
+    // connection opens per capture interval this case cannot be told from a
+    // retrier that keeps reconnecting and holds the top id, and every
+    // alternative split credits that retrier's churn to the one-off clients
+    // below it instead.
+    const captures = [
+      capture(0, 100, 500, 'pool'),
+      capture(0, 101, 500, 'BetterDB-Monitor'),
+      capture(60_000, 100, 560, 'pool'),
+      capture(60_000, 107, 10, 'BetterDB-Monitor'),
+      capture(60_000, 109, 5, 'BetterDB-Monitor-keyscan'),
+      capture(60_000, 110, 1, 'storm'),
+    ];
+    const newConnections = estimateNewConnections(
+      [{ ...identity, name: 'storm', count: 1 }],
+      captures,
+      60_000,
+      60_000,
+    );
+
+    expect(newConnections).toEqual([
+      { ...identity, name: 'storm', count: 3 },
+      { ...identity, name: 'BetterDB-Monitor', count: 3 },
+      { ...identity, name: 'BetterDB-Monitor-keyscan', count: 3 },
+    ]);
+    expect(RETRY_AMP_MIN_NEW_CONNECTIONS).toBe(3);
+    expect(
+      rankRetryAmplificationContributors({
+        before: null,
+        first: null,
+        latest: null,
+        capture: [],
+        newConnections,
+      }).map((c) => [c.key, c.newConnections]),
+    ).toEqual([['storm', 3]]);
+  });
 });
