@@ -119,15 +119,6 @@ function setEnv(env: Record<string, string>, key: string, value: string): void {
   env[key] = value;
 }
 
-async function checkHealth(port: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://localhost:${port}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 function readValidPid(file: string): number | null {
   try {
     const raw = fs.readFileSync(file, 'utf8').trim();
@@ -139,13 +130,20 @@ function readValidPid(file: string): number | null {
   }
 }
 
-async function waitForHealth(port: number): Promise<void> {
-  const deadline = Date.now() + 15_000;
+function hasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+export async function waitForMonitor(port: number, child: ChildProcess, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await checkHealth(port)) return;
+    if (hasExited(child)) {
+      throw new Error(`BetterDB monitor exited before it started on port ${port}`);
+    }
+    if ((await isBetterDbMonitor(port)) && !hasExited(child)) return;
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error('BetterDB monitor did not start within 15s');
+  throw new Error(`BetterDB monitor did not start within ${Math.round(timeoutMs / 1000)}s`);
 }
 
 export async function startMonitor(opts: {
@@ -174,7 +172,15 @@ export async function startMonitor(opts: {
         await new Promise(resolve => setTimeout(resolve, 250));
       }
     }
-    if (identity !== 'unknown') fs.unlinkSync(PID_FILE);
+    if (identity === 'unknown') {
+      if (await isBetterDbMonitor(existingPort)) {
+        return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: false };
+      }
+      throw new Error(
+        `Could not read the command line of process ${pid} from ${PID_FILE}, so no new monitor was started. Stop that process or remove the PID file, then try again.`,
+      );
+    }
+    fs.unlinkSync(PID_FILE);
   }
 
   if (await isBetterDbMonitor(opts.port)) {
@@ -213,7 +219,7 @@ export async function startMonitor(opts: {
     fs.writeFileSync(PID_FILE, `${child.pid}:${opts.port}`);
 
     try {
-      await waitForHealth(opts.port);
+      await waitForMonitor(opts.port, child);
     } catch (err) {
       // Health check failed — kill the orphaned child and clean up PID file
       terminate(child.pid);
@@ -242,7 +248,12 @@ export async function startMonitor(opts: {
     });
     registerEphemeralHandlers();
 
-    await waitForHealth(opts.port);
+    try {
+      await waitForMonitor(opts.port, child);
+    } catch (err) {
+      terminate(child.pid);
+      throw err;
+    }
   }
 
   return { url, alreadyRunning: false, owned: true };
