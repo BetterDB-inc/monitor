@@ -930,6 +930,19 @@ describe('estimateNewConnections', () => {
     ]);
   });
 
+  it('counts the growth of a split interval once, not rounded up on each side', () => {
+    // 5 ids, half the interval on each side: rounding each half would give 3
+    // and 3, the reconnect threshold on both sides from 5 ids.
+    const captures = [capture(0, 100, 5), capture(60_000, 105, 1)];
+
+    expect(estimateNewConnections([], captures, -60_000, 30_000)).toEqual([
+      { ...identity, count: 2 },
+    ]);
+    expect(estimateNewConnections([], captures, 30_000, 120_000)).toEqual([
+      { ...identity, count: 3 },
+    ]);
+  });
+
   it('gives the monitor and its scan client their share of the id growth', () => {
     // The monitor held id 101 at the previous capture, reconnected three times
     // (102-104) and opened a key-scan client (105); one application client

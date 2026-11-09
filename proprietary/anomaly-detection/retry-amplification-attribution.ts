@@ -473,7 +473,15 @@ export function estimateNewConnections(
     const previous = times[i - 1];
     const inRange = Math.min(capturedAt, until) - Math.max(previous, since);
     if (growth <= 0 || inRange <= 0) continue;
-    const counted = (growth * inRange) / (capturedAt - previous);
+    // The part before a range boundary takes the floor of its prorated ids and
+    // the part after it the rest, so the two sides of a split add up to the
+    // growth instead of each rounding up.
+    const idsBefore = (at: number) =>
+      Math.floor((growth * (at - previous)) / (capturedAt - previous));
+    const counted =
+      (capturedAt > until ? idsBefore(until) : growth) -
+      (previous < since ? idsBefore(since) : 0);
+    if (counted <= 0) continue;
     const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= previous);
     for (const row of fresh) {
       const key = JSON.stringify([row.name, row.user, row.ip]);
