@@ -13250,6 +13250,58 @@ describe('AnomalyService', () => {
         expect((service as any).nextFiringCache.size).toBe(0);
         expect((service as any).nextFiringInFlight.size).toBe(0);
       });
+
+      it('lets a later caller extend the deadline of a shared lookup', async () => {
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        const page = Array.from({ length: 100 }, (_, i) => ({
+          ...anomaly({ id: `o-${i}`, timestamp: after + i + 1, connectionId: 'other' }),
+          anomalyType: 'spike',
+        }));
+        let releaseFirstPage!: (rows: any[]) => void;
+        storage.getAnomalyEvents
+          .mockImplementationOnce(() => new Promise((resolve) => (releaseFirstPage = resolve)))
+          .mockResolvedValue([]);
+
+        const first = (service as any).nextFiring(signal, after, Date.now() - 1);
+        const second = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        releaseFirstPage(page);
+
+        await expect(second).resolves.toBeNull();
+        await expect(first).resolves.toBeNull();
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      });
+
+      it('still uses a cached later firing once the budget is spent', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        const tailEnd = end + 30 * MIN;
+        openSignals(end);
+        const firing = {
+          ...anomaly({ id: 'c-19-again', timestamp: tailEnd + 5 * MIN, connectionId: 'conn-19' }),
+          anomalyType: 'spike',
+        };
+        storage.getAnomalyEvents.mockImplementation(async (q: any) =>
+          q.order === 'asc' && q.connectionId === 'conn-19' ? [firing] : [],
+        );
+        const cachedSignal = (service as any).recentAnomalies.find((e: any) => e.id === 'c-19');
+        await (service as any).nextFiring(cachedSignal, tailEnd);
+        jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+
+        const bounds = recovery.mock.calls
+          .filter(([event]: any[]) => event.id === 'c-19')
+          .map((call: any[]) => call[2]);
+        expect(bounds).toContain(firing.timestamp);
+        expect((service as any).skippedNextFirings.size).toBe(11);
+      });
     });
 
     it('reads incident boundaries once when opening an incident', async () => {
