@@ -515,7 +515,9 @@ function closeWindow(
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
     const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
-    state.staleAckWindows.set(addr, { start, end, gapBytes, bytesPerSec: rate, secondsBehind });
+    const window: DivergenceWindow = { start, end, gapBytes, bytesPerSec: rate, secondsBehind };
+    state.staleAckWindows.set(addr, window);
+    state.closedWindows.push({ addr, ...window });
     const finding = staleAckFinding(replica, gapBytes, start, rate);
     if (finding) outcomes.push(finding);
   }

@@ -254,7 +254,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     });
   }
 
-  async getReplicaConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+  async getReplicaConnection(host: string, port: number, connectionId: string, hostname?: string): Promise<Valkey> {
     this.assertDialsDataNodes(connectionId, `${host}:${port}`);
     const config = this.connectionRegistry.getConfig(connectionId);
     if (!config || config.membership || config.sshTunnel?.enabled) {
@@ -272,6 +272,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       configEpoch: 0,
       healthy: true,
       flags: [],
+      hostname,
     };
     return this.openNodeClient(key, node, host, port, connectionId, {
       username: username || '',

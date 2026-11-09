@@ -9353,7 +9353,7 @@ export class AnomalyService
       const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
       if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
       this.replicaReadsInFlight.add(inFlight);
-      const pending = reader.read(budget);
+      const pending = reader.read(Date.now() + budget);
       const release = () => {
         this.replicaReadsInFlight.delete(inFlight);
       };
@@ -9385,7 +9385,7 @@ export class AnomalyService
     host: string,
     port: number,
     ownPrimary: boolean,
-  ): { via: string; read: (budgetMs: number) => Promise<Record<string, string>> } | null {
+  ): { via: string; read: (deadline: number) => Promise<Record<string, string>> } | null {
     const connectionId = ctx.connectionId;
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
     if (
@@ -9399,27 +9399,29 @@ export class AnomalyService
     if (!discovery || !this.dialsDataNodes(connectionId)) return null;
     const readNode = async (
       pending: Promise<{ info(section: string): Promise<string>; disconnect(): void }>,
-      budgetMs: number,
+      deadline: number,
     ) => {
       const client = await pending;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('no time left to read the replica');
       try {
-        const reply = await withTimeout(client.info('replication'), budgetMs, AnomalyService.REPLICA_READ_TIMED_OUT);
+        const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
         return this.convertInfoToRecord(InfoParser.parse(reply));
       } catch (err) {
         if (err instanceof Error && err.message === AnomalyService.REPLICA_READ_TIMED_OUT) client.disconnect();
         throw err;
       }
     };
-    const discovered = (read: (budgetMs: number) => Promise<Record<string, string>>) => ({ via: 'discovered', read });
+    const discovered = (read: (deadline: number) => Promise<Record<string, string>>) => ({ via: 'discovered', read });
     if (this.clusterViews.has(connectionId)) {
-      return discovered(async (budgetMs) => {
+      return discovered(async (deadline) => {
         const nodes = await discovery.discoverNodes(connectionId);
         const node = nodes.find((n) => {
           const nodeAddress = splitHostPort(n.address);
           return n.role === 'replica' && nodeAddress?.host === host && nodeAddress.port === port;
         });
         if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
-        return readNode(discovery.getNodeConnection(node.id, connectionId), budgetMs);
+        return readNode(discovery.getNodeConnection(node.id, connectionId), deadline);
       });
     }
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
@@ -9428,22 +9430,26 @@ export class AnomalyService
     const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
     const sentinelAddress = reported ? splitHostPort(reported) : null;
     if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
-      return discovered((budgetMs) =>
-        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), budgetMs),
+      return discovered((deadline) =>
+        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), deadline),
       );
     }
     if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
-      return discovered(async (budgetMs) => {
+      return discovered(async (deadline) => {
         const [peers, addresses] = await Promise.all([
           ctx.client.getClients({ type: 'replica' }),
           this.resolveHost(host),
         ]);
-        const connectedFrom = peers.some((peer) => {
-          const peerHost = splitHostPort(peer.addr)?.host;
-          return peerHost !== undefined && addresses.has(normalizeIp(peerHost));
-        });
-        if (!connectedFrom) throw new Error(`no replica is connected to the primary from ${host}`);
-        return readNode(discovery.getReplicaConnection(host, port, connectionId), budgetMs);
+        const connectedFrom = new Set(
+          peers.flatMap((peer) => {
+            const peerHost = splitHostPort(peer.addr)?.host;
+            return peerHost === undefined ? [] : [normalizeIp(peerHost)];
+          }),
+        );
+        const verified = [...addresses].find((address) => connectedFrom.has(address));
+        if (!verified) throw new Error(`no replica is connected to the primary from ${host}`);
+        const hostname = isIP(host) ? [] : [host];
+        return readNode(discovery.getReplicaConnection(verified, port, connectionId, ...hostname), deadline);
       });
     }
     return null;

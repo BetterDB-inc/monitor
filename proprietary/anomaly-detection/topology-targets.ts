@@ -1,3 +1,4 @@
+import { isIP } from 'net';
 import type { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
 
 export const TOPOLOGY_TARGET_LIMIT = 64;
@@ -43,7 +44,14 @@ export function splitHostPort(addr: string): { host: string; port: number } | nu
 }
 
 export function normalizeIp(host: string): string {
-  return host.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+  const lower = host.toLowerCase().replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/, '');
+  if (isIP(lower) !== 6) return lower;
+  const canonical = new URL(`http://[${lower}]`).hostname.slice(1, -1);
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonical);
+  if (!mapped) return canonical;
+  const high = parseInt(mapped[1], 16);
+  const low = parseInt(mapped[2], 16);
+  return [high >> 8, high & 255, low >> 8, low & 255].join('.');
 }
 
 export function clusterTargets(nodes: ClusterNode[], isRegistered: RegisteredAddress): TopologyScope {

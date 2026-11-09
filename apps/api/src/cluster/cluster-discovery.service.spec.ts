@@ -720,6 +720,21 @@ describe('ClusterDiscoveryService', () => {
       );
     });
 
+    it('dials the verified address while checking TLS against the announced hostname', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example', ca: 'seed-ca' } },
+      });
+
+      await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection', 'replica-0.cache.svc');
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.1.6',
+          tls: { ca: 'seed-ca', servername: 'replica-0.cache.svc', checkServerIdentity: expect.any(Function) },
+        }),
+      );
+    });
+
     it('reuses the client for the same replica', async () => {
       const first = await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection');
       const calls = jest.mocked(Valkey).mock.calls.length;

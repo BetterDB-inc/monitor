@@ -16670,8 +16670,29 @@ describe('AnomalyService', () => {
 
         const samples = await (service as any).sampleReplicas(mockCtx, [named], true, readPrimary);
 
-        expect(getReplicaConnection).toHaveBeenCalledWith('replica-0.cache.svc', 6379, 'conn-1');
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1', 'replica-0.cache.svc');
         expect(samples.get(named)).toMatchObject({ status: 'ok' });
+      });
+
+      it('dials only the resolved address a replica is connected from', async () => {
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.9', '10.0.0.2']));
+
+        await (service as any).sampleReplicas(mockCtx, ['replica-0.cache.svc:6379'], true, readPrimary);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1', 'replica-0.cache.svc');
+      });
+
+      it('sends no command on a connection that arrives after the read budget', async () => {
+        let connect!: (client: typeof replica) => void;
+        getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        connect(replica);
+        await settle();
+
+        expect(replica.info).not.toHaveBeenCalled();
+        expect(replica.disconnect).not.toHaveBeenCalled();
       });
 
       it('does not dial a hostname that resolves away from every connected replica', async () => {

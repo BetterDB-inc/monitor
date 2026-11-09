@@ -1493,6 +1493,22 @@ describe("the replica's own view", () => {
     expect(h.state.replicas.get(ADDR)!.disagreeEventId).toBe('evt-views');
   });
 
+  it('stores stale-ack windows with the replica reading', () => {
+    const h = new ViewHarness();
+    h.reading = ok(0, 0);
+    h.viewWindows(2, { gap: 0, rate: MiB });
+    drainClosedWindows(h.state);
+
+    h.reading = ok(0, 200 * MiB);
+    h.viewWindows(2, { gap: 200 * MiB, rate: MiB, lagSec: 60 });
+
+    const stale = drainClosedWindows(h.state).filter((w) => w.gapBytes === 200 * MiB);
+    expect(stale.length).toBeGreaterThan(0);
+    expect(stale).toEqual(
+      stale.map(() => expect.objectContaining({ addr: ADDR, replicaGapBytes: 0, replicaView: 'ok' })),
+    );
+  });
+
   it('samples every replica with a fresh window', () => {
     const h = new ViewHarness();
     h.viewWindows(2, { gap: 0, rate: MiB });
