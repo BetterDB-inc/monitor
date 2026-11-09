@@ -668,6 +668,7 @@ export class AnomalyService
   private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
+  private nodeEventsAdopted = new Set<string>();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -2198,6 +2199,23 @@ export class AnomalyService
     const current = this.clientSaturationLevel.get(connectionId) ?? 'none';
     if (AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[current]) {
       this.clientSaturationLevel.set(connectionId, level);
+    }
+  }
+
+  private async adoptNodeOpenEvents(ctx: ConnectionContext, key: string, nodeAddr: string): Promise<void> {
+    if (this.nodeEventsAdopted.has(key)) return;
+    try {
+      const own = async (metricType: MetricType) =>
+        (await this.readOpenEvents(ctx.connectionId, metricType)).filter((e) => e.nodeAddr === nodeAddr);
+      const backlog = await own(MetricType.BACKLOG_COVERAGE_RISK);
+      const resync = await own(MetricType.RESYNC_ESCALATION);
+      this.adoptBacklogEvents(key, backlog);
+      this.adoptResyncEvents(key, resync);
+      this.nodeEventsAdopted.add(key);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read open events of ${ctx.connectionName}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -8660,6 +8678,7 @@ export class AnomalyService
 
   private forgetNodeDetectors(key: string): void {
     for (const map of this.nodeDetectorMaps()) map.delete(key);
+    this.nodeEventsAdopted.delete(key);
   }
 
   private clearFanoutNodeSignals(connectionId: string): void {
@@ -8936,6 +8955,7 @@ export class AnomalyService
       };
       const { info, self } = result.value;
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
+      await this.adoptNodeOpenEvents(nodeCtx, key, target.addr);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) {
         await this.detectRecoveryAmplification(sample, info, nodeCtx, target.addr);

@@ -13739,6 +13739,92 @@ describe('AnomalyService', () => {
         expect((service as any).backlogCoverageEventIds.get(NODE_KEY)).toBe(risk.id);
       });
     });
+
+    describe('open rows left by an earlier run', () => {
+      const openRows = (rows: Partial<Record<MetricType, Record<string, unknown>[]>>) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          offset === 0 ? (rows[metricType as MetricType] ?? []) : [],
+        );
+      const readsOf = (metricType: MetricType) =>
+        storage.getAnomalyEvents.mock.calls.filter(([q]: [{ metricType: MetricType }]) => q.metricType === metricType).length;
+
+      it('re-adopts its own open backlog row after a restart instead of raising again', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([]);
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+
+        for (let i = 0; i < 20; i += 1) await pollNode({ bytes: 2000 });
+
+        expect(await resolvedIds()).toContain('b-1');
+      });
+
+      it('re-adopts its own open resync row and settles it when the replica is back online', async () => {
+        openRows({
+          [MetricType.RESYNC_ESCALATION]: [
+            { id: 'r-1', nodeAddr: NODE, replicaAddr: '10.0.1.6:6379', timestamp: clock },
+          ],
+        });
+
+        await pollNode();
+        await pollNode();
+
+        expect(await resolvedIds()).toContain('r-1');
+      });
+
+      it('ignores open rows that belong to another node', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'other', nodeAddr: '10.0.1.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+
+        await pollNode();
+
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('other');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level).toBe('none');
+      });
+
+      it('retries node adoption after a failed read', async () => {
+        let failed = false;
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType }) => {
+          if (metricType === MetricType.BACKLOG_COVERAGE_RISK && !failed) {
+            failed = true;
+            throw new Error('storage down');
+          }
+          return [];
+        });
+
+        await pollNode();
+        expect((service as any).nodeEventsAdopted.has(NODE_KEY)).toBe(false);
+
+        await pollNode();
+        expect((service as any).nodeEventsAdopted.has(NODE_KEY)).toBe(true);
+      });
+
+      it('adopts each address once', async () => {
+        await pollNode();
+        await pollNode();
+        await pollNode();
+
+        expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(1);
+        expect(readsOf(MetricType.RESYNC_ESCALATION)).toBe(1);
+      });
+
+      it('sweeps a node again after it left and came back', async () => {
+        await pollNode();
+        await pollNode({}, []);
+        await pollNode();
+
+        expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(2);
+      });
+    });
   });
 
   describe('replication divergence', () => {
