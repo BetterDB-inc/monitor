@@ -214,6 +214,7 @@ import {
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
+  restoreCobAcknowledgedLevel,
 } from './cob-pressure-detector';
 import {
   MemoryOverheadState,
@@ -393,6 +394,19 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
 ];
+
+const NODE_ADOPTED_METRICS: MetricType[] = [MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE];
+
+interface PendingNodeEvents {
+  backlog: StoredAnomalyEvent[];
+  resync: StoredAnomalyEvent[];
+  fork: StoredAnomalyEvent[];
+  cob: StoredAnomalyEvent[];
+}
+
+interface FanoutClient {
+  disconnect(): void;
+}
 
 interface SeedBackoff {
   failures: number;
@@ -675,10 +689,8 @@ export class AnomalyService
   private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
-  private pendingNodeOpenEvents = new Map<
-    string,
-    Map<string, { backlog: StoredAnomalyEvent[]; resync: StoredAnomalyEvent[] }>
-  >();
+  private pendingNodeOpenEvents = new Map<string, Map<string, PendingNodeEvents>>();
+  private restoredCobLevel = new Map<string, 'warning' | 'critical'>();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -2163,7 +2175,7 @@ export class AnomalyService
     if (retry && timestamp < retry.at) return;
     try {
       const open = new Map<MetricType, StoredAnomalyEvent[]>();
-      for (const metricType of ADOPTED_METRICS) {
+      for (const metricType of [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]) {
         open.set(metricType, await this.readOpenEvents(connectionId, metricType));
       }
       if (!this.connectionRegistry.getConfig(connectionId)) return;
@@ -2180,7 +2192,12 @@ export class AnomalyService
       const seedRows = (metricType: MetricType) => rows(metricType).filter((e) => !e.nodeAddr);
       this.adoptBacklogEvents(connectionId, seedRows(MetricType.BACKLOG_COVERAGE_RISK));
       this.adoptResyncEvents(connectionId, seedRows(MetricType.RESYNC_ESCALATION));
-      this.holdNodeOpenEvents(connectionId, rows(MetricType.BACKLOG_COVERAGE_RISK), rows(MetricType.RESYNC_ESCALATION));
+      this.holdNodeOpenEvents(connectionId, {
+        backlog: rows(MetricType.BACKLOG_COVERAGE_RISK),
+        resync: rows(MetricType.RESYNC_ESCALATION),
+        fork: rows(MetricType.FORK_MEMORY_RISK),
+        cob: rows(MetricType.REPL_BUFFER_PRESSURE),
+      });
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
@@ -2216,20 +2233,21 @@ export class AnomalyService
     }
   }
 
-  private holdNodeOpenEvents(
-    connectionId: string,
-    backlog: StoredAnomalyEvent[],
-    resync: StoredAnomalyEvent[],
-  ): void {
-    const byNode = new Map<string, { backlog: StoredAnomalyEvent[]; resync: StoredAnomalyEvent[] }>();
-    const entry = (nodeAddr: string) => {
-      const pending = byNode.get(nodeAddr) ?? { backlog: [], resync: [] };
-      byNode.set(nodeAddr, pending);
-      return pending;
-    };
-    for (const event of backlog) if (event.nodeAddr) entry(event.nodeAddr).backlog.push(event);
-    for (const event of resync) if (event.nodeAddr) entry(event.nodeAddr).resync.push(event);
+  private holdNodeOpenEvents(connectionId: string, open: PendingNodeEvents): void {
+    const byNode = new Map<string, PendingNodeEvents>();
+    for (const kind of Object.keys(open) as (keyof PendingNodeEvents)[]) {
+      for (const event of open[kind]) {
+        if (!event.nodeAddr) continue;
+        const pending = byNode.get(event.nodeAddr) ?? { backlog: [], resync: [], fork: [], cob: [] };
+        pending[kind].push(event);
+        byNode.set(event.nodeAddr, pending);
+      }
+    }
     if (byNode.size > 0) this.pendingNodeOpenEvents.set(connectionId, byNode);
+  }
+
+  private pendingEventsOf(pending: PendingNodeEvents): StoredAnomalyEvent[] {
+    return [...pending.backlog, ...pending.resync, ...pending.fork, ...pending.cob];
   }
 
   private adoptNodeOpenEvents(connectionId: string, key: string, nodeAddr: string): void {
@@ -2240,6 +2258,27 @@ export class AnomalyService
     if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
     this.adoptBacklogEvents(key, pending.backlog);
     this.adoptResyncEvents(key, pending.resync);
+    this.adoptNodeForkEvents(key, pending.fork);
+    this.adoptNodeCobEvents(key, pending.cob);
+  }
+
+  private adoptNodeForkEvents(key: string, open: StoredAnomalyEvent[]): void {
+    const level = this.openEventLevel(open);
+    if (level === 'none') return;
+    this.forkMemoryState.set(key, { ackedLevel: level, ackedKind: 'live-cow-oom' });
+    this.trackAdoptedNodeEvents(key, open);
+  }
+
+  private adoptNodeCobEvents(key: string, open: StoredAnomalyEvent[]): void {
+    const level = this.openEventLevel(open);
+    if (level === 'none') return;
+    this.restoredCobLevel.set(key, level);
+    this.trackAdoptedNodeEvents(key, open);
+  }
+
+  private trackAdoptedNodeEvents(key: string, open: StoredAnomalyEvent[]): void {
+    const oldestFirst = [...open].sort((a, b) => a.timestamp - b.timestamp);
+    for (const event of oldestFirst) this.trackFanoutNodeEvent(key, event.id);
   }
 
   private closePendingNodeEvents(connectionId: string, active: Set<string>): void {
@@ -2247,7 +2286,7 @@ export class AnomalyService
     if (!byNode) return;
     for (const [nodeAddr, pending] of [...byNode]) {
       if (active.has(topologyStateKey(connectionId, nodeAddr))) continue;
-      for (const event of [...pending.backlog, ...pending.resync]) this.closeLater(event.id);
+      for (const event of this.pendingEventsOf(pending)) this.closeLater(event.id);
       byNode.delete(nodeAddr);
     }
     if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
@@ -2255,7 +2294,7 @@ export class AnomalyService
 
   private pendingNodeEventIds(connectionId: string): string[] {
     return [...(this.pendingNodeOpenEvents.get(connectionId)?.values() ?? [])].flatMap((pending) =>
-      [...pending.backlog, ...pending.resync].map((event) => event.id),
+      this.pendingEventsOf(pending).map((event) => event.id),
     );
   }
 
@@ -4742,6 +4781,17 @@ export class AnomalyService
       }
     }
 
+    const restored = this.restoredCobLevel.get(key);
+    if (restored) {
+      this.restoredCobLevel.delete(key);
+      restoreCobAcknowledgedLevel(
+        state,
+        replicas === null ? [null] : replicas.map((replica) => replica.addr),
+        restored,
+        timestamp,
+      );
+    }
+
     if (!nodeAddr) {
       const hardBytes = limit !== null ? limit.hardBytes : 0;
       const gaugeEntries =
@@ -4826,7 +4876,7 @@ export class AnomalyService
   }
 
   private async readFanoutCob(
-    client: { call(...args: string[]): Promise<unknown> },
+    client: FanoutClient & { call(...args: string[]): Promise<unknown> },
     key: string,
     addr: string,
     info: Record<string, string>,
@@ -4836,7 +4886,7 @@ export class AnomalyService
     const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> => {
       const remaining = deadline - Date.now();
       if (remaining <= 0) return Promise.reject(new Error(`${what} to ${addr} timed out`));
-      return withTimeout(this.fanoutCommand(`${key}#${suffix}`, read), remaining, `${what} to ${addr} timed out`);
+      return this.fanoutRead(client, `${key}#${suffix}`, remaining, `${what} to ${addr} timed out`, read);
     };
     const [limit, replicas] = await Promise.allSettled([
       needed.limit
@@ -4867,6 +4917,7 @@ export class AnomalyService
     for (const oldest of ids) {
       if (ids.size <= AnomalyService.FANOUT_NODE_EVENT_LIMIT) break;
       ids.delete(oldest);
+      this.closeLater(oldest);
     }
     this.fanoutNodeEventIds.set(key, ids);
   }
@@ -5932,15 +5983,17 @@ export class AnomalyService
   }
 
   private async readNodeSelf(
-    client: { call(...args: string[]): Promise<unknown> },
+    client: FanoutClient & { call(...args: string[]): Promise<unknown> },
     addr: string,
     stateKey: string,
   ): Promise<ClusterNode | null> {
     try {
-      const raw = await withTimeout(
-        this.fanoutCommand(`${stateKey}#nodes`, () => client.call('CLUSTER', 'NODES')),
+      const raw = await this.fanoutRead(
+        client,
+        `${stateKey}#nodes`,
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `CLUSTER NODES to ${addr} timed out`,
+        () => client.call('CLUSTER', 'NODES'),
       );
       const self = MetricsParser.parseClusterNodes(raw as string).find((n) => n.flags.includes('myself')) ?? null;
       if (self) this.reshardNodeSelves.set(stateKey, { self, readAt: Date.now() });
@@ -5965,7 +6018,7 @@ export class AnomalyService
   }
 
   private async readNodeWriteP99(
-    client: { info(section: string): Promise<string> },
+    client: FanoutClient & { info(section: string): Promise<string> },
     key: string,
     addr: string,
     timestamp: number,
@@ -5973,22 +6026,22 @@ export class AnomalyService
     if (timestamp - (this.reshardWriteP99.get(key)?.readAt ?? -Infinity) < AnomalyService.RESHARD_P99_REFRESH_MS) {
       return;
     }
-    let value: number | null = null;
     try {
-      const raw = await withTimeout(
-        this.fanoutCommand(`${key}#latency`, () => client.info('latencystats')),
+      const raw = await this.fanoutRead(
+        client,
+        `${key}#latency`,
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `INFO latencystats to ${addr} timed out`,
+        () => client.info('latencystats'),
       );
       const parsed = InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>;
       const writes = parseLatencyStatsSection(parsed.latencystats ?? parsed.Latencystats)
         .filter((row) => isWriteCommand(row.command))
         .map((row) => row.p99Us);
-      value = writes.length > 0 ? Math.max(...writes) : null;
+      this.reshardWriteP99.set(key, { readAt: timestamp, value: writes.length > 0 ? Math.max(...writes) : null });
     } catch (err) {
       this.logger.debug(`Write P99 read failed for ${addr}: ${err instanceof Error ? err.message : err}`);
     }
-    this.reshardWriteP99.set(key, { readAt: timestamp, value });
   }
 
   private forgetNodeWriteP99(connectionId: string, keep: Set<string> = new Set()): void {
@@ -8825,6 +8878,7 @@ export class AnomalyService
       this.cobLimitCache,
       this.cobLimitRecheck,
       this.fanoutNodeEventIds,
+      this.restoredCobLevel,
     ];
   }
 
@@ -9085,12 +9139,12 @@ export class AnomalyService
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
         const deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
         const [raw, self] = await Promise.all([
-          withTimeout(
-            this.fanoutCommand(stateKey, () =>
-              Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
-            ),
+          this.fanoutRead(
+            client,
+            stateKey,
             AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
             `INFO to ${target.addr} timed out`,
+            () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
           ),
           target.nodeId
             ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
@@ -9164,6 +9218,19 @@ export class AnomalyService
       ? this.clusterDiscovery!.getNodeConnection(target.nodeId, connectionId)
       : this.clusterDiscovery!.getAddressConnection(target.host, target.port, connectionId));
     return this.convertInfoToRecord(InfoParser.parse(await client.info('replication')));
+  }
+
+  private fanoutRead<T>(
+    client: FanoutClient,
+    key: string,
+    timeoutMs: number,
+    message: string,
+    send: () => Promise<T>,
+  ): Promise<T> {
+    return withTimeout(this.fanoutCommand(key, send), timeoutMs, message).catch((err: unknown) => {
+      if (err instanceof Error && err.message === message) client.disconnect();
+      throw err;
+    });
   }
 
   private fanoutCommand<T>(key: string, send: () => Promise<T>): Promise<T> {

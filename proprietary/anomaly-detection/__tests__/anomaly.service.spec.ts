@@ -2161,6 +2161,28 @@ describe('AnomalyService', () => {
         expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
       });
 
+      it('keeps the last write P99 when a refresh fails and retries on the next poll', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 30_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: 1000 });
+
+        clock += 1000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(3);
+      });
+
       it('forgets a node write latency when the node leaves', async () => {
         discover({ b0000000: reshardNode('b', 6000, '', 1000), c0000000: reshardNode('c', 6000, '', 1000) });
         await pollSeed(1, 6000, false);
@@ -13752,6 +13774,7 @@ describe('AnomalyService', () => {
       return {
         info: jest.fn().mockImplementation(async (name?: string) => nodeInfo(name)),
         call: jest.fn().mockImplementation(async (...args: string[]) => call(...args)),
+        disconnect: jest.fn(),
       };
     }
 
@@ -14022,6 +14045,84 @@ describe('AnomalyService', () => {
         expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('b-1');
         expect((service as any).backlogCoverage.get(NODE_KEY)?.level ?? 'none').toBe('none');
       });
+
+      it('re-adopts its own open fork row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('f-1');
+      });
+
+      it('re-adopts its own open output-buffer row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('c-1');
+      });
+
+      it('still alerts when a re-adopted node escalates past its earlier output-buffer row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replicaOmem: HARD * 0.95 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.CRITICAL }),
+        ]);
+      });
+
+      it('closes earlier fork and output-buffer rows of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'gone-f', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'gone-c', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-f', 'gone-c']));
+      });
+
+      it('leaves the seed own fork and output-buffer rows alone', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [{ id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock }],
+          [MetricType.REPL_BUFFER_PRESSURE]: [{ id: 'seed-c', severity: AnomalySeverity.WARNING, timestamp: clock }],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-f']));
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-c']));
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
     });
 
     describe('fork memory and output-buffer pressure', () => {
@@ -14091,19 +14192,28 @@ describe('AnomalyService', () => {
         expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
       });
 
-      it('does not wait on a hung CLIENT LIST beyond the fan-out timeout', async () => {
+      it('drops the connection of a node whose CLIENT LIST hangs so its next INFO still answers', async () => {
         const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
         (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
         try {
-          const client = nodeClient((...args) => (args[0] === 'CLIENT' ? new Promise(() => {}) : nodeCall(...args)));
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          client.info.mockImplementation((name?: string) =>
+            stuck.length > 0 ? new Promise(() => {}) : Promise.resolve(nodeInfo(name)),
+          );
+          client.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
           (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
 
           await pollNode(FORKING);
           await pollNode(FORKING);
 
-          expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+          expect(client.disconnect).toHaveBeenCalled();
           expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
-          expect(client.call.mock.calls.filter(([command]: string[]) => command === 'CLIENT')).toHaveLength(1);
+          expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
         } finally {
           (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
         }
@@ -14164,11 +14274,13 @@ describe('AnomalyService', () => {
         expect((service as any).fanoutNodeEventIds.get(NODE_KEY)?.has(fork.id) ?? false).toBe(false);
       });
 
-      it('tracks only the latest eight event ids per node', async () => {
+      it('closes the oldest node events beyond the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
         const ids = Array.from({ length: 20 }, (_, i) => `node-event-${i}`);
         for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id);
 
         expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY)]).toEqual(ids.slice(-8));
+        expect(close.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 12));
       });
     });
   });
@@ -15297,7 +15409,7 @@ describe('AnomalyService', () => {
       it('does not queue another INFO on a primary that has not answered the last one', async () => {
         jest.useFakeTimers();
         try {
-          const client = { info: jest.fn(() => new Promise(() => {})) };
+          const client = { info: jest.fn(() => new Promise(() => {})), disconnect: jest.fn() };
           (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
 
           for (let i = 0; i < 3; i++) {

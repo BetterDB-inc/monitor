@@ -499,6 +499,18 @@ export function cobPressureRearm(
   );
 }
 
+export function restoreCobAcknowledgedLevel(
+  state: CobConnectionState,
+  replicaAddrs: (string | null)[],
+  level: 'warning' | 'critical',
+  timestamp: number,
+): void {
+  for (const addr of replicaAddrs) {
+    const replicaState = getReplicaState(state, addr ?? AGGREGATE_KEY, timestamp);
+    if (LEVEL_RANK[level] > LEVEL_RANK[replicaState.ackedLevel]) replicaState.ackedLevel = level;
+  }
+}
+
 export function cobPressureLatch(finding: CobPressureFinding): string {
   return finding.kind === 'resync-loop' ? finding.kind : (finding.replicaAddr ?? AGGREGATE_KEY);
 }
