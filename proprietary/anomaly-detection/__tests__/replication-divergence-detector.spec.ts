@@ -18,6 +18,15 @@ import {
   replicaObservedLevel,
   requeueClosedWindows,
   assessOrphanedReplica,
+  DIVERGENCE_DISAGREE_WINDOWS,
+  ReplicaViewReading,
+  ViewDisagreement,
+  acknowledgeViewAgreement,
+  acknowledgeViewDisagreement,
+  applyReplicaViews,
+  describeViewDisagreement,
+  replicaEventIds,
+  replicasToSample,
 } from '../replication-divergence-detector';
 import { ReplicaOffset, ReplicationStreamSample, ReplicationStreamTracker } from '../replication-stream';
 
@@ -1310,5 +1319,169 @@ describe('requeueClosedWindows', () => {
     expect(ends).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
     expect(ends[0]).toBe(2);
     expect(ends[ends.length - 1]).toBe(DIVERGENCE_PERSIST_BACKLOG + 1);
+  });
+});
+
+describe("the replica's own view", () => {
+  const ok = (gapBytes: number, primaryGapBytes: number, linkUp = true): ReplicaViewReading => ({
+    status: 'ok',
+    gapBytes,
+    linkUp,
+    primaryGapBytes,
+  });
+
+  class ViewHarness extends Harness {
+    reading: ReplicaViewReading | undefined = undefined;
+
+    viewWindow(spec: WindowSpec): DivergenceOutcome[] {
+      const outcomes: DivergenceOutcome[] = [];
+      for (let i = 0; i < WINDOW_MS / POLL_MS; i++) {
+        const before = this.state.closedWindowCount;
+        let emitted = observeDivergence(this.state, this.sample(spec), WINDOW_MS);
+        if (this.state.closedWindowCount !== before) {
+          const readings = new Map(this.reading ? [[ADDR, this.reading]] : []);
+          emitted = applyReplicaViews(this.state, emitted, readings);
+        }
+        for (const o of emitted) {
+          if (o.kind === 'divergence') acknowledgeDivergence(this.state, o, `evt-${o.level}`);
+          else if (o.kind === 'views_disagree') acknowledgeViewDisagreement(this.state, o.addr, 'evt-views');
+          else if (o.kind === 'views_agree') acknowledgeViewAgreement(this.state, o.addr, o.eventId);
+          else acknowledgeRecovery(this.state, o.addr);
+        }
+        outcomes.push(...emitted);
+        this.t += POLL_MS;
+      }
+      return outcomes;
+    }
+
+    viewWindows(count: number, spec: WindowSpec): DivergenceOutcome[] {
+      return Array.from({ length: count }, () => this.viewWindow(spec)).flat();
+    }
+  }
+
+  const kinds = (outcomes: DivergenceOutcome[]) => outcomes.map((o) => o.kind);
+
+  it('stores both views on the closed windows', () => {
+    const h = new ViewHarness();
+    h.reading = ok(MiB / 2, 2 * MiB);
+    h.viewWindows(3, { gap: 2 * MiB, rate: MiB });
+
+    const drained = drainClosedWindows(h.state);
+    expect(drained.length).toBeGreaterThan(0);
+    expect(drained.every((w) => w.replicaView === 'ok' && w.replicaGapBytes === MiB / 2)).toBe(true);
+    expect(h.state.replicas.get(ADDR)!.windows.at(-1)).toMatchObject({ replicaGapBytes: MiB / 2, replicaView: 'ok' });
+  });
+
+  it('marks a window the replica could not confirm without a replica gap', () => {
+    const h = new ViewHarness();
+    h.reading = { status: 'replid_mismatch', gapBytes: null, linkUp: false, primaryGapBytes: null };
+    h.viewWindows(3, { gap: 2 * MiB, rate: MiB });
+
+    expect(h.state.replicas.get(ADDR)!.windows.at(-1)).toMatchObject({
+      replicaGapBytes: null,
+      replicaView: 'replid_mismatch',
+    });
+  });
+
+  it('ignores a disagreement that lasts a single window', () => {
+    const h = new ViewHarness();
+    h.reading = ok(0, 0);
+    h.viewWindows(3, { gap: 0, rate: MiB });
+    h.reading = ok(20 * MiB, 0);
+    const blip = h.viewWindow({ gap: 0, rate: MiB });
+    h.reading = ok(0, 0);
+    const after = h.viewWindows(3, { gap: 0, rate: MiB });
+
+    expect(kinds([...blip, ...after])).not.toContain('views_disagree');
+  });
+
+  it(`reports views that disagree for ${DIVERGENCE_DISAGREE_WINDOWS} windows in a row once`, () => {
+    const h = new ViewHarness();
+    h.reading = ok(20 * MiB, 0);
+    const outcomes = h.viewWindows(DIVERGENCE_DISAGREE_WINDOWS + 3, { gap: 0, rate: MiB });
+
+    const disagreements = outcomes.filter((o): o is ViewDisagreement => o.kind === 'views_disagree');
+    expect(disagreements).toHaveLength(1);
+    expect(disagreements[0]).toMatchObject({
+      addr: ADDR,
+      primaryGapBytes: 0,
+      replicaGapBytes: 20 * MiB,
+      windowCount: DIVERGENCE_DISAGREE_WINDOWS,
+    });
+    expect(describeViewDisagreement(disagreements[0])).toContain(
+      'the primary is tracking an offset the replica no longer has',
+    );
+    expect(h.state.replicas.get(ADDR)!.disagreeEventId).toBe('evt-views');
+  });
+
+  it('does not count a difference a few seconds of writes would cover', () => {
+    const h = new ViewHarness();
+    h.reading = ok(10 * MiB, 0);
+    const outcomes = h.viewWindows(DIVERGENCE_DISAGREE_WINDOWS + 2, { gap: 0, rate: 10 * MiB });
+
+    expect(kinds(outcomes)).not.toContain('views_disagree');
+  });
+
+  it(`clears the disagreement after ${DIVERGENCE_RECOVERED_WINDOWS} windows that do not confirm it`, () => {
+    const h = new ViewHarness();
+    h.reading = ok(0, 20 * MiB);
+    const raised = h.viewWindows(DIVERGENCE_DISAGREE_WINDOWS + 1, { gap: 20 * MiB, rate: MiB });
+    expect(kinds(raised)).toContain('views_disagree');
+
+    h.reading = { status: 'unreachable', gapBytes: null, linkUp: false, primaryGapBytes: null };
+    const first = h.viewWindow({ gap: 0, rate: MiB });
+    expect(kinds(first)).not.toContain('views_agree');
+    h.reading = ok(0, 0);
+    const second = h.viewWindow({ gap: 0, rate: MiB });
+
+    expect(second.filter((o) => o.kind === 'views_agree')).toEqual([
+      { kind: 'views_agree', addr: ADDR, eventId: 'evt-views' },
+    ]);
+    expect(h.state.replicas.get(ADDR)?.disagreeEventId ?? null).toBeNull();
+  });
+
+  it('holds back recovery while the replica still reports it is behind', () => {
+    const h = new ViewHarness();
+    h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB })));
+    expect(h.state.replicas.get(ADDR)!.level).not.toBe('none');
+
+    h.reading = ok(400 * MiB, 0);
+    const held = h.viewWindows(DIVERGENCE_RECOVERED_WINDOWS + 1, { gap: 0, rate: 10 * MiB });
+    expect(kinds(held)).not.toContain('recovered');
+
+    h.reading = ok(0, 0, false);
+    expect(kinds(h.viewWindow({ gap: 0, rate: 10 * MiB }))).not.toContain('recovered');
+
+    h.reading = ok(0, 0);
+    expect(kinds(h.viewWindow({ gap: 0, rate: 10 * MiB }))).toContain('recovered');
+  });
+
+  it('confirms recovery from the primary alone when the replica cannot be read', () => {
+    const h = new ViewHarness();
+    h.windows(Array.from({ length: 10 }, () => ({ gap: 400 * MiB, rate: 10 * MiB })));
+
+    const outcomes = h.viewWindows(DIVERGENCE_RECOVERED_WINDOWS + 1, { gap: 0, rate: 10 * MiB });
+
+    expect(kinds(outcomes)).toContain('recovered');
+  });
+
+  it('resolves the disagreement when the replica drops out', () => {
+    const h = new ViewHarness();
+    h.reading = ok(20 * MiB, 0);
+    h.viewWindows(DIVERGENCE_DISAGREE_WINDOWS + 1, { gap: 0, rate: MiB });
+
+    const dropped = h.viewWindows(2, { gap: 0, rate: MiB, present: false });
+
+    expect(dropped.filter((o) => o.kind === 'views_agree')).toEqual([
+      { kind: 'views_agree', addr: ADDR, eventId: 'evt-views' },
+    ]);
+  });
+
+  it('samples every replica with a fresh window', () => {
+    const h = new ViewHarness();
+    h.viewWindows(2, { gap: 0, rate: MiB });
+
+    expect(replicasToSample(h.state, [])).toEqual([ADDR]);
+    expect(replicaEventIds(h.state.replicas.get(ADDR)!)).toEqual([]);
   });
 });

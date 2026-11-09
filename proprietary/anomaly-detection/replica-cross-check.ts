@@ -1,6 +1,7 @@
 import { formatBytes } from '@app/scaling-readiness/dimension-inputs';
 import { isReplicaRole, toFiniteNumber } from '@app/database/parsers/replication-info.parser';
-import { DIVERGENCE_FLOOR_BYTES } from './replication-divergence-detector';
+import { DIVERGENCE_FLOOR_BYTES, ReplicaViewReading, ReplicaViewStatus } from './replication-divergence-detector';
+import { parseReplicaOffsetLines } from './replication-stream';
 
 export interface ReplicaView {
   gapBytes: number;
@@ -8,21 +9,44 @@ export interface ReplicaView {
   applyBacklogBytes: number | null;
 }
 
-export function readReplicaView(
+export type ReplicaSample =
+  | { status: 'ok'; view: ReplicaView; primaryGapBytes: number | null }
+  | { status: Exclude<ReplicaViewStatus, 'ok'>; view: null; primaryGapBytes: null };
+
+export const UNREACHABLE_REPLICA: ReplicaSample = { status: 'unreachable', view: null, primaryGapBytes: null };
+
+export function sampleReplicaView(
   replica: Record<string, string>,
   primary: Record<string, string>,
-): ReplicaView | null {
-  if (!isReplicaRole(replica.role)) return null;
-  const primaryOffset = toFiniteNumber(primary.master_repl_offset);
+  addr: string,
+): ReplicaSample {
+  if (!isReplicaRole(replica.role)) return { status: 'not_replica', view: null, primaryGapBytes: null };
   const offset = toFiniteNumber(replica.slave_repl_offset);
-  if (primaryOffset === null || offset === null) return null;
-  if (!primary.master_replid || replica.master_replid !== primary.master_replid) return null;
+  const primaryOffset = toFiniteNumber(primary.master_repl_offset);
+  if (offset === null || primaryOffset === null) return UNREACHABLE_REPLICA;
+  if (!primary.master_replid || replica.master_replid !== primary.master_replid) {
+    return { status: 'replid_mismatch', view: null, primaryGapBytes: null };
+  }
   const readOffset = toFiniteNumber(replica.slave_read_repl_offset);
+  const acked = parseReplicaOffsetLines(primary).find((line) => line.addr === addr);
   return {
-    gapBytes: Math.max(0, primaryOffset - offset),
-    linkStatus: replica.master_link_status || null,
-    applyBacklogBytes: readOffset === null ? null : Math.max(0, readOffset - offset),
+    status: 'ok',
+    view: {
+      gapBytes: Math.max(0, primaryOffset - offset),
+      linkStatus: replica.master_link_status || null,
+      applyBacklogBytes: readOffset === null ? null : Math.max(0, readOffset - offset),
+    },
+    primaryGapBytes: acked ? Math.max(0, primaryOffset - acked.offset) : null,
   };
+}
+
+export function replicaReadings(samples: ReadonlyMap<string, ReplicaSample>): Map<string, ReplicaViewReading> {
+  return new Map(
+    [...samples].map(([addr, { status, view, primaryGapBytes }]) => [
+      addr,
+      { status, gapBytes: view?.gapBytes ?? null, linkUp: view?.linkStatus === 'up', primaryGapBytes },
+    ]),
+  );
 }
 
 export function replicaCaughtUp(view: ReplicaView): boolean {

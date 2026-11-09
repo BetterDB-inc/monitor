@@ -12,6 +12,8 @@ const window = (gapBytes: number, secondsBehind: number | null) => ({
   gapBytes,
   bytesPerSec: secondsBehind === null ? null : MiB,
   secondsBehind,
+  replicaGapBytes: null,
+  replicaView: null,
 });
 
 describe('ReplicationDivergencePanel', () => {

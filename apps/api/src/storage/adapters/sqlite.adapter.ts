@@ -316,6 +316,17 @@ function addKvCacheCoverageColumns(db: Database.Database): void {
   }
 }
 
+function addDivergenceReplicaViewColumns(db: Database.Database): void {
+  const cols = db.prepare(`PRAGMA table_info(replication_divergence_windows)`).all() as { name: string }[];
+  if (cols.length === 0) return;
+  if (!cols.some((c) => c.name === 'replica_gap_bytes')) {
+    db.prepare(`ALTER TABLE replication_divergence_windows ADD COLUMN replica_gap_bytes REAL`).run();
+  }
+  if (!cols.some((c) => c.name === 'replica_view')) {
+    db.prepare(`ALTER TABLE replication_divergence_windows ADD COLUMN replica_view TEXT`).run();
+  }
+}
+
 function addCaptureSessionsTargetNodeColumn(db: Database.Database): void {
   try {
     const cols = db.prepare(`PRAGMA table_info(capture_sessions)`).all() as { name: string }[];
@@ -2315,7 +2326,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
         window_end INTEGER NOT NULL,
         gap_bytes REAL NOT NULL,
         bytes_per_sec REAL,
-        seconds_behind REAL
+        seconds_behind REAL,
+        replica_gap_bytes REAL,
+        replica_view TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
@@ -2702,6 +2715,7 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     addCaptureSessionsTargetNodeColumn(this.db!);
     addMemoryProposalIntegrityColumns(this.db!);
     addKvCacheCoverageColumns(this.db!);
+    addDivergenceReplicaViewColumns(this.db!);
 
     // Agent Tokens Table (cloud-only, but created in all environments for interface compliance)
     this.db.exec(`
@@ -5239,8 +5253,9 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO replication_divergence_windows
-        (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+         replica_gap_bytes, replica_view)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -5255,6 +5270,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
           w.gapBytes,
           w.bytesPerSec,
           w.secondsBehind,
+          w.replicaGapBytes,
+          w.replicaView,
         ).changes;
       }
     });
@@ -5274,7 +5291,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     const rows = this.db
       .prepare(
-        `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+        `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+                replica_gap_bytes, replica_view
          FROM (
            SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
            FROM replication_divergence_windows
@@ -5294,6 +5312,8 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       gapBytes: Number(row.gap_bytes),
       bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
       secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+      replicaGapBytes: row.replica_gap_bytes === null ? null : Number(row.replica_gap_bytes),
+      replicaView: row.replica_view ?? null,
     }));
   }
 

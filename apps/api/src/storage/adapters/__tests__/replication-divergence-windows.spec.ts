@@ -1,5 +1,9 @@
 import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { Pool } from 'pg';
 import { MemoryAdapter } from '../memory.adapter';
 import { SqliteAdapter } from '../sqlite.adapter';
@@ -74,6 +78,8 @@ const win = (
   gapBytes: 4 * 1024 * 1024,
   bytesPerSec: 524_288.5,
   secondsBehind: 8,
+  replicaGapBytes: 512 * 1024,
+  replicaView: 'ok',
   ...o,
 });
 
@@ -126,8 +132,33 @@ describe.each<[string, AdapterFactory]>([
       gapBytes: 4 * 1024 * 1024,
       bytesPerSec: 524_288.5,
       secondsBehind: 8,
+      replicaGapBytes: 512 * 1024,
+      replicaView: 'ok',
     });
     expect(typeof rows[0].id).toBe('string');
+  });
+
+  it('keeps a window the replica could not confirm without a replica gap', async () => {
+    await storage.saveReplicationDivergenceWindows(
+      [
+        win({ windowEnd: 30_000, replicaGapBytes: null, replicaView: 'unreachable' }),
+        win({ windowEnd: 60_000, replicaGapBytes: null, replicaView: 'replid_mismatch' }),
+        win({ windowEnd: 90_000, replicaGapBytes: null, replicaView: null }),
+      ],
+      CONN,
+    );
+
+    const rows = await storage.getReplicationDivergenceWindows({
+      connectionId: CONN,
+      startTime: 0,
+      endTime: 90_000,
+    });
+
+    expect(rows.map((r) => [r.replicaView, r.replicaGapBytes])).toEqual([
+      ['unreachable', null],
+      ['replid_mismatch', null],
+      [null, null],
+    ]);
   });
 
   it('ignores a window that was already saved when a batch is retried', async () => {
@@ -237,6 +268,8 @@ describe('saving replication divergence windows before initialization', () => {
       gapBytes: 1,
       bytesPerSec: 1,
       secondsBehind: 1,
+      replicaGapBytes: null,
+      replicaView: null,
     },
   ];
 
@@ -263,6 +296,8 @@ describe('MemoryAdapter replication divergence window dedupe', () => {
     gapBytes: 1,
     bytesPerSec: 1,
     secondsBehind: 1,
+    replicaGapBytes: null,
+    replicaView: null,
   });
 
   it('dedupes saves without scanning the stored windows', async () => {
@@ -291,5 +326,51 @@ describe('MemoryAdapter replication divergence window dedupe', () => {
 
     expect(await adapter.saveReplicationDivergenceWindows([window(1)], 'c2')).toBe(0);
     expect(await adapter.saveReplicationDivergenceWindows([window(1)], 'c1')).toBe(1);
+  });
+});
+
+describe('SqliteAdapter replication divergence windows from before the replica view', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'repl-div-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('adds the replica view columns and keeps the existing windows', async () => {
+    const filepath = join(dir, 'monitor.db');
+    const legacy = new Database(filepath);
+    legacy.exec(`
+      CREATE TABLE replication_divergence_windows (
+        id TEXT PRIMARY KEY,
+        connection_id TEXT NOT NULL,
+        replica_addr TEXT NOT NULL,
+        window_start INTEGER NOT NULL,
+        window_end INTEGER NOT NULL,
+        gap_bytes REAL NOT NULL,
+        bytes_per_sec REAL,
+        seconds_behind REAL
+      );
+      INSERT INTO replication_divergence_windows VALUES ('old', '${CONN}', '${A}', 0, 30000, 2097152, 1024, 2048);
+    `);
+    legacy.close();
+
+    const storage = new SqliteAdapter({ filepath });
+    await storage.initialize();
+    try {
+      await storage.saveReplicationDivergenceWindows([win({ windowStart: 30_000, windowEnd: 60_000 })], CONN);
+
+      const rows = await storage.getReplicationDivergenceWindows({ connectionId: CONN, startTime: 0, endTime: 60_000 });
+
+      expect(rows.map((r) => [r.windowEnd, r.replicaView, r.replicaGapBytes])).toEqual([
+        [30_000, null, null],
+        [60_000, 'ok', 512 * 1024],
+      ]);
+    } finally {
+      await storage.close();
+    }
   });
 });

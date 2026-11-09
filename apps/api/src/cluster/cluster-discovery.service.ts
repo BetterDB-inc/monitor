@@ -254,6 +254,31 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     });
   }
 
+  async getReplicaConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    this.assertDialsDataNodes(connectionId, `${host}:${port}`);
+    const config = this.connectionRegistry.getConfig(connectionId);
+    if (!config || config.membership || config.sshTunnel?.enabled) {
+      throw new Error(`Connection ${connectionId} cannot dial its replica ${host}:${port} directly`);
+    }
+    const key = `replica:${connectionId}:${host}:${port}`;
+    const reused = await this.reuseNodeClient(key);
+    if (reused) return reused;
+    const { username, password } = this.connectionRegistry.get(connectionId).getClient().options;
+    const node: DiscoveredNode = {
+      id: key,
+      address: `${host}:${port}`,
+      role: 'replica',
+      slots: [],
+      configEpoch: 0,
+      healthy: true,
+      flags: [],
+    };
+    return this.openNodeClient(key, node, host, port, connectionId, {
+      username: username || '',
+      password: password || '',
+    });
+  }
+
   private async reuseNodeClient(key: string): Promise<Valkey | null> {
     const existingConnection = this.discoveredNodes.get(key);
     if (existingConnection) {

@@ -16084,6 +16084,8 @@ describe('AnomalyService', () => {
           gapBytes: 2 * MiB,
           bytesPerSec: MiB,
           secondsBehind: 2,
+          replicaGapBytes: MiB,
+          replicaView: 'ok',
         },
         {
           id: 'w2',
@@ -16115,8 +16117,11 @@ describe('AnomalyService', () => {
         gapBytes: 2 * MiB,
         bytesPerSec: MiB,
         secondsBehind: 2,
+        replicaGapBytes: MiB,
+        replicaView: 'ok',
       });
-      expect(history[0].latest?.gapBytes).toBe(10 * MiB);
+      expect(history[0].latest).toMatchObject({ gapBytes: 10 * MiB, replicaGapBytes: null, replicaView: null });
+      expect(history[1].windows[0]).toMatchObject({ replicaGapBytes: null, replicaView: null });
     });
 
     it('reads a stored gap as behind until a live window closes', async () => {
@@ -16437,6 +16442,140 @@ describe('AnomalyService', () => {
       expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual(['warning']);
     });
 
+    describe('reading its own replicas', () => {
+      const REPLID = 'b'.repeat(40);
+      const ADDR = '10.0.0.2:6379';
+      let primaryGap: number;
+      let replica: { info: jest.Mock };
+      let getReplicaConnection: jest.Mock;
+
+      function replicaReply(gap: number, replid = REPLID) {
+        return [
+          '# Replication',
+          'role:slave',
+          `master_replid:${replid}`,
+          'master_link_status:up',
+          `slave_repl_offset:${1_000 * MiB - gap}`,
+        ].join('\r\n');
+      }
+
+      beforeEach(() => {
+        primaryGap = 0;
+        (dbClient.getInfoParsed as jest.Mock).mockImplementation(async () => ({
+          replication: {
+            role: 'master',
+            master_replid: REPLID,
+            master_repl_offset: String(1_000 * MiB),
+            slave0: `ip=10.0.0.2,port=6379,state=online,offset=${1_000 * MiB - primaryGap},lag=0`,
+          },
+        }));
+        replica = { info: jest.fn().mockResolvedValue(replicaReply(0)) };
+        getReplicaConnection = jest.fn().mockResolvedValue(replica);
+        (service as any).clusterDiscovery = { getReplicaConnection };
+      });
+
+      const disagreements = () =>
+        service
+          .getRecentEvents(20, MetricType.REPLICATION_DIVERGENCE)
+          .filter((event) => event.message.includes('disagree on how far behind it is'));
+
+      const persistedViews = async () => {
+        await (service as any).drainPersistenceOutbox();
+        return storage.saveReplicationDivergenceWindows.mock.calls
+          .flatMap(([rows]: [Array<{ replicaView: string | null; replicaGapBytes: number | null }>]) => rows)
+          .map((row) => [row.replicaView, row.replicaGapBytes]);
+      };
+
+      it("dials a replica it has no connection for with the primary's credentials", async () => {
+        replica.info.mockResolvedValue(replicaReply(MiB / 2));
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1');
+        expect(await persistedViews()).toContainEqual(['ok', MiB / 2]);
+      });
+
+      it('stores an unreachable replica without its own gap', async () => {
+        getReplicaConnection.mockRejectedValue(new Error('refused'));
+
+        await feed([0, 0, 0], T0);
+
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view, gap]) => view === 'unreachable' && gap === null)).toBe(true);
+      });
+
+      it('stores a replica that follows another history without its own gap', async () => {
+        replica.info.mockResolvedValue(replicaReply(0, 'c'.repeat(40)));
+
+        await feed([0, 0, 0], T0);
+
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view, gap]) => view === 'replid_mismatch' && gap === null)).toBe(true);
+      });
+
+      it('does not dial the replicas of a Sentinel connection', async () => {
+        (dbClient as any).getCapabilities = jest.fn().mockReturnValue({ isSentinel: true });
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('does not dial the replicas of a Sentinel member', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          id: 'conn-1',
+          membership: { source: 'sentinel', seedId: 'seed-s', nodeId: 'n' },
+        });
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('raises a warning while the two views disagree and resolves it once they agree', async () => {
+        const divergenceHook = (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+        replica.info.mockResolvedValue(replicaReply(20 * MiB));
+
+        let t = await feed([0, 0, 0, 0, 0, 0], T0);
+
+        const [raised] = disagreements();
+        expect(disagreements()).toHaveLength(1);
+        expect(raised).toMatchObject({
+          severity: AnomalySeverity.WARNING,
+          value: 20 * MiB,
+          replicaAddr: ADDR,
+          resolved: false,
+        });
+        expect(raised.message).toContain('the primary sees 0 B, the replica reports 20 MB');
+        expect(divergenceHook).not.toHaveBeenCalled();
+
+        replica.info.mockResolvedValue(replicaReply(0));
+        t = await feed([0, 0, 0], t);
+
+        expect(disagreements()).toEqual([expect.objectContaining({ id: raised.id, resolved: true })]);
+        const replicaState = (service as any).divergenceState.get('conn-1').replicas.get(ADDR);
+        expect(replicaState?.disagreeEventId ?? null).toBeNull();
+      });
+
+      it('holds back recovery while the replica still reports it is behind', async () => {
+        const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+        replica.info.mockResolvedValue(replicaReply(400 * MiB));
+        primaryGap = 400 * MiB;
+        let t = await feed([2, 4, 6, 8, 10, 12], T0);
+        expect((webhookEventsProService as any).dispatchReplicationDivergence).toHaveBeenCalledTimes(1);
+
+        primaryGap = 0;
+        t = await feed([0, 0, 0], t);
+        expect(recoveredHook).not.toHaveBeenCalled();
+
+        replica.info.mockResolvedValue(replicaReply(0));
+        await feed([0, 0], t);
+        expect(recoveredHook).toHaveBeenCalledTimes(1);
+      });
+    });
+
     describe('across the topology', () => {
       const NODE = '10.0.1.5:6379';
       const NODE_REPLICA = '10.0.1.6:6379';
@@ -16533,13 +16672,17 @@ describe('AnomalyService', () => {
 
         const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
 
-        it('skips the alert when the replica reports it is caught up', async () => {
+        it('skips the divergence alert when the replica reports it is caught up', async () => {
           clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB));
 
           await poll([target], 18, T0);
 
           expect(hook()).not.toHaveBeenCalled();
-          expect(service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)).toEqual([]);
+          expect(
+            service
+              .getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)
+              .every((event) => event.message.includes('disagree on how far behind it is')),
+          ).toBe(true);
           expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-r', 'conn-1');
         });
 
@@ -16657,13 +16800,13 @@ describe('AnomalyService', () => {
           const getAddressConnection = jest.fn().mockResolvedValue(replica);
           (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getAddressConnection };
 
-          const view = await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, async () => ({
+          const samples = await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, async () => ({
             master_repl_offset: String(1_000 * MiB),
             master_replid: 'b'.repeat(40),
           }));
 
           expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'seed-s');
-          expect(view).toMatchObject({ gapBytes: 0, linkStatus: 'up' });
+          expect(samples.get(NODE_REPLICA).view).toMatchObject({ gapBytes: 0, linkStatus: 'up' });
         });
 
         it('skips the cross-check once the poll has used up its time', async () => {
@@ -16672,9 +16815,9 @@ describe('AnomalyService', () => {
           jest.spyOn(Date, 'now').mockReturnValue(T0);
           const readPrimary = jest.fn();
 
-          const view = await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, readPrimary);
+          const samples = await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, readPrimary);
 
-          expect(view).toBeNull();
+          expect(samples.get(NODE_REPLICA)).toMatchObject({ status: 'unreachable', view: null });
           expect(readPrimary).not.toHaveBeenCalled();
         });
 
@@ -16687,7 +16830,7 @@ describe('AnomalyService', () => {
           });
           clusterWith(nodeClient([2]), replica);
 
-          await (service as any).crossCheckReplica(mockCtx, NODE_REPLICA, async () => {
+          await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, async () => {
             order.push('primary');
             return { master_repl_offset: '1', master_replid: 'b'.repeat(40) };
           });
