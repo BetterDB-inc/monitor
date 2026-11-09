@@ -30,6 +30,7 @@ export const DIVERGENCE_WINDOW_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
 export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
 export const DIVERGENCE_DISAGREE_WINDOWS = 3;
+export const REPLICA_VIEWS_DEDUPE_KEY = 'replica-views';
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
 export type ReplicaObservedLevel = DivergenceLevel | 'behind' | 'unobserved';

@@ -268,6 +268,7 @@ import {
   describeViewDisagreement,
   replicaEventIds,
   replicasToSample,
+  REPLICA_VIEWS_DEDUPE_KEY,
   withReplicaView,
   assessOrphanedReplica,
   acknowledgeRecovery,
@@ -708,6 +709,7 @@ export class AnomalyService
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
   private sentinelReplicaAddrs = new Map<string, Set<string>>();
   private crossCheckDeadline = new Map<string, number | null>();
+  private replicaReadsInFlight = new Set<string>();
   // Monitor-clock ms the masters snapshot above was last refreshed, and the value
   // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
   // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
@@ -6921,6 +6923,7 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+  private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
   /**
@@ -9313,7 +9316,8 @@ export class AnomalyService
     let primary: Record<string, string> | null = null;
     if (attempted.some(([, replica]) => !(replica instanceof Error))) {
       try {
-        primary = await withTimeout(readPrimary(), this.crossCheckBudget(ctx.connectionId), 'Re-reading the primary timed out');
+        const budget = this.crossCheckBudget(ctx.connectionId);
+        primary = await withTimeout(readPrimary(), budget, 'Re-reading the primary timed out');
       } catch (err) {
         this.logger.debug(
           `Could not re-read the primary of ${ctx.connectionName} for the replica cross-check: ${
@@ -9340,12 +9344,17 @@ export class AnomalyService
     if (!address) return null;
     const readReplica = this.replicaReader(ctx, address.host, address.port, ownPrimary);
     if (!readReplica) return null;
+    const inFlight = `${ctx.connectionId}:${replicaAddr}`;
     try {
-      return await withTimeout(
-        readReplica(),
-        this.crossCheckBudget(ctx.connectionId),
-        `Reading replica ${replicaAddr} timed out`,
-      );
+      const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
+      if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
+      this.replicaReadsInFlight.add(inFlight);
+      const pending = readReplica();
+      const release = () => {
+        this.replicaReadsInFlight.delete(inFlight);
+      };
+      pending.then(release, release);
+      return await withTimeout(pending, budget, `Reading replica ${replicaAddr} timed out`);
     } catch (err) {
       this.logger.debug(
         `Could not read replica ${replicaAddr} of ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -9354,16 +9363,15 @@ export class AnomalyService
     }
   }
 
-  private crossCheckBudget(connectionId: string): number {
+  private crossCheckBudget(connectionId: string, reserveMs = 0): number {
     let deadline = this.crossCheckDeadline.get(connectionId);
     if (deadline === null) {
       deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
       this.crossCheckDeadline.set(connectionId, deadline);
     }
-    const budget = Math.min(
-      AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-      deadline === undefined ? Infinity : deadline - Date.now(),
-    );
+    const budget =
+      Math.min(AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, deadline === undefined ? Infinity : deadline - Date.now()) -
+      reserveMs;
     if (budget <= 0) throw new Error('no time left in this poll');
     return budget;
   }
@@ -10016,6 +10024,10 @@ export class AnomalyService
         if (!active.has(event.nodeAddr!)) continue;
         const key = topologyStateKey(ctx.connectionId, event.nodeAddr!);
         if (this.divergenceOrphansSwept.has(key)) continue;
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          await this.closeRestoredDisagreements(key, [event]);
+          continue;
+        }
         const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
@@ -10086,10 +10098,15 @@ export class AnomalyService
       const seen = new Set([...state.replicas.values()].flatMap(replicaEventIds));
       const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
+      const disagreements: StoredAnomalyEvent[] = [];
       for (const event of open) {
         if (event.nodeAddr !== nodeAddr) continue;
         if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
         seen.add(event.id);
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          disagreements.push(event);
+          continue;
+        }
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
           eventIds: new Set<string>(),
@@ -10101,6 +10118,7 @@ export class AnomalyService
       }
       if (orphans.size > 0) this.divergenceOrphans.set(key, orphans);
       this.divergenceOrphansSwept.add(key);
+      await this.closeRestoredDisagreements(key, disagreements);
     } catch (err) {
       this.logger.warn(
         `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
@@ -10146,6 +10164,15 @@ export class AnomalyService
       }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(key);
+  }
+
+  private async closeRestoredDisagreements(key: string, events: StoredAnomalyEvent[]): Promise<void> {
+    for (const event of events) {
+      const replica = event.replicaAddr ?? 'unknown';
+      await this.resolveAnomalyOutcome(event.id, () => {
+        this.retryDroppedDivergenceClose(key, replica, event.id);
+      });
+    }
   }
 
   private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
@@ -10465,8 +10492,10 @@ export class AnomalyService
       resolved: false,
       connectionId: ctx.connectionId,
       replicaAddr: outcome.addr,
+      dedupeKey: REPLICA_VIEWS_DEDUPE_KEY,
       ...(nodeAddr ? { nodeAddr } : {}),
     };
+    this.anomalySaveHooks.set(event, () => undefined);
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
     await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${outcome.addr}:views`, () => {
       acknowledgeViewAgreement(state, outcome.addr, event.id);
