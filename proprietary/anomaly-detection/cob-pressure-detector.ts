@@ -62,6 +62,7 @@ export interface CobConnectionState {
    * addr-keyed gate would never suppress anything.
    */
   resyncFiredAt: number | null;
+  aggregateAlertLevel: CobLevel;
 }
 
 export interface CobEvaluationInput {
@@ -96,6 +97,7 @@ export function createCobConnectionState(): CobConnectionState {
     syncFullTimes: [],
     lastConnectedSlaves: null,
     resyncFiredAt: null,
+    aggregateAlertLevel: 'none',
   };
 }
 
@@ -277,12 +279,15 @@ export function evaluateCobPressure(
     if (input.replicas !== null) {
       // Per-replica visibility is back — the degraded-mode aggregate entry is
       // superseded and must not linger as pressure memory.
-      const aggregateLevel = state.replicas.get(AGGREGATE_KEY)?.ackedLevel ?? 'none';
+      const aggregateLevel = lowerLevel(
+        state.replicas.get(AGGREGATE_KEY)?.ackedLevel ?? 'none',
+        state.aggregateAlertLevel,
+      );
       state.replicas.delete(AGGREGATE_KEY);
+      state.aggregateAlertLevel = 'none';
       for (const replica of input.replicas) {
-        const known = state.replicas.has(replica.addr);
         const replicaState = getReplicaState(state, replica.addr, timestamp);
-        if (!known && LEVEL_RANK[aggregateLevel] > LEVEL_RANK[replicaState.ackedLevel]) {
+        if (LEVEL_RANK[aggregateLevel] > LEVEL_RANK[replicaState.ackedLevel]) {
           replicaState.ackedLevel = aggregateLevel;
         }
         const assessment = assessRatio(replica.omem, limit, replicaState, timestamp);
@@ -302,6 +307,7 @@ export function evaluateCobPressure(
       const ratio = combined > 0 ? input.memClientsSlaves / combined : 0;
       const level: CobLevel =
         ratio >= COB_CRIT_RATIO ? 'critical' : ratio >= COB_WARN_RATIO ? 'warning' : 'none';
+      if (!state.replicas.has(AGGREGATE_KEY)) state.aggregateAlertLevel = 'none';
       const inherited = state.replicas.has(AGGREGATE_KEY) ? 'none' : highestAckedLevel(state);
       const replicaState = getReplicaState(state, AGGREGATE_KEY, timestamp);
       if (LEVEL_RANK[inherited] > LEVEL_RANK[replicaState.ackedLevel]) replicaState.ackedLevel = inherited;
@@ -490,6 +496,7 @@ export function acknowledgeCobFinding(
     return;
   }
   replicaState.ackedLevel = finding.level;
+  if (finding.kind === 'aggregate') state.aggregateAlertLevel = finding.level;
 }
 
 export function cobPressureRearm(
@@ -504,7 +511,7 @@ export function cobPressureRearm(
   }
   const replicaState = state.replicas.get(finding.replicaAddr ?? AGGREGATE_KEY);
   if (!replicaState) return () => undefined;
-  return rearmLevel(
+  const rearmReplica = rearmLevel(
     LEVEL_RANK,
     replicaState.ackedLevel,
     () => replicaState.ackedLevel,
@@ -512,15 +519,39 @@ export function cobPressureRearm(
       replicaState.ackedLevel = level;
     },
   );
+  if (finding.kind !== 'aggregate') return rearmReplica;
+  const rearmAggregate = rearmLevel(
+    LEVEL_RANK,
+    state.aggregateAlertLevel,
+    () => state.aggregateAlertLevel,
+    (level) => {
+      state.aggregateAlertLevel = level;
+    },
+  );
+  return () => {
+    rearmReplica();
+    rearmAggregate();
+  };
 }
 
+type AlertLevel = 'warning' | 'critical';
+
 export interface RestoredCobLevels {
-  replicas: Map<string, 'warning' | 'critical'>;
-  aggregate: 'warning' | 'critical' | null;
+  replicas: Map<string, AlertLevel>;
+  aggregate: AlertLevel | null;
+  aggregateAlert: AlertLevel | null;
 }
 
 export function createRestoredCobLevels(): RestoredCobLevels {
-  return { replicas: new Map(), aggregate: null };
+  return { replicas: new Map(), aggregate: null, aggregateAlert: null };
+}
+
+function higherAlertLevel(held: AlertLevel | null | undefined, level: AlertLevel): AlertLevel {
+  return held && LEVEL_RANK[held] >= LEVEL_RANK[level] ? held : level;
+}
+
+function lowerLevel(a: CobLevel, b: CobLevel): CobLevel {
+  return LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
 }
 
 export function holdRestoredCobFinding(
@@ -534,10 +565,12 @@ export function holdRestoredCobFinding(
     state.resyncFiredAt = Math.max(state.resyncFiredAt ?? timestamp, timestamp);
     return;
   }
-  if (restored.aggregate === null || LEVEL_RANK[level] > LEVEL_RANK[restored.aggregate]) restored.aggregate = level;
-  if (!latch || latch === AGGREGATE_KEY) return;
-  const held = restored.replicas.get(latch);
-  if (!held || LEVEL_RANK[level] > LEVEL_RANK[held]) restored.replicas.set(latch, level);
+  restored.aggregate = higherAlertLevel(restored.aggregate, level);
+  if (!latch || latch === AGGREGATE_KEY) {
+    restored.aggregateAlert = higherAlertLevel(restored.aggregateAlert, level);
+    return;
+  }
+  restored.replicas.set(latch, higherAlertLevel(restored.replicas.get(latch), level));
 }
 
 export function applyRestoredCobLevels(
@@ -548,11 +581,21 @@ export function applyRestoredCobLevels(
 ): boolean {
   if (!replicasVisible) {
     if (restored.aggregate) restoreCobAcknowledgedLevel(state, [null], restored.aggregate, timestamp);
+    restoreAggregateAlertLevel(state, restored.aggregateAlert);
     restored.aggregate = null;
+    restored.aggregateAlert = null;
     return restored.replicas.size === 0;
   }
   for (const [addr, level] of restored.replicas) restoreCobAcknowledgedLevel(state, [addr], level, timestamp);
+  if (restored.aggregateAlert) {
+    restoreCobAcknowledgedLevel(state, [null], restored.aggregateAlert, timestamp);
+    restoreAggregateAlertLevel(state, restored.aggregateAlert);
+  }
   return true;
+}
+
+function restoreAggregateAlertLevel(state: CobConnectionState, level: AlertLevel | null): void {
+  if (level && LEVEL_RANK[level] > LEVEL_RANK[state.aggregateAlertLevel]) state.aggregateAlertLevel = level;
 }
 
 function restoreCobAcknowledgedLevel(

@@ -14181,7 +14181,7 @@ describe('AnomalyService', () => {
       it('keeps a re-adopted projected fork warning while the write rate is still unknown', async () => {
         openRows({
           [MetricType.FORK_MEMORY_RISK]: [
-            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
           ],
         });
         await adoptSeed();
@@ -14212,6 +14212,59 @@ describe('AnomalyService', () => {
         expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
           expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.WARNING, dedupeKey: 'live-cow-oom' }),
         ]);
+      });
+
+      it('restores the latest fork kind when older and newer fork rows are open', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-old', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.WARNING, timestamp: clock - 60_000 },
+            { id: 'f-new', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8.5 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([expect.objectContaining({ dedupeKey: 'live-cow-oom' })]);
+      });
+
+      it('does not let a restored warning of one replica hide another replica after CLIENT LIST recovers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored aggregate output-buffer warning when CLIENT LIST answers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '(aggregate)', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
       });
 
       it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
@@ -14436,6 +14489,7 @@ describe('AnomalyService', () => {
       });
 
       it('checks a fan-out primary again once its registered connection stops polling', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
         (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock - 10 * 60_000 });
 
         await pollNode(FORKING);
@@ -14466,6 +14520,23 @@ describe('AnomalyService', () => {
         expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
           expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: '(aggregate)' }),
         ]);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
+      it('does not re-alert a replica seen before CLIENT LIST failed once the aggregate alert covers it', async () => {
+        await pollNode();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.95) }, replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
 
         await pollNode();
         await pollNode();

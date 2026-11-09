@@ -2273,10 +2273,12 @@ export class AnomalyService
   }
 
   private adoptNodeForkEvents(key: string, open: StoredAnomalyEvent[]): void {
-    const level = this.openEventLevel(open);
-    if (level === 'none') return;
-    const live = open.some((e) => e.dedupeKey !== 'projected-fork-oom');
-    this.forkMemoryState.set(key, { ackedLevel: level, ackedKind: live ? 'live-cow-oom' : 'projected-fork-oom' });
+    if (open.length === 0) return;
+    const latest = open.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
+    this.forkMemoryState.set(key, {
+      ackedLevel: latest.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning',
+      ackedKind: latest.dedupeKey === 'projected-fork-oom' ? 'projected-fork-oom' : 'live-cow-oom',
+    });
     this.trackAdoptedNodeEvents(key, open);
   }
 
