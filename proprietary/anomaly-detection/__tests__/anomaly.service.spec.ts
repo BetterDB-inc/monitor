@@ -14852,6 +14852,47 @@ describe('AnomalyService', () => {
           expect(latest()).toMatchObject({ checked: 1, unreachable: 0, reason: null });
         });
 
+        it('keeps a down primary with its holder while the takeover read fails', async () => {
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
+            return nodeClient([2]);
+          });
+          const members = new Set([NODE, other.addr]);
+          const conn2 = () =>
+            (service as any).detectTopologyAnomalies(
+              { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+              { targets: [target, other], members },
+            );
+
+          await poll([target], 1, T0, members);
+          await conn2();
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+
+          await poll([target], 1, T0 + 10_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+          // Whether it retries node-c or backs off, conn-2 still leaves it to conn-1.
+          await conn2();
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+          await poll([target], 1, T0 + 20_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+        });
+
+        it('counts a primary past the cap as skipped when another connection holds it only as down', async () => {
+          discovery();
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, TOPOLOGY_TARGET_LIMIT, [other.addr]);
+          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT }, (_, i) => ({
+            addr: `10.0.0.${i}:6379`,
+            host: `10.0.0.${i}`,
+            port: 6379,
+            nodeId: `node-${i}`,
+          }));
+
+          await poll([...targets, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: 1 });
+        });
+
         it('counts the primaries past the target cap as skipped', async () => {
           discovery();
           const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 3 }, (_, i) => ({

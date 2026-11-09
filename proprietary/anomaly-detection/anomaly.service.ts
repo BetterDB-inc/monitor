@@ -9025,6 +9025,14 @@ export class AnomalyService
       [...scope.members].filter((addr) => !reachable.has(addr)),
     );
     const claimedAddrs = new Set(claimed.map((t) => t.addr));
+    // Primaries taken over from a connection holding them as down. That one
+    // keeps counting them until a read here succeeds, so a failed or
+    // backed-off read of one is not counted here as well.
+    const takeovers = new Set(
+      claimed
+        .filter((t) => this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs))
+        .map((t) => t.addr),
+    );
     // A down primary stays with every connection of its topology, so its open
     // alerts stay open until it leaves the topology; only the connection
     // holding it counts it unreachable.
@@ -9036,7 +9044,7 @@ export class AnomalyService
     const skipped = scope.targets.filter(
       (t) =>
         !claimedAddrs.has(t.addr) &&
-        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
+        this.topologyTargetClaims.isFreeFor(ctx.connectionId, t.addr, now, staleMs),
     ).length;
     const down = [...kept].filter(
       (addr) =>
@@ -9069,11 +9077,12 @@ export class AnomalyService
     const targets = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
     );
-    const backedOff = claimed.length - targets.length;
+    const backedOffTargets = claimed.filter((t) => !targets.includes(t) && !takeovers.has(t.addr));
+    const backedOff = backedOffTargets.length;
     // A primary backing off after refusing the credentials still counts as
     // refusing them, not as unreachable.
-    const backedOffAuth = claimed.filter(
-      (t) => !targets.includes(t) && this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.auth,
+    const backedOffAuth = backedOffTargets.filter(
+      (t) => this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.auth,
     ).length;
     // Recorded before the awaits below, so a storage error there cannot leave
     // the previous cycle's counts in place.
@@ -9176,11 +9185,13 @@ export class AnomalyService
     const refused = results.map(
       (result) => result.status === 'rejected' && AnomalyService.isFanoutAuthError(result.reason),
     );
-    const failed = results.filter((result) => result.status === 'rejected').length;
-    const authFailed = backedOffAuth + refused.filter(Boolean).length;
+    const counted = (i: number) => !takeovers.has(targets[i].addr);
+    const failed = results.filter((result, i) => result.status === 'rejected' && counted(i)).length;
+    const authFailed = backedOffAuth + refused.filter((r, i) => r && counted(i)).length;
     const unreachable = backedOff + failed;
+    const checked = results.filter((result) => result.status === 'fulfilled').length;
     // Recorded as soon as the reads settle: detection below can throw.
-    coverage(claimed.length - unreachable, unreachable - authFailed + down, authFailed);
+    coverage(checked, unreachable - authFailed + down, authFailed);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
@@ -9194,6 +9205,7 @@ export class AnomalyService
       }
       this.topologyBackoff.delete(key);
       const target = targets[i];
+      if (takeovers.has(target.addr)) this.topologyTargetClaims.confirm(ctx.connectionId, target.addr, now);
       const nodeCtx: ConnectionContext = {
         ...ctx,
         connectionName: `${ctx.connectionName} (${target.addr})`,

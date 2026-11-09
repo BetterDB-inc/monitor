@@ -94,7 +94,9 @@ export class TopologyTargetClaims {
    * primary the topology flags as down is not read, but whoever holds it is
    * the one connection that counts it unreachable. A primary held only as
    * down is free to a connection whose topology still reaches it (`fail?` and
-   * `s_down` are one seed's view), so that connection reads it instead.
+   * `s_down` are one seed's view), so that connection reads it instead. The
+   * down claim stays until that read succeeds (`confirm`), so a takeover whose
+   * read fails or backs off does not hand the primary back and forth.
    * Returns the claimed targets.
    */
   claim(
@@ -105,14 +107,13 @@ export class TopologyTargetClaims {
     limit = TOPOLOGY_TARGET_LIMIT,
     down: Iterable<string> = [],
   ): TopologyTarget[] {
-    const free = targets.filter((target) => {
-      const owner = this.otherOwner(connectionId, target.addr, now, staleMs);
-      return !owner || owner.down;
-    });
+    const free = targets.filter((target) => this.isFreeFor(connectionId, target.addr, now, staleMs));
     const claimed = free.slice(0, limit);
     const freeDown = [...down].filter((addr) => !this.heldByOther(connectionId, addr, now, staleMs));
     const wanted = new Map<string, boolean>([
-      ...claimed.map((t): [string, boolean] => [t.addr, false]),
+      ...claimed
+        .filter((t) => !this.heldByOther(connectionId, t.addr, now, staleMs))
+        .map((t): [string, boolean] => [t.addr, false]),
       ...freeDown.map((addr): [string, boolean] => [addr, true]),
     ]);
     for (const [addr, owner] of this.owners) {
@@ -120,6 +121,17 @@ export class TopologyTargetClaims {
     }
     for (const [addr, isDown] of wanted) this.owners.set(addr, { connectionId, at: now, down: isDown });
     return claimed;
+  }
+
+  /** Takes over a primary claimed from a down holder once it was read. */
+  confirm(connectionId: string, addr: string, now: number): void {
+    this.owners.set(addr, { connectionId, at: now, down: false });
+  }
+
+  /** Whether the connection may read the primary: no one else holds it, or only as down. */
+  isFreeFor(connectionId: string, addr: string, now: number, staleMs: number): boolean {
+    const owner = this.otherOwner(connectionId, addr, now, staleMs);
+    return !owner || owner.down;
   }
 
   heldByOther(connectionId: string, addr: string, now: number, staleMs: number): boolean {

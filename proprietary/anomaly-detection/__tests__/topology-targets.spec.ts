@@ -133,12 +133,35 @@ describe('topology targets', () => {
       expect(claims.heldByOther('b', target.addr, 1_000, 30_000)).toBe(true);
 
       expect(claims.claim('b', [target], 1_000, 30_000)).toEqual([target]);
+      // The down claim stays until b has read the primary.
+      expect(claims.heldByOther('b', target.addr, 1_000, 30_000)).toBe(true);
+      claims.confirm('b', target.addr, 1_000);
 
       expect(claims.heldByOther('a', target.addr, 2_000, 30_000)).toBe(true);
       // A down claim never takes a primary back from the connection reading it.
       claims.claim('a', [], 2_000, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
       expect(claims.heldByOther('a', target.addr, 3_000, 30_000)).toBe(true);
       expect(claims.heldByOther('b', target.addr, 3_000, 30_000)).toBe(false);
+    });
+
+    it('keeps the down claim when the takeover read fails', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+
+      claims.claim('b', [target], 1_000, 30_000);
+      claims.releaseTarget('b', target.addr);
+
+      expect(claims.heldByOther('b', target.addr, 2_000, 30_000)).toBe(true);
+      expect(claims.heldByOther('a', target.addr, 2_000, 30_000)).toBe(false);
+    });
+
+    it('treats a primary held only as down as free', () => {
+      const claims = new TopologyTargetClaims();
+      claims.claim('a', [], 0, 30_000, TOPOLOGY_TARGET_LIMIT, [target.addr]);
+
+      expect(claims.isFreeFor('b', target.addr, 1_000, 30_000)).toBe(true);
+      claims.claim('a', [target], 2_000, 30_000);
+      expect(claims.isFreeFor('b', target.addr, 3_000, 30_000)).toBe(false);
     });
 
     it('hands a primary over once its owner gives it up', () => {
