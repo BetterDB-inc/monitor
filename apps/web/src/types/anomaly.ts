@@ -129,12 +129,20 @@ export interface IncidentSequenceStep {
   step: number | null;
 }
 
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+}
+
 export interface IncidentSequenceMatch {
   pattern: string;
   anomalyIds: string[];
   steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
 }
 

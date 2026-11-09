@@ -134,6 +134,15 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                 ))}
               </ul>
             )}
+            {match.values && match.values.length > 0 && (
+              <ul className="space-y-1 text-sm font-mono">
+                {match.values.map((v) => (
+                  <li key={v.setting}>
+                    {v.setting}: {v.current} → {v.target} {v.unit}
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
       ))}

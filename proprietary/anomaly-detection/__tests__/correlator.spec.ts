@@ -416,6 +416,79 @@ describe('Correlator', () => {
 
       expect(groups[0].anomalies[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     });
+
+    it('names the top clients and their growth in the throttle recommendation', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          retryContributors: [
+            {
+              key: 'checkout',
+              keyKind: 'name',
+              commandRateGrowth: 4.2,
+              newConnections: 12,
+              connections: 3,
+            },
+            {
+              key: '10.0.0.7',
+              keyKind: 'ip',
+              commandRateGrowth: null,
+              newConnections: 5,
+              connections: 1,
+            },
+          ],
+        }),
+      ]);
+
+      expect(groups[0].recommendations).toContain(
+        'Throttle or inspect the clients whose command rate grew the most. Top clients: ' +
+          'name checkout (cmds 4.2×, 12 reconnects); ip 10.0.0.7 (5 reconnects).',
+      );
+    });
+
+    it.each([
+      ['unavailable', null],
+      ['empty', []],
+    ])('keeps the fixed throttle recommendation when attribution is %s', (_, retryContributors) => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message, retryContributors }),
+      ]);
+
+      expect(groups[0].recommendations).toContain(
+        'Throttle or inspect the clients whose command rate grew the most',
+      );
+    });
+  });
+
+  describe('computed recommendation values', () => {
+    it('carries one value per setting from the group members, the latest winning', () => {
+      const base = Date.now();
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: base,
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: [{ setting: 'total_system_memory', current: 1024, target: 1200, unit: 'MB' }],
+        }),
+        makeAnomaly({
+          timestamp: base + 1,
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: [{ setting: 'total_system_memory', current: 1024, target: 1400, unit: 'MB' }],
+        }),
+      ]);
+
+      expect(groups[0].values).toEqual([
+        { setting: 'total_system_memory', current: 1024, target: 1400, unit: 'MB' },
+      ]);
+    });
+
+    it('leaves values out when no member has any', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.FORK_MEMORY_RISK }),
+      ]);
+
+      expect(groups[0]).not.toHaveProperty('values');
+    });
   });
 
   describe('pattern precedence', () => {

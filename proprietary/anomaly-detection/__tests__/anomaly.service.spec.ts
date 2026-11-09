@@ -8771,6 +8771,33 @@ describe('AnomalyService', () => {
       const critical = cobEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
       expect(critical).toHaveLength(1);
       expect(critical[0].message).toContain('resync');
+      expect(critical[0].values).toBeUndefined();
+    });
+
+    it('sizes the replica hard limit at twice the observed buffer', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica hard',
+          current: 256,
+          target: 359,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('keeps the fixed text when CLIENT LIST is unavailable and only the aggregate is known', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        memory: { used_memory: '1000000', mem_clients_slaves: String(HARD * 0.7) },
+      });
+      (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await poll();
+      const [event] = cobEvents();
+      expect(event.message).toContain('mem_clients_slaves aggregate');
+      expect(event.message).toContain('Raise the limit or reduce the write burst.');
+      expect(event.values).toBeUndefined();
     });
 
     it('updates the per-replica Prometheus ratio gauge each poll', async () => {
@@ -14350,6 +14377,33 @@ describe('AnomalyService', () => {
       expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].resolved).toBe(true);
     });
 
+    it('sizes repl-backlog-size to cover 75s of writes at the measured rate', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+
+      // 30,000 B/s x 60s x 1.25 = 2.15 MB, rounded up
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 1, target: 3, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps the fixed text when the backlog size is unknown', async () => {
+      const sample = {
+        timestamp: clock,
+        role: 'primary',
+        replid: 'r',
+        masterReplOffset: 0,
+        bytesPerSec: 30_000,
+        bytesPerSecEwma: 30_000,
+        replBacklogSize: null,
+        replicas: [],
+      };
+      await (service as any).emitBacklogCoverageRisk(mockCtx, sample, 30, 'warning', 'none');
+
+      const [event] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(event.message).toContain('Raise repl-backlog-size or reduce the write rate.');
+      expect(event.values).toBeUndefined();
+    });
+
     it('raises the risk again when the outbox drops its unsaved event', async () => {
       storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
       for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
@@ -14430,6 +14484,42 @@ describe('AnomalyService', () => {
         }),
         'conn-1',
       );
+    });
+
+    it('puts the fork memory target on the incident, also when read back from storage', async () => {
+      const GB = 1024 ** 3;
+      const forking = {
+        bytes: 2000,
+        syncFull: 1,
+        replicaState: 'send_bulk',
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1, replicaState: 'wait_bgsave' });
+      await pollPrimary(forking);
+      await pollPrimary(forking);
+      await (service as any).tickIncidentTimelines(clock);
+
+      // 9 GB projected peak / 0.7 = 13,165.7 MB, rounded up
+      const expected = [
+        { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
+      ];
+      expect(events(MetricType.FORK_MEMORY_RISK)[0].values).toEqual(expected);
+      expect((service as any).liveIncidents[0].sequenceMatches[0].values).toEqual(expected);
+
+      const stored = service
+        .getRecentEvents()
+        .map((e) => (service as any).toStoredAnomalyEvent(e, mockCtx));
+      expect(stored.some((e: Record<string, unknown>) => 'values' in e)).toBe(false);
+      storage.getAnomalyEvents.mockResolvedValue(stored);
+      const [timeline] = await service.getIncidentTimelines('conn-1');
+      expect(timeline.sequenceMatches[0].values).toEqual(expected);
     });
 
     it('stays quiet when a short disconnect is covered by the backlog', async () => {

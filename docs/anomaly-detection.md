@@ -383,7 +383,7 @@ The client ids consumed between two captures by connections that no capture list
 - Add exponential backoff with jitter and a retry budget
 - Put a circuit breaker in front of the instance
 - Set client timeouts above the observed P99
-- Throttle the clients whose command rate grew the most, then shed load until latency recovers
+- Throttle the clients whose command rate grew the most, then shed load until latency recovers. The group's recommendation names them (see [Computed values](#computed-values))
 
 ### REPLICATION_DIVERGENCE
 
@@ -848,6 +848,24 @@ GET /api/anomaly/groups?limit=50&pattern=memory_pressure
   ]
 }
 ```
+
+### Computed values
+
+Three detectors work out a target for the setting their recommendation names. The correlated group and the incident sequence match that hold the event carry it as `values`, next to the recommendation text, and so does the event's entry in the incident timeline:
+
+```json
+"values": [{ "setting": "repl-backlog-size", "current": 1, "target": 3, "unit": "MB" }]
+```
+
+| Event | Setting | Target |
+| --- | --- | --- |
+| `backlog_coverage_risk` | `repl-backlog-size` | The size that covers 75s of writes (the 60s warning plus 25%) at the write rate the coverage was measured with |
+| `repl_buffer_pressure` | `client-output-buffer-limit replica hard` (or `soft` for a sustained soft-limit breach) | Twice the replica's observed output buffer, so the same burst sits at 50% of the limit |
+| `fork_memory_risk` | `total_system_memory` | The RAM at which the projected fork peak sits at 70%, ten points under the 80% warning |
+
+Values are rounded up to whole MB. When an input is unknown (no backlog size, or no per-replica buffer because `CLIENT LIST` was denied or the finding is a resync loop), `values` is left out and the text stays as it is. Values are kept in memory only, for the anomaly cache TTL (1 hour by default). After that, incidents rebuilt from stored events, and groups read from storage, have the text without `values`. The events endpoint returns the stored copy of a saved event, so it does not include them, and neither do webhook payloads.
+
+For retry amplification, the group's "Throttle or inspect the clients whose command rate grew the most" recommendation names the top clients and their growth (`Top clients: name checkout (cmds 4.2×, 12 reconnects)`), and keeps the fixed text when attribution is unavailable or no client stood out.
 
 ### Get Anomaly Summary
 

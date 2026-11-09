@@ -2036,7 +2036,7 @@ server.tool(
 
 server.tool(
   'get_incident_timeline',
-  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). Use to answer "what happened, in what order, and has it recovered".',
+  'Get anomaly incidents as ordered timelines. Anomalies on one instance or topology that follow each other closely are grouped into one incident, in the order they happened, with any matched multi-step sequence pattern and a recovery status (active, recovering, recovered, degraded when signals stay open long after the incident went quiet, or unknown when recovery can no longer be measured, with those metrics in recovery.unknownSignals). A sequence match can carry `values`: the settings its recommendations name, each with the current value and a target computed from the instance (setting, current, target, unit). Use to answer "what happened, in what order, and has it recovered".',
   {
     limit: z.number().optional().describe('Max incidents to return, newest first (default 20)'),
     startTime: z.number().optional().describe('Start time (Unix timestamp ms, default 24h ago)'),

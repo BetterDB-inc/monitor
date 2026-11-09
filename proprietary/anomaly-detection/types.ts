@@ -1,5 +1,6 @@
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
+import type { RetryAmplificationContributor } from './retry-amplification-attribution';
 
 export enum MetricType {
   CONNECTIONS = 'connections',
@@ -160,6 +161,14 @@ export enum AnomalyPattern {
 
 export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
 
+/** A setting the recommendation names, with the value computed from this instance's numbers. */
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+}
+
 export interface AnomalyEvent {
   id: string;
   timestamp: number;
@@ -193,6 +202,14 @@ export interface AnomalyEvent {
    */
   syntheticPattern?: AnomalyPattern;
   retryTrigger?: RetryAmplificationTrigger;
+  /** In-memory only, like retryTrigger: the top clients of a retry amplification event. */
+  retryContributors?: RetryAmplificationContributor[] | null;
+  /**
+   * In-memory only, like retryTrigger: target values computed from the
+   * detector's inputs. Absent when an input is unknown, and on events read
+   * back from storage.
+   */
+  values?: RecommendationValue[];
   /**
    * Transient (not persisted): whether this cached event was durably written to
    * storage. An event whose save has not landed is resolved by flipping the cache
@@ -208,6 +225,7 @@ export interface CorrelatedAnomalyGroup {
   pattern: AnomalyPattern;
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
   truncated?: boolean;
 }

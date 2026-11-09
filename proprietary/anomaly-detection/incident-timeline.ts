@@ -1,6 +1,12 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
-import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
+import {
+  AnomalyEvent,
+  AnomalyPattern,
+  AnomalySeverity,
+  MetricType,
+  RecommendationValue,
+} from './types';
 import { SequenceRule, leadOf } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
@@ -16,6 +22,7 @@ export interface IncidentTimelineEntry {
   message: string;
   recoveredAt: number | null;
   recoveryState: IncidentEntryRecovery;
+  values?: RecommendationValue[];
 }
 
 export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
@@ -38,6 +45,7 @@ export interface IncidentSequenceMatch {
   steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
 }
 
@@ -305,6 +313,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     message: event.message,
     recoveredAt: null,
     recoveryState: 'open',
+    ...(event.values ? { values: event.values } : {}),
   };
 }
 
@@ -646,6 +655,10 @@ export class IncidentTimelineBuilder {
         matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
       for (const matched of matchSequences(candidates, rule, holdsStep)) {
         const held = matched.filter((e) => !dropped.includes(e));
+        // One value per setting, the latest event's.
+        const values = [
+          ...new Map(held.flatMap((e) => e.values ?? []).map((v) => [v.setting, v])).values(),
+        ];
         sequenceMatches.push({
           pattern: rule.pattern,
           anomalyIds: held.map((e) => e.anomalyId),
@@ -660,6 +673,7 @@ export class IncidentTimelineBuilder {
           recommendations: rule.recommendations.filter(
             (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
           ),
+          ...(values.length > 0 ? { values } : {}),
           severity: maxSeverity(held.map((e) => e.severity)),
         });
         for (const r of rule.recommendations) {
