@@ -1375,6 +1375,21 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return id === ENV_DEFAULT_ID;
   }
 
+  /**
+   * True when `id` is a registered connection that `list()` would return: not
+   * deleted and not a retired auto-registered member. Unlike getConfig, an
+   * empty id never resolves to the default connection.
+   */
+  isListed(id: string): boolean {
+    const config = this.configs.get(id);
+    return config !== undefined && !isRetiredAuto(config);
+  }
+
+  /** True when `id` was registered automatically from a cluster or Sentinel seed. */
+  isAutoRegistered(id: string): boolean {
+    return this.configs.get(id)?.membership?.origin === 'auto';
+  }
+
   findIdByHostPort(host: string, port: number): string | null {
     for (const [id, config] of this.configs.entries()) {
       if (isRetiredAuto(config)) continue;

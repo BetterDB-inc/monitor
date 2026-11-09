@@ -93,27 +93,28 @@ See [Configuration Reference](configuration.md#prometheus-metrics) for the `METR
 
 ## Cardinality Contract
 
-This section states how many series a scrape can hold, so you can size Prometheus before you add connections. Every series except the Node.js process metrics carries a `connection` label. The total is therefore a fixed instance overhead plus a budget per connection.
+This section states how many series a scrape can hold, so you can size Prometheus before you add connections. Every series except the Node.js process metrics and the connection-less anomaly series carries a `connection` label. The total is therefore a fixed instance overhead plus a budget per connection.
 
 ```
 total = P + A + Σ over connections (F + V)
 ```
 
 - `P`: process metrics, paid once per BetterDB instance.
-- `A`: the anomaly summary, paid once per instance under `full`.
+- `A`: the anomaly baseline buffers, paid once per instance under `full`, plus 9 anomaly summary series per user-added connection that anomaly detection polls and up to 61 for each connection with anomalies in the last hour.
 - `F`: the fixed series for the connection's type and profile.
 - `V`: the variable series. Under `vitals` this is always 0.
 
-The OTLP mirror exports the same series as the scrape, so the same budget applies to both.
+The OTLP mirror exports the same series as the scrape, so the same budget applies to both. A connection-less anomaly series has no `connection` attribute in OTLP, just as it has no `connection` label once Prometheus ingests it; the `semconv` export sends those points under the monitor's own resource rather than a node's.
 
 ### Instance overhead
 
 | Source                                                              | Series                                                                        | Profile |
 | ------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------- |
 | Node.js process metrics (`betterdb_process_*`, `betterdb_nodejs_*`) | about 55 on Node 22. The count shifts slightly with heap spaces and GC kinds. | both    |
-| Anomaly summary and baseline buffers                                | up to 181, while anomaly detection runs                                       | `full`  |
+| Anomaly baseline buffers                                            | up to 120, while anomaly detection runs                                       | `full`  |
+| Anomaly summary                                                     | 9 per polled user-added connection, plus up to 61 per connection (user-added or auto-registered) with anomalies in the last hour, plus up to 61 for connection-less events | `full`  |
 
-The anomaly summary and buffer gauges are published once per instance under the default connection's label, not once per connection. Their bounds:
+The buffer gauges are published once per instance: the default connection's baselines under its label while anomaly detection polls it, and no buffer series otherwise. They are removed from the old label when the default connection changes. The anomaly summary gauges are published per connection, under each connection's own label. A connection is published while it has an anomaly or correlated group in the last hour, even if it has since gone down, so its unresolved anomalies stay visible during an outage. A user-added connection that anomaly detection polls successfully is also published when quiet, with its three severity gauges at 0, so it reads 0 rather than no data. Auto-registered cluster and Sentinel nodes are not, to keep large clusters cheap. So a quiet node has no series, and neither does a quiet connection that is disconnected or whose polls fail; one with an anomaly or group in the window keeps its series until that ages out, whatever its state. Retired and deleted connections never have series: theirs are removed when the connection goes, and are not published again. The metric-type and pattern gauges exist only while a connection has an anomaly or correlated group of that kind in the last hour, and are removed once it ages out. Connections that share a `host:port` share one set of series, which counts the anomalies and groups of both. Events that belong to no connection are exported with an empty `connection` value. Prometheus drops a label with an empty value at ingestion, so these series are stored without a `connection` label at all: select them with `{connection=""}`, which matches a missing label, and a `sum by (connection)` groups them under an empty value. Their bounds:
 
 | Gauges                                                                                                      | Label               | Bound         | Series |
 | ----------------------------------------------------------------------------------------------------------- | ------------------- | ------------- | ------ |
@@ -122,7 +123,7 @@ The anomaly summary and buffer gauges are published once per instance under the 
 | `betterdb_correlated_groups_by_pattern`                                                                     | correlation pattern | 12            | 12     |
 | the three `betterdb_anomaly_buffer_*` gauges                                                                | metric type         | 40 each       | 120    |
 
-Total: 9 + 40 + 12 + 120 = 181.
+Total: up to 120 once, plus 9 per polled user-added connection, plus up to 9 + 40 + 12 = 61 per connection with anomalies in the last hour (52 for a user-added one, whose 9 are already counted). A connection whose anomalies aged out goes back to 9, or to 0 for an auto-registered node.
 
 ### Fixed series per connection (`F`)
 
@@ -231,7 +232,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | ACL reason/user     | 5                  | 5               |
 | **Per connection**  | **270**            | **674**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 181 more while anomaly detection runs. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -524,6 +525,8 @@ Real-time anomaly detection system metrics.
 - `metric_type`: `connections`, `ops_per_sec`, `memory_used`, `input_kbps`, `output_kbps`, `slowlog_last_id`, `acl_denied`, `evicted_keys`, `blocked_clients`, `keyspace_misses`, `fragmentation_ratio`, `cpu_utilization`, `replication_role`
 - `anomaly_type`: `spike`, `drop`
 
+The three gauges are published per connection, under the connection the anomaly is stored under; sum over `connection` for a fleet-wide count. A connection with an anomaly in the last hour is published, including after it goes down. `betterdb_anomaly_events_current` and `betterdb_anomaly_by_severity` are also published at 0 for every user-added connection anomaly detection polls successfully, so a quiet one reads 0 rather than having no series; a quiet auto-registered node has no series, and neither does a quiet connection that is disconnected or failing, while one with an anomaly in the window keeps its series until it ages out. The window holds up to the 1,000 most recent anomalies of each connection and 10,000 in total. When the total is reached, the connection with the most anomalies loses its oldest first, so a noisy connection cannot push a quieter connection's anomalies out early. Retired and deleted connections never have series. `betterdb_anomaly_by_metric` series exist only for metric types with an anomaly in the last hour and are removed once those anomalies age out. An anomaly with no connection is not filed under the default connection: it has no `connection` label in Prometheus, matched by `{connection=""}`, and those series exist only while such anomalies are in the window. `betterdb_anomaly_events_total` counts each anomaly under the same connection as the gauges, and one with no connection without the label. Its series, and those of `betterdb_correlated_groups_total`, are removed when the connection is retired or deleted, unless another connection on the same `host:port` is still listed.
+
 #### Correlation Metrics
 
 | Metric                                   | Type    | Labels                | Description                     | Example |
@@ -533,6 +536,8 @@ Real-time anomaly detection system metrics.
 | `betterdb_correlated_groups_by_pattern`  | gauge   | `pattern`             | Groups in last hour by pattern  | `5`     |
 
 **Pattern Values**: `traffic_burst`, `batch_job`, `memory_pressure`, `slow_queries`, `auth_attack`, `connection_leak`, `cache_thrashing`, `node_failover`, `unknown`
+
+The two gauges follow the same per-connection rules as the anomaly gauges above: `betterdb_correlated_groups_by_severity` is published at 0 for every polled user-added connection, `betterdb_correlated_groups_by_pattern` only for patterns seen in the last hour. Each group is counted once, under the connection it is stored under (its first member's), in the gauges and in `betterdb_correlated_groups_total` alike. A group whose members span several connections therefore appears under one of them only, and a sum over `connection` counts every group exactly once. A group with no connection has no `connection` label.
 
 #### Buffer Stats Metrics
 
@@ -579,7 +584,7 @@ The two rate gauges are absent until two polls have produced a connection rate. 
 - `pattern`: each sequence pattern the incident matched (for example `retry_storm`, `backlog_exhaustion`), or `none` when it matched none. An incident that matched two patterns is counted under both.
 - `status`: `active`, `recovering`, `degraded`. Recovered incidents and incidents whose recovery is unknown are not counted.
 
-An incident that spans several connections is counted under each of them. An incident stays counted for as long as it is open, up to the 30-day incident lookback, including after a restart. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series. Unlike the other per-connection gauges, it is kept while the connection is stale, so an incident on a node that went down stays visible. If incidents cannot be read from storage, the last values are kept; after three failed refreshes in a row the series are removed.
+An incident that spans several connections is counted under each of them, so unlike the correlated group gauges, a sum over `connection` counts such an incident more than once; connections that share a `host:port` count it once. An incident with no connection has no `connection` label (matched by `{connection=""}`) rather than being filed under the default connection. Retired and deleted connections are not counted. An incident stays counted for as long as it is open, up to the 30-day incident lookback, including after a restart. The gauge refreshes on the anomaly summary interval, and a pattern and status pair with no open incident loses its series. Unlike the other per-connection gauges, it is kept while the connection is stale, so an incident on a node that went down stays visible. If incidents cannot be read from storage, the last values are kept; after three failed refreshes in a row the series are removed.
 
 ### Metric Forecasting Metrics
 
