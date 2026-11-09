@@ -425,6 +425,7 @@ const NEXT_FIRING_PAGE_SIZE = 100;
 const NEXT_FIRING_MAX_PAGES = 5;
 const NEXT_FIRING_MISS_TTL_MS = 60_000;
 const NEXT_FIRING_CACHE_SIZE = 2_000;
+const NEXT_FIRING_BUDGET_MS = 10_000;
 const MAX_INCIDENT_LOOKBACK_MS = 30 * 24 * 60 * 60_000;
 const MAX_INCIDENT_EVENTS_PER_CONNECTION = 200;
 const RETRY_AMP_ATTRIBUTION_TIMEOUT_MS = 5_000;
@@ -7801,11 +7802,17 @@ export class AnomalyService
     }
     const later: AnomalyEvent[] = [];
     const failures: { key: string; error: unknown }[] = [];
+    const deadline = Date.now() + NEXT_FIRING_BUDGET_MS;
     for (let i = 0; i < signals.length; i += NEXT_FIRING_CONCURRENCY) {
+      const remaining = deadline - Date.now();
       const batch = await Promise.all(
         signals.slice(i, i + NEXT_FIRING_CONCURRENCY).map(async (signal) => {
           const key = signalKey(signal);
-          const stored = await this.nextFiring(signal, after).catch((error: unknown) => {
+          const lookup =
+            remaining > 0
+              ? withTimeout(this.nextFiring(signal, after), remaining, 'lookup budget exhausted')
+              : Promise.reject(new Error('lookup budget exhausted'));
+          const stored = await lookup.catch((error: unknown) => {
             failures.push({ key, error });
             return null;
           });

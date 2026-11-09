@@ -13104,6 +13104,59 @@ describe('AnomalyService', () => {
           .filter((q: any) => q.order === 'asc');
         expect(lookups.map((q: any) => q.metricType)).toEqual([MetricType.CONNECTIONS]);
       });
+
+      it('still bounds recovery of the failed signal by its live later firing', async () => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'conn-later', timestamp: end + 40 * MIN }),
+        );
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const call = recovery.mock.calls.find(([event]: any[]) => event.id === 'conn');
+        expect(call?.[2]).toBe(end + 40 * MIN);
+      });
+
+      it('keeps incidents read only from storage', async () => {
+        const stored = { ...anomaly({ id: 'stored', timestamp: end - 8 * MIN }), anomalyType: 'spike' };
+        storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+          if (failingLookup(q)) throw new Error('pool exhausted');
+          if (q.order === 'asc') return [];
+          return stored.timestamp >= q.startTime && stored.timestamp <= q.endTime ? [stored] : [];
+        });
+
+        const incidents = await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(incidents.flatMap((i) => i.entries.map((e) => e.anomalyId))).toContain('stored');
+      });
+    });
+
+    describe('when later-firing lookups hang', () => {
+      afterEach(() => jest.useRealTimers());
+
+      it('stops looking up once the time budget is spent', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        for (let i = 0; i < 20; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+        const next = jest
+          .spyOn(service as any, 'nextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        const incidents = await listed;
+
+        expect(incidents.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(next).toHaveBeenCalledTimes(8);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('20 signals');
+        expect(warn.mock.calls[0][0]).toContain('lookup budget exhausted');
+      });
     });
 
     it('reads incident boundaries once when opening an incident', async () => {
