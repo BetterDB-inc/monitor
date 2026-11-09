@@ -4261,12 +4261,20 @@ export class AnomalyService
       baselineRead &&
       baselineScale <= RETRY_AMP_MAX_BASELINE_SCALE;
     const ratesKnown = hasRatePair(snapshots);
-    // After skipped captures, the id growth up to the first capture read
-    // again is not the episode's newest span: it starts from that capture.
-    const episodeCaptures =
-      recentStart > episodeStart
-        ? summary.captures.filter((row) => row.capturedAt >= recentStart)
-        : summary.captures;
+    // The id growth between the last capture before the episode and the first
+    // one in it is split by time between the baseline and the episode. After
+    // skipped captures there is no such interval: the growth up to the first
+    // capture read again is not the episode's newest span, so each side counts
+    // only between its own captures. The baseline's id growth starts at its
+    // first capture: before a cut baseline that interval holds the previous
+    // episode's churn.
+    const contiguous = recentStart === episodeStart;
+    const episodeCaptures = contiguous
+      ? summary.captures
+      : summary.captures.filter((row) => row.capturedAt >= recentStart);
+    const baselineCaptures = summary.captures.filter(
+      (row) => row.capturedAt >= baselineStart && (contiguous || row.capturedAt < episodeStart),
+    );
     const ranked = rankRetryAmplificationContributors({
       ...snapshots,
       capture,
@@ -4282,9 +4290,9 @@ export class AnomalyService
       baselineConnections: reconnectsKnown
         ? estimateNewConnections(
             newConnectionsBetween(summary.connections, baselineStart, episodeStart - 1),
-            summary.captures.filter((row) => row.capturedAt >= baselineStart),
+            baselineCaptures,
             baselineStart,
-            episodeStart - 1,
+            episodeStart,
           ).map((group) => ({ ...group, count: group.count * baselineScale }))
         : [],
     });

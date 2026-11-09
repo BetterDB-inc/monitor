@@ -5396,7 +5396,8 @@ describe('AnomalyService', () => {
         509_999,
       );
 
-      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
+      // 50 s of the 60 s between 590 s and 650 s are in the episode: 25 of the 30 ids.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 25 })]);
     });
 
     it('still names a reconnecting client above the scaled baseline', async () => {
@@ -5449,7 +5450,8 @@ describe('AnomalyService', () => {
         skipTo: 600_000,
         maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
       });
-      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 30 })]);
+      // 50 s of the 60 s between 590 s and 650 s are in the episode: 25 of the 30 ids.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 25 })]);
     });
 
     it('reports a connection on its own recent events', () => {
@@ -5666,6 +5668,32 @@ describe('AnomalyService', () => {
         );
 
         // Split by first capture it would be 60 reconnects against 6.
+        expect(ranked).toEqual([]);
+      });
+
+      it('does not rank a steady pool when a capture interval straddles the episode start', async () => {
+        // 60 s polls at 550 s and 610 s around an episode from 600 s, and a pool
+        // that opens one connection a second (ids 1 apart) and closes it after
+        // 20 s, so every capture lists only connections opened since the last.
+        const pool = (capturedAt: number) =>
+          Array.from({ length: 20 }, (_, i) => {
+            const id = capturedAt / 1000 - i;
+            return stored(String(id), `10.0.0.7:${id}`, 'pool', i, capturedAt);
+          });
+        await history.saveClientSnapshot(pool(550_000), 'conn-1');
+        await history.saveClientSnapshot(pool(610_000), 'conn-1');
+        const steadyReadings = [steady(520_000, 0), steady(580_000, 60_000), steady(640_000, 120_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          steadyReadings,
+          600_000,
+          660_000,
+        );
+
+        // The 60 ids between the captures are 50 s of baseline and 10 s of
+        // episode; credited whole to the episode they read as 60 reconnects
+        // against a baseline of 20.
         expect(ranked).toEqual([]);
       });
 

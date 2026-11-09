@@ -812,7 +812,7 @@ describe('estimateNewConnections', () => {
     const groups = [{ ...identity, count: 2 }];
     const captures = [capture(0, 100, 5), capture(60_000, 130, 1), capture(120_000, 160, 1)];
 
-    expect(estimateNewConnections(groups, captures, 60_000, 120_000)).toEqual([
+    expect(estimateNewConnections(groups, captures, 0, 120_000)).toEqual([
       { ...identity, count: 60 },
     ]);
   });
@@ -824,7 +824,7 @@ describe('estimateNewConnections', () => {
       capture(60_000, 120, 2, 'other'),
     ];
 
-    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
+    expect(estimateNewConnections([], captures, 0, 60_000)).toEqual([
       { ...identity, count: 15 },
       { ...identity, name: 'other', count: 15 },
     ]);
@@ -833,7 +833,7 @@ describe('estimateNewConnections', () => {
   it('gives no growth to clients older than the previous capture', () => {
     const captures = [capture(0, 100, 5), capture(60_000, 130, 61)];
 
-    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([]);
+    expect(estimateNewConnections([], captures, 0, 60_000)).toEqual([]);
   });
 
   it('credits the growth to a retrier and not a pool with older connections', () => {
@@ -844,7 +844,7 @@ describe('estimateNewConnections', () => {
       capture(60_000, 129, 560, 'pool'),
     ];
 
-    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([
+    expect(estimateNewConnections([], captures, 0, 60_000)).toEqual([
       { ...identity, count: 30 },
     ]);
   });
@@ -888,14 +888,14 @@ describe('estimateNewConnections', () => {
   it('ignores the drop in ids after a server restart', () => {
     const captures = [capture(0, 5_000, 5), capture(60_000, 12, 1)];
 
-    expect(estimateNewConnections([], captures, 60_000, 60_000)).toEqual([]);
+    expect(estimateNewConnections([], captures, 0, 60_000)).toEqual([]);
   });
 
   it('keeps the observed count when ids grew less than it', () => {
     const groups = [{ ...identity, count: 4 }];
     const captures = [capture(0, 100, 5), capture(60_000, 101, 1)];
 
-    expect(estimateNewConnections(groups, captures, 60_000, 60_000)).toEqual(groups);
+    expect(estimateNewConnections(groups, captures, 0, 60_000)).toEqual(groups);
   });
 
   it('handles a capture with more identities than a spread call can take', () => {
@@ -904,14 +904,27 @@ describe('estimateNewConnections', () => {
     );
 
     expect(() =>
-      estimateNewConnections([], [capture(0, 100, 5), ...fresh], 60_000, 60_000),
+      estimateNewConnections([], [capture(0, 100, 5), ...fresh], 0, 60_000),
     ).not.toThrow();
   });
 
-  it('counts only captures inside the range', () => {
+  it('counts only the growth between captures inside the range', () => {
     const captures = [capture(0, 100, 5), capture(60_000, 900, 1), capture(120_000, 910, 1)];
 
-    expect(estimateNewConnections([], captures, 120_000, 120_000)).toEqual([
+    expect(estimateNewConnections([], captures, 60_000, 120_000)).toEqual([
+      { ...identity, count: 10 },
+    ]);
+  });
+
+  it('splits the id growth of an interval that straddles the range by time', () => {
+    // 60 ids between the captures at 0 and 60s, 10s of which fall before the
+    // range: each side counts its part, as connections are counted by opening.
+    const captures = [capture(0, 100, 5), capture(60_000, 160, 1)];
+
+    expect(estimateNewConnections([], captures, 10_000, 120_000)).toEqual([
+      { ...identity, count: 50 },
+    ]);
+    expect(estimateNewConnections([], captures, -60_000, 10_000)).toEqual([
       { ...identity, count: 10 },
     ]);
   });
@@ -931,7 +944,7 @@ describe('estimateNewConnections', () => {
     const newConnections = estimateNewConnections(
       [{ ...identity, name: 'storm', count: 1 }],
       captures,
-      60_000,
+      0,
       60_000,
     );
 
@@ -975,7 +988,7 @@ describe('estimateNewConnections', () => {
     const newConnections = estimateNewConnections(
       [{ ...identity, name: 'storm', count: 1 }],
       captures,
-      60_000,
+      0,
       60_000,
     );
 

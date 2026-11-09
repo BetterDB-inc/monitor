@@ -378,6 +378,16 @@ function highestClientId(rows: ClientConnectionCaptureRow[]): number {
   return rows.reduce((highest, row) => Math.max(highest, row.maxClientId), 0);
 }
 
+/**
+ * `groups` (the connections opened in [since, until]) with each identity's
+ * count raised to its share of the client id growth in that time, when the
+ * ids grew more. The growth between two captures is shared evenly by the
+ * identities whose connections all opened after the earlier capture. An
+ * interval only partly inside [since, until] counts that part of its growth,
+ * prorated by time, so a range boundary between two captures splits the ids
+ * the way the connections are split, by when they opened. The shares are
+ * summed per identity and rounded once, to the nearest whole connection.
+ */
 export function estimateNewConnections(
   groups: NewClientConnectionGroup[],
   captures: ClientConnectionCaptureRow[],
@@ -408,13 +418,15 @@ export function estimateNewConnections(
     if (current < highest && restarted) highest = current;
     const growth = current - highest;
     highest = Math.max(highest, current);
-    if (capturedAt < since || capturedAt > until) continue;
-    if (growth <= 0) continue;
-    const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= times[i - 1]);
+    const previous = times[i - 1];
+    const inRange = Math.min(capturedAt, until) - Math.max(previous, since);
+    if (growth <= 0 || inRange <= 0) continue;
+    const counted = (growth * inRange) / (capturedAt - previous);
+    const fresh = rows.filter((row) => capturedAt - row.oldestAge * 1000 >= previous);
     for (const row of fresh) {
       const key = JSON.stringify([row.name, row.user, row.ip]);
       const entry = shares.get(key) ?? { row, share: 0 };
-      entry.share += growth / fresh.length;
+      entry.share += counted / fresh.length;
       shares.set(key, entry);
     }
   }
