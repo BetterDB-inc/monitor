@@ -95,7 +95,8 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
-// Least of the pass left for the slot-stats fan-out to start at all.
+// Least of the pass left for the slot-stats fan-out to start at all, or half
+// the pass when that is shorter, so a short poll interval still collects.
 const SLOT_STATS_MIN_BUDGET_MS = 1_000;
 
 const ANOMALY_SERIES: ReadonlySet<string> = new Set([
@@ -2855,10 +2856,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       ) {
         // The fan-out must finish inside this pass, or a later pass retires the
         // epoch and every primary's answer is thrown away.
-        const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - Date.now();
+        const now = Date.now();
+        const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - now;
         // Too little left for a node round trip: keep last pass's series rather
-        // than expire every primary on a deadline it never had a chance to meet.
-        if (remainingMs < SLOT_STATS_MIN_BUDGET_MS) {
+        // than expire every primary on a deadline it never had a chance to meet,
+        // until they are older than the staleness bound.
+        if (remainingMs < Math.min(SLOT_STATS_MIN_BUDGET_MS, Math.floor(this.pollIntervalMs / 2))) {
+          for (const slot of state.currentClusterSlotLabels) {
+            if (now - (state.clusterSlotSeenAt.get(slot) ?? 0) <= this.stalenessMs) continue;
+            this.removeSlotSeries(connLabel, slot);
+            state.clusterSlotSeenAt.delete(slot);
+            state.currentClusterSlotLabels.delete(slot);
+          }
           return;
         }
         this.slotStatsFanOuts.add(connectionId);

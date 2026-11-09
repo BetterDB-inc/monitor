@@ -499,6 +499,55 @@ describe('PrometheusService slot stats', () => {
     }
   });
 
+  it('still reads cluster-wide slot stats at a one-second poll interval', async () => {
+    const harness = buildService({ PROMETHEUS_POLL_INTERVAL_MS: 1000 });
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: {}, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+
+    service.passDeadlines.set('conn-1', Date.now() + 800);
+    await runSlotStats(harness);
+
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
+    const [, , , timeoutMs, fullBudgetMs] = clusterMetrics.getClusterSlotStatsResult.mock.calls[0];
+    expect(timeoutMs).toBeLessThanOrEqual(800);
+    expect(fullBudgetMs).toBe(1000);
+  });
+
+  it('drops series it keeps for lack of pass time once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({ stats: { '1': slot(50) }, failedNodes: [], failedSlotRanges: [] }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    const service = harness.service as unknown as { clusterMetricsService: unknown; passDeadlines: Map<string, number> };
+    service.clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await runSlotStats(harness);
+      service.passDeadlines.set('conn-1', now + 100);
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+      now += stalenessMs + 1;
+      service.passDeadlines.set('conn-1', now + 100);
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+      expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('bounds the cluster-wide fan-out by what is left of the INFO pass', async () => {
     const harness = buildService();
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
