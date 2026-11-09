@@ -880,7 +880,7 @@ used_cpu_user:20.3\r
       }
     });
 
-    it('drops a client that arrives after the deadline instead of sending it commands', async () => {
+    it('does not send commands to a client that arrives after the deadline', async () => {
       jest.useFakeTimers();
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue([
@@ -897,8 +897,10 @@ used_cpu_user:20.3\r
         await jest.advanceTimersByTimeAsync(2_000);
 
         expect(late.call).not.toHaveBeenCalled();
-        expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(late);
-        // The node is let back in once that client is gone.
+        // The late client is the shared pool client and has no command from
+        // this call, so it stays connected. The stall clears when the connect
+        // settles, and the next call asks the node again.
+        expect(mockDiscoveryService.evictNodeClient).not.toHaveBeenCalled();
         mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue('') });
         await service.getSlotMigrations();
         expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(2);

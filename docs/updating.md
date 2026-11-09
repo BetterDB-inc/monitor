@@ -115,7 +115,16 @@ helm upgrade betterdb-monitor betterdb/betterdb-monitor \
 `--reset-then-reuse-values` (Helm 3.14+) keeps your overrides but picks up
 the new chart's defaults, such as a longer startup probe. `--reuse-values`
 keeps the old release's defaults too, so a changed default never reaches an
-existing install. On older Helm, pass your values file with `-f` instead.
+existing install. On older Helm, export the overrides already stored on the
+release and pass that file. A values file written by hand can omit a
+connection or storage setting that was applied only with `--set`, and the
+upgrade then drops it:
+
+```bash
+helm get values betterdb-monitor -n betterdb -o yaml > betterdb-values.yaml
+helm upgrade betterdb-monitor betterdb/betterdb-monitor \
+  --namespace betterdb -f betterdb-values.yaml
+```
 
 Don't override `image.tag` to update — leave it empty and let the chart's
 `appVersion` drive the image, so chart and app versions move together and
@@ -173,18 +182,36 @@ minutes for it; an install upgraded with `--reuse-values` keeps the old 150
 seconds, so upgrade with `--reset-then-reuse-values` or set
 `startupProbe.failureThreshold` (e.g. `--set startupProbe.failureThreshold=120`).
 
+- **Stop the previous version first.** Do not roll this change through a
+  deployment that still has the previous version running. Startup drops the
+  unique keys that version's inserts name, and those inserts then fail on
+  every poll, so that replica stops recording logs until it is replaced.
+  Scale it to zero, then start this version.
+- **What this version can recover.** Each poll reads at most 128 entries per
+  log type. Entries a server still holds beyond that window are not stored.
+  If a server can hold more than 128 slow log or command log entries across
+  the time the previous version is stopped, copy those entries out before
+  upgrading when you need to keep them.
 - **First poll after updating**: entries stored before the update carry no
   `run_id`, so the entries still in each server's log (at most 128 per log
   type) are stored once more under that server's `run_id`, and history can
   show them twice. This happens once. Resuming from the old rows instead
   could skip entries for good on a seed that fronts several nodes, whose old
   rows mix the log IDs of different nodes.
-- **Rolling updates**: until every replica runs the new version, the old
-  replicas fail to store slow and command log entries, because their inserts
-  name the dropped key. The new replicas resume from what is stored, so
-  entries still in each server's log are stored once the rollout finishes.
 - **Rolling back**: the older version cannot store slow or command log entries
-  until the old keys exist again. Before starting it, run:
+  until the old keys exist again. Scale every replica of this version to zero
+  before the SQL below, and leave them stopped until the older version is
+  running. A replica of this version that is still up can insert a row between
+  the `DELETE` and the `ALTER TABLE`, and creating the constraint then fails.
+  One that starts after the old keys are restored drops them again during its
+  own startup.
+
+  Back up `slow_log_entries` and `command_log_entries` before the deletes. Each
+  `DELETE` keeps one row where different server processes reused an ID and an
+  address, and drops the others. Those rows are distinct history, and the
+  rollback removes them for good unless the backup still has them.
+
+  Then run:
 
 ```sql
 DELETE FROM slow_log_entries a USING slow_log_entries b
@@ -201,9 +228,7 @@ ALTER TABLE command_log_entries ADD CONSTRAINT command_log_entries_legacy_key
   UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
 ```
 
-  The `DELETE` keeps one entry where entries from different server processes
-  share an ID and address, which the old key cannot tell apart. Updating again
-  drops these constraints automatically.
+  Updating again drops these constraints automatically.
 
 ## Release notes
 

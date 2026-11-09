@@ -86,7 +86,14 @@ helm upgrade betterdb-monitor betterdb/betterdb-monitor -n betterdb --reset-then
 
 `--reset-then-reuse-values` (Helm 3.14+) keeps your overrides and picks up the
 new chart's defaults; `--reuse-values` would keep the old defaults too. On
-older Helm, pass your values file with `-f` instead.
+older Helm, export the overrides already stored on the release and pass that
+file. A values file written by hand can omit a connection or storage setting
+that was applied only with `--set`, and the upgrade then drops it:
+
+```bash
+helm get values betterdb-monitor -n betterdb -o yaml > betterdb-values.yaml
+helm upgrade betterdb-monitor betterdb/betterdb-monitor -n betterdb -f betterdb-values.yaml
+```
 
 ## Releasing the chart (maintainers)
 

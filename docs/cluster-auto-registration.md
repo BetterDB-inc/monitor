@@ -48,9 +48,11 @@ reach.
 A seed host can be a DNS name that resolves to several cluster nodes, such as
 the headless Service a Kubernetes operator creates for a cluster. The seed then
 connects to whichever node the name resolves to, and to a different one after a
-reconnect. When the seed host resolves to more than one address, every node in
-`CLUSTER NODES` is registered as a child, including the node that answered the
-sync, so the children stay stable across syncs. A seed changes between this
+reconnect. The seed is an alias when those addresses match more than one node
+in `CLUSTER NODES`, and every node is then registered as a child, including the
+node that answered the sync, so the children stay stable across syncs. Several
+addresses for one dual-stack node are not an alias: when only the node that
+answered matches, the seed stays that one node. A seed changes between an alias
 and a single node only when two syncs in a row agree, so one stale answer
 cannot register a single node twice, and a rollout that leaves one pod behind
 the name for a sync does not retire the node that answered.
@@ -74,15 +76,21 @@ complete and attributable when the seed moves between nodes.
 
 The node is identified by its `run_id` from `INFO server`, which stays the
 same whatever address reaches it. When `INFO` is refused (an ACL or a blocked
-command), entries are stored against the address instead, also for a
-connection that reported a `run_id` before. A poll in which `INFO` fails for
-any other reason, such as a timeout, is skipped, and its entries are stored by
-the next poll. If a connection's entries were stored under the address and
-`INFO` later starts working, the entries still in a server's log (at most 128
-per log type) are stored once more under that server's `run_id`, so history
-can show those entries twice. This happens once for each server whose entries
-were stored under the address, so a seed that moved between nodes while
-`INFO` was refused can repeat it for several of them.
+command), entries are stored against the serving address instead, also for a
+connection that reported a `run_id` before. Behind a shared proxy or VIP that
+address is the same for every node, so their log IDs can overlap and a move of
+the seed can skip entries that belong to the node now answering. Allow `INFO`
+so each node is attributed by its `run_id`. A poll in which `INFO` fails for
+any other reason, such as a timeout, is skipped. The next poll does not always
+get those entries back: each poll fetches at most 128 entries per log type, and
+it may reach a different node. They are stored only if a later poll reaches the
+same node while the entries are still among the 128 most recent in its log.
+If a connection's entries were stored under the address and `INFO` later starts
+working, the entries still in a server's log (at most 128 per log type) are
+stored once more under that server's `run_id`, so history can show those
+entries twice. This happens once for each server whose entries were stored
+under the address, so a seed that moved between nodes while `INFO` was refused
+can repeat it for several of them.
 
 ### TLS certificates
 

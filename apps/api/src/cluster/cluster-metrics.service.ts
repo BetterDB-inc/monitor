@@ -691,8 +691,12 @@ export class ClusterMetricsService {
   /**
    * Run commands against one node within `timeoutMs`, so a node that accepts
    * the connection but never replies cannot hold up a fan-out. The timeout
-   * releases the caller and drops the node's client, so the command still on
-   * that socket rejects and the next call reconnects.
+   * releases the caller. A client that already has a command in flight is
+   * dropped so that command rejects and the next call reconnects. A client
+   * that connects only after the deadline has had nothing sent on it. It is
+   * the shared pool client, so disconnecting it would reject other callers'
+   * commands on that node. Leave it in the pool and let the stall clear when
+   * the connect settles.
    */
   private onNode<T>(
     node: DiscoveredNode,
@@ -712,10 +716,10 @@ export class ClusterMetricsService {
     const work = this.discoveryService
       .getNodeConnection(node.id, connectionId)
       .then((connected) => {
-        // Connected only after the caller gave up: nothing waits for commands
-        // sent now, and a silent node would hold them, and the guard, forever.
+        // Connected only after the caller gave up. No command was queued for
+        // this call, and `connected` is the shared pool client, so drop the
+        // call without disconnecting it.
         if (timedOut) {
-          this.discoveryService.evictNodeClient(connected);
           throw new Error(`${node.address} connected after the ${timeoutMs}ms deadline`);
         }
         return run((client = connected));

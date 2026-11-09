@@ -582,7 +582,7 @@ Once running, access the web interface at:
 | ------------------------- | ----------------------------- |
 | `/`                       | Web UI dashboard              |
 | `/api/health`             | Health check endpoint (waits on the monitored database) |
-| `/api/health/live`        | Liveness: answers once the API is up, without touching any database; use it for container probes |
+| `/api/health/live`        | Liveness: answers once the API is up. A probe that sends no cookie and no `Authorization` header does not touch storage. With user control on, a request that includes either resolves the caller against storage first, so a stalled database can delay it. Probes must omit both. |
 | `/docs`                   | Swagger/OpenAPI documentation |
 | `/api/prometheus/metrics` | Prometheus metrics endpoint   |
 

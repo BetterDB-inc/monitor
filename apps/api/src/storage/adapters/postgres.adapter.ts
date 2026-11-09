@@ -5704,6 +5704,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
    * That wait is not bounded on purpose: a build given up on a timeout would
    * leave the tables on their old keys until the next start, storing one
    * process's entries again under each address it is read through.
+   *
+   * The constraints dropped below are the ones the previous version's inserts
+   * name. Stop that version before this one starts. Leaving it running makes
+   * every slow log and command log insert fail until it is replaced. See
+   * docs/updating.md.
    */
   private async migrateLogSourceKeys(): Promise<void> {
     if (!this.pool) return;
