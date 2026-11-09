@@ -233,6 +233,14 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   // itself; the anomaly service also covers Sentinels, so this is what lets
   // cleanupConnectionMetrics find their summary and incident series.
   private readonly anomalyLabels = new Map<string, string>();
+  // The anomaly and correlated group counter series published per connection
+  // label, keyed by their labels. Counters have no removal by
+  // partial labels, and the label sweep only removes gauges, so this is what
+  // lets cleanupConnectionMetrics drop them.
+  private readonly anomalyCounterSeries = new Map<
+    string,
+    Map<string, { counter: Counter; labels: LabelValues<string> }>
+  >();
   // The label and metric types the anomaly buffer gauges were last published under.
   private anomalyBufferLabel: string | null = null;
   private anomalyBufferMetrics = new Set<string>();
@@ -4110,7 +4118,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (connLabel === null) {
       return;
     }
-    this.anomalyEventsTotal.inc({
+    this.incrementAnomalyCounter(this.anomalyEventsTotal, {
       connection: connLabel,
       severity,
       metric_type: metricType,
@@ -4123,7 +4131,35 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (connLabel === null) {
       return;
     }
-    this.correlatedGroupsTotal.inc({ connection: connLabel, pattern, severity });
+    this.incrementAnomalyCounter(this.correlatedGroupsTotal, {
+      connection: connLabel,
+      pattern,
+      severity,
+    });
+  }
+
+  private incrementAnomalyCounter(
+    counter: Counter,
+    labels: LabelValues<string> & { connection: string },
+  ): void {
+    counter.inc(labels);
+    let series = this.anomalyCounterSeries.get(labels.connection);
+    if (series === undefined) {
+      series = new Map();
+      this.anomalyCounterSeries.set(labels.connection, series);
+    }
+    // The two counters have different label names, so the labels alone are unique.
+    const key = JSON.stringify(labels);
+    if (!series.has(key)) {
+      series.set(key, { counter, labels });
+    }
+  }
+
+  private removeAnomalyCounters(connLabel: string): void {
+    for (const { counter, labels } of this.anomalyCounterSeries.get(connLabel)?.values() ?? []) {
+      counter.remove(labels);
+    }
+    this.anomalyCounterSeries.delete(connLabel);
   }
 
   /**
@@ -4262,9 +4298,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
     this.retireStorageEpoch(connectionId);
-    // Drop the anomaly summary and incident series now rather than at the
-    // anomaly service's next summary cycle, unless a connection that stays
-    // shares the label and therefore the series.
+    // Drop the anomaly summary, incident and anomaly counter series now rather
+    // than at the anomaly service's next summary cycle, unless a connection
+    // that stays shares the label and therefore the series.
     let anomalyLabel = this.anomalyLabels.get(connectionId);
     this.anomalyLabels.delete(connectionId);
     if (anomalyLabel !== undefined && this.hasAnomalyLabel(anomalyLabel)) {
@@ -4273,6 +4309,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (anomalyLabel !== undefined) {
       this.removeAnomalySummary(anomalyLabel);
       this.removeStaleIncidentLabels(anomalyLabel, new Set());
+      this.removeAnomalyCounters(anomalyLabel);
     }
     const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? anomalyLabel;
     if (label !== undefined) {

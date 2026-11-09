@@ -432,6 +432,36 @@ describe('PrometheusService updateAnomalySummaries', () => {
     }
   });
 
+  it('removes the anomaly counters of a deleted connection', async () => {
+    const unlisted = new Set<string>();
+    const service = buildService(unlisted);
+    for (const connectionId of [CONNECTION_ID, OTHER_CONNECTION_ID]) {
+      service.incrementAnomalyEvent('critical', 'memory_used', 'spike', connectionId);
+      service.incrementCorrelatedGroup('memory_pressure', 'critical', connectionId);
+    }
+
+    unlisted.add(OTHER_CONNECTION_ID);
+    service.cleanupConnectionMetrics(OTHER_CONNECTION_ID);
+
+    for (const name of ['betterdb_anomaly_events_total', 'betterdb_correlated_groups_total']) {
+      expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+    }
+  });
+
+  it('keeps shared anomaly counters when one of the connections under a host:port is deleted', async () => {
+    const unlisted = new Set<string>();
+    const service = buildService(unlisted);
+    service.incrementAnomalyEvent('critical', 'memory_used', 'spike', CONNECTION_ID);
+    service.incrementCorrelatedGroup('memory_pressure', 'critical', SAME_HOST_CONNECTION_ID);
+
+    unlisted.add(SAME_HOST_CONNECTION_ID);
+    service.cleanupConnectionMetrics(SAME_HOST_CONNECTION_ID);
+
+    for (const name of ['betterdb_anomaly_events_total', 'betterdb_correlated_groups_total']) {
+      expect(await connectionLabels(service, name)).toEqual([CONNECTION_LABEL]);
+    }
+  });
+
   it('never publishes a retired connection that still has a config', async () => {
     const service = buildService(new Set([OTHER_CONNECTION_ID]));
 
