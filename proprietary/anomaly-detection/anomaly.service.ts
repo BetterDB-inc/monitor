@@ -412,6 +412,11 @@ interface IncidentCutoffs {
   earlier: Map<string, number>;
 }
 
+interface CobReads {
+  limit(): Promise<string | null>;
+  replicas(): Promise<ReplicaObservation[]>;
+}
+
 interface TrackedResyncEvent {
   id: string;
   addr: string | null;
@@ -700,6 +705,7 @@ export class AnomalyService
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
+  private fanoutNodeEventIds = new Map<string, Set<string>>();
   // Non-dataset memory overhead (valkey#1792): per-connection hysteresis state
   // and the last-seen evicted_keys counter for computing the per-poll delta.
   private memoryOverheadState = new Map<string, MemoryOverheadState>();
@@ -1969,7 +1975,7 @@ export class AnomalyService
     }
   }
 
-  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication'] as const;
+  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication', 'persistence'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
@@ -4495,9 +4501,11 @@ export class AnomalyService
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    nodeAddr?: string,
   ): Promise<void> {
-    const state = this.forkMemoryState.get(ctx.connectionId) ?? createForkMemoryState();
-    this.forkMemoryState.set(ctx.connectionId, state);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    const state = this.forkMemoryState.get(key) ?? createForkMemoryState();
+    this.forkMemoryState.set(key, state);
 
     // Current write rate from the per-poll delta of rdb_changes_since_last_save.
     // max(0, …) absorbs the counter reset on an RDB save (and server restart);
@@ -4506,14 +4514,14 @@ export class AnomalyService
     let writeRatePerSec: number | null = null;
     const currentChanges = this.parseNumber(info.rdb_changes_since_last_save);
     if (currentChanges !== null) {
-      const prev = this.forkMemLastChanges.get(ctx.connectionId);
+      const prev = this.forkMemLastChanges.get(key);
       if (prev !== undefined) {
         const dtSec = (timestamp - prev.ts) / 1000;
         if (dtSec > 0) {
           writeRatePerSec = Math.max(0, currentChanges - prev.changes) / dtSec;
         }
       }
-      this.forkMemLastChanges.set(ctx.connectionId, { changes: currentChanges, ts: timestamp });
+      this.forkMemLastChanges.set(key, { changes: currentChanges, ts: timestamp });
     }
 
     const usedMemoryRss = this.parseNumber(info.used_memory_rss);
@@ -4552,9 +4560,11 @@ export class AnomalyService
       message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, forkMemoryRearm(state));
+    if (nodeAddr) this.trackFanoutNodeEvent(key, event.id);
+    await this.addLatchedAnomaly(event, ctx, key, forkMemoryRearm(state));
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -4627,15 +4637,14 @@ export class AnomalyService
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    nodeAddr?: string,
+    reads: CobReads = this.seedCobReads(ctx),
   ): Promise<void> {
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
     if (info.role !== 'master') {
-      // A demoted node keeps no COB history: pressure memory and the
-      // sync_full baseline from its master era would otherwise turn a
-      // legitimate first sync after failback into a false resync-loop
-      // CRITICAL, and its per-replica gauges would go stale.
-      const hadState = this.cobState.delete(ctx.connectionId);
-      this.cobLastSyncFull.delete(ctx.connectionId);
-      if (hadState) {
+      const hadState = this.cobState.delete(key);
+      this.cobLastSyncFull.delete(key);
+      if (hadState && !nodeAddr) {
         try {
           this.prometheusService.updateReplBufferPressure(ctx.connectionId, []);
         } catch (promErr) {
@@ -4652,32 +4661,31 @@ export class AnomalyService
     let syncFullDelta = 0;
     const syncFull = this.parseNumber(info.sync_full);
     if (syncFull !== null) {
-      const prev = this.cobLastSyncFull.get(ctx.connectionId);
+      const prev = this.cobLastSyncFull.get(key);
       if (prev !== undefined && syncFull > prev) {
         syncFullDelta = syncFull - prev;
       }
-      this.cobLastSyncFull.set(ctx.connectionId, syncFull);
+      this.cobLastSyncFull.set(key, syncFull);
     }
 
-    const state = this.cobState.get(ctx.connectionId) ?? createCobConnectionState();
-    this.cobState.set(ctx.connectionId, state);
+    const state = this.cobState.get(key) ?? createCobConnectionState();
+    this.cobState.set(key, state);
 
     if (connectedSlaves === 0 && state.replicas.size === 0 && syncFullDelta === 0) {
       return;
     }
 
-    let limit = this.cobLimitCache.get(ctx.connectionId) ?? null;
-    const countdown = this.cobLimitRecheck.get(ctx.connectionId) ?? 0;
+    let limit = this.cobLimitCache.get(key) ?? null;
+    const countdown = this.cobLimitRecheck.get(key) ?? 0;
     if (countdown > 0) {
-      this.cobLimitRecheck.set(ctx.connectionId, countdown - 1);
+      this.cobLimitRecheck.set(key, countdown - 1);
     } else {
       try {
-        const raw = await ctx.client.getConfigValue('client-output-buffer-limit');
-        const parsed = parseSlaveOutputBufferLimit(raw);
+        const parsed = parseSlaveOutputBufferLimit(await reads.limit());
         if (parsed !== null) {
           limit = parsed;
-          this.cobLimitCache.set(ctx.connectionId, parsed);
-          this.cobLimitRecheck.set(ctx.connectionId, AnomalyService.COB_LIMIT_RECHECK_POLLS);
+          this.cobLimitCache.set(key, parsed);
+          this.cobLimitRecheck.set(key, AnomalyService.COB_LIMIT_RECHECK_POLLS);
         }
       } catch (cobErr) {
         this.logger.debug(
@@ -4689,10 +4697,7 @@ export class AnomalyService
     let replicas: ReplicaObservation[] | null = [];
     if (connectedSlaves > 0) {
       try {
-        const clients = await ctx.client.getClients({ type: 'replica' });
-        replicas = clients.map((c) => {
-          return { addr: c.addr, omem: c.omem };
-        });
+        replicas = await reads.replicas();
       } catch (listErr) {
         this.logger.debug(
           `CLIENT LIST TYPE replica failed for ${ctx.connectionName}: ${listErr instanceof Error ? listErr.message : listErr}`,
@@ -4701,23 +4706,21 @@ export class AnomalyService
       }
     }
 
-    // Published even when ratios are uncomputable (unlimited/unreadable limit,
-    // CLIENT LIST denied): an empty set removes stale per-replica series so a
-    // runtime switch to `slave 0 0 0` doesn't leave dashboards showing
-    // outdated pressure.
-    const hardBytes = limit !== null ? limit.hardBytes : 0;
-    const gaugeEntries =
-      replicas !== null && hardBytes > 0
-        ? replicas.map((r) => {
-            return { replica: r.addr, ratio: r.omem / hardBytes };
-          })
-        : [];
-    try {
-      this.prometheusService.updateReplBufferPressure(ctx.connectionId, gaugeEntries);
-    } catch (promErr) {
-      this.logger.debug(
-        `Failed to update repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
-      );
+    if (!nodeAddr) {
+      const hardBytes = limit !== null ? limit.hardBytes : 0;
+      const gaugeEntries =
+        replicas !== null && hardBytes > 0
+          ? replicas.map((r) => {
+              return { replica: r.addr, ratio: r.omem / hardBytes };
+            })
+          : [];
+      try {
+        this.prometheusService.updateReplBufferPressure(ctx.connectionId, gaugeEntries);
+      } catch (promErr) {
+        this.logger.debug(
+          `Failed to update repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
+        );
+      }
     }
 
     const findings = evaluateCobPressure(state, {
@@ -4746,16 +4749,85 @@ export class AnomalyService
         message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
+        ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      if (nodeAddr) this.trackFanoutNodeEvent(key, event.id);
       await this.addLatchedAnomaly(
         event,
         ctx,
-        `${ctx.connectionId}:${cobPressureLatch(finding)}`,
+        `${key}:${cobPressureLatch(finding)}`,
         cobPressureRearm(state, finding),
       );
       acknowledgeCobFinding(state, finding);
     }
+  }
+
+  private seedCobReads(ctx: ConnectionContext): CobReads {
+    return {
+      limit: () => ctx.client.getConfigValue('client-output-buffer-limit'),
+      replicas: async () =>
+        (await ctx.client.getClients({ type: 'replica' })).map((c) => {
+          return { addr: c.addr, omem: c.omem };
+        }),
+    };
+  }
+
+  private cobReadsNeeded(key: string, info: Record<string, string>): { limit: boolean; replicas: boolean } {
+    if (info.role !== 'master') return { limit: false, replicas: false };
+    const connectedSlaves = this.parseNumber(info.connected_slaves) ?? 0;
+    const syncFull = this.parseNumber(info.sync_full);
+    const lastSyncFull = this.cobLastSyncFull.get(key);
+    const active =
+      connectedSlaves > 0 ||
+      (this.cobState.get(key)?.replicas.size ?? 0) > 0 ||
+      (syncFull !== null && lastSyncFull !== undefined && syncFull > lastSyncFull);
+    return {
+      limit: active && (this.cobLimitRecheck.get(key) ?? 0) === 0,
+      replicas: connectedSlaves > 0,
+    };
+  }
+
+  private async readFanoutCob(
+    client: { call(...args: string[]): Promise<unknown> },
+    key: string,
+    addr: string,
+    info: Record<string, string>,
+  ): Promise<CobReads> {
+    const needed = this.cobReadsNeeded(key, info);
+    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> =>
+      withTimeout(
+        this.fanoutCommand(`${key}#${suffix}`, read),
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `${what} to ${addr} timed out`,
+      );
+    const [limit, replicas] = await Promise.allSettled([
+      needed.limit
+        ? send('cob-limit', 'CONFIG GET', async () => {
+            const raw = await client.call('CONFIG', 'GET', 'client-output-buffer-limit');
+            return MetricsParser.parseConfigGet(raw as string[])['client-output-buffer-limit'] ?? null;
+          })
+        : Promise.resolve(null),
+      needed.replicas
+        ? send('replicas', 'CLIENT LIST', async () => {
+            const raw = String(await client.call('CLIENT', 'LIST', 'TYPE', 'replica'));
+            return raw.trim()
+              ? MetricsParser.parseClientList(raw).map((c) => {
+                  return { addr: c.addr, omem: c.omem };
+                })
+              : [];
+          })
+        : Promise.resolve([]),
+    ]);
+    const settled = <T>(result: PromiseSettledResult<T>): Promise<T> =>
+      result.status === 'fulfilled' ? Promise.resolve(result.value) : Promise.reject(result.reason);
+    return { limit: () => settled(limit), replicas: () => settled(replicas) };
+  }
+
+  private trackFanoutNodeEvent(key: string, id: string): void {
+    const ids = this.fanoutNodeEventIds.get(key) ?? new Set<string>();
+    ids.add(id);
+    this.fanoutNodeEventIds.set(key, ids);
   }
 
   /**
@@ -8659,6 +8731,13 @@ export class AnomalyService
       this.staleBacklogEventIds,
       this.resyncEscalation,
       this.resyncEscalationEvents,
+      this.forkMemoryState,
+      this.forkMemLastChanges,
+      this.cobState,
+      this.cobLastSyncFull,
+      this.cobLimitCache,
+      this.cobLimitRecheck,
+      this.fanoutNodeEventIds,
     ];
   }
 
@@ -8668,6 +8747,7 @@ export class AnomalyService
       ...(current ? [current] : []),
       ...(this.staleBacklogEventIds.get(key) ?? []),
       ...(this.resyncEscalationEvents.get(key) ?? []).map((e) => e.id),
+      ...(this.fanoutNodeEventIds.get(key) ?? []),
     ];
   }
 
@@ -8928,7 +9008,9 @@ export class AnomalyService
               this.readNodeSelf(client, target.addr, stateKey))
             : Promise.resolve(null),
         ]);
-        return { info: this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n'))), self };
+        const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
+        const cob = await this.readFanoutCob(client, stateKey, target.addr, info);
+        return { info, self, cob };
       }),
     );
 
@@ -8953,9 +9035,11 @@ export class AnomalyService
         host: target.host,
         port: target.port,
       };
-      const { info, self } = result.value;
+      const { info, self, cob } = result.value;
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       await this.adoptNodeOpenEvents(nodeCtx, key, target.addr);
+      await this.detectForkMemoryRisk(info, nodeCtx, timestamp, target.addr);
+      await this.detectCobPressure(info, nodeCtx, timestamp, target.addr, cob);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) {
         await this.detectRecoveryAmplification(sample, info, nodeCtx, target.addr);

@@ -2124,7 +2124,7 @@ describe('AnomalyService', () => {
 
         await pollSeed(6, 6000, false);
 
-        expect(b.info).toHaveBeenCalledTimes(6 * 4);
+        expect(b.info).toHaveBeenCalledTimes(6 * 5);
         expect(b.call.mock.calls.length).toBeLessThan(6);
       });
 
@@ -13566,25 +13566,49 @@ describe('AnomalyService', () => {
       syncFull: number;
       memory: Record<string, string>;
       persistence: Record<string, string>;
+      role: string;
+      gap: number;
+      cobLimit: string | null;
+      replicaOmem: number;
     }
 
     let node: NodeState;
+    const HARD = 256 * 1024 * 1024;
+    const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+    const GB = 1024 ** 3;
+    const FORKING = {
+      memory: { used_memory: String(9 * GB), used_memory_rss: String(9 * GB), total_system_memory: String(10 * GB) },
+      persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+    };
 
     function section(name: string, fields: Record<string, string | number>): string {
       return [`# ${name}`, ...Object.entries(fields).map(([k, v]) => `${k}:${v}`)].join('\r\n');
     }
 
     function nodeInfo(name?: string): string {
-      const replication = section('Replication', {
-        role: 'master',
-        master_replid: 'b'.repeat(40),
-        master_repl_offset: node.offset,
-        repl_backlog_size: node.backlogSize,
-        connected_slaves: node.replica ? 1 : 0,
-        ...(node.replica
-          ? { slave0: `ip=10.0.1.6,port=6379,state=${node.replicaState},offset=${node.offset},lag=0` }
-          : {}),
-      });
+      const replication =
+        node.role === 'master'
+          ? section('Replication', {
+              role: 'master',
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+              repl_backlog_size: node.backlogSize,
+              connected_slaves: node.replica ? 1 : 0,
+              ...(node.replica
+                ? {
+                    slave0: `ip=10.0.1.6,port=6379,state=${node.replicaState},offset=${node.offset - node.gap},lag=0`,
+                  }
+                : {}),
+            })
+          : section('Replication', {
+              role: 'slave',
+              master_host: '10.0.1.7',
+              master_port: 6379,
+              master_link_status: 'up',
+              slave_repl_offset: node.offset,
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+            });
       const parts: Record<string, string> = {
         clients: section('Clients', { connected_clients: 10 }),
         memory: section('Memory', { used_memory: 1_000_000, ...node.memory }),
@@ -13600,22 +13624,30 @@ describe('AnomalyService', () => {
       return name ? (parts[name] ?? '') : Object.values(parts).join('\r\n');
     }
 
-    function nodeClient() {
+    function nodeCall(...args: string[]): Promise<unknown> | unknown {
+      if (args[0] === 'CLUSTER') return `node-b ${NODE}@16379 myself,master - 0 0 1 connected 0-5460\n`;
+      if (args[0] === 'CONFIG') return node.cobLimit === null ? [] : ['client-output-buffer-limit', node.cobLimit];
+      if (args[0] === 'CLIENT') {
+        return node.replica
+          ? `id=7 addr=10.0.1.6:6379 laddr=${NODE} fd=8 name= age=10 idle=0 flags=S db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=${node.replicaOmem} events=r cmd=replconf user=default\n`
+          : '';
+      }
+      throw new Error(`unexpected ${args.join(' ')}`);
+    }
+
+    function nodeClient(call: (...args: string[]) => Promise<unknown> | unknown = nodeCall) {
       return {
         info: jest.fn().mockImplementation(async (name?: string) => nodeInfo(name)),
-        call: jest.fn().mockImplementation(async (...args: string[]) => {
-          if (args[0] === 'CLUSTER') return `node-b ${NODE}@16379 myself,master - 0 0 1 connected 0-5460\n`;
-          throw new Error(`unexpected ${args.join(' ')}`);
-        }),
+        call: jest.fn().mockImplementation(async (...args: string[]) => call(...args)),
       };
     }
 
     async function pollNode(
-      update: Partial<NodeState> & { bytes?: number } = {},
+      update: Partial<NodeState> & { bytes?: number; stepMs?: number } = {},
       targets: TopologyTarget[] = [target],
     ): Promise<void> {
-      const { bytes = 2000, ...rest } = update;
-      clock += 1000;
+      const { bytes = 2000, stepMs = 1000, ...rest } = update;
+      clock += stepMs;
       node.offset += bytes;
       Object.assign(node, rest);
       await (service as any).detectTopologyAnomalies(mockCtx, {
@@ -13641,6 +13673,10 @@ describe('AnomalyService', () => {
         syncFull: 0,
         memory: {},
         persistence: {},
+        role: 'master',
+        gap: 0,
+        cobLimit: LIMIT_RAW,
+        replicaOmem: 0,
       };
       jest.spyOn(Date, 'now').mockImplementation(() => clock);
       (service as any).clusterDiscovery = {
@@ -13823,6 +13859,115 @@ describe('AnomalyService', () => {
         await pollNode();
 
         expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(2);
+      });
+    });
+
+    describe('fork memory and output-buffer pressure', () => {
+      it('raises fork memory risk on a fan-out primary with its node address', async () => {
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('raises output-buffer pressure on a fan-out primary without touching the seed gauge', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, syncFull: 1 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect(prometheusService.updateReplBufferPressure).not.toHaveBeenCalled();
+      });
+
+      it('lists node fork and output-buffer pressure in that node divergence alert', async () => {
+        const hook = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationDivergence = hook;
+        Object.assign(node, FORKING, { replicaOmem: HARD * 0.7 });
+        for (const gap of [2, 4, 6, 8, 10, 12]) {
+          for (let i = 0; i < 3; i += 1) await pollNode({ gap: gap * 1024 * 1024, bytes: 10 * 1024 * 1024, stepMs: 10_000 });
+        }
+
+        expect(hook).toHaveBeenCalled();
+        expect(hook.mock.calls[0][0].correlatedSignals).toEqual(
+          expect.arrayContaining([MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE]),
+        );
+      });
+
+      it('matches recovery amplification on a fan-out node', async () => {
+        await pollNode();
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1, replicaState: 'wait_bgsave' });
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.RECOVERY_AMPLIFICATION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([resync.id, fork.id]);
+      });
+
+      it('still checks a node whose CLIENT LIST is denied', async () => {
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('NOPERM');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+
+        expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('does not wait on a hung CLIENT LIST beyond the fan-out timeout', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+            nodeClient((...args) => (args[0] === 'CLIENT' ? new Promise(() => {}) : nodeCall(...args))),
+          );
+
+          await pollNode(FORKING);
+          await pollNode(FORKING);
+
+          expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+          expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('drops a demoted node output-buffer state', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        expect((service as any).cobState.has(NODE_KEY)).toBe(true);
+
+        await pollNode({ role: 'slave' });
+
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('closes node fork and output-buffer events when the node leaves', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [cob] = events(MetricType.REPL_BUFFER_PRESSURE);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([fork.id, cob.id]));
+        expect((service as any).fanoutNodeEventIds.has(NODE_KEY)).toBe(false);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
       });
     });
   });
@@ -14715,7 +14860,7 @@ describe('AnomalyService', () => {
         await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
 
         expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
-        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication']]);
+        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication'], ['persistence']]);
       });
 
       describe('Sentinel targets', () => {
@@ -14960,7 +15105,7 @@ describe('AnomalyService', () => {
             await done;
           }
 
-          expect(client.info).toHaveBeenCalledTimes(4);
+          expect(client.info).toHaveBeenCalledTimes(5);
         } finally {
           jest.useRealTimers();
         }
