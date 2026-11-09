@@ -277,9 +277,14 @@ export function evaluateCobPressure(
     if (input.replicas !== null) {
       // Per-replica visibility is back — the degraded-mode aggregate entry is
       // superseded and must not linger as pressure memory.
+      const aggregateLevel = state.replicas.get(AGGREGATE_KEY)?.ackedLevel ?? 'none';
       state.replicas.delete(AGGREGATE_KEY);
       for (const replica of input.replicas) {
+        const known = state.replicas.has(replica.addr);
         const replicaState = getReplicaState(state, replica.addr, timestamp);
+        if (!known && LEVEL_RANK[aggregateLevel] > LEVEL_RANK[replicaState.ackedLevel]) {
+          replicaState.ackedLevel = aggregateLevel;
+        }
         const assessment = assessRatio(replica.omem, limit, replicaState, timestamp);
         applyLevel(
           findings,

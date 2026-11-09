@@ -2275,7 +2275,8 @@ export class AnomalyService
   private adoptNodeForkEvents(key: string, open: StoredAnomalyEvent[]): void {
     const level = this.openEventLevel(open);
     if (level === 'none') return;
-    this.forkMemoryState.set(key, { ackedLevel: level, ackedKind: 'live-cow-oom' });
+    const live = open.some((e) => e.dedupeKey !== 'projected-fork-oom');
+    this.forkMemoryState.set(key, { ackedLevel: level, ackedKind: live ? 'live-cow-oom' : 'projected-fork-oom' });
     this.trackAdoptedNodeEvents(key, open);
   }
 
@@ -4653,6 +4654,7 @@ export class AnomalyService
       message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
       resolved: false,
       connectionId: ctx.connectionId,
+      dedupeKey: finding.kind,
       ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
@@ -9250,8 +9252,10 @@ export class AnomalyService
 
   private isRegisteredPrimary(info: Record<string, string>, now: number, staleMs: number): boolean {
     if (info.role !== 'master' || !info.master_replid) return false;
-    return [...this.registeredPrimaryReplids.values()].some(
-      (seen) => seen.replid === info.master_replid && now - seen.seenAt <= staleMs,
+    const connected = new Set(this.connectionRegistry.list().filter((c) => c.isConnected).map((c) => c.id));
+    return [...this.registeredPrimaryReplids].some(
+      ([connectionId, seen]) =>
+        connected.has(connectionId) && seen.replid === info.master_replid && now - seen.seenAt <= staleMs,
     );
   }
 

@@ -14196,6 +14196,24 @@ describe('AnomalyService', () => {
         expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
       });
 
+      it('still raises a live fork warning after re-adopting a projected one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8.5 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.WARNING, dedupeKey: 'live-cow-oom' }),
+        ]);
+      });
+
       it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
         openRows({
           [MetricType.REPL_BUFFER_PRESSURE]: [
@@ -14406,6 +14424,7 @@ describe('AnomalyService', () => {
       });
 
       it('skips a fan-out primary that is registered under another address', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
         (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
 
         await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
@@ -14425,6 +14444,35 @@ describe('AnomalyService', () => {
         expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
       });
 
+      it('checks a fan-out primary again once its registered connection disconnects', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: false }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('does not raise per-replica output-buffer alerts already covered by the aggregate one', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: '(aggregate)' }),
+        ]);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
       it('retires the fan-out state of a node once it is registered under another address', async () => {
         await pollNode({ replicaOmem: HARD * 0.7 });
         await pollNode();
@@ -14432,6 +14480,7 @@ describe('AnomalyService', () => {
         prometheusService.clearNodeSignals.mockClear();
 
         (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
         await pollNode();
 
         expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(false);
