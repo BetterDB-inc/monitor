@@ -5,7 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
 import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { AnomalyService } from '../anomaly.service';
-import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf } from '../incident-timeline';
+import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
 import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
 import { MetricBuffer } from '../metric-buffer';
 import * as sequenceRules from '../sequence-rules';
@@ -13239,7 +13239,7 @@ describe('AnomalyService', () => {
         await load();
         const second = next.mock.calls.map(([s]: any[]) => s.id);
 
-        expect(second).toHaveLength(8);
+        expect(second).toHaveLength(5);
         expect(second.some((id: string) => first.includes(id))).toBe(false);
       });
 
@@ -13260,34 +13260,84 @@ describe('AnomalyService', () => {
         };
 
         await load();
+        (service as any).nextFiringInFlight.clear();
         await load();
+        (service as any).nextFiringInFlight.clear();
         const third = await load();
 
-        expect(third.slice(0, 4).sort()).toEqual(['c-16', 'c-17', 'c-18', 'c-19']);
+        expect(third).toEqual(['c-10', 'c-11', 'c-12', 'c-13', 'c-14']);
       });
 
-      it('starts a fresh lookup once a shared one passes its deadline', async () => {
+      it('keeps one query per signal running past its deadline until it settles', async () => {
         jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
         const after = Date.now() - 24 * 60 * MIN;
         const signal = anomaly({ id: 'a', timestamp: after - MIN });
         const firing = { ...anomaly({ id: 'a-again', timestamp: after + MIN }), anomalyType: 'spike' };
-        let releaseStale!: (rows: any[]) => void;
-        storage.getAnomalyEvents
-          .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
-          .mockResolvedValueOnce([firing]);
+        let release!: (rows: any[]) => void;
+        storage.getAnomalyEvents.mockImplementationOnce(
+          () => new Promise((resolve) => (release = resolve)),
+        );
 
-        const budget = () => Date.now() + 10_000;
-        const stale = (service as any).nextFiring(signal, after, budget());
-        await jest.advanceTimersByTimeAsync(10_000);
-        const fresh = (service as any).nextFiring(signal, after, budget());
+        const stale = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        await jest.advanceTimersByTimeAsync(30_000);
+        const again = (service as any).nextFiring(signal, after, Date.now() + 10_000);
+        release([firing]);
 
-        await expect(fresh).resolves.toMatchObject({ id: 'a-again' });
-        releaseStale([]);
-        await expect(stale).resolves.toBeNull();
-        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+        expect(again).toBe(stale);
+        await expect(stale).resolves.toMatchObject({ id: 'a-again' });
         await expect((service as any).nextFiring(signal, after)).resolves.toMatchObject({
           id: 'a-again',
         });
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      const hangNextFiringReads = () => {
+        const releases: ((rows: any[]) => void)[] = [];
+        storage.getAnomalyEvents.mockImplementation((q: any) =>
+          q.order === 'asc'
+            ? new Promise((resolve) => releases.push(resolve))
+            : Promise.resolve([]),
+        );
+        return releases;
+      };
+
+      it('caps next-firing reads still running across loads', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        const releases = hangNextFiringReads();
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+        const load = async () => {
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          return listed;
+        };
+
+        const first = await load();
+        const second = await load();
+
+        expect(first.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(second.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(releases).toHaveLength(5);
+      });
+
+      it('caches a lookup that settles after its load gave up', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        const releases = hangNextFiringReads();
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+        releases.forEach((release) => release([]));
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect((service as any).nextFiringInFlight.size).toBe(0);
+        expect((service as any).nextFiringCache.size).toBe(5);
       });
 
       it('keeps sharing a lookup whose deadline a later load extended', async () => {
@@ -13306,89 +13356,32 @@ describe('AnomalyService', () => {
         expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
       });
 
-      it('replaces a stuck lookup under polling faster than the budget', async () => {
-        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
-        const after = Date.now() - 24 * 60 * MIN;
-        const signal = anomaly({ id: 'a', timestamp: after - MIN });
-        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
-
-        const first = (service as any).nextFiring(signal, after, Date.now() + 10_000);
-        const polls: Promise<unknown>[] = [];
-        for (let t = 5_000; t <= 25_000; t += 5_000) {
-          await jest.advanceTimersByTimeAsync(5_000);
-          polls.push((service as any).nextFiring(signal, after, Date.now() + 10_000));
-        }
-
-        expect(polls.slice(0, 3).every((p) => p === first)).toBe(true);
-        expect(polls[3]).not.toBe(first);
-        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
-      });
-
-      it('evicts an expired in-flight lookup before a live one when full', () => {
-        const inFlight: Map<string, any> = (service as any).nextFiringInFlight;
-        const now = Date.now();
-        inFlight.set('live', { lookup: Promise.resolve(null), budget: { deadline: now + 10_000 } });
-        inFlight.set('expired', { lookup: Promise.resolve(null), budget: { deadline: now - 1 } });
-        for (let i = 0; i < 1_998; i++) {
-          inFlight.set(`k-${i}`, {
-            lookup: Promise.resolve(null),
-            budget: { deadline: now + 10_000 },
-            startedAt: now,
-          });
-        }
-        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
-
-        (service as any).nextFiring(anomaly({ id: 'a' }), now - 60 * MIN, now + 10_000);
-
-        expect(inFlight.has('live')).toBe(true);
-        expect(inFlight.has('expired')).toBe(false);
-        expect(inFlight.size).toBe(2_000);
-      });
-
-      it('keeps the longest-skipped signals when the skip list is full', () => {
+      it('drops the oldest skip when the skip list is full', () => {
         const skipped: Map<string, number> = (service as any).skippedNextFirings;
         for (let i = 0; i < 2_000; i++) (service as any).markLookupSkipped(`k-${i}`, true);
 
         (service as any).markLookupSkipped('newest', true);
 
-        expect(skipped.has('k-0')).toBe(true);
-        expect(skipped.has('newest')).toBe(false);
+        expect(skipped.has('k-0')).toBe(false);
+        expect(skipped.has('k-1')).toBe(true);
+        expect(skipped.has('newest')).toBe(true);
         expect(skipped.size).toBe(2_000);
       });
 
-      it('makes room in a full skip list by dropping abandoned entries', () => {
-        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+      it('keeps one skip per signal across time ranges', async () => {
+        const signals = Array.from({ length: 1_200 }, (_, i) =>
+          anomaly({ id: `s-${i}`, connectionId: `conn-${i}` }),
+        );
+        jest.spyOn(service as any, 'canStartNextFiring').mockReturnValue(false);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
         const now = Date.now();
-        for (let i = 0; i < 2_000; i++) skipped.set(`k-${i}`, i < 10 ? now - 11 * MIN : now);
 
-        (service as any).markLookupSkipped('newest', true);
+        await (service as any).nextFiringsAfter(signals, now - 120 * MIN);
+        await (service as any).nextFiringsAfter(signals, now - 60 * MIN);
 
-        expect(skipped.has('k-0')).toBe(false);
-        expect(skipped.has('k-10')).toBe(true);
-        expect(skipped.has('newest')).toBe(true);
-        expect(skipped.size).toBe(1_991);
-      });
-
-      it('keeps a pending replacement when the stale lookup settles first', async () => {
-        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
-        const after = Date.now() - 24 * 60 * MIN;
-        const signal = anomaly({ id: 'a', timestamp: after - MIN });
-        let releaseStale!: (rows: any[]) => void;
-        storage.getAnomalyEvents
-          .mockImplementationOnce(() => new Promise((resolve) => (releaseStale = resolve)))
-          .mockImplementationOnce(() => new Promise(() => undefined));
-
-        const budget = () => Date.now() + 10_000;
-        const stale = (service as any).nextFiring(signal, after, budget());
-        await jest.advanceTimersByTimeAsync(10_000);
-        const fresh = (service as any).nextFiring(signal, after, budget());
-        releaseStale([]);
-        await stale;
-        const third = (service as any).nextFiring(signal, after, budget());
-
-        expect(third).toBe(fresh);
-        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
-        expect((service as any).nextFiringCache.size).toBe(0);
+        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+        expect(skipped.size).toBe(1_200);
+        expect(skipped.has(signalKey(signals[1_199]))).toBe(true);
       });
 
       it('shares a lookup that is still in flight', async () => {
@@ -13472,7 +13465,7 @@ describe('AnomalyService', () => {
           .filter(([event]: any[]) => event.id === 'c-19')
           .map((call: any[]) => call[2]);
         expect(bounds).toContain(firing.timestamp);
-        expect((service as any).skippedNextFirings.size).toBe(11);
+        expect((service as any).skippedNextFirings.size).toBe(14);
       });
     });
 
