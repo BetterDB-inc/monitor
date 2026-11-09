@@ -5,6 +5,7 @@ import os from 'node:os';
 
 const isWindows = process.platform === 'win32';
 const MONITOR_PACKAGE = '@betterdb/monitor';
+const COMMAND_LINE_TIMEOUT_MS = 3_000;
 const npxCmd = isWindows ? 'npx.cmd' : 'npx';
 
 export const BETTERDB_DIR = path.join(os.homedir(), '.betterdb');
@@ -29,11 +30,12 @@ function commandLineOf(pid: number): string | null {
     ? spawnSync(
         path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: COMMAND_LINE_TIMEOUT_MS },
       )
     : spawnSync('/bin/ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: COMMAND_LINE_TIMEOUT_MS,
       });
   const commandLine = result.status === 0 ? result.stdout?.trim() : '';
   return commandLine ? commandLine.replace(/\\/g, '/') : null;
@@ -130,7 +132,7 @@ export async function startMonitor(opts: {
   persist: boolean;
   port: number;
   storage: 'sqlite' | 'memory';
-}): Promise<{ url: string; alreadyRunning: boolean }> {
+}): Promise<{ url: string; alreadyRunning: boolean; owned: boolean }> {
   const url = `http://localhost:${opts.port}`;
 
   // Pre-check: existing PID file
@@ -145,7 +147,7 @@ export async function startMonitor(opts: {
     } else {
       if (await isMonitorProcess(pid, existingPort)) {
         if (await checkHealth(existingPort)) {
-          return { url: `http://localhost:${existingPort}`, alreadyRunning: true };
+          return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: true };
         }
         // Process is alive but unhealthy — terminate it before re-spawning
         terminate(pid);
@@ -162,7 +164,7 @@ export async function startMonitor(opts: {
   }
 
   if (await checkHealth(opts.port)) {
-    return { url, alreadyRunning: true };
+    return { url, alreadyRunning: true, owned: false };
   }
 
   const defaults: Record<string, string> = {
@@ -229,7 +231,7 @@ export async function startMonitor(opts: {
     await waitForHealth(opts.port);
   }
 
-  return { url, alreadyRunning: false };
+  return { url, alreadyRunning: false, owned: true };
 }
 
 function readPidPort(file: string): number | null {

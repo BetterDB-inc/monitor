@@ -158,8 +158,11 @@ function isJsonResponse(res: Response): boolean {
   return ct.includes('application/json');
 }
 
+const PREFIX_RETRY_MS = 30_000;
+const prefixRetryAt = new WeakMap<MonitorTarget, number>();
+
 async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<string> {
-  let reachable = true;
+  if ((prefixRetryAt.get(to) ?? 0) > Date.now()) return '/api';
   for (const prefix of API_PREFIXES) {
     try {
       const res = await rawFetch(to, prefix, '/mcp/instances', timeoutMs);
@@ -168,10 +171,11 @@ async function detectPrefix(to: MonitorTarget, timeoutMs: number): Promise<strin
         return prefix;
       }
     } catch {
-      reachable = false;
+      prefixRetryAt.set(to, Date.now() + PREFIX_RETRY_MS);
+      return '/api';
     }
   }
-  if (reachable) to.prefix = '/api';
+  to.prefix = '/api';
   return '/api';
 }
 
@@ -1009,8 +1013,11 @@ if (MONITOR_TOOLS) {
           const result = await startMonitor({ persist: true, port, storage });
           switchTo(result.url, true);
           const status = result.alreadyRunning ? 'Monitor already running' : 'Monitor started';
+          const note = result.owned
+            ? ''
+            : ' It was not started by this server, so stop_monitor will not stop it.';
           return {
-            content: [{ type: 'text' as const, text: `${status} at ${result.url}` }],
+            content: [{ type: 'text' as const, text: `${status} at ${result.url}.${note}` }],
           };
         } catch (err) {
           return {
