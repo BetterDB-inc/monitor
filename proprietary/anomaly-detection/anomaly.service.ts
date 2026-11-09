@@ -1056,6 +1056,7 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
+    for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
@@ -8369,9 +8370,11 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     info: Record<string, string>,
     ctx: ConnectionContext,
+    nodeAddr?: string,
   ): Promise<void> {
-    const coverage = this.backlogCoverage.get(ctx.connectionId) ?? createBacklogCoverageState();
-    this.backlogCoverage.set(ctx.connectionId, coverage);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    const coverage = this.backlogCoverage.get(key) ?? createBacklogCoverageState();
+    this.backlogCoverage.set(key, coverage);
     const coverageSec = observeBacklogCoverage(coverage, sample);
     const levelBefore = coverage.level;
     const step = stepBacklogCoverage(coverage, coverageSec);
@@ -8383,20 +8386,22 @@ export class AnomalyService
           coverageSec!,
           step.escalatedTo,
           levelBefore,
+          key,
+          nodeAddr,
         );
       } catch (err) {
         coverage.level = levelBefore;
         throw err;
       }
     }
-    if (step.cleared) await this.settleBacklogCoverageEvent(ctx.connectionId);
+    if (step.cleared) await this.settleBacklogCoverageEvent(key);
     if (backlogCoverageRecovered(coverageSec)) {
-      await this.settleEvents(this.staleBacklogEventIds, ctx.connectionId);
+      await this.settleEvents(this.staleBacklogEventIds, key);
     }
-    await this.settleResyncEvents(sample, ctx.connectionId);
+    await this.settleResyncEvents(sample, key);
 
     if (sample.role !== 'primary') {
-      this.resyncEscalation.delete(ctx.connectionId);
+      this.resyncEscalation.delete(key);
       return;
     }
     const counters = {
@@ -8404,13 +8409,13 @@ export class AnomalyService
       partialOk: this.parseNumber(info.sync_partial_ok) ?? 0,
       partialErr: this.parseNumber(info.sync_partial_err) ?? 0,
     };
-    const state = this.resyncEscalation.get(ctx.connectionId) ?? createResyncEscalationState();
-    this.resyncEscalation.set(ctx.connectionId, state);
+    const state = this.resyncEscalation.get(key) ?? createResyncEscalationState();
+    this.resyncEscalation.set(key, state);
     for (const escalation of observeResyncEscalation(state, sample, counters, coverageSec)) {
-      const event = this.buildResyncEscalationEvent(ctx, escalation);
+      const event = this.buildResyncEscalationEvent(ctx, escalation, nodeAddr);
       await this.addAnomaly(event, ctx);
-      this.resyncEscalationEvents.set(ctx.connectionId, [
-        ...(this.resyncEscalationEvents.get(ctx.connectionId) ?? []),
+      this.resyncEscalationEvents.set(key, [
+        ...(this.resyncEscalationEvents.get(key) ?? []),
         { id: event.id, addr: escalation.addr, since: sample.timestamp },
       ]);
     }
@@ -8418,9 +8423,9 @@ export class AnomalyService
 
   private async settleResyncEvents(
     sample: ReplicationStreamSample,
-    connectionId: string,
+    key: string,
   ): Promise<void> {
-    const tracked = this.resyncEscalationEvents.get(connectionId);
+    const tracked = this.resyncEscalationEvents.get(key);
     if (!tracked) return;
     const pending: TrackedResyncEvent[] = [];
     for (const event of tracked) {
@@ -8431,8 +8436,8 @@ export class AnomalyService
         pending.push(event);
       }
     }
-    if (pending.length > 0) this.resyncEscalationEvents.set(connectionId, pending);
-    else this.resyncEscalationEvents.delete(connectionId);
+    if (pending.length > 0) this.resyncEscalationEvents.set(key, pending);
+    else this.resyncEscalationEvents.delete(key);
   }
 
   private async emitBacklogCoverageRisk(
@@ -8441,6 +8446,8 @@ export class AnomalyService
     coverageSec: number,
     level: BacklogCoverageLevel,
     levelBefore: BacklogCoverageLevel,
+    key: string,
+    nodeAddr?: string,
   ): Promise<void> {
     const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
     const threshold =
@@ -8463,38 +8470,37 @@ export class AnomalyService
         `resync. Raise repl-backlog-size or reduce the write rate.`,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
-    this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
-    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, () => {
-      const coverage = this.backlogCoverage.get(ctx.connectionId);
+    const previous = this.backlogCoverageEventIds.get(key);
+    this.backlogCoverageEventIds.set(key, event.id);
+    await this.addLatchedAnomaly(event, ctx, key, () => {
+      const coverage = this.backlogCoverage.get(key);
       if (coverage?.level === level) coverage.level = levelBefore;
-      if (this.backlogCoverageEventIds.get(ctx.connectionId) === event.id) {
-        this.backlogCoverageEventIds.delete(ctx.connectionId);
+      if (this.backlogCoverageEventIds.get(key) === event.id) {
+        this.backlogCoverageEventIds.delete(key);
       }
     });
-    if (previous) await this.closeBacklogEvent(ctx.connectionId, previous);
+    if (previous) await this.closeBacklogEvent(key, previous);
   }
 
-  private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
-    const id = this.backlogCoverageEventIds.get(connectionId);
+  private async settleBacklogCoverageEvent(key: string): Promise<void> {
+    const id = this.backlogCoverageEventIds.get(key);
     if (!id) return;
-    this.backlogCoverageEventIds.delete(connectionId);
-    await this.closeBacklogEvent(connectionId, id);
+    this.backlogCoverageEventIds.delete(key);
+    await this.closeBacklogEvent(key, id);
   }
 
-  private async closeBacklogEvent(connectionId: string, id: string): Promise<void> {
+  private async closeBacklogEvent(key: string, id: string): Promise<void> {
     if ((await this.resolveAnomalyOutcome(id)) !== 'retry') return;
-    this.staleBacklogEventIds.set(connectionId, [
-      ...(this.staleBacklogEventIds.get(connectionId) ?? []),
-      id,
-    ]);
+    this.staleBacklogEventIds.set(key, [...(this.staleBacklogEventIds.get(key) ?? []), id]);
   }
 
   private buildResyncEscalationEvent(
     ctx: ConnectionContext,
     escalation: ResyncEscalation,
+    nodeAddr?: string,
   ): AnomalyEvent {
     const seconds = escalation.disconnectedForMs / 1000;
     const coverage =
@@ -8527,6 +8533,7 @@ export class AnomalyService
       replicaAddr: escalation.addr,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     return event;
@@ -8615,6 +8622,44 @@ export class AnomalyService
         `Failed to clear retry amplification gauges for ${node}: ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  private nodeDetectorKeysOf(connectionId: string): string[] {
+    const keys = new Set<string>();
+    for (const map of this.nodeDetectorMaps()) {
+      for (const key of map.keys()) {
+        if (key !== connectionId && isTopologyStateKeyOf(key, connectionId)) keys.add(key);
+      }
+    }
+    return [...keys];
+  }
+
+  private nodeDetectorMaps(): Map<string, unknown>[] {
+    return [
+      this.backlogCoverage,
+      this.backlogCoverageEventIds,
+      this.staleBacklogEventIds,
+      this.resyncEscalation,
+      this.resyncEscalationEvents,
+    ];
+  }
+
+  private nodeDetectorEventIds(key: string): string[] {
+    const current = this.backlogCoverageEventIds.get(key);
+    return [
+      ...(current ? [current] : []),
+      ...(this.staleBacklogEventIds.get(key) ?? []),
+      ...(this.resyncEscalationEvents.get(key) ?? []).map((e) => e.id),
+    ];
+  }
+
+  private retireNodeDetectors(key: string): void {
+    for (const id of this.nodeDetectorEventIds(key)) this.closeLater(id);
+    this.forgetNodeDetectors(key);
+  }
+
+  private forgetNodeDetectors(key: string): void {
+    for (const map of this.nodeDetectorMaps()) map.delete(key);
   }
 
   private clearFanoutNodeSignals(connectionId: string): void {
@@ -8804,6 +8849,9 @@ export class AnomalyService
         this.clearNodeSignals(ctx.connectionId, key);
       }
     }
+    for (const key of this.nodeDetectorKeysOf(ctx.connectionId)) {
+      if (!active.has(key)) this.retireNodeDetectors(key);
+    }
     for (const key of this.reshardSnapshotKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
         this.reshardSnapshot.delete(key);
@@ -8890,6 +8938,7 @@ export class AnomalyService
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) {
+        await this.detectRecoveryAmplification(sample, info, nodeCtx, target.addr);
         await this.detectReplicationDivergence(sample, nodeCtx, target.addr, () =>
           this.readTargetReplicationInfo(ctx.connectionId, target),
         );
@@ -9311,6 +9360,7 @@ export class AnomalyService
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
+      ...this.nodeDetectorKeysOf(connectionId).flatMap((key) => this.nodeDetectorEventIds(key)),
       ...divergenceKeys.flatMap((key) => [
         ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
         ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),

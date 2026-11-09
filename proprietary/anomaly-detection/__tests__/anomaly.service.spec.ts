@@ -13552,6 +13552,195 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('detectors on a fan-out node', () => {
+    const NODE = '10.0.1.5:6379';
+    const NODE_KEY = `conn-1@${NODE}`;
+    const target = { addr: NODE, host: '10.0.1.5', port: 6379, nodeId: 'node-b' };
+    let clock: number;
+
+    interface NodeState {
+      offset: number;
+      backlogSize: number;
+      replica: boolean;
+      replicaState: string;
+      syncFull: number;
+      memory: Record<string, string>;
+      persistence: Record<string, string>;
+    }
+
+    let node: NodeState;
+
+    function section(name: string, fields: Record<string, string | number>): string {
+      return [`# ${name}`, ...Object.entries(fields).map(([k, v]) => `${k}:${v}`)].join('\r\n');
+    }
+
+    function nodeInfo(name?: string): string {
+      const replication = section('Replication', {
+        role: 'master',
+        master_replid: 'b'.repeat(40),
+        master_repl_offset: node.offset,
+        repl_backlog_size: node.backlogSize,
+        connected_slaves: node.replica ? 1 : 0,
+        ...(node.replica
+          ? { slave0: `ip=10.0.1.6,port=6379,state=${node.replicaState},offset=${node.offset},lag=0` }
+          : {}),
+      });
+      const parts: Record<string, string> = {
+        clients: section('Clients', { connected_clients: 10 }),
+        memory: section('Memory', { used_memory: 1_000_000, ...node.memory }),
+        stats: section('Stats', {
+          instantaneous_ops_per_sec: 100,
+          sync_full: node.syncFull,
+          sync_partial_ok: 0,
+          sync_partial_err: 0,
+        }),
+        replication,
+        persistence: section('Persistence', node.persistence),
+      };
+      return name ? (parts[name] ?? '') : Object.values(parts).join('\r\n');
+    }
+
+    function nodeClient() {
+      return {
+        info: jest.fn().mockImplementation(async (name?: string) => nodeInfo(name)),
+        call: jest.fn().mockImplementation(async (...args: string[]) => {
+          if (args[0] === 'CLUSTER') return `node-b ${NODE}@16379 myself,master - 0 0 1 connected 0-5460\n`;
+          throw new Error(`unexpected ${args.join(' ')}`);
+        }),
+      };
+    }
+
+    async function pollNode(
+      update: Partial<NodeState> & { bytes?: number } = {},
+      targets: TopologyTarget[] = [target],
+    ): Promise<void> {
+      const { bytes = 2000, ...rest } = update;
+      clock += 1000;
+      node.offset += bytes;
+      Object.assign(node, rest);
+      await (service as any).detectTopologyAnomalies(mockCtx, {
+        targets,
+        members: new Set(targets.map((t) => t.addr)),
+      });
+    }
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+    const resolvedIds = async () => {
+      await (service as any).drainPersistenceOutbox();
+      return storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id);
+    };
+
+    beforeEach(() => {
+      clock = 1_700_000_000_000;
+      node = {
+        offset: 0,
+        backlogSize: 1_000_000,
+        replica: true,
+        replicaState: 'online',
+        syncFull: 0,
+        memory: {},
+        persistence: {},
+      };
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient()),
+      };
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    describe('backlog coverage and resync escalation', () => {
+      async function raiseBacklog(): Promise<void> {
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+      }
+
+      async function raiseResync(): Promise<void> {
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1 });
+        await pollNode();
+      }
+
+      it('raises backlog coverage risk on a fan-out primary with its node address', async () => {
+        await raiseBacklog();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING }),
+        ]);
+        expect((service as any).backlogCoverage.has(NODE_KEY)).toBe(true);
+      });
+
+      it('leaves the seed backlog state alone while a node raises', async () => {
+        await raiseBacklog();
+
+        expect((service as any).backlogCoverage.has('conn-1')).toBe(false);
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+      });
+
+      it('raises resync escalation on a fan-out primary and matches backlog exhaustion per node', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync, ...rest] = events(MetricType.RESYNC_ESCALATION);
+        expect(rest).toEqual([]);
+        expect(resync).toMatchObject({ nodeAddr: NODE, replicaAddr: '10.0.1.6:6379' });
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.BACKLOG_EXHAUSTION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([risk.id, resync.id]);
+      });
+
+      it('closes node backlog and resync events when the node leaves the topology', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([risk.id, resync.id]));
+        for (const map of ['backlogCoverage', 'backlogCoverageEventIds', 'staleBacklogEventIds', 'resyncEscalation', 'resyncEscalationEvents']) {
+          expect((service as any)[map].has(NODE_KEY)).toBe(false);
+        }
+      });
+
+      it('starts clean when a node rejoins after leaving', async () => {
+        await raiseBacklog();
+        await pollNode({}, []);
+        const closed = await resolvedIds();
+
+        for (let i = 0; i < 3; i += 1) await pollNode();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+        expect(await resolvedIds()).toEqual(closed);
+      });
+
+      it('closes node backlog events when the seed connection is removed', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+
+        expect(await resolvedIds()).toContain(risk.id);
+      });
+
+      it('keeps node backlog events open when the seed cannot list topology', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).clearFanoutNodeSignals('conn-1');
+
+        expect(await resolvedIds()).not.toContain(risk.id);
+        expect((service as any).backlogCoverageEventIds.get(NODE_KEY)).toBe(risk.id);
+      });
+    });
+  });
+
   describe('replication divergence', () => {
     const MiB = 1024 * 1024;
     const T0 = 1_700_000_000_000;
