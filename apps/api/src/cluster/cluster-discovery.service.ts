@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
+import { dialsDataNodes } from '../connections/data-node-reach';
 import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
@@ -185,6 +186,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     // Bind the node client to the connection that owns it now, so a later
     // default-connection change can't swap in another connection's TLS identity.
     const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    this.assertDialsDataNodes(ownerId, nodeId);
     const nodes = await this.discoverNodes(ownerId);
     const node = nodes.find((n) => n.id === nodeId);
 
@@ -217,7 +219,19 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     });
   }
 
+  /**
+   * Refuses node clients for a connection whose nodes the monitor cannot dial
+   * itself (an agent connection), rather than failing later on the seed's raw
+   * client and reading as an unreachable node.
+   */
+  private assertDialsDataNodes(connectionId: string | undefined, node: string): void {
+    if (connectionId && !dialsDataNodes(this.connectionRegistry.getConfig(connectionId))) {
+      throw new Error(`Connection ${connectionId} cannot dial ${node} directly`);
+    }
+  }
+
   async getAddressConnection(host: string, port: number, connectionId: string): Promise<Valkey> {
+    this.assertDialsDataNodes(connectionId, `${host}:${port}`);
     const credentials = this.connectionRegistry.sentinelDataNodeCredentials(connectionId);
     if (!credentials) {
       throw new Error(`Connection ${connectionId} has no data-node credentials for ${host}:${port}`);
@@ -320,7 +334,16 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     // Add error handler to prevent unhandled error events
     // Only log each unique connection error once to avoid log spam
+    //
+    // The last error is kept because iovalkey reports a refused connection
+    // (WRONGPASS, NOAUTH, a socket error) on this event and then rejects
+    // connect() with its generic "Connection is closed.", which tells the
+    // caller nothing about why. Only kept until connect() settles, so a
+    // stored client does not hold on to its later errors.
+    let lastError: Error | undefined;
+    let connecting = true;
     client.on('error', (err) => {
+      if (connecting) lastError = err;
       const errorCode = (err as any).code || err.name;
       const errorKey = `${key}-${host}:${port}-${errorCode}`;
       if (!this.loggedConnectionErrors.has(errorKey)) {
@@ -342,6 +365,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
           setTimeout(() => reject(new Error('Connection timeout')), this.CONNECTION_TIMEOUT),
         ),
       ]);
+      connecting = false;
+      lastError = undefined;
 
       const connection: NodeConnection = {
         node,
@@ -372,12 +397,23 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       this.clearNodeErrors(key);
 
       return client;
-    } catch (error) {
+    } catch (connectError) {
+      // Surface the server's reply (or the socket error) behind iovalkey's
+      // generic rejection, so a credential refusal reads as one downstream
+      // (isAuthErrorReply matches the code after the `: `). A rejection that
+      // already is the emitted error, or came with no error event, is kept.
+      const error =
+        lastError && lastError !== connectError
+          ? new Error(`Failed to connect to ${host}:${port}: ${lastError.message}`, { cause: lastError })
+          : connectError;
+
       // Only log each unique connection error once to avoid spam
       const errorKey = `connect-${key}`;
       if (!this.loggedGetConnectionErrors.has(errorKey)) {
+        // The reply itself, not the wrapped message, which repeats this prefix.
+        const reason = lastError ?? connectError;
         this.logger.debug(
-          `Failed to connect to node ${key} at ${host}:${port}: ${error instanceof Error ? error.message : error}`,
+          `Failed to connect to node ${key} at ${host}:${port}: ${reason instanceof Error ? reason.message : reason}`,
         );
         // Prevent unbounded growth
         if (this.loggedGetConnectionErrors.size >= this.MAX_LOGGED_ERRORS) {

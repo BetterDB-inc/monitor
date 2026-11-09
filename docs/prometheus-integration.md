@@ -84,8 +84,8 @@ topk(5, betterdb_slowlog_pattern_avg_duration_us)
 # Anomaly rate
 rate(betterdb_anomaly_events_total[5m])
 
-# Critical anomalies in last hour
-betterdb_anomaly_by_severity{severity="critical"}
+# Critical anomalies in last hour, across all connections
+sum without (connection) (betterdb_anomaly_by_severity{severity="critical"})
 ```
 
 ## Anomaly Metrics
@@ -103,6 +103,8 @@ Anomaly detection publishes precomputed signals alongside the raw metrics:
 | `betterdb_anomaly_buffer_ready`         | Gauge   | metric_type                         |
 | `betterdb_anomaly_buffer_mean`          | Gauge   | metric_type                         |
 | `betterdb_anomaly_buffer_stddev`        | Gauge   | metric_type                         |
+
+Each of these also carries a `connection` label. The summary gauges are per connection, so sum over `connection` for a fleet-wide count. Events that belong to no connection are exported with an empty `connection` value, which Prometheus drops at ingestion, so they are stored without the label; select them with `{connection=""}`.
 
 ## Alert Rules
 

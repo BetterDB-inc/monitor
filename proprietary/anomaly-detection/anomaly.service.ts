@@ -9,7 +9,11 @@ import {
   StoredAnomalyEvent,
   StoredCorrelatedGroup,
 } from '@app/common/interfaces/storage-port.interface';
-import { PrometheusService } from '@app/prometheus/prometheus.service';
+import {
+  type AnomalySummaryCounts,
+  NO_CONNECTION_ID,
+  PrometheusService,
+} from '@app/prometheus/prometheus.service';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
 import { RetentionPolicyService } from '@app/retention/retention-policy.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -21,6 +25,8 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { withTimeout } from '@app/common/utils/with-timeout';
+import { isAuthErrorReply } from '@app/common/utils/auth-error';
+import { dialsDataNodes } from '@app/connections/data-node-reach';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   IWebhookEventsProService,
@@ -269,6 +275,7 @@ import {
 } from './replication-divergence-detector';
 import {
   RegisteredAddress,
+  TOPOLOGY_TARGET_LIMIT,
   TopologyScope,
   TopologyTarget,
   TopologyTargetClaims,
@@ -357,12 +364,33 @@ import {
   AnomalyPattern,
   BufferStats,
   AnomalySummary,
+  FanoutCoverage,
+  FanoutCoverageReason,
   SpikeDetectorConfig,
   AnomalyEventSink,
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
 } from './types';
+
+/** A topology the fan-out does not dial, and how many of its primaries that leaves unchecked. */
+interface FanoutGap {
+  reason: FanoutCoverageReason;
+  notDialed: number;
+}
+
+type FanoutCount = 'checked' | 'unreachable' | 'authFailed' | 'skipped' | 'notDialed';
+
+/** Coverage as recorded; its age and staleness are worked out when it is read. */
+type StoredFanoutCoverage = Omit<FanoutCoverage, 'ageMs' | 'stale'>;
+
+const EMPTY_FANOUT: Readonly<Record<FanoutCount, number>> = {
+  checked: 0,
+  unreachable: 0,
+  authFailed: 0,
+  skipped: 0,
+  notDialed: 0,
+};
 
 interface MetricExtractor {
   (info: Record<string, string>): number | null;
@@ -441,6 +469,12 @@ interface TrackedResyncEvent {
   id: string;
   addr: string | null;
   since: number;
+}
+
+interface LastHourGroup extends Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'> {
+  // The connection the group is stored under (its first member's), or
+  // NO_CONNECTION_ID. A group is counted once, under this connection only.
+  connectionId: string;
 }
 
 const INCIDENT_HISTORY_PAGE_SIZE = 5_000;
@@ -531,9 +565,7 @@ export class AnomalyService
   private sequenceDedupeSeedFailedAt: number | null = null;
   private readonly observedRecoveries = new Map<string, number>();
   private readonly observedOpenThrough = new Map<string, number>();
-  private lastHourGroups: Array<
-    Pick<CorrelatedAnomalyGroup, 'timestamp' | 'pattern' | 'severity'>
-  > = [];
+  private lastHourGroups: LastHourGroup[] = [];
   private lastSlowlogId = new Map<string, number>();
   // Previous lifetime rejected_connections counter per connection, so we can feed
   // the per-poll DELTA (new refusals) to the detector rather than the ever-growing
@@ -707,8 +739,21 @@ export class AnomalyService
   private fanoutInFlight = new Set<string>();
   private openDivergenceReads = new Map<string, Promise<StoredAnomalyEvent[]>>();
   private topologyFanoutUnreachable = new Map<string, number>();
+  private fanoutCoverage = new Map<string, StoredFanoutCoverage>();
+  // Connections whose coverage went stale and whose gauges were withdrawn.
+  private fanoutCoverageWithdrawn = new Set<string>();
+  // Connections already told why their fan-out does not dial their primaries,
+  // and the reason they were told; cleared once the gap closes so the notice
+  // fires again if it reopens.
+  private fanoutGapNoticed = new Map<string, FanoutCoverageReason>();
+  // Connections already told that nothing dials their primaries because the
+  // deployment has no cluster discovery. Kept apart from fanoutGapNoticed,
+  // which a Sentinel poll re-arms every cycle its credentials are present.
+  private fanoutUndialedNoticed = new Set<string>();
+  // Sentinel connections whose latest SENTINEL MASTERS probe failed.
+  private sentinelMastersFailed = new Set<string>();
   private readonly topologyTargetClaims = new TopologyTargetClaims();
-  private topologyBackoff = new Map<string, { failures: number; until: number }>();
+  private topologyBackoff = new Map<string, { failures: number; until: number; auth?: boolean }>();
   private removedConnectionSweeps = new Map<string, MetricType[]>();
   private readonly persistenceOutbox = new PersistenceOutbox((entry, reason) => {
     this.logger.warn(`Dropped pending ${entry.kind} of anomaly ${entry.id}: ${reason}`);
@@ -744,6 +789,13 @@ export class AnomalyService
   private retryAmplificationClients = new Map<string, RetryAmplificationClientHistory>();
   private readonly retryAmplificationReports = new Map<string, Promise<void>>();
   private recentAnomaliesByConnection = new Map<string, AnomalyEvent[]>();
+  // The anomalies the Prometheus summary counts, keyed like the summary
+  // (NO_CONNECTION_ID for connection-less events). Capped per connection and
+  // in total; the total cap trims the connection with the most events, so a
+  // noisy connection cannot push a quiet or down connection's last hour out
+  // early the way it can in the shared recentAnomalies buffer.
+  private summaryAnomalies = new Map<string, AnomalyEvent[]>();
+  private summaryEventCount = 0;
   private retryAmplificationDispatched = new Map<
     string,
     { episodeStart: number; level: RetryAmplificationFinding['level'] }
@@ -827,6 +879,7 @@ export class AnomalyService
   // group member's snapshot lags a poll behind its peers.
   private activeConfigDriftSignatures = new Set<string>();
   private readonly maxRecentEvents = 1000;
+  private readonly maxSummaryEvents = 10_000;
   private readonly maxRecentGroups = 100;
 
   private readonly metricExtractors: Map<MetricType, MetricExtractor>;
@@ -1068,6 +1121,7 @@ export class AnomalyService
   }
 
   protected onConnectionRemoved(connectionId: string): void {
+    this.setSummaryEvents(connectionId, []);
     this.buffers.delete(connectionId);
     this.detectors.delete(connectionId);
     this.lastSlowlogId.delete(connectionId);
@@ -1209,6 +1263,11 @@ export class AnomalyService
     this.divergenceRetiredWindowEnd.delete(connectionId);
     this.openDivergenceReads.delete(connectionId);
     this.topologyFanoutUnreachable.delete(connectionId);
+    this.fanoutCoverage.delete(connectionId);
+    this.fanoutCoverageWithdrawn.delete(connectionId);
+    this.fanoutGapNoticed.delete(connectionId);
+    this.fanoutUndialedNoticed.delete(connectionId);
+    this.sentinelMastersFailed.delete(connectionId);
     this.topologyTargetClaims.release(connectionId);
     for (const key of [...this.topologyBackoff.keys()]) {
       if (isTopologyStateKeyOf(key, connectionId)) this.topologyBackoff.delete(key);
@@ -1280,11 +1339,18 @@ export class AnomalyService
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    this.sweepStaleFanoutCoverage();
     let replicationSample: ReplicationStreamSample | null = null;
     let divergenceTargets: TopologyScope | null = null;
     let sentinelDivergence = false;
+    // Why the fan-out dials nothing, once the poll has learnt the topology
+    // mode. Stays null when the poll fails before that point, so the last
+    // coverage is kept (until it goes stale) rather than overwritten with a guess.
+    let fanoutGap: FanoutGap | null = null;
+    let topology: FanoutCoverage['topology'] = null;
     try {
       const live = ctx.connectionType !== 'external';
+      if (!live) fanoutGap = { reason: 'not_applicable', notDialed: 0 };
       // Timed around the socket call only: this round-trip doubles as the
       // control-plane probe latency sample for detectControlPlaneSaturation and the
       // loop-stall RTT proxy for Sentinels.
@@ -1730,6 +1796,7 @@ export class AnomalyService
       const clusterEnabled = info['cluster_enabled'];
       let aclClusterNodes: ClusterNode[] | undefined;
       if (live && clusterEnabled === '1') {
+        topology = 'cluster';
         // Raft (Cluster V2) vs gossip is decided from CLUSTER INFO. Default to the
         // last known mode so a transient CLUSTER INFO failure can't flip a Raft
         // connection back to gossip and run the gossip topology detectors on it.
@@ -1867,11 +1934,27 @@ export class AnomalyService
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
         }
         aclClusterNodes = nodes;
-        if (nodes) divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
+        if (nodes && !this.dialsDataNodes(ctx.connectionId)) {
+          // The agent reaches only this node; cluster discovery would fail on
+          // the seed's raw client for every other primary and count them all
+          // unreachable.
+          fanoutGap = this.undialedGap(
+            ctx.connectionId,
+            clusterTargets(nodes, this.registeredAddresses()),
+            'agent_connection',
+          );
+          divergenceTargets = { targets: [], members: new Set() };
+        } else if (nodes) {
+          divergenceTargets = clusterTargets(nodes, this.registeredAddresses());
+        } else {
+          fanoutGap = { reason: 'topology_unreadable', notDialed: 0 };
+        }
       } else if (live && sentinelMode) {
+        topology = 'sentinel';
         sentinelDivergence = true;
       } else if (live && sentinelMode === false) {
         divergenceTargets = { targets: [], members: new Set() };
+        fanoutGap = { reason: 'not_applicable', notDialed: 0 };
       }
 
       // Persistence-child stall detection (stuck BGSAVE / AOF rewrite) — state-based, not z-score
@@ -1990,15 +2073,16 @@ export class AnomalyService
           this.logger.error(`Failed to detect replication divergence for ${ctx.connectionName}:`, err);
         });
       }
-      const scope = sentinelDivergence
-        ? this.sentinelDivergenceTargets(ctx.connectionId)
-        : divergenceTargets;
+      const sentinel = sentinelDivergence ? this.sentinelDivergenceTargets(ctx) : null;
+      const scope = sentinel ? sentinel.scope : divergenceTargets;
+      if (sentinel) fanoutGap = sentinel.gap;
       if (scope) {
-        await this.detectTopologyAnomalies(ctx, scope).catch((err) => {
+        await this.detectTopologyAnomalies(ctx, scope, fanoutGap, topology).catch((err) => {
           this.logger.error(`Failed to check ${ctx.connectionName}'s other nodes:`, err);
         });
       } else {
         this.clearFanoutNodeSignals(ctx.connectionId);
+        if (fanoutGap) this.recordFanoutCoverage(ctx, topology, { ...EMPTY_FANOUT, ...fanoutGap });
       }
       this.openDivergenceReads.delete(ctx.connectionId);
       this.crossCheckDeadline.delete(ctx.connectionId);
@@ -2619,6 +2703,7 @@ export class AnomalyService
       this.sentinelMastersSnapshot.delete(ctx.connectionId);
       this.sentinelReplicaAddrs.delete(ctx.connectionId);
       this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
+      this.sentinelMastersFailed.delete(ctx.connectionId);
       return;
     }
 
@@ -2632,7 +2717,21 @@ export class AnomalyService
     this.sentinelLastProbe.set(ctx.connectionId, timestamp);
 
     try {
-      const masters = await ctx.client.getSentinelMasters();
+      let masters: Awaited<ReturnType<typeof ctx.client.getSentinelMasters>>;
+      try {
+        masters = await ctx.client.getSentinelMasters();
+      } catch (mastersErr) {
+        // Only SENTINEL MASTERS itself failing leaves the fan-out without a
+        // topology; a later replica read or storage error does not. Drop the
+        // snapshot here rather than let the loop-stall classifier keep
+        // counting an old `s_down` toward a misdirected alert from evidence
+        // we can no longer confirm.
+        this.sentinelMastersSnapshot.delete(ctx.connectionId);
+        this.sentinelReplicaAddrs.delete(ctx.connectionId);
+        this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
+        this.sentinelMastersFailed.add(ctx.connectionId);
+        throw mastersErr;
+      }
       // Share this view with the loop-stall classifier: it reads the masters'
       // `s_down`/`o_down` flags to tell a stall (loop starvation) apart from a
       // master-down-with-healthy-loop (misdirected resolution), and this is the
@@ -2640,6 +2739,7 @@ export class AnomalyService
       // sdown is slow-moving, so a slightly stale snapshot is acceptable.
       this.sentinelMastersSnapshot.set(ctx.connectionId, masters);
       this.sentinelMastersSnapshotAt.set(ctx.connectionId, timestamp);
+      this.sentinelMastersFailed.delete(ctx.connectionId);
       const findings: SentinelDrift[] = [];
       const unreadMasters = new Set<string>();
       const replicaAddrs = new Set<string>();
@@ -2681,12 +2781,9 @@ export class AnomalyService
         },
       });
     } catch (sentinelErr) {
-      // The probe failed, so the snapshot is either absent or stale. Drop it rather
-      // than let the loop-stall classifier keep counting an old `s_down` toward a
-      // misdirected alert from evidence we can no longer confirm.
-      this.sentinelMastersSnapshot.delete(ctx.connectionId);
-      this.sentinelReplicaAddrs.delete(ctx.connectionId);
-      this.sentinelMastersSnapshotAt.delete(ctx.connectionId);
+      // A failure past SENTINEL MASTERS (the persistence gate, for example)
+      // leaves the snapshot just read in place: it is fresh, and the fan-out
+      // needs it.
       this.logger.debug(
         `Failed to check Sentinel topology for ${ctx.connectionName}: ${sentinelErr instanceof Error ? sentinelErr.message : sentinelErr}`,
       );
@@ -3105,9 +3202,7 @@ export class AnomalyService
   private static isAclPermissionError(message: string): boolean {
     const normalized = message.toUpperCase();
     return (
-      normalized.includes('NOPERM') ||
-      normalized.includes('WRONGPASS') ||
-      normalized.includes('NOAUTH') ||
+      isAuthErrorReply(message) ||
       normalized.includes('UNKNOWN COMMAND') ||
       normalized.includes('UNKNOWN SUBCOMMAND')
     );
@@ -4259,7 +4354,9 @@ export class AnomalyService
     return this.recentAnomaliesByConnection.get(connectionId) ?? [];
   }
 
-  private addRecentAnomaly(anomaly: AnomalyEvent): void {
+  private addRecentAnomaly(anomaly: AnomalyEvent, connectionId = anomaly.connectionId): void {
+    this.addSummaryAnomaly(anomaly, connectionId || NO_CONNECTION_ID);
+
     this.recentAnomalies.push(anomaly);
     if (anomaly.connectionId !== undefined) {
       const events = this.recentAnomaliesByConnection.get(anomaly.connectionId);
@@ -4286,6 +4383,45 @@ export class AnomalyService
       else events.push(anomaly);
     }
     this.recentAnomaliesByConnection = byConnection;
+    for (const [connectionId, events] of this.summaryAnomalies) {
+      this.setSummaryEvents(connectionId, events.filter(keep));
+    }
+  }
+
+  private addSummaryAnomaly(anomaly: AnomalyEvent, connectionId: string): void {
+    let events = this.summaryAnomalies.get(connectionId);
+    if (events === undefined) {
+      events = [];
+      this.summaryAnomalies.set(connectionId, events);
+    }
+    // Events arrive roughly in time order, so the expired ones are at the front.
+    const oneHourAgo = Date.now() - 3600000;
+    let dropped = 0;
+    while (dropped < events.length && events[dropped].timestamp < oneHourAgo) dropped++;
+    dropped = Math.max(dropped, events.length + 1 - this.maxRecentEvents);
+    if (dropped > 0) events.splice(0, dropped);
+    events.push(anomaly);
+    this.summaryEventCount += 1 - dropped;
+
+    while (this.summaryEventCount > this.maxSummaryEvents) {
+      let largestId = connectionId;
+      let largest = events;
+      for (const [id, list] of this.summaryAnomalies) {
+        if (list.length > largest.length) {
+          largestId = id;
+          largest = list;
+        }
+      }
+      largest.shift();
+      this.summaryEventCount--;
+      if (largest.length === 0) this.summaryAnomalies.delete(largestId);
+    }
+  }
+
+  private setSummaryEvents(connectionId: string, events: AnomalyEvent[]): void {
+    this.summaryEventCount += events.length - (this.summaryAnomalies.get(connectionId)?.length ?? 0);
+    if (events.length === 0) this.summaryAnomalies.delete(connectionId);
+    else this.summaryAnomalies.set(connectionId, events);
   }
 
   private refreshClientSnapshots(
@@ -6787,7 +6923,9 @@ export class AnomalyService
     baseNodes: ClusterNode[],
     ctx: ConnectionContext,
   ): Promise<{ nodes: ClusterNode[]; unreachableIds: Set<string> }> {
-    if (!this.clusterDiscovery) return { nodes: baseNodes, unreachableIds: new Set() };
+    if (!this.clusterDiscovery || !this.dialsDataNodes(ctx.connectionId)) {
+      return { nodes: baseNodes, unreachableIds: new Set() };
+    }
 
     // Only fan out to reachable remote replicas. A replica flagged dead/
     // unreachable (fail/fail?/noaddr/handshake) can't provide a self-view, and
@@ -7301,11 +7439,11 @@ export class AnomalyService
     onDrop?: () => void,
   ): Promise<void> {
     this.stamp(anomaly, ctx?.connectionId || anomaly.connectionId);
-    this.addRecentAnomaly(anomaly);
+    this.addRecentAnomaly(anomaly, ctx?.connectionId || anomaly.connectionId);
     this.rememberIncidentEvent(anomaly);
 
-    this.countAnomaly(anomaly, ctx?.connectionId);
     if (ctx) this.anomalyContexts.set(anomaly, ctx);
+    this.countAnomaly(anomaly, this.anomalyConnectionId(anomaly));
 
     try {
       await this.persistAnomaly(anomaly, ctx);
@@ -7483,6 +7621,12 @@ export class AnomalyService
       this.persistenceOutbox.defer(entry.id, Date.now());
       return false;
     }
+  }
+
+  // The connection an anomaly is stored and counted under: its poll context's,
+  // else its own. The counter and the summary gauges both use this.
+  private anomalyConnectionId(anomaly: AnomalyEvent): string | undefined {
+    return this.anomalyContexts.get(anomaly)?.connectionId || anomaly.connectionId;
   }
 
   private countAnomaly(anomaly: AnomalyEvent, connectionId: string | undefined): void {
@@ -7886,13 +8030,10 @@ export class AnomalyService
     this.logger.warn(
       `Sequence detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
     );
-    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+    const lastHourGroup = this.toLastHourGroup(group);
+    this.countCorrelatedGroup(lastHourGroup);
     this.recentGroups.push(group);
-    this.lastHourGroups.push({
-      timestamp: group.timestamp,
-      pattern: group.pattern,
-      severity: group.severity,
-    });
+    this.lastHourGroups.push(lastHourGroup);
     if (this.recentGroups.length > this.maxRecentGroups) {
       this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
     }
@@ -8251,6 +8392,7 @@ export class AnomalyService
         `Correlated ${uncorrelated.length} anomalies into ${newGroups.length} pattern groups`,
       );
 
+      const lastHourGroups: LastHourGroup[] = [];
       for (const group of newGroups) {
         const storedGroup: StoredCorrelatedGroup = {
           correlationId: group.correlationId,
@@ -8273,11 +8415,15 @@ export class AnomalyService
         this.logger.warn(
           `Pattern detected: ${group.pattern} (${group.severity}) - ${group.diagnosis}`,
         );
-        this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, connectionId);
+        if (connectionId) {
+          for (const anomaly of group.anomalies) anomaly.connectionId ??= connectionId;
+        }
+        const lastHourGroup = this.toLastHourGroup(group);
+        this.countCorrelatedGroup(lastHourGroup);
+        lastHourGroups.push(lastHourGroup);
 
         if (!connectionId) continue;
         for (const anomaly of group.anomalies) {
-          anomaly.connectionId ??= connectionId;
           try {
             await this.persistAnomaly(anomaly);
           } catch (err) {
@@ -8288,9 +8434,7 @@ export class AnomalyService
       }
 
       this.recentGroups.push(...newGroups);
-      this.lastHourGroups.push(
-        ...newGroups.map(({ timestamp, pattern, severity }) => ({ timestamp, pattern, severity })),
-      );
+      this.lastHourGroups.push(...lastHourGroups);
       if (this.recentGroups.length > this.maxRecentGroups) {
         this.recentGroups = this.recentGroups.slice(-this.maxRecentGroups);
       }
@@ -9001,7 +9145,7 @@ export class AnomalyService
       return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
     }
     const discovery = this.clusterDiscovery;
-    if (!discovery) return null;
+    if (!discovery || !this.dialsDataNodes(connectionId)) return null;
     const readNode = async (client: Promise<{ info(section: string): Promise<string> }>) =>
       this.convertInfoToRecord(InfoParser.parse(await (await client).info('replication')));
     if (this.clusterViews.has(connectionId)) {
@@ -9029,12 +9173,166 @@ export class AnomalyService
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
   private static readonly TOPOLOGY_BACKOFF_MAX_POLLS = 8;
 
-  private sentinelDivergenceTargets(connectionId: string): TopologyScope | null {
-    if (this.connectionRegistry.sentinelDataNodeCredentials(connectionId) === null) {
-      return { targets: [], members: new Set() };
+  /** A fan-out read the node refused for its credentials, not for reachability. */
+  private static isFanoutAuthError(err: unknown): boolean {
+    return isAuthErrorReply(err instanceof Error ? err.message : String(err));
+  }
+
+  private topologyClaimStaleMs(): number {
+    return Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS);
+  }
+
+  private dialsDataNodes(connectionId: string): boolean {
+    return dialsDataNodes(this.connectionRegistry.getConfig(connectionId));
+  }
+
+  private sentinelDivergenceTargets(
+    ctx: ConnectionContext,
+  ): { scope: TopologyScope | null; gap: FanoutGap | null } {
+    const masters = this.sentinelMastersSnapshot.get(ctx.connectionId);
+    const known = masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
+    const reason = this.sentinelFanoutGap(ctx);
+    if (reason) {
+      // Without a topology there is nothing to tell apart from a real gap.
+      const gap = known ? this.undialedGap(ctx.connectionId, known, reason) : { reason, notDialed: 0 };
+      if (gap.reason === reason) this.noticeFanoutGap(ctx, reason);
+      return { scope: { targets: [], members: new Set() }, gap };
     }
-    const masters = this.sentinelMastersSnapshot.get(connectionId);
-    return masters ? sentinelTargets(masters, this.registeredAddresses()) : null;
+    this.fanoutGapNoticed.delete(ctx.connectionId);
+    if (known) return { scope: known, gap: null };
+    const unread = this.sentinelMastersFailed.has(ctx.connectionId) ? 'topology_unreadable' : 'topology_unknown';
+    return { scope: null, gap: { reason: unread, notDialed: 0 } };
+  }
+
+  /**
+   * A topology the connection does not dial. Its primaries that are registered
+   * on their own, or checked by another connection, are no gap: a Sentinel
+   * without data-node credentials whose primaries are all covered reports
+   * `no_targets` or `covered_elsewhere`, not the missing credentials.
+   */
+  private undialedGap(connectionId: string, scope: TopologyScope, reason: FanoutCoverageReason): FanoutGap {
+    const now = Date.now();
+    const staleMs = this.topologyClaimStaleMs();
+    const notDialed = [...scope.members].filter(
+      (addr) => !this.topologyTargetClaims.heldByOther(connectionId, addr, now, staleMs),
+    ).length;
+    if (notDialed > 0) return { reason, notDialed };
+    return { reason: scope.members.size > 0 ? 'covered_elsewhere' : 'no_targets', notDialed: 0 };
+  }
+
+  /**
+   * Why a Sentinel connection's primaries cannot be dialed, or null when they
+   * can. The Sentinel's own credentials are never sent to an address it
+   * reports, so without data-node credentials the fan-out skips every primary
+   * rather than trying without AUTH: that would fail on every authenticated
+   * node, poll after poll, and read as "unreachable" instead of "not
+   * configured".
+   */
+  private sentinelFanoutGap(ctx: ConnectionContext): FanoutCoverageReason | null {
+    if (this.connectionRegistry.sentinelDataNodeCredentials(ctx.connectionId) !== null) return null;
+    // Follows the checks sentinelDataNodeCredentials refuses on (bar
+    // `membership`: a managed child is a data node, never a Sentinel), so the
+    // reason names what actually blocks the fan-out.
+    const config = this.connectionRegistry.getConfig(ctx.connectionId);
+    if (config?.sshTunnel?.enabled) return 'ssh_tunnel';
+    if (!dialsDataNodes(config) || ctx.connectionType === 'agent') return 'agent_connection';
+    // A data-node password still marked encrypted after loading is one the
+    // stored key could not decrypt.
+    if (config?.nodePassword && config.nodePasswordEncrypted) return 'sentinel_credentials_unreadable';
+    if (config?.nodeUsername === undefined && config?.nodePassword === undefined) {
+      return config?.authMode === 'certificate' ? 'certificate_auth' : 'no_sentinel_credentials';
+    }
+    // Data-node credentials are set, but another stored secret (the password,
+    // TLS key or SSH material) failed to decrypt.
+    return config?.credentialStatus === 'decryption_failed' ? 'connection_secrets_unreadable' : 'no_sentinel_credentials';
+  }
+
+  private static readonly FANOUT_GAP_NOTICES: Partial<Record<FanoutCoverageReason, string>> = {
+    no_sentinel_credentials:
+      'the connection has no data-node credentials. Set nodeUsername/nodePassword ("Data node credentials" in the connection form), or "Connect to data nodes without a username" with an empty password when the data nodes need no AUTH.',
+    sentinel_credentials_unreadable:
+      'its stored data-node password could not be decrypted. Check that ENCRYPTION_KEY is set to the key the connection was saved with.',
+    connection_secrets_unreadable:
+      'its stored secrets (password, TLS key or SSH material) could not be decrypted. Check that ENCRYPTION_KEY is set to the key the connection was saved with.',
+    certificate_auth:
+      'the connection uses certificate auth, and the connection form stores no data-node settings in that mode. Add it through POST /api/connections with nodeUsername "" to check the data nodes with the client certificate, or with nodeUsername/nodePassword for AUTH.',
+  };
+
+  /**
+   * Logs a fan-out gap once per connection and reason. Only a different
+   * reason, or the gap closing (sentinelDivergenceTargets clears it), re-arms
+   * the notice: primaries flipping between covered and not as another
+   * connection's claim comes and goes do not. Reasons with nothing to fix (an
+   * SSH tunnel, the agent) are not logged.
+   */
+  private noticeFanoutGap(ctx: ConnectionContext, reason: FanoutCoverageReason): void {
+    const notice = AnomalyService.FANOUT_GAP_NOTICES[reason];
+    if (!notice || this.fanoutGapNoticed.get(ctx.connectionId) === reason) return;
+    this.fanoutGapNoticed.set(ctx.connectionId, reason);
+    this.logger.warn(
+      `Node fan-out for ${ctx.connectionName}: the primaries this Sentinel monitors are not checked because ${notice}`,
+    );
+  }
+
+  private recordFanoutCoverage(
+    ctx: ConnectionContext,
+    topology: FanoutCoverage['topology'],
+    coverage: Pick<FanoutCoverage, FanoutCount | 'reason'>,
+  ): void {
+    this.fanoutCoverage.set(ctx.connectionId, {
+      connectionId: ctx.connectionId,
+      topology,
+      ...coverage,
+      tunnelled: !!this.connectionRegistry.getConfig(ctx.connectionId)?.sshTunnel?.enabled,
+      targetLimit: TOPOLOGY_TARGET_LIMIT,
+      timeoutMs: AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+      timestamp: Date.now(),
+    });
+    this.fanoutCoverageWithdrawn.delete(ctx.connectionId);
+    this.publishFanoutCoverage(ctx.connectionId, coverage.reason === 'not_applicable' ? null : coverage);
+  }
+
+  private publishFanoutCoverage(
+    connectionId: string,
+    coverage: Pick<FanoutCoverage, FanoutCount | 'reason'> | null,
+  ): void {
+    try {
+      this.prometheusService.updateFanoutCoverage(connectionId, coverage);
+    } catch (err) {
+      this.logger.debug(
+        `Failed to update fan-out coverage gauges for ${connectionId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
+   * Withdraws the gauges of coverage no poll has refreshed for a while: a
+   * disconnected connection, or one whose polls fail before the topology is
+   * read, would otherwise keep exporting its last cycle as current. The entry
+   * itself stays, marked stale, so the dashboard says the checks stopped
+   * rather than showing nothing, which reads as full coverage. Runs on every
+   * poll, the summary timer and each API read.
+   */
+  private sweepStaleFanoutCoverage(now = Date.now()): void {
+    const staleMs = this.topologyClaimStaleMs();
+    for (const [connectionId, coverage] of this.fanoutCoverage) {
+      if (now - coverage.timestamp <= staleMs || this.fanoutCoverageWithdrawn.has(connectionId)) continue;
+      this.fanoutCoverageWithdrawn.add(connectionId);
+      this.publishFanoutCoverage(connectionId, null);
+    }
+  }
+
+  getFanoutCoverage(connectionId?: string): FanoutCoverage[] {
+    const now = Date.now();
+    this.sweepStaleFanoutCoverage(now);
+    const entries = connectionId
+      ? [this.fanoutCoverage.get(connectionId)].filter((c): c is StoredFanoutCoverage => c !== undefined)
+      : [...this.fanoutCoverage.values()];
+    // The age comes from the server clock, so a skewed browser clock cannot
+    // make fresh coverage look old or the reverse.
+    return entries
+      .map((c) => ({ ...c, ageMs: now - c.timestamp, stale: this.fanoutCoverageWithdrawn.has(c.connectionId) }))
+      .sort((a, b) => a.connectionId.localeCompare(b.connectionId));
   }
 
   private registeredAddresses(): RegisteredAddress {
@@ -9063,28 +9361,85 @@ export class AnomalyService
   private async detectTopologyAnomalies(
     ctx: ConnectionContext,
     scope: TopologyScope,
+    gap: FanoutGap | null = null,
+    topology: FanoutCoverage['topology'] = null,
   ): Promise<void> {
-    if (!this.clusterDiscovery) return;
+    if (!this.clusterDiscovery) {
+      // Nothing can be dialed without cluster discovery. Say so rather than
+      // record nothing, which reads as full coverage, and log it once per
+      // connection: the dashboard points at the log for this reason.
+      const recorded = gap ?? this.undialedGap(ctx.connectionId, scope, 'fanout_failed');
+      if (recorded.reason === 'fanout_failed' && !this.fanoutUndialedNoticed.has(ctx.connectionId)) {
+        this.fanoutUndialedNoticed.add(ctx.connectionId);
+        this.logger.warn(
+          `Node fan-out for ${ctx.connectionName}: the other primaries ${topology === 'sentinel' ? 'this Sentinel monitors' : 'the topology lists'} are not checked because cluster discovery is not available in this deployment.`,
+        );
+      }
+      this.recordFanoutCoverage(ctx, topology, { ...EMPTY_FANOUT, ...recorded });
+      return;
+    }
     try {
-      await this.checkTopologyNodes(ctx, scope);
+      await this.checkTopologyNodes(ctx, scope, gap, topology);
     } finally {
       this.openDivergenceReads.delete(ctx.connectionId);
     }
   }
 
-  private async checkTopologyNodes(ctx: ConnectionContext, scope: TopologyScope): Promise<void> {
+  private async checkTopologyNodes(
+    ctx: ConnectionContext,
+    scope: TopologyScope,
+    gap: FanoutGap | null,
+    topology: FanoutCoverage['topology'],
+  ): Promise<void> {
     const now = Date.now();
-    const staleMs = Math.max(3 * this.getIntervalMs(), AnomalyService.TOPOLOGY_CLAIM_STALE_MS);
-    const claimed = this.topologyTargetClaims.claim(ctx.connectionId, scope.targets, now, staleMs);
-    const claimedAddrs = new Set(claimed.map((t) => t.addr));
+    const staleMs = this.topologyClaimStaleMs();
     const reachable = new Set(scope.targets.map((t) => t.addr));
-    const kept = new Set(
-      [...scope.members].filter(
-        (addr) =>
-          !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs) &&
-          (claimedAddrs.has(addr) || !reachable.has(addr)),
-      ),
+    const claimed = this.topologyTargetClaims.claim(
+      ctx.connectionId,
+      scope.targets,
+      now,
+      staleMs,
+      TOPOLOGY_TARGET_LIMIT,
+      [...scope.members].filter((addr) => !reachable.has(addr)),
     );
+    const claimedAddrs = new Set(claimed.map((t) => t.addr));
+    // Primaries taken over from a connection holding them as down. That one
+    // keeps counting them until a read here succeeds, so a failed or
+    // backed-off read of one is not counted here as well.
+    const takeovers = new Set(
+      claimed
+        .filter((t) => this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs))
+        .map((t) => t.addr),
+    );
+    // A down primary stays with every connection of its topology, so its open
+    // alerts stay open until it leaves the topology; only the connection
+    // holding it counts it unreachable.
+    const kept = new Set(
+      [...scope.members].filter((addr) => claimedAddrs.has(addr) || !reachable.has(addr)),
+    );
+    // Primaries past the target cap that no other connection holds either:
+    // nothing checks them until a connection has room. One held as down is
+    // counted unreachable by its holder, so it is not counted here as well.
+    const skipped = scope.targets.filter(
+      (t) =>
+        !claimedAddrs.has(t.addr) &&
+        !this.topologyTargetClaims.heldByOther(ctx.connectionId, t.addr, now, staleMs),
+    ).length;
+    const down = [...kept].filter(
+      (addr) =>
+        !reachable.has(addr) && !this.topologyTargetClaims.heldByOther(ctx.connectionId, addr, now, staleMs),
+    ).length;
+    const coverage = (checked: number, unreachable: number, authFailed: number) => {
+      const notDialed = gap?.notDialed ?? 0;
+      const reason =
+        gap?.reason ??
+        (checked + unreachable + authFailed + skipped > 0
+          ? null
+          : scope.members.size > 0
+            ? 'covered_elsewhere'
+            : 'no_targets');
+      this.recordFanoutCoverage(ctx, topology, { checked, unreachable, authFailed, skipped, notDialed, reason });
+    };
     const active = new Set([...kept].map((addr) => topologyStateKey(ctx.connectionId, addr)));
     for (const key of this.topologyBackoff.keys()) {
       if (isTopologyStateKeyOf(key, ctx.connectionId) && !active.has(key)) this.topologyBackoff.delete(key);
@@ -9101,7 +9456,16 @@ export class AnomalyService
     const targets = claimed.filter(
       (t) => (this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.until ?? 0) <= now,
     );
-    const backedOff = claimed.length - targets.length;
+    const backedOffTargets = claimed.filter((t) => !targets.includes(t) && !takeovers.has(t.addr));
+    const backedOff = backedOffTargets.length;
+    // A primary backing off after refusing the credentials still counts as
+    // refusing them, not as unreachable.
+    const backedOffAuth = backedOffTargets.filter(
+      (t) => this.topologyBackoff.get(topologyStateKey(ctx.connectionId, t.addr))?.auth,
+    ).length;
+    // Recorded before the awaits below, so a storage error there cannot leave
+    // the previous cycle's counts in place.
+    if (targets.length === 0) coverage(0, backedOff - backedOffAuth + down, backedOffAuth);
     for (const target of claimed) {
       if (!targets.includes(target)) this.topologyTargetClaims.releaseTarget(ctx.connectionId, target.addr);
     }
@@ -9142,9 +9506,28 @@ export class AnomalyService
     for (const addr of kept) {
       if (!read.has(addr)) this.clearNodeSignals(ctx.connectionId, topologyStateKey(ctx.connectionId, addr));
     }
-    await this.persistPendingDivergenceWindows(ctx);
-    await this.sweepRetiredDivergenceNodes(ctx, kept);
-    await this.settleRetiredDivergence(ctx.connectionId);
+    try {
+      await this.persistPendingDivergenceWindows(ctx);
+      await this.sweepRetiredDivergenceNodes(ctx, kept);
+      await this.settleRetiredDivergence(ctx.connectionId);
+    } catch (err) {
+      // The reads below never run. Say so rather than keep the previous
+      // cycle's counts until they go stale, and let the claims go so another
+      // connection of the topology can take the primaries over instead of
+      // reporting them covered here.
+      this.topologyTargetClaims.release(ctx.connectionId);
+      if (targets.length > 0) {
+        this.recordFanoutCoverage(ctx, topology, {
+          checked: 0,
+          unreachable: backedOff - backedOffAuth + down,
+          authFailed: backedOffAuth,
+          skipped,
+          notDialed: targets.length,
+          reason: 'fanout_failed',
+        });
+      }
+      throw err;
+    }
     if (targets.length === 0) {
       if (backedOff === 0 && (this.topologyFanoutUnreachable.get(ctx.connectionId) ?? 0) > 0) {
         this.logger.log(
@@ -9188,20 +9571,41 @@ export class AnomalyService
       }),
     );
 
-    let unreachable = backedOff;
+    const refused = results.map(
+      (result) => result.status === 'rejected' && AnomalyService.isFanoutAuthError(result.reason),
+    );
+    const counted = (i: number) => !takeovers.has(targets[i].addr);
+    const failed = results.filter((result, i) => result.status === 'rejected' && counted(i)).length;
+    const authFailed = backedOffAuth + refused.filter((r, i) => r && counted(i)).length;
+    const unreachable = backedOff + failed;
+    // A takeover whose reservation was lost while the read was in flight stays
+    // with the connection that now holds the primary: it is neither counted
+    // nor checked here.
+    const lost = new Set<string>();
+    for (const [i, result] of results.entries()) {
+      const addr = targets[i].addr;
+      if (result.status !== 'fulfilled' || !takeovers.has(addr)) continue;
+      if (!this.topologyTargetClaims.confirm(ctx.connectionId, addr, now)) lost.add(addr);
+    }
+    const checked = results.filter((result, i) => result.status === 'fulfilled' && !lost.has(targets[i].addr)).length;
+    // Recorded as soon as the reads settle: detection below can throw.
+    coverage(checked, unreachable - authFailed + down, authFailed);
     for (const [i, result] of results.entries()) {
       const key = topologyStateKey(ctx.connectionId, targets[i].addr);
       if (result.status === 'rejected') {
-        unreachable++;
         this.clearNodeSignals(ctx.connectionId, key);
         this.topologyTargetClaims.releaseTarget(ctx.connectionId, targets[i].addr);
         if (targets[i].nodeId) this.reshardMissedReads.add(topologyStateKey(ctx.connectionId, targets[i].addr));
         const failures = (this.topologyBackoff.get(key)?.failures ?? 0) + 1;
         const polls = Math.min(2 ** (failures - 1), AnomalyService.TOPOLOGY_BACKOFF_MAX_POLLS);
-        this.topologyBackoff.set(key, { failures, until: now + polls * this.getIntervalMs() });
+        this.topologyBackoff.set(key, { failures, until: now + polls * this.getIntervalMs(), auth: refused[i] });
         continue;
       }
       this.topologyBackoff.delete(key);
+      if (lost.has(targets[i].addr)) {
+        this.clearNodeSignals(ctx.connectionId, key);
+        continue;
+      }
       const target = targets[i];
       const nodeCtx: ConnectionContext = {
         ...ctx,
@@ -9234,7 +9638,7 @@ export class AnomalyService
     if (unreachable !== previous) {
       if (unreachable > 0) {
         this.logger.warn(
-          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.`,
+          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable${authFailed > 0 ? ` (${authFailed} refused the credentials)` : ''} — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.`,
         );
       } else {
         this.logger.log(
@@ -10105,43 +10509,89 @@ export class AnomalyService
   private incidentGaugeFailures = 0;
   private openIncidentSince: number | null = null;
 
-  private async updatePrometheusSummary(): Promise<void> {
-    const oneHourAgo = Date.now() - 3600000;
-    const bySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byMetric: Record<string, number> = {};
-    const unresolvedBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
-    const byPattern: Record<string, number> = {};
-    const groupsBySeverity: Record<string, number> = { info: 0, warning: 0, critical: 0 };
+  private toLastHourGroup(group: CorrelatedAnomalyGroup): LastHourGroup {
+    return {
+      timestamp: group.timestamp,
+      pattern: group.pattern,
+      severity: group.severity,
+      connectionId: group.anomalies[0]?.connectionId ?? NO_CONNECTION_ID,
+    };
+  }
 
-    for (const a of this.recentAnomalies) {
-      if (a.timestamp < oneHourAgo) continue;
-      bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
-      byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
-      if (!a.resolved)
-        unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
+  // The counter uses the same single connection as the summary gauges, so a
+  // group spanning several connections is counted once in both and sums over
+  // connections stay exact.
+  private countCorrelatedGroup(group: LastHourGroup): void {
+    this.prometheusService.incrementCorrelatedGroup(group.pattern, group.severity, group.connectionId);
+  }
+
+  private async updatePrometheusSummary(): Promise<void> {
+    this.sweepStaleFanoutCoverage();
+    const oneHourAgo = Date.now() - 3600000;
+    // One summary per connection with an anomaly or group in the window, so a
+    // connection that went down keeps its unresolved anomalies visible. A
+    // user-added connection this service covers is also published when quiet,
+    // so it reads zero rather than no data; auto-registered nodes are not, to
+    // keep their cost off large clusters. NO_CONNECTION_ID collects
+    // connection-less events. The Prometheus service drops retired and deleted
+    // connections and removes the series of anything left out.
+    const summaries = new Map<string, AnomalySummaryCounts>();
+    const summaryFor = (connectionId: string): AnomalySummaryCounts => {
+      let summary = summaries.get(connectionId);
+      if (!summary) {
+        summary = {
+          bySeverity: {},
+          byMetric: {},
+          byPattern: {},
+          groupsBySeverity: {},
+          unresolvedBySeverity: {},
+        };
+        summaries.set(connectionId, summary);
+      }
+      return summary;
+    };
+
+    const polled = this.getPolledConnectionIds();
+    for (const connectionId of polled) {
+      if (!this.connectionRegistry.isAutoRegistered(connectionId)) summaryFor(connectionId);
+    }
+
+    for (const [connectionId, events] of this.summaryAnomalies) {
+      const inWindow = events.filter((a) => a.timestamp >= oneHourAgo);
+      this.setSummaryEvents(connectionId, inWindow);
+      if (inWindow.length === 0) continue;
+      const { bySeverity, byMetric, unresolvedBySeverity } = summaryFor(connectionId);
+      for (const a of inWindow) {
+        bySeverity[a.severity] = (bySeverity[a.severity] ?? 0) + 1;
+        byMetric[a.metricType] = (byMetric[a.metricType] ?? 0) + 1;
+        if (!a.resolved)
+          unresolvedBySeverity[a.severity] = (unresolvedBySeverity[a.severity] ?? 0) + 1;
+      }
     }
 
     this.lastHourGroups = this.lastHourGroups.filter((g) => g.timestamp >= oneHourAgo);
     for (const g of this.lastHourGroups) {
+      const { byPattern, groupsBySeverity } = summaryFor(g.connectionId);
       byPattern[g.pattern] = (byPattern[g.pattern] ?? 0) + 1;
       groupsBySeverity[g.severity] = (groupsBySeverity[g.severity] ?? 0) + 1;
     }
 
-    this.prometheusService.updateAnomalySummary({
-      bySeverity,
-      byMetric,
-      byPattern,
-      groupsBySeverity,
-      unresolvedBySeverity,
-    });
+    this.prometheusService.updateAnomalySummaries(summaries);
 
-    const bufferStats = this.getBufferStats().map((s) => ({
-      metricType: s.metricType,
-      mean: s.mean,
-      stdDev: s.stdDev,
-      ready: s.isReady,
-    }));
-    this.prometheusService.updateAnomalyBufferStats(bufferStats);
+    // The buffer gauges are published once per instance: the default
+    // connection's baselines while this service covers it, nothing otherwise.
+    const defaultConnectionId = this.connectionRegistry.getDefaultId();
+    if (defaultConnectionId && polled.has(defaultConnectionId)) {
+      const bufferStats = this.getBufferStats(defaultConnectionId).map((s) => ({
+        metricType: s.metricType,
+        mean: s.mean,
+        stdDev: s.stdDev,
+        ready: s.isReady,
+      }));
+      this.prometheusService.updateAnomalyBufferStats(bufferStats, defaultConnectionId);
+    } else {
+      this.prometheusService.updateAnomalyBufferStats([], null);
+    }
 
     await this.updateIncidentGauges(oneHourAgo);
   }
@@ -10152,27 +10602,16 @@ export class AnomalyService
     try {
       const from = Math.min(since, this.openIncidentSince ?? Date.now() - MAX_INCIDENT_LOOKBACK_MS);
       const timelines = await this.getIncidentTimelines(undefined, from, undefined, Number.MAX_SAFE_INTEGER);
-      const byConnection = new Map<string, Map<string, { pattern: string; status: string; count: number }>>();
+      const open: Array<{ connectionIds: string[]; patterns: string[]; status: string }> = [];
       let oldestOpen: number | null = null;
       for (const timeline of timelines) {
         const status = timeline.recovery.status;
         if (!OPEN_INCIDENT_STATUSES.has(status)) continue;
         oldestOpen = Math.min(oldestOpen ?? timeline.lastEventAt, timeline.lastEventAt);
-        const patterns = timeline.matchedPatterns.length > 0 ? new Set<string>(timeline.matchedPatterns) : ['none'];
-        for (const connectionId of timeline.connectionIds.length > 0 ? timeline.connectionIds : ['']) {
-          const counts = byConnection.get(connectionId) ?? new Map();
-          for (const pattern of patterns) {
-            const label = `${pattern}\u0000${status}`;
-            const entry = counts.get(label) ?? { pattern, status, count: 0 };
-            entry.count++;
-            counts.set(label, entry);
-          }
-          byConnection.set(connectionId, counts);
-        }
+        open.push({ connectionIds: timeline.connectionIds, patterns: timeline.matchedPatterns, status });
       }
-      this.prometheusService.updateActiveIncidents(
-        new Map([...byConnection].map(([connectionId, counts]) => [connectionId, [...counts.values()]])),
-      );
+      // Counted per connection label, once per incident, by the Prometheus service.
+      this.prometheusService.updateActiveIncidents(open);
       this.openIncidentSince = oldestOpen === null ? since : Math.min(since, oldestOpen);
       this.incidentGaugeFailures = 0;
     } catch (err) {
@@ -10188,7 +10627,7 @@ export class AnomalyService
 
   private clearIncidentGauges(): void {
     try {
-      this.prometheusService.updateActiveIncidents(new Map());
+      this.prometheusService.updateActiveIncidents([]);
     } catch (err) {
       this.logger.debug(`Failed to clear incident gauges: ${err instanceof Error ? err.message : err}`);
     }

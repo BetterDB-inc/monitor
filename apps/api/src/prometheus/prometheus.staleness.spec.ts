@@ -28,6 +28,7 @@ describe('PrometheusService staleness bounds', () => {
     };
     const registry = {
       getConfig: jest.fn((id: string) => configs[id] ?? null),
+      isListed: jest.fn((id: string) => id in configs),
       get: jest.fn().mockReturnValue({ getInfoParsed }),
       list: jest.fn().mockReturnValue([]),
       getDefaultId: jest.fn().mockReturnValue('conn-1'),
@@ -211,15 +212,19 @@ describe('PrometheusService staleness bounds', () => {
 
   it('keeps anomaly summary gauges while the connection is stale', async () => {
     await update('conn-1');
-    service.updateAnomalySummary(
-      {
-        bySeverity: { critical: 2 },
-        byMetric: { memory: 2 },
-        byPattern: { memory_pressure: 1 },
-        groupsBySeverity: { critical: 1 },
-        unresolvedBySeverity: { critical: 2 },
-      },
-      'conn-1',
+    service.updateAnomalySummaries(
+      new Map([
+        [
+          'conn-1',
+          {
+            bySeverity: { critical: 2 },
+            byMetric: { memory: 2 },
+            byPattern: { memory_pressure: 1 },
+            groupsBySeverity: { critical: 1 },
+            unresolvedBySeverity: { critical: 2 },
+          },
+        ],
+      ]),
     );
     setMemory(LABEL, 100);
 
@@ -242,9 +247,13 @@ describe('PrometheusService staleness bounds', () => {
   it('does not export series for a connection that no longer exists', async () => {
     service.incrementAnomalyEvent('critical', 'memory', 'spike', 'deleted');
     service.incrementCorrelatedGroup('memory_pressure', 'critical', 'deleted');
-    service.updateAnomalySummary(
-      { bySeverity: { critical: 1 }, byMetric: {}, byPattern: {}, groupsBySeverity: {}, unresolvedBySeverity: {} },
-      'deleted',
+    service.updateAnomalySummaries(
+      new Map([
+        [
+          'deleted',
+          { bySeverity: { critical: 1 }, byMetric: {}, byPattern: {}, groupsBySeverity: {}, unresolvedBySeverity: {} },
+        ],
+      ]),
     );
     service.updateAnomalyBufferStats([{ metricType: 'memory', mean: 1, stdDev: 0, ready: true }], 'deleted');
     service.updateCommandstatsMetrics('deleted', [{ command: 'get', callsTotal: 1, usecPerCall: 2 }]);
