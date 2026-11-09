@@ -182,6 +182,7 @@ import {
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { isWriteCommand } from '@app/cluster/write-commands';
+import { parseLatencyStatsSection } from '@app/metrics/latencystats-parser';
 import {
   ClusterNode,
   ClusterShard,
@@ -1094,6 +1095,7 @@ export class AnomalyService
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
+    this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
     this.reshardWatchedSince.delete(connectionId);
@@ -5789,7 +5791,10 @@ export class AnomalyService
       opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec) ?? 0,
       cpuUtilization,
       usedMemory: this.parseNumber(info.used_memory) ?? 0,
-      writeP99Us: key === connectionOfStateKey(key) ? (previous?.writeP99Us ?? null) : null,
+      writeP99Us:
+        key === connectionOfStateKey(key)
+          ? (previous?.writeP99Us ?? null)
+          : (this.reshardWriteP99.get(key)?.value ?? null),
       timestamp,
     };
   }
@@ -5911,6 +5916,41 @@ export class AnomalyService
       shards.set(snapshot.shardId, snapshot);
     }
     return [...shards.values()];
+  }
+
+  private async readNodeWriteP99(
+    client: { info(section: string): Promise<string> },
+    key: string,
+    addr: string,
+    timestamp: number,
+  ): Promise<void> {
+    if (timestamp - (this.reshardWriteP99.get(key)?.readAt ?? -Infinity) < AnomalyService.RESHARD_P99_REFRESH_MS) {
+      return;
+    }
+    let value: number | null = null;
+    try {
+      const raw = await withTimeout(
+        this.fanoutCommand(`${key}#latency`, () => client.info('latencystats')),
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `INFO latencystats to ${addr} timed out`,
+      );
+      const parsed = InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>;
+      const writes = parseLatencyStatsSection(parsed.latencystats ?? parsed.Latencystats)
+        .filter((row) => isWriteCommand(row.command))
+        .map((row) => row.p99Us);
+      value = writes.length > 0 ? Math.max(...writes) : null;
+    } catch (err) {
+      this.logger.debug(`Write P99 read failed for ${addr}: ${err instanceof Error ? err.message : err}`);
+    }
+    this.reshardWriteP99.set(key, { readAt: timestamp, value });
+  }
+
+  private forgetNodeWriteP99(connectionId: string, keep: Set<string> = new Set()): void {
+    for (const key of [...this.reshardWriteP99.keys()]) {
+      if (key !== connectionId && isTopologyStateKeyOf(key, connectionId) && !keep.has(key)) {
+        this.reshardWriteP99.delete(key);
+      }
+    }
   }
 
   private async latestWriteP99(connectionId: string, timestamp: number): Promise<number | null> {
@@ -8958,6 +8998,7 @@ export class AnomalyService
         this.reshardNodeSelves.delete(key);
       }
     }
+    this.forgetNodeWriteP99(ctx.connectionId, active);
     const read = new Set(targets.map((t) => t.addr));
     for (const addr of kept) {
       const key = topologyStateKey(ctx.connectionId, addr);
@@ -9007,6 +9048,7 @@ export class AnomalyService
             ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
               this.readNodeSelf(client, target.addr, stateKey))
             : Promise.resolve(null),
+          target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : undefined,
         ]);
         const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
         const cob = await this.readFanoutCob(client, stateKey, target.addr, info);

@@ -1998,7 +1998,7 @@ describe('AnomalyService', () => {
     });
 
     describe('with only the seed registered', () => {
-      function reshardNode(id: string, ops: number, marker = '') {
+      function reshardNode(id: string, ops: number, marker = '', p99?: number) {
         const nodeId = `${id}0000000`;
         const info = [
           '# Replication',
@@ -2010,8 +2010,14 @@ describe('AnomalyService', () => {
           `instantaneous_ops_per_sec:${ops}`,
         ].join('\r\n');
         const nodesReply = `${nodeId} 10.0.0.${id.charCodeAt(0)}:6379@16379 myself,master - 0 0 1 connected ${marker}`;
+        const latency =
+          p99 === undefined
+            ? ''
+            : ['# Latencystats', `latency_percentiles_usec_set:p50=10.000,p99=${p99}.000,p99.9=${p99 + 10_000}.000`].join(
+                '\r\n',
+              );
         return {
-          info: jest.fn().mockResolvedValue(info),
+          info: jest.fn(async (section?: string) => (section === 'latencystats' ? latency : info)),
           call: jest.fn().mockResolvedValue(nodesReply),
         };
       }
@@ -2099,6 +2105,76 @@ describe('AnomalyService', () => {
         expect(skewEvents()).toHaveLength(0);
       });
 
+      it('marks reshard pressure on a non-seed shard from its own write latency', async () => {
+        storage.getLatencyStatsHistory = jest.fn(async () => [{ command: 'set', p99Us: 1000, capturedAt: BASE }]);
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]', 50_000),
+          c0000000: reshardNode('c', 6000, '', 1000),
+        });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({
+          nodeAddr: '10.0.0.98:6379',
+          syntheticPattern: AnomalyPattern.RESHARD_PRESSURE,
+        });
+      });
+
+      it('reads node latencystats at most every 30s', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        for (let i = 0; i < 6; i += 1) {
+          clock += 10_000;
+          await poll(shardCtx('a', 6000, false));
+        }
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(2);
+      });
+
+      it('keeps a node without latencystats in the reshard view', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({
+          shardId: 'b0000000',
+          writeP99Us: null,
+        });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('keeps a node whose latencystats read fails in the reshard view', async () => {
+        const b = reshardNode('b', 6000);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('forgets a node write latency when the node leaves', async () => {
+        discover({ b0000000: reshardNode('b', 6000, '', 1000), c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+
+        const ctx = shardCtx('a', 6000, false);
+        (ctx.client as any).getClusterNodes.mockResolvedValue(
+          shardNodes('a', false).filter((n) => n.id !== 'b0000000'),
+        );
+        clock += 1000;
+        await poll(ctx);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
       it('sends the alert of an unregistered primary with that primary as its source', async () => {
         discover({
           b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
@@ -2124,7 +2200,7 @@ describe('AnomalyService', () => {
 
         await pollSeed(6, 6000, false);
 
-        expect(b.info).toHaveBeenCalledTimes(6 * 5);
+        expect(b.info.mock.calls.filter(([section]) => section !== 'latencystats')).toHaveLength(6 * 5);
         expect(b.call.mock.calls.length).toBeLessThan(6);
       });
 
@@ -15105,7 +15181,9 @@ describe('AnomalyService', () => {
             await done;
           }
 
-          expect(client.info).toHaveBeenCalledTimes(5);
+          const calls = client.info.mock.calls as unknown as string[][];
+          expect(calls.filter(([section]) => section !== 'latencystats')).toHaveLength(5);
+          expect(calls.filter(([section]) => section === 'latencystats')).toHaveLength(1);
         } finally {
           jest.useRealTimers();
         }
