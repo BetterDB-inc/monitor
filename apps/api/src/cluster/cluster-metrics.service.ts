@@ -31,6 +31,12 @@ const UNREACHABLE_NODE_BACKOFF_MS = 30_000;
 // Part of a slot-stats budget kept back for the fallback to the connection's
 // own node, so it still fits when every primary used its full timeout.
 const SLOT_STATS_FALLBACK_RESERVE_MS = 1_000;
+// A caller that passes less than this cut the budget short of a real attempt,
+// such as the tail of a Prometheus pass. A timeout then says nothing about the
+// node. Prometheus only starts a fan-out once a second remains, and its pass
+// is the same length as the full node timeout, so the budget it passes is
+// always a little under that timeout and still a real attempt.
+const SLOT_STATS_REAL_BUDGET_MS = 1_000;
 
 /** How many SLOTSRANGE reads one node may have in flight at once. */
 const SLOT_RANGE_BATCH_SIZE = 16;
@@ -549,9 +555,11 @@ export class ClusterMetricsService {
     const primaries = owners.filter((node) => node.healthy);
     const budgetEnd = Date.now() + timeoutMs;
     const nodeTimeoutMs = timeoutMs - Math.min(SLOT_STATS_FALLBACK_RESERVE_MS, Math.floor(timeoutMs / 4));
-    // A budget cut short by the caller (what is left of a Prometheus pass) can
-    // expire on a healthy node; only a full timeout drops that node's socket.
-    const fullTimeout = timeoutMs >= NODE_COMMAND_TIMEOUT_MS;
+    // Compare with the budget the caller passed. A Prometheus pass is only as
+    // long as the full node timeout, so what is left of it is always under
+    // that timeout; it is still the whole budget this call was given. Only a
+    // budget cut below a real attempt is ignored.
+    const fullTimeout = timeoutMs >= SLOT_STATS_REAL_BUDGET_MS;
     // Ask for each owned range rather than the node's top N: during a slot move
     // a node still reports the slot it is handing off, which would take one of
     // the N places and push an owned slot out. The merge ranks them instead.

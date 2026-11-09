@@ -204,6 +204,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private perConnectionState = new Map<string, ConnectionMetricState>();
   // When the current INFO pass of each connection is abandoned by its bound.
   private passDeadlines = new Map<string, number>();
+  // One id per poll tick, shared by every connection in that tick. A member's
+  // slot series are dropped only when its seed published slots under this id.
+  private metricsPassId = 0;
+  private metricsPassActive = 0;
+  private slotStatsPass = new Map<string, number>();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
@@ -492,6 +497,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+    // Connections in one tick start together, before any of them awaits, so
+    // the first one opens the pass and the rest share it.
+    if (this.metricsPassActive === 0) this.metricsPassId += 1;
+    this.metricsPassActive += 1;
+    try {
+      await this.pollConnectionPass(ctx);
+    } finally {
+      this.metricsPassActive -= 1;
+    }
+  }
+
+  private async pollConnectionPass(ctx: ConnectionContext): Promise<void> {
     // One tick gets one interval in total. The base class waits for every
     // connection before the next tick, so stacking a second full bound here
     // would push healthy connections past their own staleness bound.
@@ -2649,8 +2666,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       return;
     }
     // Its seed exports the whole cluster, this node's slots included; a second
-    // copy here would count them twice in any sum across connections.
-    if (client.getCapabilities().clusterEnabled && this.clusterMetricsService?.coveredBySeed(connectionId)) {
+    // copy here would count them twice in any sum across connections. Skip
+    // only when that seed published slots on this pass. A seed that is down,
+    // has no slot stats, or ran out of pass time exported nothing, and
+    // clearing here would drop the slots from Prometheus entirely.
+    if (
+      client.getCapabilities().clusterEnabled &&
+      this.clusterMetricsService?.coveredBySeed(connectionId) &&
+      this.seedExportedSlotStatsThisPass(connectionId)
+    ) {
       this.clearSlotSeries(connLabel, state);
       return;
     }
@@ -2714,6 +2738,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
 
       state.currentClusterSlotLabels = newSlotLabels;
+      this.slotStatsPass.set(connectionId, this.metricsPassId);
     } catch (slotStatsError) {
       const disabled = this.runtimeCapabilityTracker.recordFailure(
         connectionId,
@@ -2725,6 +2750,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
     }
+  }
+
+  /** The seed published slot stats during the pass this connection is in. */
+  private seedExportedSlotStatsThisPass(connectionId: string): boolean {
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    if (membership?.seedId === undefined || membership.retiredAt !== undefined) return false;
+    return this.slotStatsPass.get(membership.seedId) === this.metricsPassId;
   }
 
   private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {

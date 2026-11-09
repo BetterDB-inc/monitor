@@ -524,21 +524,55 @@ describe('PrometheusService slot stats', () => {
     expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledTimes(1);
   });
 
-  it('exports no slot series for a member whose seed reports the whole cluster', async () => {
-    const harness = buildService();
+  function asMemberOfSeed(harness: Harness, seedExported: boolean): { coveredBySeed: jest.Mock } {
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
     const clusterMetrics = {
       getClusterSlotStatsResult: jest.fn(),
       usesClusterWideSlotStats: jest.fn(() => false),
       coveredBySeed: jest.fn(() => true),
     };
-    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+    const service = harness.service as unknown as {
+      clusterMetricsService: unknown;
+      metricsPassId: number;
+      slotStatsPass: Map<string, number>;
+      connectionRegistry: { getConfig: jest.Mock };
+    };
+    service.clusterMetricsService = clusterMetrics;
+    service.connectionRegistry.getConfig.mockImplementation((id: string) => {
+      if (id === 'conn-1') {
+        return {
+          host: '10.0.0.1',
+          port: 6379,
+          membership: { seedId: 'seed', nodeId: 'n1', origin: 'auto', source: 'cluster' },
+        };
+      }
+      if (id === 'seed') return { host: '10.0.0.2', port: 6379 };
+      return null;
+    });
+    if (seedExported) service.slotStatsPass.set('seed', service.metricsPassId);
+    return clusterMetrics;
+  }
+
+  it('exports no slot series for a member whose seed exported them this pass', async () => {
+    const harness = buildService();
+    const clusterMetrics = asMemberOfSeed(harness, true);
 
     await runSlotStats(harness);
 
     expect(clusterMetrics.coveredBySeed).toHaveBeenCalledWith('conn-1');
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
     expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_slot_keys{');
+  });
+
+  it('keeps a member exporting its own slots when its seed did not export this pass', async () => {
+    const harness = buildService();
+    asMemberOfSeed(harness, false);
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(7) });
+
+    await runSlotStats(harness);
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('key-count', 100);
+    expect(await harness.service.getMetrics()).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 7`);
   });
 
   it('keeps a node registered on its own on its own node slot stats', async () => {

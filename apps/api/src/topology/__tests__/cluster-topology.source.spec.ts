@@ -92,6 +92,35 @@ describe('ClusterTopologySource', () => {
     expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1']);
   });
 
+  it('clears an alias once the node that answered has settled after a failback', async () => {
+    // A, B, A marks a VIP before A has answered three syncs in a row. Once it
+    // has, A is the seed's node again and is not registered as its own child.
+    const source = unmatchedSource(nodes, landedOnN2, nodes, nodes, nodes);
+
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n2']);
+  });
+
+  it('clears an alias once a twice-replaced node settles behind one address', async () => {
+    const view = (self: string) =>
+      ['n1', 'n2', 'n3'].map((id, i) => ({
+        ...nodes[0],
+        id,
+        address: `10.0.0.${i + 1}:6379@16379`,
+        flags: id === self ? ['myself', 'master'] : ['master'],
+      }));
+    const source = unmatchedSource(view('n1'), view('n2'), view('n3'), view('n3'), view('n3'));
+
+    expect(ids(await source.discover(vip as never, 10_000))).toHaveLength(2);
+    await expect(source.discover(vip as never, 10_000)).resolves.toBeNull();
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2', 'n3']);
+    expect(ids(await source.discover(vip as never, 10_000))).toEqual(['n1', 'n2']);
+  });
+
   it('treats a failback after a settled move as another move, not as a VIP', async () => {
     const source = unmatchedSource(nodes, landedOnN2, landedOnN2, landedOnN2, nodes, nodes, nodes);
 

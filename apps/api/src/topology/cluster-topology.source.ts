@@ -102,16 +102,23 @@ export class ClusterTopologySource implements TopologySource {
         answered.length >= count && answered.slice(-count).every((id) => id === current);
       const returned = previous !== undefined && current !== previous && answered.slice(0, -2).includes(current);
       const wasAlias = prior ? prior.alias : initial;
-      alias =
-        returned || new Set(answered).size >= SETTLED_ANSWERS || (wasAlias && !settled(RECENT_ANSWERS));
-      verdict = alias;
-      // A change of `myself` not yet seen as either is left alone until the new
-      // node has answered a few syncs in a row, at most until a third node or an
-      // earlier one answers.
-      undecided = !alias && new Set(answered.slice(-SETTLED_ANSWERS)).size > 1;
-      // A settled node is the seed's node; the nodes before it no longer count,
-      // so a later failback is a move again, not a return.
-      if (!alias && settled(SETTLED_ANSWERS)) answered = [current];
+      // A failback (A, B, A) or two replacements (A, B, C) look like a VIP
+      // before the new node has answered a few syncs in a row. Leaving that
+      // alias in place registers the node as its own child. Once it has
+      // settled, it is the seed's node, and the nodes before it no longer count.
+      if (settled(SETTLED_ANSWERS)) {
+        alias = false;
+        verdict = false;
+        undecided = false;
+        answered = [current];
+      } else {
+        alias = returned || new Set(answered).size >= SETTLED_ANSWERS || wasAlias;
+        verdict = alias;
+        // A change of `myself` not yet seen as either is left alone until the new
+        // node has answered a few syncs in a row, at most until a third node or an
+        // earlier one answers.
+        undecided = !alias && new Set(answered.slice(-SETTLED_ANSWERS)).size > 1;
+      }
     } else {
       verdict = matched;
       alias = prior ? (verdict === prior.last ? verdict : prior.alias) : initial;

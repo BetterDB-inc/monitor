@@ -957,6 +957,51 @@ used_cpu_user:20.3\r
       expect(slow.call).toHaveBeenCalledTimes(1);
     });
 
+    it('drops a silent primary that used up the budget a Prometheus pass actually passed', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        ]);
+        const silent = { call: jest.fn(() => new Promise(() => undefined)) };
+        mockDiscoveryService.getNodeConnection.mockResolvedValue(silent);
+        mockConnectionRegistry.get.mockReturnValue({
+          getClient: jest.fn(),
+          getClusterSlotStats: jest.fn().mockResolvedValue({}),
+        });
+
+        const pending = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
+        await jest.advanceTimersByTimeAsync(3_000);
+        await pending;
+
+        expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(silent);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('backs off a primary that cannot be reached within the budget a Prometheus pass passed', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        ]);
+        mockDiscoveryService.getNodeConnection.mockImplementation(() => new Promise(() => undefined));
+        mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats: jest.fn().mockResolvedValue({}) });
+
+        const first = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
+        await jest.advanceTimersByTimeAsync(3_000);
+        await first;
+        mockDiscoveryService.getNodeConnection.mockResolvedValue({ call: jest.fn().mockResolvedValue([[1, ['key-count', 5]]]) });
+        const second = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 3_000);
+
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(1);
+        expect(second.failedNodes).toEqual(['10.0.0.1:6379']);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('does not back off a primary whose connect was cut off by a shortened budget', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
