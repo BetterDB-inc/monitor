@@ -772,7 +772,7 @@ export class AnomalyService
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
-  private fanoutNodeEventIds = new Map<string, Set<string>>();
+  private fanoutNodeEventIds = new Map<string, Map<string, string>>();
   // Non-dataset memory overhead (valkey#1792): per-connection hysteresis state
   // and the last-seen evicted_keys counter for computing the per-poll delta.
   private memoryOverheadState = new Map<string, MemoryOverheadState>();
@@ -2384,7 +2384,9 @@ export class AnomalyService
 
   private trackAdoptedNodeEvents(key: string, open: StoredAnomalyEvent[]): void {
     const oldestFirst = [...open].sort((a, b) => a.timestamp - b.timestamp);
-    for (const event of oldestFirst) this.trackFanoutNodeEvent(key, event.id);
+    for (const event of oldestFirst) {
+      this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey ?? ''}`);
+    }
   }
 
   private closePendingNodeEvents(connectionId: string, active: Set<string>): void {
@@ -4799,7 +4801,7 @@ export class AnomalyService
       ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    if (nodeAddr) this.trackFanoutNodeEvent(key, event.id);
+    if (nodeAddr) this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey}`);
     await this.addLatchedAnomaly(event, ctx, key, forkMemoryRearm(state), () =>
       this.untrackFanoutNodeEvent(key, event.id),
     );
@@ -4996,7 +4998,7 @@ export class AnomalyService
         ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      if (nodeAddr) this.trackFanoutNodeEvent(key, event.id);
+      if (nodeAddr) this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey}`);
       await this.addLatchedAnomaly(
         event,
         ctx,
@@ -5069,15 +5071,17 @@ export class AnomalyService
     return { limit: () => settled(limit), replicas: () => settled(replicas) };
   }
 
-  private trackFanoutNodeEvent(key: string, id: string): void {
-    const ids = this.fanoutNodeEventIds.get(key) ?? new Set<string>();
-    ids.add(id);
-    for (const oldest of ids) {
-      if (ids.size <= AnomalyService.FANOUT_NODE_EVENT_LIMIT) break;
-      ids.delete(oldest);
-      this.closeLater(oldest);
+  private trackFanoutNodeEvent(key: string, id: string, latch: string): void {
+    const events = this.fanoutNodeEventIds.get(key) ?? new Map<string, string>();
+    events.set(id, latch);
+    const latest = new Map([...events].map(([eventId, eventLatch]) => [eventLatch, eventId]));
+    for (const [eventId, eventLatch] of [...events]) {
+      if (events.size <= AnomalyService.FANOUT_NODE_EVENT_LIMIT) break;
+      if (latest.get(eventLatch) === eventId) continue;
+      events.delete(eventId);
+      this.closeLater(eventId);
     }
-    this.fanoutNodeEventIds.set(key, ids);
+    this.fanoutNodeEventIds.set(key, events);
   }
 
   private untrackFanoutNodeEvent(key: string, id: string): void {
@@ -9061,7 +9065,7 @@ export class AnomalyService
       ...(current ? [current] : []),
       ...(this.staleBacklogEventIds.get(key) ?? []),
       ...(this.resyncEscalationEvents.get(key) ?? []).map((e) => e.id),
-      ...(this.fanoutNodeEventIds.get(key) ?? []),
+      ...(this.fanoutNodeEventIds.get(key)?.keys() ?? []),
     ];
   }
 
@@ -9550,23 +9554,24 @@ export class AnomalyService
         );
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
         const deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
-        const [raw, self, writeP99] = await Promise.all([
-          this.fanoutRead(
-            client,
-            stateKey,
-            AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-            `INFO to ${target.addr} timed out`,
-            () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
-          ),
+        const raw = await this.fanoutRead(
+          client,
+          stateKey,
+          AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+          `INFO to ${target.addr} timed out`,
+          () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
+        );
+        const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
+        const cobRead = this.readFanoutCob(client, stateKey, target.addr, info, deadline);
+        const [self, writeP99, cob] = await Promise.all([
           target.nodeId
             ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
               this.readNodeSelf(client, target.addr, stateKey))
             : Promise.resolve(null),
           target.nodeId ? this.readNodeWriteP99(client, stateKey, target.addr, timestamp) : null,
+          cobRead,
         ]);
         if (writeP99) this.reshardWriteP99.set(stateKey, writeP99);
-        const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
-        const cob = await this.readFanoutCob(client, stateKey, target.addr, info, deadline);
         return { info, self, cob };
       }),
     );

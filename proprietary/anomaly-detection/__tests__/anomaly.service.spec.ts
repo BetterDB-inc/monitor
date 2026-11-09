@@ -14535,6 +14535,24 @@ describe('AnomalyService', () => {
         expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
       });
 
+      it('keeps the oldest of nine open replica output-buffer rows open while it still fires', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: Array.from({ length: 9 }, (_, i) => ({
+            id: `c-${i}`,
+            nodeAddr: NODE,
+            dedupeKey: i === 0 ? '10.0.1.6:6379' : `10.0.2.${i}:6379`,
+            severity: AnomalySeverity.WARNING,
+            timestamp: clock - (9 - i) * 1000,
+          })),
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(await resolvedIds()).not.toContain('c-0');
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
       it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
         openRows({
           [MetricType.REPL_BUFFER_PRESSURE]: [
@@ -14828,6 +14846,41 @@ describe('AnomalyService', () => {
         expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
       });
 
+      it.each([
+        ['INFO latencystats', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          client.info.mockImplementation((name?: string) => (name === 'latencystats' ? hang() : Promise.resolve(nodeInfo(name))));
+        }],
+        ['CLUSTER NODES', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          const call = client.call.getMockImplementation()!;
+          client.call.mockImplementation((...args: string[]) => (args[0] === 'CLUSTER' ? hang() : call(...args)));
+        }],
+      ])('still reads replica output buffers when %s is slow', async (_name, slow) => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (closed) throw new Error('Connection is closed.');
+            return nodeCall(...args);
+          });
+          slow(client, () => new Promise<never>((_, reject) => stuck.push(reject)));
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+            expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+          ]);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
       it('reads a node through a fresh connection after dropping a hung one', async () => {
         const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
         (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
@@ -14894,10 +14947,20 @@ describe('AnomalyService', () => {
       it('closes the oldest node events beyond the latest eight', async () => {
         const close = jest.spyOn(service as any, 'closeLater');
         const ids = Array.from({ length: 20 }, (_, i) => `node-event-${i}`);
-        for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id);
+        for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id, 'replica');
 
-        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY)]).toEqual(ids.slice(-8));
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toEqual(ids.slice(-8));
         expect(close.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 12));
+      });
+
+      it('keeps the latest event of every alert open past the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
+        const ids = Array.from({ length: 9 }, (_, i) => `node-event-${i}`);
+        ids.forEach((id, i) => (service as any).trackFanoutNodeEvent(NODE_KEY, id, `replica-${i}`));
+        (service as any).trackFanoutNodeEvent(NODE_KEY, 'node-event-9', 'replica-3');
+
+        expect(close.mock.calls.map(([id]) => id)).toEqual(['node-event-3']);
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toHaveLength(9);
       });
     });
   });
@@ -16810,7 +16873,7 @@ describe('AnomalyService', () => {
 
           const calls = client.info.mock.calls as unknown as string[][];
           expect(calls.filter(([section]) => section !== 'latencystats')).toHaveLength(5);
-          expect(calls.filter(([section]) => section === 'latencystats')).toHaveLength(1);
+          expect(calls.filter(([section]) => section === 'latencystats')).toHaveLength(0);
         } finally {
           jest.useRealTimers();
         }
