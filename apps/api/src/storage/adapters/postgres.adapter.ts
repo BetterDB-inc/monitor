@@ -3065,6 +3065,12 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     } else if (options.nodeAddr !== undefined) {
       conditions.push("(node_addr IS NULL OR node_addr = '')");
     }
+    if (options.commands?.length) {
+      conditions.push(`commands = $${paramIndex++}::text[]`);
+      params.push(options.commands);
+    } else if (options.commands !== undefined) {
+      conditions.push('(commands IS NULL OR cardinality(commands) = 0)');
+    }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
       const past = direction === 'ASC' ? '>' : '<';
