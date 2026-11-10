@@ -58,18 +58,36 @@ export function identifyProcess(pid: number): ProcessIdentity {
   return commandLine.includes(MONITOR_PACKAGE) ? 'monitor' : 'other';
 }
 
-export async function isBetterDbMonitor(port: number): Promise<boolean> {
+export type PortState = 'monitor' | 'free' | 'other' | 'unknown';
+
+function isConnectionRefused(err: unknown): boolean {
+  const cause = (err as { cause?: { code?: string } } | null)?.cause;
+  return cause?.code === 'ECONNREFUSED';
+}
+
+export async function probePort(port: number): Promise<PortState> {
+  let answered = false;
+  let failed = false;
+  let refused = false;
   for (const prefix of ['/api', '']) {
     try {
       const res = await fetch(`http://localhost:${port}${prefix}/mcp/instances`, {
         signal: AbortSignal.timeout(2000),
       });
-      if (res.ok && (res.headers.get('content-type') ?? '').includes('application/json')) return true;
-    } catch {
-      return false;
+      if (res.ok && (res.headers.get('content-type') ?? '').includes('application/json')) return 'monitor';
+      answered = true;
+    } catch (err) {
+      if (isConnectionRefused(err)) refused = true;
+      else failed = true;
     }
   }
-  return false;
+  if (failed) return 'unknown';
+  if (answered) return 'other';
+  return refused ? 'free' : 'unknown';
+}
+
+export async function isBetterDbMonitor(port: number): Promise<boolean> {
+  return (await probePort(port)) === 'monitor';
 }
 
 function registerEphemeralHandlers(): void {
@@ -130,6 +148,15 @@ function readValidPid(file: string): number | null {
   }
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hasExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
 }
@@ -167,9 +194,13 @@ export async function startMonitor(opts: {
       }
       terminate(pid);
       const killDeadline = Date.now() + 5_000;
-      while (Date.now() < killDeadline) {
-        try { process.kill(pid, 0); } catch { break; }
+      while (Date.now() < killDeadline && isAlive(pid)) {
         await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      if (isAlive(pid)) {
+        throw new Error(
+          `Monitor process ${pid} is not answering on port ${existingPort} and did not stop, so it was left running with its PID file. Stop it, then try again.`,
+        );
       }
     }
     if (identity === 'unknown') {
@@ -183,8 +214,16 @@ export async function startMonitor(opts: {
     fs.unlinkSync(PID_FILE);
   }
 
-  if (await isBetterDbMonitor(opts.port)) {
+  const portState = await probePort(opts.port);
+  if (portState === 'monitor') {
     return { url, alreadyRunning: true, owned: false };
+  }
+  if (portState !== 'free') {
+    throw new Error(
+      portState === 'other'
+        ? `Port ${opts.port} is in use by something that is not BetterDB, so no monitor was started.`
+        : `Could not tell whether port ${opts.port} is free, so no monitor was started. Try again.`,
+    );
   }
 
   const defaults: Record<string, string> = {
@@ -222,7 +261,7 @@ export async function startMonitor(opts: {
       await waitForMonitor(opts.port, child);
     } catch (err) {
       // Health check failed — kill the orphaned child and clean up PID file
-      terminate(child.pid);
+      if (!hasExited(child)) terminate(child.pid);
       try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
       throw err;
     }
@@ -251,7 +290,7 @@ export async function startMonitor(opts: {
     try {
       await waitForMonitor(opts.port, child);
     } catch (err) {
-      terminate(child.pid);
+      if (!hasExited(child)) terminate(child.pid);
       throw err;
     }
   }

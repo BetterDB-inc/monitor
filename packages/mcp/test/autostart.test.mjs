@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { identifyProcess, isBetterDbMonitor, monitorEnv, waitForMonitor } from '../dist/autostart.js';
+import { identifyProcess, isBetterDbMonitor, monitorEnv, probePort, waitForMonitor } from '../dist/autostart.js';
 
 test('monitorEnv drops MCP variables in any case and applies overrides last', () => {
   const env = monitorEnv(
@@ -126,4 +126,43 @@ test('waitForMonitor resolves when the child is alive and the port is a monitor'
     child.kill();
     server.close();
   }
+});
+
+test('probePort falls through to /mcp/instances when the /api probe times out', async () => {
+  const server = await listen((req, res) => {
+    if (req.url.startsWith('/api')) return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('[]');
+  });
+  try {
+    assert.equal(await probePort(server.address().port), 'monitor');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('probePort reports a probe timeout as unknown, not free', async () => {
+  const server = await listen(() => {});
+  try {
+    assert.equal(await probePort(server.address().port), 'unknown');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('probePort tells a free port from one used by something else', async () => {
+  const server = await listen((req, res) => {
+    res.writeHead(404, { 'content-type': 'text/html' });
+    res.end('no');
+  });
+  const { port } = server.address();
+  try {
+    assert.equal(await probePort(port), 'other');
+  } finally {
+    server.close();
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(await probePort(port), 'free');
 });
