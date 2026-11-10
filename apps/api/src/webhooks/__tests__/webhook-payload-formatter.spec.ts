@@ -170,3 +170,85 @@ describe('webhook-payload-formatter: long text', () => {
     expect(slackText(message)).toBe(`${'a'.repeat(130)} &lt;b&gt;`);
   });
 });
+
+describe('webhook-payload-formatter: incident links', () => {
+  const BASE_URL = 'https://betterdb.example.com';
+  const INCIDENT =
+    'https://betterdb.example.com/anomalies/incidents/by-event/ev-1?at=1706457000000&connection=conn-1';
+  const events = [WebhookEventType.ANOMALY_DETECTED, WebhookEventType.ANOMALY_SEQUENCE_DETECTED];
+  const linked = (event: WebhookEventType, data: Record<string, unknown> = {}): WebhookPayload => ({
+    ...base,
+    event,
+    data: {
+      anomalyId: 'ev-1',
+      timestamp: 1706457000000,
+      connectionId: 'conn-1',
+      message: 'm',
+      ...data,
+    },
+  });
+  const slackUrl = (p: WebhookPayload, baseUrl?: string) => {
+    const blocks = toSlack(p, baseUrl)['blocks'] as Array<{
+      type: string;
+      elements?: Array<{ url?: string }>;
+    }>;
+    return blocks.find((b) => b.type === 'actions')?.elements?.[0].url;
+  };
+  const discordUrl = (p: WebhookPayload, baseUrl?: string) =>
+    (toDiscord(p, baseUrl) as { embeds: Array<{ url?: string }> }).embeds[0].url;
+
+  it.each(events)('links %s to the incident of its event', (event) => {
+    expect(slackUrl(linked(event), BASE_URL)).toBe(INCIDENT);
+    expect(discordUrl(linked(event), BASE_URL)).toBe(INCIDENT);
+  });
+
+  it('uses the event time, not the delivery time', () => {
+    expect(base.timestamp).not.toBe(1706457000000);
+    expect(slackUrl(linked(WebhookEventType.ANOMALY_DETECTED), BASE_URL)).toContain(
+      'at=1706457000000',
+    );
+  });
+
+  it('leaves the connection out of the link when the data has none', () => {
+    expect(discordUrl(linked(events[1], { connectionId: undefined }), BASE_URL)).toBe(
+      'https://betterdb.example.com/anomalies/incidents/by-event/ev-1?at=1706457000000',
+    );
+  });
+
+  it.each([
+    ['no event id', { anomalyId: undefined }],
+    ['an empty event id', { anomalyId: '' }],
+    ['no event time', { timestamp: undefined }],
+    ['a text event time', { timestamp: '1706457000000' }],
+  ])('falls back to the anomalies page with %s', (_name, data) => {
+    for (const event of events) {
+      expect(slackUrl(linked(event, data), BASE_URL)).toBe(`${BASE_URL}/anomalies`);
+      expect(discordUrl(linked(event, data), BASE_URL)).toBe(`${BASE_URL}/anomalies`);
+    }
+  });
+
+  it('ignores a link carried in the data', () => {
+    const payload = linked(events[1], {
+      anomalyId: undefined,
+      incidentUrl: 'https://evil.example/x',
+    });
+    expect(JSON.stringify(toSlack(payload, BASE_URL))).not.toContain('evil.example');
+  });
+
+  it('keeps other anomaly alerts on the anomalies page', () => {
+    expect(slackUrl(linked(WebhookEventType.RETRY_AMPLIFICATION_DETECTED), BASE_URL)).toBe(
+      `${BASE_URL}/anomalies`,
+    );
+  });
+
+  it('renders no link without a base URL', () => {
+    expect(slackUrl(linked(events[1]))).toBeUndefined();
+    expect(discordUrl(linked(events[1]))).toBeUndefined();
+  });
+
+  it('colours the sequence alert like an anomaly', () => {
+    const colour = (event: WebhookEventType) =>
+      (toDiscord(linked(event)) as { embeds: Array<{ color: number }> }).embeds[0].color;
+    expect(colour(events[1])).toBe(colour(events[0]));
+  });
+});
