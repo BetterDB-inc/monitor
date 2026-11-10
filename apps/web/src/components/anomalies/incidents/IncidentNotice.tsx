@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '../../ui/alert';
 
 interface IncidentNoticeProps {
   role?: 'alert' | 'status';
@@ -9,15 +10,12 @@ interface IncidentNoticeProps {
 
 export function IncidentNotice({ role = 'status', title, children }: IncidentNoticeProps) {
   return (
-    <div
-      role={role}
-      className="flex gap-3 rounded-lg border border-yellow-500 bg-yellow-500/10 p-4 text-sm"
-    >
-      <AlertTriangle className="w-5 h-5 shrink-0 text-yellow-500" aria-hidden />
-      <div className="space-y-1">
-        {title && <p className="font-semibold">{title}</p>}
-        <div className={title ? 'text-muted-foreground' : undefined}>{children}</div>
-      </div>
-    </div>
+    <Alert role={role} className="border-yellow-500 bg-yellow-500/10">
+      <AlertTriangle className="w-4 h-4 text-yellow-500" aria-hidden />
+      {title && <AlertTitle>{title}</AlertTitle>}
+      <AlertDescription className={title ? undefined : 'text-foreground'}>
+        {children}
+      </AlertDescription>
+    </Alert>
   );
 }
