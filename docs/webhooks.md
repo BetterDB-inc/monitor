@@ -76,6 +76,7 @@ Advanced monitoring events for anomaly detection and performance tracking:
 | `replication.recovered` | Replica divergence closed | A diverged replica is back under the alert thresholds, or a divergence left open by a restart was resolved |
 | `cluster.failover` | Cluster failover occurred | Cluster state changes or slot failures |
 | `anomaly.detected` | Anomaly detected | Z-score analysis detects unusual patterns. Sent when the event is first saved, so it waits for storage if a save has to be retried. `command_p99`, `retry_amplification` and `replication_divergence` are excluded; they send `latency.regression.detected`, `retry_amplification.detected` and `replication.divergence` instead |
+| `anomaly.sequence.detected` | Anomaly sequence matched | A sequence rule matched inside an incident. Sent once when the match is recorded; nothing is sent on recovery. A compound rule that replaces an earlier match sends a second alert with the more severe diagnosis |
 | `latency.spike` | Latency spike detected | Command latency spikes above baseline |
 | `connection.spike` | Connection spike detected | Connection count spikes above baseline |
 | `cve.critical_detected` | New critical CVEs | CVE scan finds new critical findings vs previous scan |
@@ -102,8 +103,10 @@ Compliance and audit events for regulated environments:
 Set `payloadFormat` per webhook (`generic` default, `slack`, or `discord`).
 `generic` sends the raw BetterDB event JSON below; `slack` sends Block Kit
 blocks and `discord` sends an embed with the same fields (instance, metric,
-value/baseline, link back to `/anomalies` or `/dashboard`). A `message` too
-long for the title is shown in full below it.
+value/baseline, link back to `/anomalies` or `/dashboard`). For
+`anomaly.detected` and `anomaly.sequence.detected` the link opens the incident
+that holds the event. A `message` too long for the title is shown in full
+below it.
 HMAC headers are still sent for all formats; Slack/Discord ignore them.
 
 Getting the webhook URL: Slack — create an app and enable an **Incoming
@@ -114,6 +117,9 @@ format (it is auto-suggested from the URL).
 The "View in BetterDB" button (Slack) / embed link (Discord) points at your
 `FRONTEND_URL` (e.g. `https://monitor.example.com`). When `FRONTEND_URL` is
 unset, messages render without the link — everything else is unchanged.
+For `anomaly.detected` and `anomaly.sequence.detected` the link opens the
+incident that holds the event, looked up again each time it is opened, so it
+keeps working when the incident is regrouped.
 
 ```jsonc
 // generic (default)
@@ -441,11 +447,51 @@ If the replica alerts again, the old event closes with no `replication.recovered
   "zScore": 4.2,
   "threshold": 3.0,
   "message": "Unusual spike in ops_per_sec: 50000 (baseline: 10000, z-score: 4.2)",
-  "timestamp": 1706457600000
+  "timestamp": 1706457600000,
+  "incidentUrl": "https://monitor.example.com/anomalies/incidents/by-event/anom-550e8400-e29b-41d4-a716-446655440000?at=1706457600000&connection=conn-1"
 }
 ```
 
+`incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
+
 A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+
+#### anomaly.sequence.detected (Pro)
+
+```json
+{
+  "correlationId": "7d0f6f0e-3b0a-4a51-9d57-2f6f6c1b8a10",
+  "pattern": "backlog_exhaustion",
+  "severity": "critical",
+  "diagnosis": "The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.",
+  "recommendations": [
+    "Raise repl-backlog-size so a disconnect of this length resumes with a partial sync",
+    "Check why the replica disconnected",
+    "Act on backlog coverage warnings before a disconnect turns them into a full resync"
+  ],
+  "values": [
+    { "setting": "repl-backlog-size", "current": 1, "target": 64, "unit": "MB" }
+  ],
+  "anomalyIds": ["anom-1", "anom-2"],
+  "metricTypes": ["backlog_coverage_risk", "resync_escalation"],
+  "anomalyId": "anom-1",
+  "timestamp": 1706457600000,
+  "message": "Backlog exhaustion: The replication backlog had shrunk below the time a replica needs to reconnect, and a later disconnect outran it and forced a full resync.",
+  "incidentUrl": "https://monitor.example.com/anomalies/incidents/by-event/anom-1?at=1706457600000&connection=conn-1",
+  "connectionId": "conn-1"
+}
+```
+
+Notes:
+- `anomalyId` and `timestamp` are the first event of the sequence. The alert is
+  sent under that event's connection. A sequence can span several nodes of a
+  cluster; a webhook scoped only to another connection of the same sequence
+  does not receive it.
+- `incidentUrl` opens the incident that holds the sequence. It is only present
+  when `FRONTEND_URL` is set.
+- `values` is only present when the match carries settings to change.
+- Sent once per recorded match, and again when a compound rule replaces it
+  with a more severe diagnosis. Nothing is sent on recovery.
 
 #### cve.critical_detected (Pro)
 
@@ -1060,6 +1106,7 @@ These events fire immediately without hysteresis:
 - `instance.down` / `instance.up` (state change events)
 - `client.blocked` (each occurrence)
 - `anomaly.detected` (each detection, except `command_p99`, `retry_amplification` and `replication_divergence`, which have their own events)
+- `anomaly.sequence.detected` (each recorded sequence match)
 - `acl.violation` (each violation)
 - `audit.policy.violation` (each violation)
 - `acl.modified` (each change)

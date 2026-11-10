@@ -459,6 +459,8 @@ A metric marked ↑ only counts when it rose. A drop in that metric does not fil
 
 A compound rule replaces the rules it combines. When `reshard_divergence_pressure` matches, a `reshard_under_writes` or `divergence_under_pressure` match that shares a step event with it is not listed. Optional signals they share do not count, so the incident shows one diagnosis instead of two. A sequence group recorded for one of those rules before the compound rule matched stays recorded.
 
+Each recorded match sends one `anomaly.sequence.detected` webhook (Pro) with the diagnosis, the recommendations and, when `FRONTEND_URL` is set, a link to the incident. A compound rule that replaces an earlier match sends a second alert. Nothing is sent on recovery, and nothing is sent while the match cannot be stored; the alert goes out once the save succeeds. See the [webhook payload](./webhooks.md#anomalysequencedetected-pro).
+
 | Rule | Steps | Lead | Optional | Span | Same connection |
 | --- | --- | --- | --- | --- | --- |
 | `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`↑, `memory_overhead` or `output_kbps`↑ | — | `connection_churn`↑ | 10 min | yes |
