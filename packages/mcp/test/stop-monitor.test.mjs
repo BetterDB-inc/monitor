@@ -63,27 +63,75 @@ test('stop_monitor kills the whole detached monitor group', { skip: process.plat
   assert.equal(alive(grandchild), false);
 });
 
-test('start_monitor keeps the PID file when the old monitor does not stop', async () => {
-  const { startMonitor } = await import('../dist/autostart.js');
-  const stubborn = spawn(process.execPath, [
+const listenWith = async (handler) => {
+  const http = await import('node:http');
+  return new Promise((resolve) => {
+    const server = http.createServer(handler).listen(0, () => resolve(server));
+  });
+};
+
+const htmlServer = () =>
+  listenWith((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('ok');
+  });
+
+const fakeMonitor = (ignoreTerm) =>
+  spawn(process.execPath, [
     '-e',
-    "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30000)",
+    `${ignoreTerm ? "process.on('SIGTERM', () => {});" : ''} setTimeout(() => {}, 30000)`,
     '@betterdb/monitor',
   ]);
+
+test('start_monitor keeps the PID file when the old monitor does not stop', async () => {
+  const { startMonitor } = await import('../dist/autostart.js');
+  const stubborn = fakeMonitor(true);
+  const server = await htmlServer();
+  const port = server.address().port;
   await new Promise((resolve) => setTimeout(resolve, 200));
   try {
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
-    fs.writeFileSync(PID_FILE, `${stubborn.pid}:39872`);
-    await assert.rejects(
-      startMonitor({ persist: true, port: 39872, storage: 'memory' }),
-      /did not stop/,
-    );
+    fs.writeFileSync(PID_FILE, `${stubborn.pid}:${port}`);
+    await assert.rejects(startMonitor({ persist: true, port, storage: 'memory' }), /did not stop/);
     assert.equal(alive(stubborn.pid), true);
-    assert.equal(fs.readFileSync(PID_FILE, 'utf8'), `${stubborn.pid}:39872`);
+    assert.equal(fs.readFileSync(PID_FILE, 'utf8'), `${stubborn.pid}:${port}`);
   } finally {
     stubborn.kill('SIGKILL');
+    server.close();
     try { fs.unlinkSync(PID_FILE); } catch {}
   }
+});
+
+test('a recorded monitor that has not opened its port is not signalled', async () => {
+  const { adoptRecordedMonitor } = await import('../dist/autostart.js');
+  const starting = fakeMonitor(false);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  try {
+    await assert.rejects(adoptRecordedMonitor(starting.pid, 39873, 1500), /has not opened port/);
+    assert.equal(alive(starting.pid), true);
+  } finally {
+    starting.kill('SIGKILL');
+  }
+});
+
+test('a recorded monitor whose probe times out is not signalled', async () => {
+  const { adoptRecordedMonitor } = await import('../dist/autostart.js');
+  const slow = fakeMonitor(false);
+  const server = await listenWith(() => {});
+  try {
+    await assert.rejects(adoptRecordedMonitor(slow.pid, server.address().port), /Could not tell/);
+    assert.equal(alive(slow.pid), true);
+  } finally {
+    slow.kill('SIGKILL');
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a recorded monitor that exits while starting is reported gone', async () => {
+  const { adoptRecordedMonitor } = await import('../dist/autostart.js');
+  const dying = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300)', '@betterdb/monitor']);
+  assert.equal(await adoptRecordedMonitor(dying.pid, 39874, 5000), 'gone');
 });
 
 test('start_monitor does not spawn on a port used by something else', async () => {

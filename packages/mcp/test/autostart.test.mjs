@@ -166,3 +166,17 @@ test('probePort tells a free port from one used by something else', async () => 
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(await probePort(port), 'free');
 });
+
+test('probePort keeps an HTTP answer as other when the /api probe times out', async () => {
+  const server = await listen((req, res) => {
+    if (req.url.startsWith('/api')) return;
+    res.writeHead(404, { 'content-type': 'text/html' });
+    res.end('no');
+  });
+  try {
+    assert.equal(await probePort(server.address().port), 'other');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});

@@ -81,8 +81,8 @@ export async function probePort(port: number): Promise<PortState> {
       else failed = true;
     }
   }
-  if (failed) return 'unknown';
   if (answered) return 'other';
+  if (failed) return 'unknown';
   return refused ? 'free' : 'unknown';
 }
 
@@ -161,16 +161,49 @@ function hasExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
-export async function waitForMonitor(port: number, child: ChildProcess, timeoutMs = 15_000): Promise<void> {
+async function waitWhileRunning(
+  port: number,
+  isRunning: () => boolean,
+  timeoutMs: number,
+): Promise<'monitor' | 'exited' | 'timeout'> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (hasExited(child)) {
-      throw new Error(`BetterDB monitor exited before it started on port ${port}`);
-    }
-    if ((await isBetterDbMonitor(port)) && !hasExited(child)) return;
+    if (!isRunning()) return 'exited';
+    if ((await isBetterDbMonitor(port)) && isRunning()) return 'monitor';
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`BetterDB monitor did not start within ${Math.round(timeoutMs / 1000)}s`);
+  return 'timeout';
+}
+
+export async function waitForMonitor(port: number, child: ChildProcess, timeoutMs = 15_000): Promise<void> {
+  const outcome = await waitWhileRunning(port, () => !hasExited(child), timeoutMs);
+  if (outcome === 'exited') {
+    throw new Error(`BetterDB monitor exited before it started on port ${port}`);
+  }
+  if (outcome === 'timeout') {
+    throw new Error(`BetterDB monitor did not start within ${Math.round(timeoutMs / 1000)}s`);
+  }
+}
+
+export async function adoptRecordedMonitor(
+  pid: number,
+  port: number,
+  timeoutMs = 15_000,
+): Promise<'running' | 'gone' | 'stale'> {
+  const state = await probePort(port);
+  if (state === 'monitor') return 'running';
+  if (state === 'unknown') {
+    throw new Error(
+      `Could not tell whether monitor process ${pid} is answering on port ${port}, so it was left running with its PID file. Try again.`,
+    );
+  }
+  if (state === 'other') return 'stale';
+  const outcome = await waitWhileRunning(port, () => isAlive(pid), timeoutMs);
+  if (outcome === 'monitor') return 'running';
+  if (outcome === 'exited') return 'gone';
+  throw new Error(
+    `Monitor process ${pid} has not opened port ${port} yet, so it was left running with its PID file. Try again once it has started, or stop it first.`,
+  );
 }
 
 export async function startMonitor(opts: {
@@ -188,10 +221,13 @@ export async function startMonitor(opts: {
     const existingPort = portStr ? Number(portStr) : opts.port;
 
     const identity = pid === null ? 'other' : identifyProcess(pid);
-    if (pid !== null && identity === 'monitor') {
-      if (await isBetterDbMonitor(existingPort)) {
-        return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: true };
-      }
+    const recorded = pid !== null && identity === 'monitor'
+      ? await adoptRecordedMonitor(pid, existingPort)
+      : null;
+    if (recorded === 'running') {
+      return { url: `http://localhost:${existingPort}`, alreadyRunning: true, owned: true };
+    }
+    if (pid !== null && recorded === 'stale') {
       terminate(pid);
       const killDeadline = Date.now() + 5_000;
       while (Date.now() < killDeadline && isAlive(pid)) {
