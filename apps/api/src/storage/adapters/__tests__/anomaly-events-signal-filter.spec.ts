@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { adapters, type AdapterFactory } from './anomaly-storage-adapters';
 import type {
   AnomalyQueryOptions,
@@ -33,16 +34,23 @@ describe.each<[string, AdapterFactory]>(adapters)(
     let storage: StoragePort;
     let cleanup: () => Promise<void>;
 
+    let labels: Map<string, string>;
+
     const seed = async (events: StoredAnomalyEvent[]) => {
-      for (const e of events) await storage.saveAnomalyEvent(e, CONN);
+      for (const e of events) {
+        const id = randomUUID();
+        labels.set(id, e.id);
+        await storage.saveAnomalyEvent({ ...e, id }, CONN);
+      }
     };
 
     const ids = async (options: AnomalyQueryOptions) =>
       (await storage.getAnomalyEvents({ connectionId: CONN, order: 'asc', ...options })).map(
-        (e) => e.id,
+        (e) => labels.get(e.id),
       );
 
     beforeEach(async () => {
+      labels = new Map();
       ({ storage, cleanup } = await makeAdapter());
     });
 
