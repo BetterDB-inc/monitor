@@ -266,10 +266,15 @@ export interface AnomalyQueryOptions {
   order?: 'asc' | 'desc';
   after?: AnomalyEventCursor;
   scope?: AnomalyScopeFilter;
+  nodeAddr?: string | null;
+  commands?: string[];
 }
 
 export interface CorrelatedGroupQueryOptions
-  extends Omit<AnomalyQueryOptions, 'metricType' | 'resolved' | 'order' | 'after'> {
+  extends Omit<
+    AnomalyQueryOptions,
+    'metricType' | 'resolved' | 'order' | 'after' | 'nodeAddr' | 'commands'
+  > {
   patterns?: string[];
   involvingConnectionId?: string;
 }
