@@ -37,6 +37,13 @@ function slotStatsNodeBudget(budgetMs: number): number {
   return budgetMs - Math.min(SLOT_STATS_FALLBACK_RESERVE_MS, Math.floor(budgetMs / 4));
 }
 
+// A stall from a shortened budget leaves the socket up, because the miss may
+// be the budget and not the node. The commands on it have no deadline of
+// their own, so after a couple of full attempts the socket is dropped anyway.
+// Otherwise it stays stalled until TCP gives up, and every other caller,
+// the dashboard included, is turned away.
+const SHORT_STALL_HOLD_MS = NODE_COMMAND_TIMEOUT_MS * 2;
+
 /** How many SLOTSRANGE reads one node may have in flight at once. */
 const SLOT_RANGE_BATCH_SIZE = 16;
 
@@ -180,8 +187,12 @@ export class ClusterMetricsService {
   // Commands a fan-out gave up waiting for, by node socket. While they stay
   // queued on that socket the node is reported as not answering instead of
   // stacking another batch behind them on every scrape. Evicting the socket
-  // rejects them, so the guard only outlives a fan-out that never got a client.
+  // rejects them. A shortened budget leaves the socket up, and the next caller
+  // after SHORT_STALL_HOLD_MS drops it; otherwise the guard only outlives a
+  // fan-out that never got a client.
   private readonly stalledNodes: Map<string, Promise<void>> = new Map();
+  /** A socket left up because the budget that missed was shorter than a real attempt. */
+  private readonly shortStalls = new Map<string, { client: Valkey; since: number; settled: Promise<void> }>();
   // Node socket key -> until when its announced address counts as unreachable.
   private readonly unreachableUntil: Map<string, number> = new Map();
 
@@ -203,6 +214,7 @@ export class ClusterMetricsService {
   }
 
   private assertNodeNotStalled(node: DiscoveredNode, key: string): void {
+    this.releaseExpiredShortStall(key);
     if (this.stalledNodes.has(key)) {
       throw new Error(`${node.address} has not answered earlier commands yet`);
     }
@@ -210,11 +222,15 @@ export class ClusterMetricsService {
 
   /**
    * Give up on a node's outstanding commands. With the client in hand, drop and
-   * disconnect it so they reject now and the next call reconnects; without one,
+   * disconnect it so they reject now and the next call reconnects. `dropNow`
+   * false is a shortened budget: the miss may be the budget, so the socket
+   * stays up. The next caller after `SHORT_STALL_HOLD_MS` drops it and retries,
+   * so a hung node is not left stalled until TCP gives up. Without a client,
    * keep the node out until the work settles on its own.
    */
-  private markNodeStalled(key: string, work: Promise<unknown>, client?: Valkey): void {
-    if (client) {
+  private markNodeStalled(key: string, work: Promise<unknown>, client?: Valkey, dropNow = true): void {
+    if (client && dropNow) {
+      this.shortStalls.delete(key);
       this.discoveryService.evictNodeClient(client);
       return;
     }
@@ -223,8 +239,19 @@ export class ClusterMetricsService {
       () => undefined,
     ).finally(() => {
       if (this.stalledNodes.get(key) === settled) this.stalledNodes.delete(key);
+      if (this.shortStalls.get(key)?.settled === settled) this.shortStalls.delete(key);
     });
     this.stalledNodes.set(key, settled);
+    if (client) this.shortStalls.set(key, { client, since: Date.now(), settled });
+  }
+
+  /** Drop a socket a shortened budget left hanging, once it has been held long enough. */
+  private releaseExpiredShortStall(key: string): void {
+    const held = this.shortStalls.get(key);
+    if (!held || Date.now() - held.since < SHORT_STALL_HOLD_MS) return;
+    this.shortStalls.delete(key);
+    this.discoveryService.evictNodeClient(held.client);
+    if (this.stalledNodes.get(key) === held.settled) this.stalledNodes.delete(key);
   }
 
   private clearNodeError(nodeId: string, operation: string): void {
@@ -615,7 +642,7 @@ export class ClusterMetricsService {
           });
         }
         if (expired !== undefined) {
-          this.markNodeStalled(stalledKey, Promise.all(issued), fullTimeout ? client : undefined);
+          this.markNodeStalled(stalledKey, Promise.all(issued), client, fullTimeout);
         }
         const perRange: PromiseSettledResult<unknown>[] = Array.from(
           answers,

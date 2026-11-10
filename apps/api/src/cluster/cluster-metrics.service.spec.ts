@@ -1032,6 +1032,45 @@ used_cpu_user:20.3\r
       }
     });
 
+    it('drops a primary a short budget left stalled once a couple of full attempts have passed', async () => {
+      jest.useFakeTimers();
+      try {
+        mockDiscoveryService.discoverNodes.mockResolvedValue([
+          { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+        ]);
+        const silent = { call: jest.fn(() => new Promise(() => undefined)) };
+        const fresh = { call: jest.fn().mockResolvedValue([[0, ['key-count', 5]]]) };
+        let client = silent;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async () => client);
+        mockDiscoveryService.evictNodeClient.mockImplementation(() => {
+          client = fresh;
+        });
+        mockConnectionRegistry.get.mockReturnValue({
+          getClient: jest.fn(),
+          getClusterSlotStats: jest.fn().mockResolvedValue({}),
+        });
+
+        const first = service.getClusterSlotStatsResult('key-count', 10, 'conn-1', 1_200, 5_000);
+        await jest.advanceTimersByTimeAsync(1_200);
+        await first;
+        expect(mockDiscoveryService.evictNodeClient).not.toHaveBeenCalled();
+
+        // Still inside the hold: a full-budget caller is turned away rather than stacking more commands.
+        const connects = mockDiscoveryService.getNodeConnection.mock.calls.length;
+        await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+        expect(mockDiscoveryService.getNodeConnection).toHaveBeenCalledTimes(connects);
+        expect(silent.call).toHaveBeenCalledTimes(1);
+
+        await jest.advanceTimersByTimeAsync(10_000);
+        const again = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+        expect(mockDiscoveryService.evictNodeClient).toHaveBeenCalledWith(silent);
+        expect(fresh.call).toHaveBeenCalledTimes(1);
+        expect(again.failedNodes).toEqual([]);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('counts a slow discovery against the budget', async () => {
       jest.useFakeTimers();
       try {

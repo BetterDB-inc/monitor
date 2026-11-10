@@ -519,6 +519,40 @@ describe('PrometheusService slot stats', () => {
     expect(fullBudgetMs).toBe(1000);
   });
 
+  it('drops series a failing fan-out keeps once they are older than the staleness bound', async () => {
+    const harness = buildService();
+    harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });
+    const clusterMetrics = {
+      getClusterSlotStatsResult: jest.fn().mockResolvedValue({
+        stats: { '1': slot(50) },
+        failedNodes: [],
+        failedSlotRanges: [],
+      }),
+      usesClusterWideSlotStats: jest.fn(() => true),
+      coveredBySeed: jest.fn(() => false),
+    };
+    (harness.service as unknown as { clusterMetricsService: unknown }).clusterMetricsService = clusterMetrics;
+    const stalenessMs = (harness.service as unknown as { stalenessMs: number }).stalenessMs;
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      await runSlotStats(harness);
+      clusterMetrics.getClusterSlotStatsResult.mockRejectedValue(
+        new Error('Cluster discovery did not answer within 1200ms'),
+      );
+
+      now += stalenessMs;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).toContain(`slot="1"`);
+
+      now += 1;
+      await runSlotStats(harness);
+      expect(await harness.service.getMetrics()).not.toContain(`slot="1"`);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('drops series it keeps for lack of pass time once they are older than the staleness bound', async () => {
     const harness = buildService();
     harness.client.getCapabilities.mockReturnValue({ hasClusterSlotStats: true, clusterEnabled: true });

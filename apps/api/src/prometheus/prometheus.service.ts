@@ -2862,12 +2862,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // than expire every primary on a deadline it never had a chance to meet,
         // until they are older than the staleness bound.
         if (remainingMs < Math.min(SLOT_STATS_MIN_BUDGET_MS, Math.floor(this.pollIntervalMs / 2))) {
-          for (const slot of state.currentClusterSlotLabels) {
-            if (now - (state.clusterSlotSeenAt.get(slot) ?? 0) <= this.stalenessMs) continue;
-            this.removeSlotSeries(connLabel, slot);
-            state.clusterSlotSeenAt.delete(slot);
-            state.currentClusterSlotLabels.delete(slot);
-          }
+          this.dropExpiredSlotSeries(connLabel, state, now);
           return;
         }
         this.slotStatsFanOuts.add(connectionId);
@@ -2926,10 +2921,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         'canClusterSlotStats',
         slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
       );
-      if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connLabel, state);
+      if (!this.isSuperseded(connectionId, epoch)) {
+        // A fan-out that keeps throwing (discovery timing out) never reaches
+        // the success path, so the series it last wrote would stay at their
+        // old values. Age them out the same way a pass that never starts does,
+        // or once they pass the staleness bound the members export too and
+        // every sum counts the slots twice.
+        if (disabled) this.clearSlotSeries(connLabel, state);
+        else this.dropExpiredSlotSeries(connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
+    }
+  }
+
+  /** Remove slot series last seen longer ago than the staleness bound. */
+  private dropExpiredSlotSeries(connLabel: string, state: ConnectionMetricState, now: number): void {
+    for (const slot of [...state.currentClusterSlotLabels]) {
+      if (now - (state.clusterSlotSeenAt.get(slot) ?? 0) <= this.stalenessMs) continue;
+      this.removeSlotSeries(connLabel, slot);
+      state.clusterSlotSeenAt.delete(slot);
+      state.currentClusterSlotLabels.delete(slot);
     }
   }
 
