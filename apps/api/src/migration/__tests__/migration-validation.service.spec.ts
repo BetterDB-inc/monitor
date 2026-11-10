@@ -7,6 +7,7 @@ jest.mock('iovalkey', () => {
     connect: jest.fn().mockResolvedValue(undefined),
     ping: jest.fn().mockResolvedValue('PONG'),
     quit: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn(),
     dbsize: jest.fn().mockResolvedValue(100),
     scan: jest.fn().mockResolvedValue(['0', []]),
     pipeline: jest.fn().mockReturnValue({
@@ -408,6 +409,53 @@ describe('MigrationValidationService with SSH-tunneled connections', () => {
     expect(job.status).toBe('failed');
     expect(job.error).toBe('The SSH tunnel to the target closed unexpectedly');
     expect(tunnels.closed).toEqual([`migration:${id}:target`]);
+  });
+
+  it('disconnects its clients as soon as a tunnel drops', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+    let disconnectedOnDrop: boolean[] = [];
+    compareKeyCounts.mockImplementationOnce(async () => {
+      tunnels.drop('target');
+      disconnectedOnDrop = Valkey.mock.results.map((result) => result.value.disconnect.mock.calls.length > 0);
+      return { sourceKeys: 100, targetKeys: 100, discrepancy: 0, discrepancyPercent: 0 };
+    });
+
+    const { id } = await service.startValidation({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    await waitForTerminal(service, id);
+
+    expect(disconnectedOnDrop).toEqual([true, true]);
+  });
+
+  it('does not dial when a tunnel dropped before the clients connect', async () => {
+    const tunnels = new FakeTunnels();
+    const resolver = fakeEndpointResolver(tunnels);
+    const open = resolver.open.bind(resolver);
+    resolver.open = async (...args: Parameters<typeof open>) => {
+      const endpoints = await open(...args);
+      tunnels.drop('source');
+      return endpoints;
+    };
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((connectionId: string) => ({
+      id: connectionId,
+      name: connectionId,
+      host: connectionId === 'conn-1' ? 'src.internal' : 'tgt.internal',
+      port: 6379,
+      createdAt: Date.now(),
+      ...(connectionId === 'conn-1' ? { sshTunnel: SSH_TUNNEL } : {}),
+    }));
+    const service = new MigrationValidationService(registry as any, createMockStorage(), createMockMigrationService(), resolver);
+
+    const { id } = await service.startValidation({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('failed');
+    expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
+    for (const result of Valkey.mock.results) {
+      expect(result.value.connect).not.toHaveBeenCalled();
+      expect(result.value.quit).not.toHaveBeenCalled();
+      expect(result.value.disconnect).toHaveBeenCalled();
+    }
   });
 
   it('rejects an agent connection before creating a validation job', async () => {

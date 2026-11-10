@@ -28,8 +28,13 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
   const sourceClients: Valkey[] = [];
   const onTlsRefreshError = (message: string) => log(job, maxLogLines, message);
   const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster, onTlsRefreshError);
+  const dropConnections = () => {
+    for (const client of [...sourceClients, targetClient]) client.disconnect();
+  };
+  job.dropConnections = dropConnections;
 
   try {
+    if (job.tunnelError !== undefined) return;
     await targetClient.connect();
     log(job, maxLogLines, `Connected to target${targetIsCluster ? ' (cluster mode)' : ''}`);
 
@@ -76,6 +81,7 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       // Register before connecting so the outer cleanup quits it, and stop the
       // reconnect loop iovalkey starts when the first dial fails.
       sourceClients.push(client);
+      if (job.tunnelError !== undefined) return;
       try {
         await client.connect();
       } catch (err) {
@@ -177,7 +183,12 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       `Migration complete: ${job.keysTransferred.toLocaleString()} transferred, ${keysSkipped} skipped out of ${totalKeys.toLocaleString()} total`);
 
   } finally {
-    await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+    job.dropConnections = undefined;
+    if (job.tunnelError !== undefined) {
+      dropConnections();
+    } else {
+      await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+    }
   }
 }
 

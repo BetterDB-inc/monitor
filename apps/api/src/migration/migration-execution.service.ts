@@ -730,6 +730,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     job.tunnelError = tunnelClosedMessage(side);
     this.logger.error(`Execution ${job.id}: ${job.tunnelError}`);
     this.killProcess(job);
+    job.dropConnections?.();
   }
 
   private applyTunnelFailure(job: ExecutionJob): void {

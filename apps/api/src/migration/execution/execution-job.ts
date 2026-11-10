@@ -32,5 +32,6 @@ export interface ExecutionJob {
   tomlPath: string | null;        // redis_shake mode only
   pidPath: string | null;         // redis_shake mode only — for orphan detection
   tunnelError?: string;
+  dropConnections?: () => void;
   closeTunnels?: () => Promise<void>;
 }

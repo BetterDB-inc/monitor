@@ -1327,6 +1327,24 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
     expect(job.error).toBe('The SSH tunnel to the target closed unexpectedly');
   });
 
+  it('disconnects the command worker clients when a tunnel drops', async () => {
+    const { service, tunnels } = setup(['conn-2']);
+    const dropConnections = jest.fn();
+    let finishWorker: () => void = () => undefined;
+    runCommandMigration.mockImplementationOnce(({ job }: { job: { dropConnections?: () => void } }) => {
+      job.dropConnections = dropConnections;
+      return new Promise<void>((resolve) => { finishWorker = resolve; });
+    });
+
+    const { id } = await service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'command' });
+    await flushProbe();
+    tunnels.drop('target');
+
+    expect(dropConnections).toHaveBeenCalledTimes(1);
+    finishWorker();
+    await waitForTerminal(service, id);
+  });
+
   it('keeps a user cancellation when the tunnel drops afterwards', async () => {
     const { service, tunnels } = setup(['conn-2']);
     let finishWorker: () => void = () => undefined;

@@ -273,4 +273,33 @@ describe('runCommandMigration through an SSH tunnel', () => {
     expect(scans).toBe(1);
     expect(job.progress).not.toBe(100);
   });
+
+  it('lets the job disconnect every client while it runs', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    let disconnectedOnDrop: boolean[] = [];
+    onScan = () => {
+      job.tunnelError = 'The SSH tunnel to the target closed unexpectedly';
+      job.dropConnections?.();
+      disconnectedOnDrop = clients.map((client) => client.disconnect.mock.calls.length > 0);
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(disconnectedOnDrop).toEqual([true, true]);
+    expect(job.dropConnections).toBeUndefined();
+  });
+
+  it('does not dial when a tunnel dropped before it connects', async () => {
+    const job = makeJob();
+    job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    for (const client of clients) {
+      expect(client.connect).not.toHaveBeenCalled();
+      expect(client.quit).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalled();
+    }
+  });
 });

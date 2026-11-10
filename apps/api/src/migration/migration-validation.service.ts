@@ -125,12 +125,15 @@ export class MigrationValidationService {
       assertTunnelSupport(sourceConfig, targetConfig, { sourceIsCluster, targetIsCluster });
       endpoints = await this.endpointResolver.open(job.id, { source: sourceConfig, target: targetConfig }, (side) => {
         tunnelError ??= tunnelClosedMessage(side);
+        sourceClient?.disconnect();
+        targetClient?.disconnect();
       });
 
       sourceClient = createClient(endpoints.source, 'BetterDB-Validation-Source');
       targetClient = createTargetClient(endpoints.target, 'BetterDB-Validation-Target', targetIsCluster);
 
       // Step 1: Connect check (5%)
+      if (tunnelError !== undefined) return;
       try {
         await sourceClient.connect();
       } catch (err: unknown) {
@@ -141,6 +144,7 @@ export class MigrationValidationService {
         return;
       }
 
+      if (tunnelError !== undefined) return;
       try {
         await targetClient.connect();
       } catch (err: unknown) {
@@ -241,9 +245,13 @@ export class MigrationValidationService {
         job.error = job.error ?? 'Cancelled by user';
       }
       job.completedAt = Date.now();
-      // Graceful cleanup — never Promise.all, never disconnect()
+      // Graceful cleanup — never Promise.all; disconnect() only after a tunnel drop, when QUIT would redial
       const clients = [sourceClient, sourceClusterClient, targetClient].filter((c): c is Valkey => c !== null);
-      await Promise.allSettled(clients.map(c => c.quit()));
+      if (tunnelError !== undefined) {
+        for (const client of clients) client.disconnect();
+      } else {
+        await Promise.allSettled(clients.map(c => c.quit()));
+      }
       await endpoints?.close().catch(() => undefined);
     }
   }
