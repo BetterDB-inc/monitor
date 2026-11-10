@@ -66,11 +66,12 @@ describe.each<[string, AdapterFactory]>(adapters)(
           event('c', 3000),
           event('d', 4000, { nodeAddr: '' }),
           event('e', 5000, { nodeAddr: '10.0.0.1:6379' }),
+          event('f', 6000, { nodeAddr: '10.0.0.1:63790' }),
         ]),
       );
 
       it('returns every event when no node filter is given', async () => {
-        expect(await ids({})).toEqual(['a', 'b', 'c', 'd', 'e']);
+        expect(await ids({})).toEqual(['a', 'b', 'c', 'd', 'e', 'f']);
       });
 
       it('returns only the events of the given node', async () => {
