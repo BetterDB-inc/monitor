@@ -12,6 +12,7 @@ interface IncidentListProps {
   incidents: IncidentTimeline[] | undefined;
   now?: number;
   loading?: boolean;
+  refreshing?: boolean;
   limit?: number;
   linkQuery?: string;
 }
@@ -24,8 +25,15 @@ function scopeLabel(incident: IncidentTimeline): string {
   return parts.join(' · ') || 'Unscoped';
 }
 
-export function IncidentList({ incidents, now, loading, limit, linkQuery }: IncidentListProps) {
-  if (!incidents && loading) {
+export function IncidentList({
+  incidents,
+  now,
+  loading,
+  refreshing = false,
+  limit,
+  linkQuery,
+}: IncidentListProps) {
+  if (!incidents?.length && (loading || refreshing)) {
     return <p className="text-sm text-muted-foreground">Loading incidents…</p>;
   }
   if (!incidents?.length) {
@@ -41,50 +49,61 @@ export function IncidentList({ incidents, now, loading, limit, linkQuery }: Inci
 
   return (
     <div className="space-y-3">
+      {refreshing && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Loading incidents…
+        </p>
+      )}
       {limit !== undefined && incidents.length > limit && (
         <p className="text-sm text-muted-foreground">
           Showing the newest {limit} incidents. Narrow the time range to see older ones.
         </p>
       )}
       <LiveClock enabled={now === undefined && incidents.some(isIncidentOpen)}>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Incident</TableHead>
-              <TableHead>Scope</TableHead>
-              <TableHead>Started</TableHead>
-              <TableHead>Duration</TableHead>
-              <TableHead>Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {incidents.slice(0, limit).map((incident) => (
-              <TableRow key={incident.incidentId}>
-                <TableCell>
-                  <ConnectionLink
-                    to={incidentPath(incident.incidentId, linkQuery)}
-                    className="font-medium hover:underline"
-                  >
-                    {incidentTitle(incident)}
-                  </ConnectionLink>
-                  <p className="text-xs text-muted-foreground">
-                    {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
-                  </p>
-                </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  {scopeLabel(incident)}
-                </TableCell>
-                <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
-                <TableCell className="text-sm">
-                  <LiveDuration incident={incident} now={now} />
-                </TableCell>
-                <TableCell>
-                  <IncidentStatusBadge status={incident.recovery.status} />
-                </TableCell>
+        <div
+          data-testid="incident-rows"
+          aria-busy={refreshing}
+          className={refreshing ? 'opacity-60' : undefined}
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Incident</TableHead>
+                <TableHead>Scope</TableHead>
+                <TableHead>Started</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead>Status</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {incidents.slice(0, limit).map((incident) => (
+                <TableRow key={incident.incidentId}>
+                  <TableCell>
+                    <ConnectionLink
+                      to={incidentPath(incident.incidentId, linkQuery)}
+                      className="font-medium hover:underline"
+                    >
+                      {incidentTitle(incident)}
+                    </ConnectionLink>
+                    <p className="text-xs text-muted-foreground">
+                      {incident.entries.length} event{incident.entries.length === 1 ? '' : 's'}
+                    </p>
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {scopeLabel(incident)}
+                  </TableCell>
+                  <TableCell className="text-sm">{formatDateTime(incident.startedAt)}</TableCell>
+                  <TableCell className="text-sm">
+                    <LiveDuration incident={incident} now={now} />
+                  </TableCell>
+                  <TableCell>
+                    <IncidentStatusBadge status={incident.recovery.status} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       </LiveClock>
     </div>
   );
