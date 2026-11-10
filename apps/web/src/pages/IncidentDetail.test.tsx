@@ -162,6 +162,19 @@ describe('IncidentDetail', () => {
     );
   });
 
+  it('keeps the refresh warning text level with its retry button', () => {
+    polling.state = {
+      data: incident(),
+      error: new ApiError('Storage unavailable', 500),
+      loading: false,
+      lastUpdated: new Date(),
+    };
+
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(screen.getByRole('status').querySelector('p:not(:last-child)')).toBeNull();
+  });
+
   it('keeps the connection on the back link', () => {
     polling.state = { data: incident(), error: null, loading: false, lastUpdated: new Date() };
 

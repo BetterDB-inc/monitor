@@ -63,12 +63,12 @@ export function IncidentDetail() {
           {error && (
             <IncidentNotice>
               <div className="flex flex-wrap items-center gap-3">
-                <p>
+                <span>
                   {notFound
                     ? 'This incident can no longer be found. Its events may have been regrouped into another incident.'
                     : `Could not refresh the incident: ${error.message}.`}{' '}
                   Showing the last timeline loaded.
-                </p>
+                </span>
                 <Button variant="outline" size="sm" onClick={() => void refresh()}>
                   Try again
                 </Button>

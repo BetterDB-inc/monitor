@@ -10,8 +10,8 @@ interface IncidentNoticeProps {
 
 export function IncidentNotice({ role = 'status', title, children }: IncidentNoticeProps) {
   return (
-    <Alert role={role} className="border-yellow-500 bg-yellow-500/10">
-      <AlertTriangle className="w-4 h-4 text-yellow-500" aria-hidden />
+    <Alert role={role} className="border-yellow-500 bg-yellow-500/10 *:[svg]:text-yellow-500">
+      <AlertTriangle className="w-4 h-4" aria-hidden />
       {title && <AlertTitle>{title}</AlertTitle>}
       <AlertDescription className={title ? undefined : 'text-foreground'}>
         {children}

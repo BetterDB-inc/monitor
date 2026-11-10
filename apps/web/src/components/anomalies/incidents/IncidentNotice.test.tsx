@@ -30,6 +30,14 @@ describe('IncidentNotice', () => {
     );
   });
 
+  it('colours the warning icon through the alert so the shared icon rule cannot override it', () => {
+    render(<IncidentNotice>Showing the last list loaded.</IncidentNotice>);
+
+    const notice = screen.getByRole('status');
+    expect(notice.className).toContain('*:[svg]:text-yellow-500');
+    expect(notice.className).not.toContain('*:[svg]:text-current');
+  });
+
   it('keeps action buttons inside the notice usable', () => {
     render(
       <IncidentNotice>
