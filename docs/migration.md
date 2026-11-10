@@ -251,13 +251,14 @@ mechanisms above:
 - **`redis_shake` (DUMP/RESTORE) needs matching RDB versions.** Managed
   providers do not always run the engine version their name suggests, so for
   a managed target prefer `redis_shake_sync` or `command`.
-- **Execution and validation connect to the stored host and port directly.**
-  They do not go through the BetterDB Agent or an SSH tunnel; an agent
-  connection has no addressable endpoint and a tunnelled connection is reached
-  at its remote address. Those connection types support monitoring and the
-  analysis phase only. To execute a migration involving a VPC-only cache, run
-  BetterDB Monitor on a host that can reach both caches directly, for example
-  self-hosted on an EC2 instance in the same VPC.
+- **Execution and validation open their own connections.** A connection with
+  an SSH tunnel is reached through a tunnel the job opens for itself (see
+  [SSH tunnels](#ssh-tunnels)). A BetterDB Agent connection has no addressable
+  endpoint, so it supports monitoring and the analysis phase only; execution
+  and validation reject it with a 400. To execute a migration involving a
+  VPC-only cache, give the connection an SSH tunnel through a bastion in the
+  VPC, or run BetterDB Monitor on a host that can reach both caches directly,
+  for example self-hosted on an EC2 instance in the same VPC.
 
 ## Compatibility checks
 
@@ -434,14 +435,33 @@ the `RESTORE` compatibility constraint entirely.
 
 ### SSH tunnels
 
-Connections reached through an SSH tunnel cannot be migrated yet. Analysis,
-execution and validation reject them with a 400 before doing anything, and the
-connection picker marks them as unavailable. Execution and validation open their
-own connections to `host:port` (and RedisShake runs as a separate process), so
-they would bypass the tunnel and fail partway through — in the worst case after
-an `emptyDbBeforeSync` flush has already emptied the target. To migrate such an
-instance, register a connection BetterDB can reach directly, for example through
-a VPN or a port-forward you run yourself.
+A standalone source or target that is registered with an SSH tunnel can be
+analysed, migrated and validated in every execution mode. Each execution or
+validation job opens its own tunnel per tunnelled side, using the SSH settings
+stored on the connection, and closes it when the job ends. BetterDB's own
+clients and RedisShake then connect to the tunnel's local end on `127.0.0.1`;
+credentials and TLS settings still come from the stored connection.
+
+If a tunnel cannot be opened, execution is refused with a 502 before anything
+is written and a validation job fails with the SSH error. If a tunnel drops
+while a job runs, the job stops and fails with
+`The SSH tunnel to the source closed unexpectedly` (or `target`). A drop before
+RedisShake starts also skips the `emptyDbBeforeSync` flush.
+
+Limits:
+
+- **Clusters are not supported through a tunnel.** Only the configured node is
+  tunnelled, so the other nodes cannot be reached. When a tunnelled source or
+  target is a cluster, analysis and validation jobs fail and execution returns
+  a 400.
+- **`prefer_replica` is rejected for a tunnelled source.** RedisShake would
+  connect to the replica's own address and bypass the tunnel.
+- **TLS in command mode and validation** is verified against the stored host,
+  not `127.0.0.1`. A hostname is sent as SNI; when the stored host is a bare IP
+  the certificate must list that IP.
+- **TLS endpoints that route by SNI cannot be reached through a tunnel in the
+  RedisShake modes.** RedisShake dials `127.0.0.1` and has no option to send
+  the real hostname as SNI. Use `command` mode for those endpoints.
 
 ## Batching and concurrency
 

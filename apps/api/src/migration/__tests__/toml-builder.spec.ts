@@ -367,3 +367,25 @@ describe('function filtering (cross-fork)', () => {
     expect(toml.indexOf('[filter]')).toBeLessThan(toml.indexOf('[advanced]'));
   });
 });
+
+describe('tunnelled endpoints', () => {
+  const tunnelledSource = { ...makeConfig({ host: 'src.internal', port: 6379, password: 'srcpass', tls: true }), dial: { host: '127.0.0.1', port: 40001 } };
+  const tunnelledTarget = { ...makeConfig({ host: 'tgt.internal', port: 6380 }), dial: { host: '127.0.0.1', port: 40002 } };
+
+  it('writes the local tunnel address for scan_reader and redis_writer, keeping credentials and TLS', () => {
+    const toml = buildScanReaderToml(tunnelledSource, tunnelledTarget, { sourceIsCluster: false });
+
+    expect(toml).toContain('[scan_reader]\naddress = "127.0.0.1:40001"\nusername = ""\npassword = "srcpass"\ntls = true');
+    expect(toml).toContain('address = "127.0.0.1:40002"');
+    expect(toml).not.toContain('src.internal');
+    expect(toml).not.toContain('tgt.internal');
+  });
+
+  it('writes the local tunnel address for sync_reader', () => {
+    const toml = buildSyncReaderToml(tunnelledSource, tunnelledTarget, { sourceIsCluster: false });
+
+    expect(toml).toContain('[sync_reader]\ncluster = false\naddress = "127.0.0.1:40001"');
+    expect(toml).toContain('address = "127.0.0.1:40002"');
+    expect(toml).not.toContain('src.internal');
+  });
+});

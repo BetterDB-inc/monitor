@@ -341,6 +341,24 @@ describe('AnalysisForm', () => {
   });
 
   it('blocks a Serverless check on a source that cannot be analysed', async () => {
+    const viaAgent = conn({
+      id: 'agent',
+      name: 'agent-cache',
+      connectionType: 'agent',
+    } as Partial<Connection> & Pick<Connection, 'id' | 'name'>);
+    setConnections([viaAgent, TARGET], viaAgent);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /check against elasticache serverless/i }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/connected via an agent/i);
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+  });
+
+  it('allows a Serverless check on a source reached through an SSH tunnel', async () => {
     const tunneled = conn({
       id: 'tun',
       name: 'tunneled-cache',
@@ -354,8 +372,23 @@ describe('AnalysisForm', () => {
       await screen.findByRole('button', { name: /check against elasticache serverless/i }),
     );
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(/ssh tunnel/i);
-    expect(screen.getByRole('button', { name: /start analysis/i })).toBeDisabled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /start analysis/i })).toBeEnabled();
+  });
+
+  it('offers an SSH-tunneled connection in the target picker', async () => {
+    const tunneled = conn({
+      id: 'tun',
+      name: 'tunneled-cache',
+      sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+    } as Partial<Connection> & Pick<Connection, 'id' | 'name'>);
+    setConnections([SOURCE, tunneled], SOURCE);
+    renderForm();
+
+    fireEvent.click(screen.getByRole('button', { name: /select target/i }));
+
+    expect(await screen.findByText('tunneled-cache')).toBeInTheDocument();
+    expect(screen.queryByText(/ssh tunnel — not supported yet/i)).not.toBeInTheDocument();
   });
 
   it('rewrites an offline-connection failure into something actionable', async () => {

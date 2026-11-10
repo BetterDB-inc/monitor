@@ -1,0 +1,61 @@
+# Topology for the migration SSH tunnel e2e test.
+# An SSH bastion and two Valkey instances share a private network. The Valkey
+# hostnames resolve only inside that network, so a connection registered under
+# one of them can be reached only through the bastion. Each Valkey also
+# publishes a loopback port the test uses to seed and inspect data directly.
+#
+# Usage:
+#   docker compose -p migration-ssh-e2e -f docker-compose.migration-ssh-e2e.yml up -d
+#   docker compose -p migration-ssh-e2e -f docker-compose.migration-ssh-e2e.yml down -v
+
+services:
+  ssh-bastion:
+    image: alpine:3.20
+    container_name: mig-ssh-bastion
+    command: >
+      sh -c "apk add --no-cache openssh-server &&
+      ssh-keygen -A &&
+      adduser -D tunnel &&
+      echo 'tunnel:tunnel-e2e' | chpasswd &&
+      exec /usr/sbin/sshd -D -e
+      -o AllowTcpForwarding=yes
+      -o PasswordAuthentication=yes"
+    ports:
+      - "127.0.0.1:2299:22"
+    networks:
+      - tunnelled
+    restart: "no"
+
+  tunnelled-source:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tunnelled-source
+    command: valkey-server --save "" --appendonly no
+    ports:
+      - "127.0.0.1:6992:6379"
+    networks:
+      - tunnelled
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+  tunnelled-target:
+    image: valkey/valkey:8-alpine
+    container_name: mig-tunnelled-target
+    command: valkey-server --save "" --appendonly no
+    ports:
+      - "127.0.0.1:6993:6379"
+    networks:
+      - tunnelled
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    restart: "no"
+
+networks:
+  tunnelled:
+    driver: bridge

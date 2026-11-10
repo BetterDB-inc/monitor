@@ -1,12 +1,19 @@
+import { checkServerIdentity } from 'tls';
 import Valkey, { Cluster } from 'iovalkey';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { assertUsableTlsMaterial, buildTlsOptions, clientCredentials } from '../../database/adapters/tls-material';
-import { tlsIdentityOptions } from '../../database/adapters/tls-servername';
+import { tlsIdentityOptions, type TlsIdentityOptions } from '../../database/adapters/tls-servername';
+import { dialEndpoint, type MigrationConnectionConfig } from '../migration-endpoints';
 
 /** Receives a one-line explanation when a TLS re-read is skipped. */
 export type TlsRefreshErrorHandler = (message: string) => void;
 
-type TlsAuthConfig = Pick<DatabaseConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode'>;
+type TlsAuthConfig = Pick<MigrationConnectionConfig, 'username' | 'password' | 'tls' | 'tlsConfig' | 'authMode' | 'dial'>;
+
+function tlsIdentityFor(config: TlsAuthConfig, host: string, announcedHostname?: string): TlsIdentityOptions {
+  const identity = tlsIdentityOptions(host, announcedHostname);
+  if (config.dial === undefined || identity.servername !== undefined) return identity;
+  return { checkServerIdentity: (_name, certificate) => checkServerIdentity(host, certificate) };
+}
 
 /**
  * Credentials and TLS options for a per-node client built from a connection
@@ -25,7 +32,7 @@ export function nodeClientAuthOptions(
   const tls = buildTlsOptions(config);
   return {
     ...clientCredentials(config),
-    tls: tls && host ? { ...tlsIdentityOptions(host, announcedHostname), ...tls } : tls,
+    tls: tls && host ? { ...tlsIdentityFor(config, host, announcedHostname), ...tls } : tls,
   };
 }
 
@@ -106,10 +113,9 @@ function refreshClusterNodeTls(
 /**
  * Create a standalone Valkey client from a connection config.
  */
-export function createClient(config: DatabaseConnectionConfig, name: string, onTlsRefreshError?: TlsRefreshErrorHandler): Valkey {
+export function createClient(config: MigrationConnectionConfig, name: string, onTlsRefreshError?: TlsRefreshErrorHandler): Valkey {
   const client = new Valkey({
-    host: config.host,
-    port: config.port,
+    ...dialEndpoint(config),
     ...nodeClientAuthOptions(config, config.host),
     lazyConnect: true,
     connectTimeout: 10_000,
@@ -126,7 +132,7 @@ export function createClient(config: DatabaseConnectionConfig, name: string, onT
  * interface without branching.
  */
 export function createTargetClient(
-  config: DatabaseConnectionConfig,
+  config: MigrationConnectionConfig,
   name: string,
   isCluster: boolean,
   onTlsRefreshError?: TlsRefreshErrorHandler,

@@ -16,7 +16,8 @@ import { validateSample } from './validation/sample-validator';
 import { compareBaseline } from './validation/baseline-comparator';
 import { MigrationService } from './migration.service';
 import { createClient, createTargetClient } from './execution/client-factory';
-import { assertLiveMigrationPair } from './live-connections';
+import { assertAddressableEndpoints, assertLiveMigrationPair, assertTunnelSupport } from './live-connections';
+import { MigrationEndpointResolver, tunnelClosedMessage, type MigrationEndpoints } from './migration-endpoints';
 
 @Injectable()
 export class MigrationValidationService {
@@ -28,6 +29,7 @@ export class MigrationValidationService {
     private readonly connectionRegistry: ConnectionRegistry,
     @Inject('STORAGE_CLIENT') private readonly storage: StoragePort,
     private readonly migrationService: MigrationService,
+    private readonly endpointResolver: MigrationEndpointResolver,
   ) {}
 
   async startValidation(req: MigrationValidationRequest): Promise<StartValidationResponse> {
@@ -47,6 +49,7 @@ export class MigrationValidationService {
     }
 
     assertLiveMigrationPair(this.connectionRegistry, req.sourceConnectionId, req.targetConnectionId);
+    assertAddressableEndpoints(sourceConfig, targetConfig);
 
     // 3. Optionally retrieve Phase 1 analysis result
     let analysisResult: MigrationAnalysisResult | undefined;
@@ -104,6 +107,8 @@ export class MigrationValidationService {
     let sourceClient: Valkey | null = null;
     let sourceClusterClient: Valkey | null = null;
     let targetClient: Valkey | null = null;
+    let endpoints: MigrationEndpoints | null = null;
+    let tunnelError: string | undefined;
 
     try {
       job.status = 'running';
@@ -117,8 +122,13 @@ export class MigrationValidationService {
       const targetIsCluster = isClusterEnabled(await targetAdapter.getInfo(['cluster']));
 
       // Create temporary iovalkey clients — same pattern as command-migration-worker.ts
-      sourceClient = createClient(sourceConfig, 'BetterDB-Validation-Source');
-      targetClient = createTargetClient(targetConfig, 'BetterDB-Validation-Target', targetIsCluster);
+      assertTunnelSupport(sourceConfig, targetConfig, { sourceIsCluster, targetIsCluster });
+      endpoints = await this.endpointResolver.open(job.id, { source: sourceConfig, target: targetConfig }, (side) => {
+        tunnelError ??= tunnelClosedMessage(side);
+      });
+
+      sourceClient = createClient(endpoints.source, 'BetterDB-Validation-Source');
+      targetClient = createTargetClient(endpoints.target, 'BetterDB-Validation-Target', targetIsCluster);
 
       // Step 1: Connect check (5%)
       try {
@@ -221,6 +231,10 @@ export class MigrationValidationService {
         this.logger.error(`Validation ${job.id} error: ${message}`);
       }
     } finally {
+      if (tunnelError !== undefined && !job.cancelled) {
+        job.status = 'failed';
+        job.error = tunnelError;
+      }
       // Ensure cancelled jobs get a terminal status
       if (job.cancelled && job.status === 'running') {
         job.status = 'cancelled';
@@ -230,6 +244,7 @@ export class MigrationValidationService {
       // Graceful cleanup — never Promise.all, never disconnect()
       const clients = [sourceClient, sourceClusterClient, targetClient].filter((c): c is Valkey => c !== null);
       await Promise.allSettled(clients.map(c => c.quit()));
+      await endpoints?.close().catch(() => undefined);
     }
   }
 

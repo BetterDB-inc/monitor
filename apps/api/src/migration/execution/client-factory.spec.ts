@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import Valkey from 'iovalkey';
-import { attachTlsRefresh, createTargetClient, nodeClientAuthOptions } from './client-factory';
+import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
 import * as tlsMaterial from '../../database/adapters/tls-material';
 import { generateTlsPair } from '../../../test/helpers/tls-fixtures';
 
@@ -160,5 +160,60 @@ describe('attachTlsRefresh', () => {
       client.disconnect();
       fs.rmSync(certDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('createClient through an SSH tunnel', () => {
+  const dial = { host: '127.0.0.1', port: 40001 };
+  const certFor = (ip: string) => ({ subject: { CN: 'db' }, subjectaltname: `IP Address:${ip}` }) as unknown as import('tls').PeerCertificate;
+
+  it('dials the stored host and port when there is no tunnel', () => {
+    const client = createClient({ id: 'c', name: 'c', host: 'db.internal', port: 6379, createdAt: 0 }, 'n');
+    expect(client.options).toMatchObject({ host: 'db.internal', port: 6379 });
+    client.disconnect();
+  });
+
+  it('dials the local tunnel port and keeps the TLS identity on the stored hostname', () => {
+    const client = createClient({ id: 'c', name: 'c', host: 'db.internal', port: 6379, createdAt: 0, tls: true, password: 'pw', dial }, 'n');
+    expect(client.options).toMatchObject({ host: '127.0.0.1', port: 40001, password: 'pw' });
+    expect(client.options.tls).toMatchObject({ servername: 'db.internal' });
+    client.disconnect();
+  });
+
+  it('verifies the certificate against the stored IP, not 127.0.0.1, when the stored host is a bare IP', () => {
+    const client = createClient({ id: 'c', name: 'c', host: '10.0.0.5', port: 6379, createdAt: 0, tls: true, dial }, 'n');
+    const check = client.options.tls?.checkServerIdentity;
+    expect(client.options.tls?.servername).toBeUndefined();
+    expect(check?.('127.0.0.1', certFor('10.0.0.5'))).toBeUndefined();
+    expect(check?.('127.0.0.1', certFor('127.0.0.1'))).toMatchObject({ code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
+    client.disconnect();
+  });
+
+  it('leaves identity checking to Node when a bare-IP host is dialled directly', () => {
+    const client = createClient({ id: 'c', name: 'c', host: '10.0.0.5', port: 6379, createdAt: 0, tls: true }, 'n');
+    expect(client.options.tls?.checkServerIdentity).toBeUndefined();
+    client.disconnect();
+  });
+
+  it('keeps the tunnel identity check when file-sourced material is re-read on reconnect', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tunnel-tls-'));
+    const pair = generateTlsPair('a');
+    const certPath = path.join(dir, 'c.crt');
+    const keyPath = path.join(dir, 'c.key');
+    writeFile(certPath, pair.cert);
+    writeFile(keyPath, pair.key);
+    const client = createClient(
+      { id: 'c', name: 'c', host: '10.0.0.5', port: 6379, createdAt: 0, tls: true, tlsConfig: { source: 'file', trustedPaths: true, certPath, keyPath }, dial },
+      'n',
+    );
+    const loadedAtCreation = client.options.tls;
+
+    client.emit('reconnecting');
+
+    expect(client.options.tls).not.toBe(loadedAtCreation);
+    expect(client.options.tls?.checkServerIdentity?.('127.0.0.1', certFor('10.0.0.5'))).toBeUndefined();
+    expect(client.options.tls?.checkServerIdentity?.('127.0.0.1', certFor('127.0.0.1'))).toMatchObject({ code: 'ERR_TLS_CERT_ALTNAME_INVALID' });
+    client.disconnect();
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

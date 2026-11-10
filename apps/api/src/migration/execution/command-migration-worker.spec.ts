@@ -15,11 +15,14 @@ type MockClient = {
   quit: jest.Mock;
   call: jest.Mock;
   dbsize: jest.Mock;
+  scan: jest.Mock;
 };
 
 const clients: MockClient[] = [];
 let clusterNodesRaw = '';
 let failingHosts = new Set<string>();
+let sourceKeyCount = 0;
+let onScan: (() => void) | undefined;
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; connectionName?: string; tls?: { servername?: string } }) => {
@@ -38,7 +41,11 @@ jest.mock('iovalkey', () => {
       disconnect: jest.fn(),
       quit: jest.fn().mockResolvedValue('OK'),
       call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'CLUSTER' ? clusterNodesRaw : null)),
-      dbsize: jest.fn().mockResolvedValue(0),
+      dbsize: jest.fn().mockImplementation(async () => sourceKeyCount),
+      scan: jest.fn().mockImplementation(async () => {
+        onScan?.();
+        return ['1', []];
+      }),
     };
     clients.push(client);
     return client;
@@ -228,5 +235,42 @@ describe('runCommandMigration source clients', () => {
     expect(nodeA?.options.tls).toMatchObject({ cert: CERT, key: KEY });
     const nodeB = clients.find((c) => c.host === '10.0.0.2');
     expect(nodeB?.options.tls?.servername).toBeUndefined();
+  });
+});
+
+describe('runCommandMigration through an SSH tunnel', () => {
+  const source = { id: 's', name: 's', host: 'src.internal', port: 6379, createdAt: 0, dial: { host: '127.0.0.1', port: 40001 } };
+  const target = { id: 't', name: 't', host: 'tgt.internal', port: 6380, createdAt: 0, dial: { host: '127.0.0.1', port: 40002 } };
+
+  beforeEach(() => {
+    clients.length = 0;
+    failingHosts = new Set();
+    sourceKeyCount = 0;
+    onScan = undefined;
+  });
+
+  it('dials both instances at their local tunnel ports', async () => {
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job: makeJob(), maxLogLines: 100 });
+
+    expect(clients.map((client) => `${client.options.connectionName}@${client.host}:${client.port}`)).toEqual([
+      'BetterDB-Migration-Target@127.0.0.1:40002',
+      'BetterDB-Migration-Source@127.0.0.1:40001',
+    ]);
+  });
+
+  it('stops scanning once a tunnel has dropped', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    let scans = 0;
+    onScan = () => {
+      scans += 1;
+      if (scans > 3) throw new Error('kept scanning after the tunnel dropped');
+      job.tunnelError = 'The SSH tunnel to the target closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(scans).toBe(1);
+    expect(job.progress).not.toBe(100);
   });
 });

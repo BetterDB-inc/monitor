@@ -256,6 +256,57 @@ describe('MigrationService with external connections', () => {
   });
 });
 
+describe('MigrationService with SSH-tunneled connections', () => {
+  const tunnel = { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' };
+
+  function tunnelledRegistry(tunnelledId: string) {
+    const registry = createMockRegistry();
+    registry.getConfig.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      host: '10.0.0.5',
+      port: 6379,
+      createdAt: Date.now(),
+      ...(id === tunnelledId ? { sshTunnel: tunnel } : {}),
+    }));
+    return registry;
+  }
+
+  it.each([
+    ['source', 'conn-1'],
+    ['target', 'conn-2'],
+  ])('analyses a standalone %s reached through a tunnel', async (_side, tunnelledId) => {
+    const registry = tunnelledRegistry(tunnelledId);
+    const service = new MigrationService(registry as any);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.error ?? '').not.toMatch(/SSH tunnel/);
+    expect(job.status).toBe('completed');
+  });
+
+  it('fails the analysis with the cluster message for a cluster reached through a tunnel', async () => {
+    const registry = tunnelledRegistry('conn-1');
+    registry.mockAdapter.getInfo.mockResolvedValue({
+      keyspace: { db0: 'keys=100,expires=0,avg_ttl=0' },
+      memory: { used_memory: '1000000' },
+      cluster: { cluster_enabled: '1' },
+      server: {},
+      persistence: { rdb_last_save_time: '0', aof_enabled: '0' },
+    });
+    const service = new MigrationService(registry as any);
+    jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
+
+    const { id } = await service.startAnalysis({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2' });
+    const job = await waitForTerminal(service, id);
+
+    expect(job.status).toBe('failed');
+    expect(job.error).toMatch(/cluster reached through an SSH tunnel/);
+    expect(registry.mockAdapter.getClusterNodes).not.toHaveBeenCalled();
+  });
+});
+
 describe('MigrationService ElastiCache Serverless readiness', () => {
   beforeEach(() => {
     jest.mocked(saveAnalysisVerdict).mockClear();

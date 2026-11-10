@@ -1,5 +1,5 @@
 import Valkey from 'iovalkey';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import type { MigrationConnectionConfig } from '../migration-endpoints';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
 import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
@@ -11,8 +11,8 @@ const TYPE_BATCH = 500;
 const MIGRATE_BATCH = 50;
 
 export interface CommandMigrationOptions {
-  sourceConfig: DatabaseConnectionConfig;
-  targetConfig: DatabaseConnectionConfig;
+  sourceConfig: MigrationConnectionConfig;
+  targetConfig: MigrationConnectionConfig;
   sourceIsCluster: boolean;
   targetIsCluster: boolean;
   job: ExecutionJob;
@@ -208,7 +208,7 @@ async function batchType(client: Valkey, keys: string[]): Promise<string[]> {
 }
 
 function isCancelled(job: ExecutionJob): boolean {
-  return (job.status as string) === 'cancelled';
+  return (job.status as string) === 'cancelled' || job.tunnelError !== undefined;
 }
 
 function log(job: ExecutionJob, maxLines: number, message: string): void {
