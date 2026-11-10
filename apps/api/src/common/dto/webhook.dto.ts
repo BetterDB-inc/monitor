@@ -406,7 +406,10 @@ export class WebhookDeliveryDto implements WebhookDelivery {
   @ApiProperty({ description: 'Event payload', example: { instanceId: 'inst-123', timestamp: 1704934800000 } })
   payload: WebhookPayload;
 
-  @ApiProperty({ description: 'Delivery status', enum: ['pending', 'success', 'failed', 'retrying'] })
+  @ApiProperty({
+    description: 'Delivery status (suppressed = not sent because a maintenance window covered the event)',
+    enum: ['pending', 'success', 'failed', 'retrying', 'dead_letter', 'suppressed'],
+  })
   status: DeliveryStatus;
 
   @ApiPropertyOptional({ description: 'HTTP status code', example: 200 })
@@ -456,10 +459,10 @@ export class GetDeliveriesQueryDto {
 
   @ApiPropertyOptional({
     description: 'Delivery status to filter by',
-    enum: ['pending', 'success', 'failed', 'retrying', 'dead_letter'],
+    enum: ['pending', 'success', 'failed', 'retrying', 'dead_letter', 'suppressed'],
     example: 'failed'
   })
-  @IsEnum(['pending', 'success', 'failed', 'retrying', 'dead_letter'])
+  @IsEnum(['pending', 'success', 'failed', 'retrying', 'dead_letter', 'suppressed'])
   @IsOptional()
   status?: DeliveryStatus;
 }

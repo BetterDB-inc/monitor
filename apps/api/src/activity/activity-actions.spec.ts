@@ -9,6 +9,21 @@ describe('actionFor', () => {
     expect(actionFor('PATCH', '/workspace/members/:userId/role')).toBe('member.role');
   });
 
+  it('names maintenance window changes, which silence paging and must be attributable', () => {
+    expect(actionFor('POST', '/maintenance-windows')).toBe('maintenance_window.create');
+    expect(actionFor('PATCH', '/maintenance-windows/:id')).toBe('maintenance_window.update');
+    expect(actionFor('POST', '/api/maintenance-windows/:id/end')).toBe('maintenance_window.end');
+    expect(actionFor('DELETE', '/maintenance-windows/:id')).toBe('maintenance_window.delete');
+    expect(targetFor('maintenance_window.create', {}, {}, { id: 'mw-1' })).toEqual({
+      type: 'maintenance_window',
+      id: 'mw-1',
+    });
+    expect(targetFor('maintenance_window.end', { id: 'mw-1' }, {}, undefined)).toEqual({
+      type: 'maintenance_window',
+      id: 'mw-1',
+    });
+  });
+
   it('strips the api prefix and upper-cases the method', () => {
     expect(actionFor('post', '/api/connections')).toBe('connection.create');
   });

@@ -4,6 +4,7 @@ import { Webhook, WebhookFormData, TestWebhookResponse } from '../types/webhooks
 import { WebhookList } from '../components/webhooks/WebhookList';
 import { WebhookForm } from '../components/webhooks/WebhookForm';
 import { WebhookDeliveries } from '../components/webhooks/WebhookDeliveries';
+import { MaintenanceWindows } from '../components/webhooks/MaintenanceWindows';
 import { Card } from '../components/ui/card';
 import { useConnection } from '../hooks/useConnection';
 
@@ -187,6 +188,8 @@ export function Webhooks() {
       )}
 
       {/* Main Content */}
+      {view === 'list' && <MaintenanceWindows />}
+
       {view === 'list' && (
         <WebhookList
           webhooks={webhooks}
