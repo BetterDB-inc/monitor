@@ -1,6 +1,6 @@
 import { useConnection } from '../hooks/useConnection';
 import { ReactNode, ReactElement, useState, useRef, useEffect, FormEvent } from 'react';
-import { useLocation } from 'react-router-dom';
+import { matchPath, useLocation } from 'react-router-dom';
 import { useIsDemo } from '../contexts/DemoContext';
 import { useCanMutate } from '../hooks/useCanMutate';
 import { useTelemetry } from '../hooks/useTelemetry';
@@ -17,6 +17,12 @@ const DEFAULT_PAGE_STATE: PageEmptyState = {
   headline: 'Connect your database.',
   description:
     'Add a Valkey or Redis instance to monitor slow queries, latency, client activity, and memory - all in one place.',
+};
+
+const MONITOR_PAGE_STATE: PageEmptyState = {
+  headline: 'Watch commands live.',
+  description:
+    'Connect a database to stream every command in real time, with filtering and recorded sessions.',
 };
 
 const PAGE_STATES: Record<string, PageEmptyState> = {
@@ -110,11 +116,13 @@ const PAGE_STATES: Record<string, PageEmptyState> = {
     description:
       'Connect a database to capture authentication failures and permission denials from ACL LOG.',
   },
-  '/monitor': {
-    headline: 'Watch commands live.',
+  '/anomalies/incidents/:incidentId': {
+    headline: 'Follow an incident from start to recovery.',
     description:
-      'Connect a database to stream every command in real time, with filtering and recorded sessions.',
+      'Connect a database and BetterDB will group related anomalies into incidents, with a timeline of what fired and what recovered.',
   },
+  '/monitor': MONITOR_PAGE_STATE,
+  '/monitor/sessions/:id': MONITOR_PAGE_STATE,
   '/webhooks': {
     headline: 'Get alerted where you work.',
     description:
@@ -652,9 +660,10 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
   }
 
   if (hasNoConnections) {
-    const page = PAGE_STATES[location.pathname] ?? DEFAULT_PAGE_STATE;
+    const route = Object.keys(PAGE_STATES).find((pattern) => matchPath(pattern, location.pathname));
+    const page = route ? PAGE_STATES[route] : DEFAULT_PAGE_STATE;
     const capture = (event: string, props?: Record<string, unknown>) =>
-      telemetry.capture(event, { page: location.pathname, ...props });
+      telemetry.capture(event, { page: route ?? location.pathname, ...props });
 
     if (isDemo) {
       return (
@@ -686,8 +695,8 @@ export function NoConnectionsGuard({ children }: NoConnectionsGuardProps): React
               {page.headline}
             </h1>
             <p className="text-[15px] text-muted-foreground leading-relaxed">
-              Ask a workspace admin to add a connection. Your account is read-only, so it cannot
-              add or change connections.
+              Ask a workspace admin to add a connection. Your account is read-only, so it cannot add
+              or change connections.
             </p>
           </div>
         </div>
