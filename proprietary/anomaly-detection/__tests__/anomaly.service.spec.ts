@@ -12463,13 +12463,13 @@ describe('AnomalyService', () => {
     it('widens the history read back to a stored start before the window', async () => {
       const t = Date.now() - 2 * 60 * MIN;
       storage.getIncidentBoundaries.mockResolvedValue([
-        { scopeId: 'conn-1', startedAt: t - 40 * MIN, anomalyId: 'head' },
+        { scopeId: 'conn-1', startedAt: t - 80 * MIN, anomalyId: 'head' },
       ]);
 
       await service.getIncidentTimelines('conn-1', t);
 
       const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
-      expect(startTime).toBe(t - 40 * MIN);
+      expect(startTime).toBe(t - 80 * MIN);
     });
 
     it('remembers on a live boundary every step its incident has held', async () => {
@@ -13364,7 +13364,7 @@ describe('AnomalyService', () => {
       await service.getIncidentTimelines('conn-1', now - 365 * 24 * 60 * MIN);
 
       const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
-      expect(startTime).toBeGreaterThanOrEqual(now - 30 * 24 * 60 * MIN - 30 * MIN - 1000);
+      expect(startTime).toBeGreaterThanOrEqual(now - 30 * 24 * 60 * MIN - 60 * MIN - 1000);
     });
 
     it('finds an incident that a long chain split off at the max span', async () => {
@@ -13966,31 +13966,115 @@ describe('AnomalyService', () => {
       ]);
     });
 
-    it('loads a past range up to one incident span after its end', async () => {
-      const now = Date.now();
-      const end = now - 24 * 60 * MIN;
-      const load = jest.spyOn(service as any, 'loadIncidentHistory');
+    describe('one window for the list and the detail page', () => {
+      let now: number;
+      let end: number;
 
-      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+      beforeEach(() => {
+        now = Date.now();
+        end = now - 24 * 60 * MIN;
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+      });
 
-      const [, loadFrom, loadEnd, options] = load.mock.calls[0] as [string, number, number, any];
-      expect(loadFrom).toBe(end - 90 * MIN);
-      expect(loadEnd).toBe(end);
-      expect(options.tailEnd).toBe(end + 30 * MIN);
-    });
+      const expectDetailToMatchList = async (connectionId?: string, from?: number, to?: number) => {
+        const listed = await service.getIncidentTimelines(
+          connectionId,
+          from,
+          to,
+          Number.MAX_SAFE_INTEGER,
+        );
+        for (const incident of listed) {
+          expect(await service.getIncidentTimeline(incident.incidentId, connectionId)).toEqual(
+            incident,
+          );
+        }
+        return listed;
+      };
+      const seedEveryMinute = (prefix: string, count: number, first: number) => {
+        for (let i = 0; i < count; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `${prefix}-${i}`, timestamp: first + i * MIN }),
+          );
+        }
+      };
+      const storeBoundaries = (boundaries: any[]) =>
+        storage.getIncidentBoundaries.mockImplementation(
+          async ({ scopeIds, startTime, endTime }: any) =>
+            boundaries.filter(
+              (b) =>
+                (!scopeIds || scopeIds.includes(b.scopeId)) &&
+                b.startedAt >= startTime &&
+                (endTime === undefined || b.startedAt <= endTime),
+            ),
+        );
+      const eventReads = () =>
+        storage.getAnomalyEvents.mock.calls
+          .map(([q]: any[]) => q)
+          .filter((q: any) => q.order !== 'asc');
 
-    it('loads the events after a past range apart from the range itself', async () => {
-      const now = Date.now();
-      const end = now - 24 * 60 * MIN;
+      it('lists an incident whole when it runs past the range end on an adopted start', async () => {
+        seedEveryMinute('tail', 56, end - MIN);
+        storeBoundaries([{ scopeId: 'conn-1', startedAt: end + 24 * MIN, anomalyId: 'tail-25' }]);
 
-      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+        const [incident] = await expectDetailToMatchList('conn-1', end - 60 * MIN, end);
 
-      const windows = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => [
-        q.startTime,
-        q.endTime,
-      ]);
-      expect(windows).toContainEqual([end - 90 * MIN, end]);
-      expect(windows).toContainEqual([end + 1, end + 30 * MIN]);
+        expect(incident.entries).toHaveLength(56);
+      });
+
+      it('lists an incident whole when it starts well before the range on an adopted start', async () => {
+        const from = end - 60 * MIN;
+        seedEveryMinute('lead', 55, from - 50 * MIN);
+        storeBoundaries([{ scopeId: 'conn-1', startedAt: from - 25 * MIN, anomalyId: 'lead-25' }]);
+
+        const listed = await expectDetailToMatchList('conn-1', from, end);
+
+        const incident = listed.find((i) => i.entries.some((e) => e.anomalyId === 'lead-25'))!;
+        expect(incident.startedAt).toBe(from - 50 * MIN);
+      });
+
+      it('opens an incident of an earlier scope with the entries before its stored start', async () => {
+        const t = now - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'late', timestamp: t - 10_000, scopeId: 's-old' }),
+          anomaly({ id: 'start', timestamp: t, scopeId: 's-old' }),
+        );
+        storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) =>
+          scopeIds?.includes('s-old') ? [{ scopeId: 's-old', startedAt: t, anomalyId: 'start' }] : [],
+        );
+
+        const [incident] = await expectDetailToMatchList('conn-1', t - MIN);
+
+        expect(incident.entries.map((e) => e.anomalyId)).toEqual(['late', 'start']);
+      });
+
+      it('loads a past range in one read, two incident spans either side', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(eventReads()).toEqual([
+          expect.objectContaining({ startTime: end - 120 * MIN, endTime: end + 60 * MIN }),
+        ]);
+      });
+
+      it('treats a range that ends less than two spans ago as open-ended', async () => {
+        (service as any).recentAnomalies.push(anomaly({ id: 'open', timestamp: now - 50 * MIN }));
+
+        await service.getIncidentTimelines('conn-1', now - 120 * MIN, now - 45 * MIN);
+
+        expect(eventReads().map((q: any) => q.endTime)).toEqual([undefined]);
+        expect(lookups()).toEqual([]);
+      });
+
+      it('opens an incident with no stored start from its anchor', async () => {
+        const t = now - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'older', timestamp: t - 10 * MIN }),
+          anomaly({ id: 'solo', timestamp: t }),
+        );
+
+        const listed = await expectDetailToMatchList('conn-1', t - 20 * MIN);
+
+        expect(listed.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['solo'], ['older']]);
+      });
     });
 
     it('opens an incident split at max span when another scope has an earlier boundary', async () => {
@@ -14083,7 +14167,7 @@ describe('AnomalyService', () => {
         expect.objectContaining({
           connectionId: 'conn-1',
           metricType: MetricType.CONNECTIONS,
-          startTime: end + 30 * MIN + 1,
+          startTime: end + 60 * MIN + 1,
         }),
       ]);
     });
@@ -14509,7 +14593,7 @@ describe('AnomalyService', () => {
 
       it('looks up every signal of a load when storage answers', async () => {
         const end = Date.now() - 24 * 60 * MIN;
-        const tailEnd = end + 30 * MIN;
+        const loadedThrough = end + 60 * MIN;
         for (let i = 0; i < 8; i++) {
           (service as any).recentAnomalies.push(
             anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
@@ -14521,7 +14605,7 @@ describe('AnomalyService', () => {
                 {
                   ...anomaly({
                     id: `${q.connectionId}-again`,
-                    timestamp: tailEnd + 5 * MIN,
+                    timestamp: loadedThrough + 5 * MIN,
                     connectionId: q.connectionId,
                   }),
                   anomalyType: 'spike',
@@ -14535,7 +14619,7 @@ describe('AnomalyService', () => {
 
         const bounded = new Set(
           recovery.mock.calls
-            .filter((call: any[]) => call[2] === tailEnd + 5 * MIN)
+            .filter((call: any[]) => call[2] === loadedThrough + 5 * MIN)
             .map(([event]: any[]) => event.id),
         );
         expect(bounded.size).toBe(8);
@@ -14634,17 +14718,17 @@ describe('AnomalyService', () => {
       it('still uses a cached later firing once the budget is spent', async () => {
         jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
         const end = Date.now() - 24 * 60 * MIN;
-        const tailEnd = end + 30 * MIN;
+        const loadedThrough = end + 60 * MIN;
         openSignals(end);
         const firing = {
-          ...anomaly({ id: 'c-19-again', timestamp: tailEnd + 5 * MIN, connectionId: 'conn-19' }),
+          ...anomaly({ id: 'c-19-again', timestamp: loadedThrough + 5 * MIN, connectionId: 'conn-19' }),
           anomalyType: 'spike',
         };
         storage.getAnomalyEvents.mockImplementation(async (q: any) =>
           q.order === 'asc' && q.connectionId === 'conn-19' ? [firing] : [],
         );
         const cachedSignal = (service as any).recentAnomalies.find((e: any) => e.id === 'c-19');
-        await (service as any).nextFiring(cachedSignal, tailEnd);
+        await (service as any).nextFiring(cachedSignal, loadedThrough);
         jest
           .spyOn(service as any, 'lookUpNextFiring')
           .mockImplementation(() => new Promise(() => undefined));

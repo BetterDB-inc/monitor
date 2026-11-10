@@ -532,6 +532,13 @@ interface IncidentCutoffs {
   earlier: Map<string, number>;
 }
 
+interface IncidentWindow {
+  events: AnomalyEvent[];
+  boundaries: StoredIncidentBoundary[];
+  loadedThrough: number;
+  openEnded: boolean;
+}
+
 interface CobReads {
   limit(): Promise<string | null>;
   replicas(): Promise<ReplicaObservation[]>;
@@ -8236,21 +8243,17 @@ export class AnomalyService
       startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
-    const tailEnd =
-      endTime !== undefined && endTime + maxSpanMs < now ? endTime + maxSpanMs : undefined;
-    const { events, boundaries } = await this.loadIncidentHistory(
+    const { events, boundaries, loadedThrough, openEnded } = await this.loadIncidentWindow(
       connectionId,
-      from - maxSpanMs,
-      tailEnd === undefined ? undefined : endTime,
-      { tailEnd },
+      from - 2 * maxSpanMs,
+      endTime,
     );
-    const next =
-      tailEnd === undefined
-        ? []
-        : await this.nextFiringsAfter(
-            this.unresolvedSignals(events.filter((e) => e.timestamp >= from)),
-            tailEnd,
-          );
+    const next = openEnded
+      ? []
+      : await this.nextFiringsAfter(
+          this.unresolvedSignals(events.filter((e) => e.timestamp >= from)),
+          loadedThrough,
+        );
     return this.buildIncidents([...events, ...next], boundaries)
       .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
       .reverse()
@@ -8284,29 +8287,63 @@ export class AnomalyService
   }
 
   private async loadIncidentWindow(
-    startedAt: number,
     connectionId: string | undefined,
-  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[]; windowEnd: number }> {
-    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
-    const windowEnd = startedAt + 2 * maxSpanMs;
-    const history = await this.loadIncidentHistory(connectionId, startedAt - maxSpanMs, windowEnd, {
-      eventsFrom: (boundaries) => {
-        const cutoffs = this.incidentCutoffs(boundaries, startedAt);
-        const scopes = new Set(boundaries.map((b) => b.scopeId));
-        return Math.min(
-          startedAt,
-          ...[...scopes].map((scope) => this.cutoffOf(cutoffs, scope, startedAt)),
-        );
-      },
-    });
-    const cutoffs = this.incidentCutoffs(history.boundaries, startedAt);
-    return {
-      events: history.events.filter(
-        (e) => e.timestamp >= this.cutoffOf(cutoffs, this.incidentScopeOf(e), startedAt),
+    rangeStart: number,
+    rangeEnd: number | undefined,
+  ): Promise<IncidentWindow> {
+    const now = Date.now();
+    const reach = 2 * DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
+    const end = rangeEnd === undefined ? now : rangeEnd + reach;
+    const openEnded = end >= now;
+    const endTime = openEnded ? undefined : end;
+    const own = await this.readIncidentBoundaries(connectionId, rangeStart - reach, endTime);
+    const earliest = this.earliestCutoff(own, own, rangeStart);
+    const loaded = await this.loadIncidentEvents(connectionId, earliest, endTime);
+    const earlier = await this.earlierScopeBoundaries(
+      connectionId,
+      loaded,
+      rangeStart - reach,
+      endTime,
+    );
+    const boundaries = [...own, ...earlier];
+    const earlierFrom = this.earliestCutoff(boundaries, earlier, rangeStart);
+    const before =
+      earlierFrom < earliest
+        ? await this.loadIncidentEvents(connectionId, earlierFrom, earliest - 1)
+        : [];
+    const cutoffs = this.incidentCutoffs(boundaries, rangeStart);
+    const events = [...new Map([...before, ...loaded].map((e) => [e.id, e])).values()].filter(
+      (e) => e.timestamp >= this.cutoffOf(cutoffs, this.incidentScopeOf(e), rangeStart),
+    );
+    return { events, boundaries, loadedThrough: endTime ?? now, openEnded };
+  }
+
+  private earliestCutoff(
+    boundaries: StoredIncidentBoundary[],
+    scopesOf: StoredIncidentBoundary[],
+    rangeStart: number,
+  ): number {
+    const cutoffs = this.incidentCutoffs(boundaries, rangeStart);
+    return Math.min(
+      rangeStart,
+      ...[...new Set(scopesOf.map((b) => b.scopeId))].map((scope) =>
+        this.cutoffOf(cutoffs, scope, rangeStart),
       ),
-      boundaries: history.boundaries,
-      windowEnd,
-    };
+    );
+  }
+
+  private async earlierScopeBoundaries(
+    connectionId: string | undefined,
+    events: AnomalyEvent[],
+    startTime: number,
+    endTime: number | undefined,
+  ): Promise<StoredIncidentBoundary[]> {
+    if (!connectionId) return [];
+    const scope = this.correlationScopeOf(connectionId);
+    const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
+      (id): id is string => id !== undefined && id !== scope,
+    );
+    return earlierScopes.length > 0 ? this.readBoundariesOf(earlierScopes, startTime, endTime) : [];
   }
 
   private incidentCutoffs(
@@ -8337,14 +8374,6 @@ export class AnomalyService
     return event.connectionId ? this.correlationScopeOf(event.connectionId) : '';
   }
 
-  private earliestIncidentLoad(boundaries: StoredIncidentBoundary[], loadFrom: number): number {
-    const reach = loadFrom - DEFAULT_INCIDENT_TIMELINE_OPTIONS.maxSpanMs;
-    return boundaries
-      .map((b) => b.startedAt)
-      .filter((at) => at >= reach)
-      .reduce((lowest, at) => Math.min(lowest, at), loadFrom);
-  }
-
   async getIncidentTimeline(
     incidentId: string,
     connectionId?: string,
@@ -8360,19 +8389,20 @@ export class AnomalyService
       );
       return timelines.find((t) => t.incidentId === incidentId) ?? null;
     }
-    const { events, boundaries, windowEnd } = await this.loadIncidentWindow(
-      startedAt,
+    const { events, boundaries, loadedThrough, openEnded } = await this.loadIncidentWindow(
       connectionId,
+      startedAt,
+      startedAt,
     );
     const find = (all: AnomalyEvent[]) =>
       this.buildIncidents(all, boundaries).find((t) => t.incidentId === incidentId) ?? null;
     const draft = find(events);
     if (!draft) return null;
-    if (windowEnd >= Date.now()) return draft;
+    if (openEnded) return draft;
     const ids = new Set(draft.entries.map((e) => e.anomalyId));
     const next = await this.nextFiringsAfter(
       this.unresolvedSignals(events.filter((e) => ids.has(e.id))),
-      windowEnd,
+      loadedThrough,
     );
     return next.length > 0 ? find([...events, ...next]) : draft;
   }
@@ -8503,38 +8533,6 @@ export class AnomalyService
       this.nextFiringCache.delete(this.nextFiringCache.keys().next().value!);
     }
     return event;
-  }
-
-  private async loadIncidentHistory(
-    connectionId: string | undefined,
-    loadFrom: number,
-    endTime: number | undefined,
-    {
-      tailEnd,
-      eventsFrom = (boundaries) => this.earliestIncidentLoad(boundaries, loadFrom),
-    }: {
-      tailEnd?: number;
-      eventsFrom?: (boundaries: StoredIncidentBoundary[]) => number;
-    } = {},
-  ): Promise<{ events: AnomalyEvent[]; boundaries: StoredIncidentBoundary[] }> {
-    const boundaryEnd = tailEnd ?? endTime;
-    const boundaries = await this.readIncidentBoundaries(connectionId, loadFrom, boundaryEnd);
-    const earliest = eventsFrom(boundaries);
-    const [inRange, tail] = await Promise.all([
-      this.loadIncidentEvents(connectionId, earliest, endTime),
-      tailEnd !== undefined && endTime !== undefined
-        ? this.loadIncidentEvents(connectionId, endTime + 1, tailEnd)
-        : Promise.resolve([]),
-    ]);
-    const events = [...new Map([...inRange, ...tail].map((e) => [e.id, e])).values()];
-    if (!connectionId) return { events, boundaries };
-    const scope = this.correlationScopeOf(connectionId);
-    const earlierScopes = [...new Set(events.map((e) => e.scopeId))].filter(
-      (id): id is string => id !== undefined && id !== scope,
-    );
-    if (earlierScopes.length === 0) return { events, boundaries };
-    const earlier = await this.readBoundariesOf(earlierScopes, loadFrom, boundaryEnd);
-    return { events, boundaries: [...boundaries, ...earlier] };
   }
 
   private async readIncidentBoundaries(
