@@ -318,6 +318,15 @@ export class SlotStatsMetricDto implements SlotStatsMetric {
 
   @ApiProperty({ description: 'Total write operations', example: 500 })
   total_writes: number;
+
+  @ApiPropertyOptional({ description: 'CPU time spent on the slot (microseconds)', example: 1200 })
+  cpu_usec?: number;
+
+  @ApiPropertyOptional({ description: 'Bytes received for commands on the slot', example: 4096 })
+  network_bytes_in?: number;
+
+  @ApiPropertyOptional({ description: 'Bytes sent in replies for the slot', example: 8192 })
+  network_bytes_out?: number;
 }
 
 // Simple response DTOs for common patterns
@@ -477,4 +486,13 @@ export class SlotMigrationDto {
 
   @ApiPropertyOptional({ description: 'Number of keys remaining to migrate', example: 2450 })
   keysRemaining?: number;
+
+  @ApiPropertyOptional({
+    description: 'Atomic slot migration (Valkey 9+): the slot ranges the job moves',
+    example: '0-1365 5462-6826',
+  })
+  slotRange?: string;
+
+  @ApiPropertyOptional({ description: 'Atomic slot migration job state as Valkey reports it', example: 'snapshotting' })
+  phase?: string;
 }

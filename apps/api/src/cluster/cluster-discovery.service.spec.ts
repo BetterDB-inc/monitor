@@ -122,21 +122,22 @@ describe('ClusterDiscoveryService', () => {
       });
     });
 
-    it('should mark nodes as unhealthy when disconnected', async () => {
+    it('keeps a node healthy when only the answering node\'s bus link to it is down', async () => {
+      // Link state is the answering node's cluster-bus link, not Monitor's
+      // reach; the parser keeps it in its own field, never in flags.
       mockDbClient.getClusterNodes.mockResolvedValueOnce([
         {
           ...mockClusterNodes[0],
-          flags: ['master', 'disconnected'],
+          flags: ['master'],
           linkState: 'disconnected',
         },
       ]);
 
-      // Clear cache to force new discovery
       await service.cleanupIdleConnections(0);
       await new Promise(resolve => setTimeout(resolve, 100));
 
       const nodes = await service.discoverNodes();
-      expect(nodes[0].healthy).toBe(false);
+      expect(nodes[0].healthy).toBe(true);
     });
 
     it('should mark nodes as unhealthy when failed', async () => {
@@ -419,6 +420,26 @@ describe('ClusterDiscoveryService', () => {
       await expect(service.getNodeConnection(nodes[0].id)).rejects.toThrow(
         'Invalid node address'
       );
+    });
+
+    it('drops and disconnects an evicted node client, so the next call opens a new one', async () => {
+      const first = await service.getNodeConnection('node2-id-def456', 'test-connection');
+
+      service.evictNodeClient(first);
+
+      expect(first.disconnect).toHaveBeenCalled();
+      expect(service.getConnectionPoolSize()).toBe(0);
+      expect(await service.getNodeConnection('node2-id-def456', 'test-connection')).not.toBe(first);
+    });
+
+    it('connects to an IPv6 node on the port after the last colon', async () => {
+      mockDbClient.getClusterNodes.mockResolvedValueOnce([
+        { ...mockClusterNodes[0], address: 'fd00::1:6380@16380' },
+      ]);
+
+      await service.getNodeConnection(mockClusterNodes[0].id, 'test-connection');
+
+      expect(jest.mocked(Valkey)).toHaveBeenCalledWith(expect.objectContaining({ host: 'fd00::1', port: 6380 }));
     });
   });
 
@@ -806,6 +827,15 @@ describe('ClusterDiscoveryService', () => {
       expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
         expect.objectContaining({ connectTimeout: 10_000, commandTimeout: 10_000, enableReadyCheck: false, retryStrategy: expect.any(Function) }),
       );
+    });
+
+    it('neither reads nor fills the discovery cache, so each call sees the node its own socket reached', async () => {
+      await service.discoverNodes('test-connection');
+      dedicatedClient(jest.fn().mockResolvedValue('vip 10.0.0.9:7009@17009 myself,master - 0 0 1 connected 0-16383\n'));
+      const isolated = await service.discoverNodesIsolated('test-connection', 10_000);
+      expect(isolated.map((n) => n.id)).toEqual(['vip']);
+      const cached = await service.discoverNodes('test-connection');
+      expect(cached.map((n) => n.id)).not.toContain('vip');
     });
 
     it('closes the dedicated client when CLUSTER NODES times out', async () => {

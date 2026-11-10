@@ -36,6 +36,7 @@ const BASE_ALLOWED: Command[] = [
   ['CLUSTER', 'SHARDS'],
   ['CLUSTER', 'SLOT-STATS', 'SLOTSRANGE', '0', '16383'],
   ['CLUSTER', 'MYID'],
+  ['CLUSTER', 'GETSLOTMIGRATIONS'],
   ['COMMAND', 'INFO', 'MONITOR'],
   ['DBSIZE'],
   ['LASTSAVE'],
@@ -179,22 +180,38 @@ function commandOfRule(rule: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+/** `cmd|sub` for a `+cmd|sub` rule, or null. */
+function subcommandOfRule(rule: string): string | null {
+  const match = /^\+([^|@]+\|[^|@\s]+)/.exec(rule);
+  return match ? match[1].toLowerCase() : null;
+}
+
 describe('Minimum ACL page (E2E)', () => {
   const doc = readFileSync(DOC_PATH, 'utf8');
   const baseLine = codeBlockAfter(doc, '## Read-only monitoring user');
   let admin: Valkey;
   let known: Set<string>;
+  // `cmd|sub` names the server has; a newer subcommand (CLUSTER GETSLOTMIGRATIONS
+  // before Valkey 9) is missing on an older server, like a newer command.
+  let knownSubcommands: Set<string>;
+  const hasSubcommands = (cmd: string) => [...knownSubcommands].some((name) => name.startsWith(`${cmd}|`));
 
   const setUser = async (rules: string[]) => {
+    // The page says to drop a rule the server rejects as unknown; do the same.
     const supported = rules.filter((r) => {
       const cmd = commandOfRule(r);
-      return cmd === null || known.has(cmd);
+      const sub = subcommandOfRule(r);
+      return cmd === null || (known.has(cmd) && (sub === null || knownSubcommands.has(sub)));
     });
     await admin.call('ACL', 'SETUSER', USER, ...supported);
   };
 
   const dryRun = async (cmd: Command): Promise<string> => {
-    if (!known.has(cmd[0].toLowerCase())) return 'unsupported';
+    const name = cmd[0].toLowerCase();
+    if (!known.has(name)) return 'unsupported';
+    if (cmd.length > 1 && hasSubcommands(name) && !knownSubcommands.has(`${name}|${cmd[1].toLowerCase()}`)) {
+      return 'unsupported';
+    }
     return String(await admin.call('ACL', 'DRYRUN', USER, ...cmd));
   };
 
@@ -234,6 +251,13 @@ describe('Minimum ACL page (E2E)', () => {
     await admin.connect();
     const names = (await admin.call('COMMAND', 'LIST')) as string[];
     known = new Set(names.map((n) => n.toLowerCase()));
+    // COMMAND lists each command with its subcommands (Valkey/Redis 7+) at index 9.
+    const all = (await admin.call('COMMAND')) as unknown[][];
+    knownSubcommands = new Set(
+      all.flatMap((entry) =>
+        Array.isArray(entry[9]) ? (entry[9] as unknown[][]).map((sub) => String(sub[0]).toLowerCase()) : [],
+      ),
+    );
   });
 
   afterAll(async () => {

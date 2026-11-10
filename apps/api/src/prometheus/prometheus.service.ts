@@ -43,7 +43,12 @@ import {
   TopologyDiff,
   TopologySnapshot,
 } from '../cluster/topology-diff';
-import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  ClusterSlotStatsResult,
+  NODE_COMMAND_TIMEOUT_MS,
+  inSlotRanges,
+} from '../cluster/cluster-metrics.service';
 import {
   demotedWritesMessage,
   evaluateDemotedWrites,
@@ -90,6 +95,9 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+// Least of the pass left for the slot-stats fan-out to start at all, or half
+// the pass when that is shorter, so a short poll interval still collects.
+const SLOT_STATS_MIN_BUDGET_MS = 1_000;
 
 const ANOMALY_SERIES: ReadonlySet<string> = new Set([
   'betterdb_anomaly_events_current',
@@ -151,6 +159,8 @@ interface ConnectionMetricState {
   rdbStopsWrites: { value: boolean | null; fetchedAt: number } | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  /** When each exported slot was last answered for, so a failing owner's series age out. */
+  clusterSlotSeenAt: Map<string, number>;
   // Key-size metric labels (per-connection). Per-key and keysize-bucket label
   // tuples are stored JSON-encoded so a single set tracks the full tuple
   // (key names may contain any delimiter character).
@@ -231,6 +241,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+  // When the current INFO pass of each connection is abandoned by its bound.
+  private passDeadlines = new Map<string, number>();
+  // Seeds whose cluster-wide slot-stats fan-out is running. Their members
+  // export no slot series of their own meanwhile.
+  private slotStatsFanOuts = new Set<string>();
   // Metric-type and pattern labels last published per anomaly summary label.
   // Keyed by label rather than connection id, so connections that share a
   // host:port share one summary instead of overwriting each other.
@@ -749,6 +764,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         rdbStopsWrites: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        clusterSlotSeenAt: new Map(),
         // Key-size metric labels
         currentKeyPatternLabels: new Set(),
         currentKeyDetailLabels: new Set(),
@@ -1762,6 +1778,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Captured now: a removal during the INFO phase must stop this pass from
     // starting storage work for the (possibly re-added) connection.
     const storageEpoch = this.currentStorageEpoch(connectionId);
+    this.passDeadlines.set(connectionId, Date.now() + this.pollIntervalMs);
     const run: Promise<number> = (async () => {
       // A hung INFO releases the in-flight entry when the bound expires
       // (otherwise the entry would outlive every later pass and no connection
@@ -2815,25 +2832,85 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.clearSlotSeries(connLabel, state);
       return;
     }
+    // Its seed exports the whole cluster, this node's slots included; a second
+    // copy here would count them twice in any sum across connections. Skip
+    // while that seed's fan-out runs or it holds series fresher than the
+    // staleness bound. A seed without slot stats holds none, nor does one that
+    // is down or keeps running out of pass time once its series are older than
+    // that; clearing here then would drop the slots from Prometheus entirely.
+    if (
+      client.getCapabilities().clusterEnabled &&
+      this.clusterMetricsService?.coveredBySeed(connectionId) &&
+      this.seedHoldsSlotStats(connectionId)
+    ) {
+      this.clearSlotSeries(connLabel, state);
+      return;
+    }
 
     try {
-      const slotStats = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      let result: ClusterSlotStatsResult;
+      if (
+        client.getCapabilities().clusterEnabled &&
+        this.clusterMetricsService &&
+        (await this.clusterMetricsService.usesClusterWideSlotStats(connectionId))
+      ) {
+        // The fan-out must finish inside this pass, or a later pass retires the
+        // epoch and every primary's answer is thrown away.
+        const now = Date.now();
+        const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - now;
+        // Too little left for a node round trip: keep last pass's series rather
+        // than expire every primary on a deadline it never had a chance to meet,
+        // until they are older than the staleness bound.
+        if (remainingMs < Math.min(SLOT_STATS_MIN_BUDGET_MS, Math.floor(this.pollIntervalMs / 2))) {
+          this.dropExpiredSlotSeries(connLabel, state, now);
+          return;
+        }
+        this.slotStatsFanOuts.add(connectionId);
+        try {
+          result = await this.clusterMetricsService.getClusterSlotStatsResult(
+            'key-count',
+            this.slotStatsTopN,
+            connectionId,
+            Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
+            Math.min(NODE_COMMAND_TIMEOUT_MS, this.pollIntervalMs),
+          );
+        } finally {
+          this.slotStatsFanOuts.delete(connectionId);
+        }
+      } else {
+        result = {
+          stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN),
+          failedNodes: [],
+          failedSlotRanges: [],
+        };
+      }
+      const { stats: slotStats, failedSlotRanges } = result;
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
 
       const newSlotLabels = new Set<string>();
+      const now = Date.now();
       for (const [slot, stats] of Object.entries(slotStats)) {
         newSlotLabels.add(slot);
+        state.clusterSlotSeenAt.set(slot, now);
         this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
         this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
         this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
         this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
       }
 
+      // A primary that did not answer is missing from this result; keep the
+      // series its slots exported last time instead of dropping them, until
+      // they are older than the staleness bound.
       for (const staleSlot of state.currentClusterSlotLabels) {
-        if (!newSlotLabels.has(staleSlot)) {
+        if (newSlotLabels.has(staleSlot)) continue;
+        const seenAt = state.clusterSlotSeenAt.get(staleSlot) ?? 0;
+        if (inSlotRanges(Number(staleSlot), failedSlotRanges) && now - seenAt <= this.stalenessMs) {
+          newSlotLabels.add(staleSlot);
+        } else {
           this.removeSlotSeries(connLabel, staleSlot);
+          state.clusterSlotSeenAt.delete(staleSlot);
         }
       }
 
@@ -2844,11 +2921,43 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         'canClusterSlotStats',
         slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
       );
-      if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connLabel, state);
+      if (!this.isSuperseded(connectionId, epoch)) {
+        // A fan-out that keeps throwing (discovery timing out) never reaches
+        // the success path, so the series it last wrote would stay at their
+        // old values. Age them out the same way a pass that never starts does,
+        // or once they pass the staleness bound the members export too and
+        // every sum counts the slots twice.
+        if (disabled) this.clearSlotSeries(connLabel, state);
+        else this.dropExpiredSlotSeries(connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
     }
+  }
+
+  /** Remove slot series last seen longer ago than the staleness bound. */
+  private dropExpiredSlotSeries(connLabel: string, state: ConnectionMetricState, now: number): void {
+    for (const slot of [...state.currentClusterSlotLabels]) {
+      if (now - (state.clusterSlotSeenAt.get(slot) ?? 0) <= this.stalenessMs) continue;
+      this.removeSlotSeries(connLabel, slot);
+      state.clusterSlotSeenAt.delete(slot);
+      state.currentClusterSlotLabels.delete(slot);
+    }
+  }
+
+  /**
+   * The member's seed is reading the cluster's slot stats now, or holds slot
+   * series read within the staleness bound.
+   */
+  private seedHoldsSlotStats(connectionId: string): boolean {
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    if (membership?.seedId === undefined || membership.retiredAt !== undefined) return false;
+    if (this.slotStatsFanOuts.has(membership.seedId)) return true;
+    const now = Date.now();
+    const seenAt = this.perConnectionState.get(membership.seedId)?.clusterSlotSeenAt.values() ?? [];
+    for (const at of seenAt) {
+      if (now - at <= this.stalenessMs) return true;
+    }
+    return false;
   }
 
   private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
@@ -2856,6 +2965,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.removeSlotSeries(connLabel, slot);
     }
     state.currentClusterSlotLabels = new Set();
+    state.clusterSlotSeenAt.clear();
   }
 
   private removeSlotSeries(connLabel: string, slot: string): void {
@@ -4360,6 +4470,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
+    this.passDeadlines.delete(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
     this.webhookEventsProService?.forgetReplication(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join

@@ -1,6 +1,7 @@
-import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus, UseGuards } from '@nestjs/common';
+import { Controller, Get, Delete, Query, Param, HttpException, HttpStatus, UseGuards, Res } from '@nestjs/common';
+import type { FastifyReply } from 'fastify';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
-import { MetricsService } from './metrics.service';
+import { MetricsService, SLOT_STATS_FAILED_NODES_HEADER } from './metrics.service';
 import { ClusterDiscoveryService, DiscoveredNode } from '../cluster/cluster-discovery.service';
 import { ClusterMetricsService, NodeStats, ClusterSlowlogEntry, ClusterClientEntry, ClusterCommandlogEntry, SlotMigration } from '../cluster/cluster-metrics.service';
 import { ConnectionId } from '../common/decorators';
@@ -592,18 +593,35 @@ export class MetricsController {
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'orderBy', required: false, enum: ['key-count', 'cpu-usec'], description: 'Sort order' })
   @ApiQuery({ name: 'limit', required: false, description: 'Maximum number of slots to return' })
-  @ApiResponse({ status: 200, description: 'Cluster slot stats retrieved successfully', schema: { type: 'object' } })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Cluster slot stats retrieved successfully. When some slot-owning primaries did not answer, their ' +
+      `addresses are listed, comma-separated, in the ${SLOT_STATS_FAILED_NODES_HEADER} header and their slots are missing.`,
+    schema: { type: 'object' },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid limit parameter' })
   @ApiResponse({ status: 501, description: 'Cluster slot stats not supported' })
   @ApiResponse({ status: 500, description: 'Failed to get cluster slot stats' })
   async getClusterSlotStats(
     @Query('orderBy') orderBy?: string,
     @Query('limit') limit?: string,
     @ConnectionId() connectionId?: string,
+    @Res({ passthrough: true }) reply?: FastifyReply,
   ): Promise<SlotStats> {
+    if (limit && (!/^\d+$/.test(limit) || parseInt(limit, 10) < 1)) {
+      throw new HttpException('Invalid limit parameter: must be a positive whole number', HttpStatus.BAD_REQUEST);
+    }
+    const parsedLimit = limit ? parseInt(limit, 10) : undefined;
     try {
       const parsedOrderBy = orderBy as 'key-count' | 'cpu-usec' | undefined;
-      const parsedLimit = limit ? parseInt(limit, 10) : undefined;
-      return await this.metricsService.getClusterSlotStats(parsedOrderBy, parsedLimit, connectionId);
+      const { stats, failedNodes } = await this.metricsService.getClusterSlotStatsResult(
+        parsedOrderBy,
+        parsedLimit,
+        connectionId,
+      );
+      if (failedNodes.length > 0) reply?.header(SLOT_STATS_FAILED_NODES_HEADER, failedNodes.join(','));
+      return stats;
     } catch (error) {
       const status = error instanceof Error && error.message.includes('not supported')
         ? HttpStatus.NOT_IMPLEMENTED
@@ -847,7 +865,7 @@ export class MetricsController {
   @ApiResponse({ status: 500, description: 'Failed to get slot migrations' })
   async getSlotMigrations(@ConnectionId() connectionId?: string): Promise<SlotMigration[]> {
     try {
-      return await this.clusterMetricsService.getSlotMigrations();
+      return await this.clusterMetricsService.getSlotMigrations(connectionId);
     } catch (error) {
       throw new HttpException(
         `Failed to get slot migrations: ${error instanceof Error ? error.message : 'Unknown error'}`,

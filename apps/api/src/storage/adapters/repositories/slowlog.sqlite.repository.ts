@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import { chunkedSqliteDelete } from '../sqlite-chunked-delete';
 import {
+  LogSource,
   SlowLogQueryOptions,
   StoredSlowLogEntry,
 } from '../../../common/interfaces/storage-port.interface';
@@ -18,8 +19,8 @@ export class SlowLogSqliteRepository {
     const stmt = this.db.prepare(`
       INSERT OR IGNORE INTO slow_log_entries (
         slowlog_id, timestamp, duration, command,
-        client_address, client_name, captured_at, source_host, source_port, connection_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     let count = 0;
@@ -35,6 +36,7 @@ export class SlowLogSqliteRepository {
           entry.capturedAt,
           entry.sourceHost,
           entry.sourcePort,
+          entry.sourceRunId ?? '',
           connId,
         );
         count += result.changes;
@@ -87,7 +89,7 @@ export class SlowLogSqliteRepository {
     const rows = this.db
       .prepare(
         `SELECT slowlog_id, timestamp, duration, command,
-              client_address, client_name, captured_at, source_host, source_port, connection_id
+              client_address, client_name, captured_at, source_host, source_port, source_run_id, connection_id
        FROM slow_log_entries
        ${whereClause}
        ${orderBy}
@@ -98,17 +100,25 @@ export class SlowLogSqliteRepository {
     return rows.map((row) => this.mappers.mapSlowLogEntryRow(row));
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
     if (connectionId) {
-      const row = this.db
-        .prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries WHERE connection_id = ?')
-        .get(connectionId) as { max_id: number | null } | undefined;
-      return row?.max_id ?? null;
+      conditions.push('connection_id = ?');
+      params.push(connectionId);
     }
-
-    const row = this.db.prepare('SELECT MAX(slowlog_id) as max_id FROM slow_log_entries').get() as
-      | { max_id: number | null }
-      | undefined;
+    if (source) {
+      conditions.push('source_run_id = ?');
+      params.push(source.runId ?? '');
+      if (!source.runId) {
+        conditions.push('source_host = ?', 'source_port = ?');
+        params.push(source.host, source.port);
+      }
+    }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+    const row = this.db
+      .prepare(`SELECT MAX(slowlog_id) as max_id FROM slow_log_entries${where}`)
+      .get(...params) as { max_id: number | null } | undefined;
     return row?.max_id ?? null;
   }
 

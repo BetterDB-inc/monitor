@@ -213,7 +213,7 @@ EXPOSE 3001
 # package and node's interpreter cold-start, which can exceed the timeout under the
 # CPU pressure of a running migration.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -T 2 -q --spider "http://127.0.0.1:${PORT:-3001}/api/health" || exit 1
+  CMD wget -T 2 -q --spider "http://127.0.0.1:${PORT:-3001}/api/health/live" || exit 1
 
 # Start the server
 CMD ["node", "apps/api/dist/apps/api/src/main.js"]
