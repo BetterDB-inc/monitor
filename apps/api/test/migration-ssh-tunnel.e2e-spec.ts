@@ -55,6 +55,7 @@ function readSshBanner(): Promise<string> {
       resolve(chunk.toString('utf8'));
     });
     socket.once('error', reject);
+    socket.once('close', () => reject(new Error('closed before sending a banner')));
   });
 }
 
