@@ -293,9 +293,9 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_cluster_size` | `betterdb.cluster.size` | `{node}` |
 | `betterdb_cluster_stats_messages_crc_mismatch` | `betterdb.cluster.messages_crc_mismatch` | `{message}` |
 | `betterdb_cluster_slot_keys` | `betterdb.cluster.slot.keys` | `{key}` |
-| `betterdb_cluster_slot_expires` | `betterdb.cluster.slot.expires` | `{key}` |
-| `betterdb_cluster_slot_reads_total` | `betterdb.cluster.slot.reads` | `{read}` |
-| `betterdb_cluster_slot_writes_total` | `betterdb.cluster.slot.writes` | `{write}` |
+| `betterdb_cluster_slot_cpu_usec_total` | `betterdb.cluster.slot.cpu.time` | `us` |
+| `betterdb_cluster_slot_network_bytes_in_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=receive`) | `By` |
+| `betterdb_cluster_slot_network_bytes_out_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=transmit`) | `By` |
 | `betterdb_commandstats_latency_us` | `betterdb.cmd.latency_avg` | `us` |
 | `betterdb_slowlog_length` | `betterdb.slowlog.length` | `{entry}` |
 | `betterdb_slowlog_last_id` | `betterdb.slowlog.last_id` | `{id}` |

@@ -1136,6 +1136,60 @@ used_cpu_user:20.3\r
       expect(result.failedNodes).toEqual([]);
     });
 
+    it('combines the top slots by key count and by CPU from one read per range', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+      ]);
+      const replies: Record<string, unknown> = {
+        p1: [[1, ['key-count', 50, 'cpu-usec', 10]], [2, ['key-count', 5, 'cpu-usec', 900]]],
+        p2: [[9000, ['key-count', 70, 'cpu-usec', 20]]],
+      };
+      let reads = 0;
+      mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
+        call: jest.fn(async () => {
+          reads++;
+          return replies[nodeId];
+        }),
+      }));
+
+      const result = await service.getClusterSlotStatsResult(['key-count', 'cpu-usec'], 1, 'conn-1');
+
+      // The biggest slot (9000) and the busiest one (2), each from its own ranking.
+      expect(Object.keys(result.stats).sort()).toEqual(['2', '9000']);
+      expect(reads).toBe(2);
+    });
+
+    it('skips the CPU ranking of a combined request while no primary reports CPU', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockResolvedValue({
+        call: jest.fn().mockResolvedValue([[1, ['key-count', 5]], [2, ['key-count', 9]]]),
+      });
+
+      const result = await service.getClusterSlotStatsResult(['key-count', 'cpu-usec'], 1, 'conn-1');
+
+      expect(Object.keys(result.stats)).toEqual(['2']);
+    });
+
+    it('ranks the fallback node by key count for a combined request', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValue([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 16383]], flags: ['myself', 'master'] },
+      ]);
+      mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      const getClusterSlotStats = jest.fn().mockResolvedValue({
+        '1': { key_count: 50, cpu_usec: 1 },
+        '2': { key_count: 5, cpu_usec: 900 },
+      });
+      mockConnectionRegistry.get.mockReturnValue({ getClient: jest.fn(), getClusterSlotStats });
+
+      const result = await service.getClusterSlotStatsResult(['key-count', 'cpu-usec'], 1, 'conn-1');
+
+      expect(getClusterSlotStats).toHaveBeenCalledWith('key-count', 1);
+      expect(Object.keys(result.stats).sort()).toEqual(['1', '2']);
+    });
+
     it('rejects ordering by cpu-usec while no primary reports it', async () => {
       // cluster-slot-stats-enabled no: replies carry key-count only.
       mockDiscoveryService.discoverNodes.mockResolvedValue([

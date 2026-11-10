@@ -29,9 +29,6 @@ export interface ParseInfoOptions {
 
 const SLOT_STAT_FIELDS: Record<string, keyof SlotStatsMetric> = {
   'key-count': 'key_count',
-  'expires-count': 'expires_count',
-  'total-reads': 'total_reads',
-  'total-writes': 'total_writes',
   'cpu-usec': 'cpu_usec',
   'network-bytes-in': 'network_bytes_in',
   'network-bytes-out': 'network_bytes_out',
@@ -541,12 +538,7 @@ export class MetricsParser {
 
       const slotKey = slot.toString();
       if (!stats[slotKey]) {
-        stats[slotKey] = {
-          key_count: 0,
-          expires_count: 0,
-          total_reads: 0,
-          total_writes: 0,
-        };
+        stats[slotKey] = { key_count: 0 };
       }
 
       // Each slot carries a flat name/value list with every metric the server

@@ -158,21 +158,34 @@ When connected to Redis or Valkey < 8.1:
 ### What is SLOT-STATS?
 
 `CLUSTER SLOT-STATS` provides per-slot statistics in cluster mode:
-- **Key count** per slot
-- **Expiring keys** per slot
-- **Total reads** per slot
-- **Total writes** per slot
-- **CPU usage** per slot
+- **Key count** per slot, always
+- **CPU time** (`cpu-usec`) per slot
+- **Network bytes in and out** per slot
+
+The CPU and network counters are only reported while `cluster-slot-stats-enabled` is `yes` (off by default), and are cumulative on the node that owns the slot. Turn it on to find hot slots; key count alone only finds big ones.
+
+The setting is per node. `CONFIG SET` only changes the node you run it on, so set it on every primary, and on the replicas too so it survives a failover:
+
+```
+CONFIG SET cluster-slot-stats-enabled yes
+```
+
+Add it to each node's config file to keep it across restarts. On a managed service, set it in the parameter group or equivalent.
 
 ### Why It Matters
 
 Essential for cluster optimization:
-- **Hotspot detection** - Identify slots with high read/write activity
+- **Hotspot detection** - Identify slots taking a disproportionate share of CPU or traffic
 - **Shard balancing** - Ensure even key distribution
 - **Slot migration planning** - Data-driven resharding decisions
 - **Performance troubleshooting** - Isolate slow slots
 
 ### How BetterDB Uses SLOT-STATS
+
+A node only reports the slots it owns, so BetterDB reads `CLUSTER SLOT-STATS` from every healthy slot-owning primary and merges the results. With cluster auto-registration, only the seed connection reads the whole cluster; its member connections export no slot series of their own while the seed's are fresh, so each slot is exported once. Coverage can be partial:
+
+- A primary that fails or does not answer in time is left out of that read. Prometheus keeps the series its slots exported last until they are older than the staleness bound. A primary that could not be connected to is skipped for 30 seconds.
+- When no primary can be reached directly (an SSH tunnel or NAT), the connection's own node is read instead, which covers only its slots.
 
 #### API Endpoint
 
@@ -182,21 +195,22 @@ GET /api/metrics/cluster/slot-stats?orderBy=key-count&limit=100
 ```
 
 **Parameters**:
-- `orderBy`: `key-count` (default) or `cpu-usec`
-- `limit`: Max slots to return (default: 100, prevents high cardinality)
+- `orderBy`: `key-count` (default) or `cpu-usec` (`cpu-usec` requires `cluster-slot-stats-enabled`)
+- `limit`: Max slots to return across the cluster (default: 100)
 
 **Response**:
 ```json
 {
   "5461": {
     "key_count": 125000,
-    "expires_count": 45000,
-    "total_reads": 1234567,
-    "total_writes": 456789,
-    "cpu_usec": 567890
+    "cpu_usec": 567890,
+    "network_bytes_in": 1234567,
+    "network_bytes_out": 456789
   }
 }
 ```
+
+`cpu_usec` and `network_bytes_*` are omitted when `cluster-slot-stats-enabled` is off.
 
 #### Prometheus Metrics
 
@@ -204,27 +218,35 @@ GET /api/metrics/cluster/slot-stats?orderBy=key-count&limit=100
 # Keys in cluster slot
 betterdb_cluster_slot_keys{slot="5461"}
 
-# Expiring keys in cluster slot
-betterdb_cluster_slot_expires{slot="5461"}
+# CPU time spent on the slot, in microseconds (counter)
+betterdb_cluster_slot_cpu_usec_total{slot="5461"}
 
-# Total reads for cluster slot
-betterdb_cluster_slot_reads_total{slot="5461"}
-
-# Total writes for cluster slot
-betterdb_cluster_slot_writes_total{slot="5461"}
+# Bytes received and sent for the slot (counters)
+betterdb_cluster_slot_network_bytes_in_total{slot="5461"}
+betterdb_cluster_slot_network_bytes_out_total{slot="5461"}
 ```
 
-**Cardinality Note**: Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count to prevent metric explosion (default 100; `0` disables the call entirely; 16,384 slots × 4 metrics = 65,536 series without limit). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series. Not exported under `METRICS_EXPORT_PROFILE=vitals`.
+The `_total` series are only exported when `cluster-slot-stats-enabled` is on. They are cumulative, so use `rate()`. A counter resets when the slot moves to another node or the node restarts. `rate()` only sees a reset as a drop between two scrapes, so a counter that resets and climbs past its old value before the next scrape is undercounted for that window.
+
+**Which slots are exported**: the top `METRICS_SLOT_STATS_TOP_N` slots by key count plus, when CPU is tracked, the top N by CPU (default 100; `0` disables the call entirely). A slot that leaves both lists is removed rather than reported as 0, so a cluster connection exports at most 2 × N slots × 4 series. Not exported under `METRICS_EXPORT_PROFILE=vitals`.
+
+The CPU list ranks by cumulative `cpu-usec`, not by recent CPU, and nothing ranks by traffic. A slot that only just became hot can stay below slots that were busy earlier and be missing from both lists, and from the queries below. Raise `METRICS_SLOT_STATS_TOP_N` to widen the net, at the cost of more series (up to 16,384 slots × 4 at the maximum).
 
 ### Example Use Cases
 
-#### Find Hottest Slots by Reads
+#### Find the Hottest Slots
 
 ```promql
-topk(10, betterdb_cluster_slot_reads_total)
+topk(10, rate(betterdb_cluster_slot_cpu_usec_total[5m]))
 ```
 
-**Action**: Consider slot migration if hotspot is on overloaded node.
+**Action**: Look for a hot key in the slot; consider moving the slot if its node is overloaded.
+
+#### Find Slots with the Most Traffic
+
+```promql
+topk(10, rate(betterdb_cluster_slot_network_bytes_in_total[5m]) + rate(betterdb_cluster_slot_network_bytes_out_total[5m]))
+```
 
 #### Identify Unbalanced Key Distribution
 
@@ -243,15 +265,6 @@ curl -b cookies.txt -c cookies.txt "http://localhost:3001/api/metrics/cluster/sl
 ```
 
 **Action**: Migrate largest slots first for balanced distribution.
-
-#### Detect Memory-Heavy Slots
-
-```promql
-# Slots with many expiring keys (potential memory waste)
-topk(5, betterdb_cluster_slot_expires)
-```
-
-**Action**: Review TTL policies for these slots.
 
 ### Fallback on Redis/Older Valkey
 

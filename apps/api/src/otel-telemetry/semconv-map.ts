@@ -124,6 +124,8 @@ const CPU_TIME = 'CPU time consumed by the server, by state';
 
 const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
 
+const SLOT_NETWORK_IO = 'Bytes received and sent for the cluster slot, by direction';
+
 const PROCESS_CPU_TIME = 'CPU time consumed by the monitor process, by mode';
 
 const EVENT_LOOP_DELAY_STATS = ['min', 'max', 'mean', 'stddev', 'p50', 'p90', 'p99'] as const;
@@ -216,9 +218,15 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
     '{message}',
   ),
   betterdb_cluster_slot_keys: gauge('betterdb.cluster.slot.keys', '{key}'),
-  betterdb_cluster_slot_expires: gauge('betterdb.cluster.slot.expires', '{key}'),
-  betterdb_cluster_slot_reads_total: counter('betterdb.cluster.slot.reads', '{read}'),
-  betterdb_cluster_slot_writes_total: counter('betterdb.cluster.slot.writes', '{write}'),
+  betterdb_cluster_slot_cpu_usec_total: counter('betterdb.cluster.slot.cpu.time', 'us'),
+  betterdb_cluster_slot_network_bytes_in_total: described(
+    SLOT_NETWORK_IO,
+    counter('betterdb.cluster.slot.network.io', 'By', withAttributes({ 'network.io.direction': 'receive' })),
+  ),
+  betterdb_cluster_slot_network_bytes_out_total: described(
+    SLOT_NETWORK_IO,
+    counter('betterdb.cluster.slot.network.io', 'By', withAttributes({ 'network.io.direction': 'transmit' })),
+  ),
   betterdb_commandstats_latency_us: gauge('betterdb.cmd.latency_avg', 'us'),
   betterdb_slowlog_length: gauge('betterdb.slowlog.length', '{entry}'),
   betterdb_slowlog_last_id: gauge('betterdb.slowlog.last_id', '{id}'),

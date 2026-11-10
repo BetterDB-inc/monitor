@@ -4279,7 +4279,7 @@ describe('AnomalyService', () => {
     ];
 
     const ownedSlotStats = {
-      '50': { key_count: 400, expires_count: 0, total_reads: 0, total_writes: 0 },
+      '50': { key_count: 400 },
     };
 
     let now: number;
@@ -4393,7 +4393,7 @@ describe('AnomalyService', () => {
       // DBSIZE removes the positive bias — a single pre-read would leave a
       // 100-key surplus every poll and confirm a leak on a healthy cache.
       dbClient.getClusterSlotStats = jest.fn().mockResolvedValue({
-        '50': { key_count: 900, expires_count: 0, total_reads: 0, total_writes: 0 },
+        '50': { key_count: 900 },
       });
       const bracketed = [1_000, 850];
       let readIndex = 0;

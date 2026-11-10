@@ -9,7 +9,7 @@ import {
 function slotStats(entries: Record<string, number>): SlotStats {
   const stats: SlotStats = {};
   for (const [slot, keyCount] of Object.entries(entries)) {
-    stats[slot] = { key_count: keyCount, expires_count: 0, total_reads: 0, total_writes: 0 };
+    stats[slot] = { key_count: keyCount };
   }
   return stats;
 }
