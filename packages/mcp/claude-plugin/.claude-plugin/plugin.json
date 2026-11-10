@@ -1,7 +1,7 @@
 {
   "name": "betterdb",
   "displayName": "BetterDB",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Valkey and Redis observability from BetterDB Monitor: health, slowlog, latency, memory, hot keys, anomalies and cluster state",
   "author": {
     "name": "BetterDB Inc.",
@@ -9,6 +9,10 @@
   },
   "homepage": "https://betterdb.com",
   "repository": "https://github.com/BetterDB-inc/monitor",
+  "documentationUrl": "https://github.com/BetterDB-inc/monitor/tree/master/packages/mcp/claude-plugin#readme",
+  "supportUrl": "https://github.com/BetterDB-inc/monitor/issues",
+  "privacyPolicyUrl": "https://www.betterdb.com/privacy",
+  "termsOfServiceUrl": "https://www.betterdb.com/terms",
   "license": "MIT",
   "keywords": [
     "valkey",
