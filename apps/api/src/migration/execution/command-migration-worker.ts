@@ -183,11 +183,14 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       `Migration complete: ${job.keysTransferred.toLocaleString()} transferred, ${keysSkipped} skipped out of ${totalKeys.toLocaleString()} total`);
 
   } finally {
-    job.dropConnections = undefined;
-    if (job.tunnelError !== undefined) {
-      dropConnections();
-    } else {
-      await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+    try {
+      if (job.tunnelError !== undefined) {
+        dropConnections();
+      } else {
+        await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+      }
+    } finally {
+      job.dropConnections = undefined;
     }
   }
 }

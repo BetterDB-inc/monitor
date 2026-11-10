@@ -23,6 +23,7 @@ let clusterNodesRaw = '';
 let failingHosts = new Set<string>();
 let sourceKeyCount = 0;
 let onScan: (() => void) | undefined;
+let pendingQuits: Array<() => void> | undefined;
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; connectionName?: string; tls?: { servername?: string } }) => {
@@ -39,7 +40,13 @@ jest.mock('iovalkey', () => {
         failingHosts.has(opts.host) ? Promise.reject(new Error('Connection is closed.')) : Promise.resolve(),
       ),
       disconnect: jest.fn(),
-      quit: jest.fn().mockResolvedValue('OK'),
+      quit: jest.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            if (pendingQuits === undefined) resolve('OK');
+            else pendingQuits.push(() => resolve('OK'));
+          }),
+      ),
       call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'CLUSTER' ? clusterNodesRaw : null)),
       dbsize: jest.fn().mockImplementation(async () => sourceKeyCount),
       scan: jest.fn().mockImplementation(async () => {
@@ -247,6 +254,7 @@ describe('runCommandMigration through an SSH tunnel', () => {
     failingHosts = new Set();
     sourceKeyCount = 0;
     onScan = undefined;
+    pendingQuits = undefined;
   });
 
   it('dials both instances at their local tunnel ports', async () => {
@@ -301,5 +309,25 @@ describe('runCommandMigration through an SSH tunnel', () => {
       expect(client.quit).not.toHaveBeenCalled();
       expect(client.disconnect).toHaveBeenCalled();
     }
+  });
+
+  it('keeps the job able to disconnect clients until their quits settle', async () => {
+    const job = makeJob();
+    const quits: Array<() => void> = [];
+    pendingQuits = quits;
+
+    const run = runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+    for (let turn = 0; turn < 50 && quits.length < 2; turn++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(quits).toHaveLength(2);
+
+    job.dropConnections?.();
+    const disconnectedWhileQuitting = clients.map((client) => client.disconnect.mock.calls.length > 0);
+    for (const settle of quits) settle();
+    await run;
+
+    expect(disconnectedWhileQuitting).toEqual([true, true]);
+    expect(job.dropConnections).toBeUndefined();
   });
 });
