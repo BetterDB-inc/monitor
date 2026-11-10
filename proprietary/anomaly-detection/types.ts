@@ -1,5 +1,6 @@
 import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
 import type { RegressionKind } from '../latency-regression/types';
+import type { RetryAmplificationContributor } from './retry-amplification-attribution';
 
 export enum MetricType {
   CONNECTIONS = 'connections',
@@ -161,6 +162,43 @@ export enum AnomalyPattern {
 
 export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
 
+/** A setting the recommendation names, with the value computed from this instance's numbers. */
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+  /** Set when the value belongs to one node of a group. */
+  nodeAddr?: string;
+}
+
+/**
+ * One value per node and setting. A later reading replaces an earlier one
+ * only when its target is at least as large, so a smaller replica cannot
+ * shrink the limit a larger one still needs. Node identity is `nodeAddr`,
+ * then the connection, so two nodes in one group each keep their own value.
+ */
+export function mergeRecommendationValues(
+  events: readonly {
+    nodeAddr?: string;
+    connectionId?: string;
+    values?: readonly RecommendationValue[];
+  }[],
+): RecommendationValue[] {
+  const best = new Map<string, RecommendationValue>();
+  for (const event of events) {
+    for (const value of event.values ?? []) {
+      const nodeAddr = value.nodeAddr ?? event.nodeAddr;
+      const identity = nodeAddr ?? event.connectionId ?? '';
+      const stamped: RecommendationValue = nodeAddr ? { ...value, nodeAddr } : { ...value };
+      const key = `${identity}\0${stamped.setting}`;
+      const held = best.get(key);
+      if (!held || stamped.target >= held.target) best.set(key, stamped);
+    }
+  }
+  return [...best.values()];
+}
+
 const RETRY_AMPLIFICATION_TRIGGERS: ReadonlySet<string> = new Set<RetryAmplificationTrigger>(['latency', 'errors', 'churn']);
 
 export function isRetryTrigger(value: unknown): value is RetryAmplificationTrigger {
@@ -200,6 +238,14 @@ export interface AnomalyEvent {
    */
   syntheticPattern?: AnomalyPattern;
   retryTrigger?: RetryAmplificationTrigger;
+  /** In-memory only, like retryTrigger: the top clients of a retry amplification event. */
+  retryContributors?: RetryAmplificationContributor[] | null;
+  /**
+   * In-memory only, like retryTrigger: target values computed from the
+   * detector's inputs. Absent when an input is unknown, and on events read
+   * back from storage.
+   */
+  values?: RecommendationValue[];
   /**
    * Transient (not persisted): whether this cached event was durably written to
    * storage. An event whose save has not landed is resolved by flipping the cache
@@ -215,6 +261,7 @@ export interface CorrelatedAnomalyGroup {
   pattern: AnomalyPattern;
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
   truncated?: boolean;
 }

@@ -8965,6 +8965,55 @@ describe('AnomalyService', () => {
       const critical = cobEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
       expect(critical).toHaveLength(1);
       expect(critical[0].message).toContain('resync');
+      expect(critical[0].values).toBeUndefined();
+    });
+
+    it('sizes the replica hard limit at twice the observed buffer', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica hard',
+          current: 256,
+          target: 359,
+          unit: 'MB',
+        },
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 359,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('sizes the replica soft limit at twice the observed buffer', async () => {
+      const omem = 64 * MB * 0.7;
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(omem));
+      await poll();
+      now += 61_000;
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 90,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('keeps the fixed text when CLIENT LIST is unavailable and only the aggregate is known', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        memory: { used_memory: '1000000', mem_clients_slaves: String(HARD * 0.7) },
+      });
+      (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await poll();
+      const [event] = cobEvents();
+      expect(event.message).toContain('mem_clients_slaves aggregate');
+      expect(event.message).toContain('Raise the limit or reduce the write burst.');
+      expect(event.values).toBeUndefined();
     });
 
     it('updates the per-replica Prometheus ratio gauge each poll', async () => {
@@ -10931,6 +10980,29 @@ describe('AnomalyService', () => {
       metricTypes: [],
       connectionId: 'node-1',
       ...over,
+    });
+
+    it('keeps in-memory values when a stored group is read back', async () => {
+      const values = [{ setting: 'repl-backlog-size', current: 1, target: 3, unit: 'MB' }];
+      (service as any).recentGroups.push({
+        correlationId: 'grp-1',
+        timestamp: 1_000_000,
+        pattern: 'memory_pressure',
+        severity: 'warning',
+        diagnosis: 'cached',
+        recommendations: ['cached'],
+        anomalies: [],
+        values,
+      });
+      storage.getCorrelatedGroups.mockResolvedValue([
+        storedGroup('grp-1', 1_000_000, { diagnosis: 'stored', recommendations: ['stored'] }),
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(1);
+
+      expect(group.diagnosis).toBe('stored');
+      expect(group.recommendations).toEqual(['stored']);
+      expect(group.values).toEqual(values);
     });
 
     it('reads groups and members in one query each, whatever the group count', async () => {
@@ -14663,6 +14735,57 @@ describe('AnomalyService', () => {
       expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].resolved).toBe(true);
     });
 
+    it('sizes repl-backlog-size to cover 75s of writes at the measured rate', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+
+      // 30,000 B/s x 60s x 1.25 = 2.15 MB, one decimal because it is under 10
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 1, target: 2.2, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps a sub-megabyte backlog from displaying the same current and target', async () => {
+      const mb = 1024 * 1024;
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: (0.75 * mb) / 75,
+          bytesPerSecEwma: (0.75 * mb) / 75,
+          replBacklogSize: 0.6 * mb,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 0.6, target: 0.8, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps the fixed text when the backlog size is unknown', async () => {
+      const sample = {
+        timestamp: clock,
+        role: 'primary',
+        replid: 'r',
+        masterReplOffset: 0,
+        bytesPerSec: 30_000,
+        bytesPerSecEwma: 30_000,
+        replBacklogSize: null,
+        replicas: [],
+      };
+      await (service as any).emitBacklogCoverageRisk(mockCtx, sample, 30, 'warning', 'none');
+
+      const [event] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(event.message).toContain('Raise repl-backlog-size or reduce the write rate.');
+      expect(event.values).toBeUndefined();
+    });
+
     it('raises the risk again when the outbox drops its unsaved event', async () => {
       storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
       for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
@@ -14742,6 +14865,99 @@ describe('AnomalyService', () => {
           anomalyIds: [resync.id, fork.id],
         }),
         'conn-1',
+      );
+    });
+
+    it('puts the fork memory target on the incident, also when read back from storage', async () => {
+      const GB = 1024 ** 3;
+      const forking = {
+        bytes: 2000,
+        syncFull: 1,
+        replicaState: 'send_bulk',
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1, replicaState: 'wait_bgsave' });
+      await pollPrimary(forking);
+      await pollPrimary(forking);
+      await (service as any).tickIncidentTimelines(clock);
+
+      // 9 GB projected peak / 0.7 = 13,165.7 MB, rounded up
+      const expected = [
+        { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
+      ];
+      expect(events(MetricType.FORK_MEMORY_RISK)[0].values).toEqual(expected);
+      const forkEntry = (incident: { entries: { metricType: string; values?: unknown }[] }) =>
+        incident.entries.find((entry) => entry.metricType === MetricType.FORK_MEMORY_RISK);
+      expect(forkEntry((service as any).liveIncidents[0])?.values).toEqual(expected);
+      expect((service as any).liveIncidents[0].sequenceMatches[0].values).toBeUndefined();
+
+      const stored = service
+        .getRecentEvents()
+        .map((e) => (service as any).toStoredAnomalyEvent(e, mockCtx));
+      expect(stored.some((e: Record<string, unknown>) => 'values' in e)).toBe(false);
+      storage.getAnomalyEvents.mockResolvedValue(stored);
+      const [timeline] = await service.getIncidentTimelines('conn-1');
+      expect(forkEntry(timeline)?.values).toEqual(expected);
+      expect(timeline.sequenceMatches[0].values).toBeUndefined();
+
+      (service as any).recentAnomalies = (service as any).recentAnomalies.filter(
+        (event: { metricType: MetricType }) => event.metricType !== MetricType.FORK_MEMORY_RISK,
+      );
+      const [aged] = await service.getIncidentTimelines('conn-1');
+      expect(forkEntry(aged)?.values).toEqual(expected);
+    });
+
+    it('keeps values after the emitting connection leaves the scope', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'keeper' }]);
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: 30_000,
+          bytesPerSecEwma: 30_000,
+          replBacklogSize: 1_000_000,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+      const [live] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(live.scopeId).toBe('seed');
+
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed'
+          ? { id: 'seed' }
+          : id === 'conn-1'
+            ? undefined
+            : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'keeper' }]);
+      (service as any).recentAnomalies = [];
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [(service as any).toStoredAnomalyEvent(live, mockCtx)],
+      );
+
+      const [timeline] = await service.getIncidentTimelines('keeper');
+
+      expect(timeline.entries.find((entry) => entry.anomalyId === live.id)?.values).toEqual(
+        live.values,
       );
     });
 

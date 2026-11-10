@@ -1,6 +1,13 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
-import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
+import {
+  AnomalyEvent,
+  AnomalyPattern,
+  AnomalySeverity,
+  MetricType,
+  RecommendationValue,
+  mergeRecommendationValues,
+} from './types';
 import { SequenceRule, fills, leadOf, opensAt } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
@@ -16,6 +23,7 @@ export interface IncidentTimelineEntry {
   message: string;
   recoveredAt: number | null;
   recoveryState: IncidentEntryRecovery;
+  values?: RecommendationValue[];
 }
 
 export type IncidentEntryRecovery = 'recovered' | 'open' | 'unknown' | 'recurred';
@@ -38,6 +46,7 @@ export interface IncidentSequenceMatch {
   steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
 }
 
@@ -329,6 +338,7 @@ export function toTimelineEntry(event: AnomalyEvent): IncidentTimelineEntry {
     message: event.message,
     recoveredAt: null,
     recoveryState: 'open',
+    ...(event.values ? { values: event.values } : {}),
   };
 }
 
@@ -713,12 +723,22 @@ export class IncidentTimelineBuilder {
     };
     const sequenceMatches: IncidentSequenceMatch[] = [];
     const recommendedBy = new Map<string, AnomalyPattern>();
-    for (const { match } of found.filter((f) => !superseded(f))) {
+    for (const { match, matched } of found.filter((f) => !superseded(f))) {
+      const recommendations = match.recommendations.filter(
+        (r) => (recommendedBy.get(r) ?? match.pattern) === match.pattern,
+      );
+      const values = mergeRecommendationValues(
+        matched
+          .filter((e) => !dropped.includes(e))
+          .sort((a, b) => a.timestamp - b.timestamp || a.anomalyId.localeCompare(b.anomalyId)),
+      ).filter((value) => {
+        const name = value.setting.split(' ')[0];
+        return recommendations.some((recommendation) => recommendation.includes(name));
+      });
       sequenceMatches.push({
         ...match,
-        recommendations: match.recommendations.filter(
-          (r) => (recommendedBy.get(r) ?? match.pattern) === match.pattern,
-        ),
+        recommendations,
+        ...(values.length > 0 ? { values } : {}),
       });
       for (const r of match.recommendations) {
         if (!recommendedBy.has(r)) recommendedBy.set(r, match.pattern);

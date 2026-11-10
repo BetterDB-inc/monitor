@@ -6,10 +6,14 @@ import {
   AnomalySeverity,
   MetricType,
   AnomalyType,
+  mergeRecommendationValues,
 } from './types';
 import { isControlPlaneSaturationEvent } from './control-plane-saturation-detector';
 import { DIVERGENCE_COMPOUND_SIGNALS } from './replication-divergence-detector';
 import { RETRY_AMP_TRIGGER_LABEL } from './retry-amplification-detector';
+import { describeRetryAmplificationContributors } from './retry-amplification-attribution';
+
+const THROTTLE_TOP_CLIENTS = 'Throttle or inspect the clients whose command rate grew the most';
 
 const RETRY_AMPLIFICATION_DIAGNOSIS =
   'Retry amplification: load per client is rising or has stepped up together with {trigger} while the client ' +
@@ -183,7 +187,7 @@ export class Correlator {
           'Add exponential backoff with jitter and a retry budget to the client retry policy',
           'Put a circuit breaker in front of the instance so failing calls stop retrying',
           'Set client timeouts above the observed P99 so slow replies are not retried',
-          'Throttle or inspect the clients whose command rate grew the most',
+          THROTTLE_TOP_CLIENTS,
           'Shed load until latency and error rates recover',
         ],
       },
@@ -568,6 +572,7 @@ export class Correlator {
     const maxSeverity = anomalies.reduce((max, a) => {
       return severityOrder[a.severity] > severityOrder[max] ? a.severity : max;
     }, AnomalySeverity.INFO);
+    const values = mergeRecommendationValues(anomalies);
 
     return {
       correlationId,
@@ -575,9 +580,19 @@ export class Correlator {
       anomalies,
       pattern: rule.pattern,
       diagnosis: this.enrichDiagnosis(rule, anomalies),
-      recommendations: rule.recommendations,
+      recommendations: this.enrichRecommendations(rule, anomalies),
+      ...(values.length > 0 ? { values } : {}),
       severity: maxSeverity,
     };
+  }
+
+  private enrichRecommendations(rule: PatternRule, anomalies: AnomalyEvent[]): string[] {
+    const contributors = anomalies.find(
+      (a) => a.metricType === MetricType.RETRY_AMPLIFICATION,
+    )?.retryContributors;
+    if (!contributors?.length) return rule.recommendations;
+    const top = describeRetryAmplificationContributors(contributors);
+    return rule.recommendations.map((r) => (r === THROTTLE_TOP_CLIENTS ? `${r}. ${top}` : r));
   }
 
   /**

@@ -165,6 +165,82 @@ describe('IncidentTimelineView', () => {
     expect(within(third).getByText('Step 3')).toBeInTheDocument();
   });
 
+  it('shows computed values under the recommendations, and none when the match has none', () => {
+    const match = {
+      pattern: 'backlog_exhaustion',
+      anomalyIds: ['a', 'b'],
+      steps: [
+        { anomalyId: 'a', step: 1 },
+        { anomalyId: 'b', step: 2 },
+      ],
+      diagnosis: 'The backlog ran out',
+      recommendations: ['Raise repl-backlog-size'],
+      severity: 'critical' as const,
+    };
+    const entries = [
+      entry({ anomalyId: 'a', metricType: 'backlog_coverage_risk' }),
+      entry({ anomalyId: 'b', metricType: 'resync_escalation', timestamp: T0 + 1 }),
+    ];
+    const { unmount } = render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries,
+          sequenceMatches: [
+            {
+              ...match,
+              values: [{ setting: 'repl-backlog-size', current: 1, target: 9, unit: 'MB' }],
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Raise repl-backlog-size')).toBeInTheDocument();
+    expect(screen.getByText('repl-backlog-size: 1 → 9 MB')).toBeInTheDocument();
+    unmount();
+
+    render(
+      <IncidentTimelineView now={T0} incident={incident({ entries, sequenceMatches: [match] })} />,
+    );
+    expect(screen.getByText('Raise repl-backlog-size')).toBeInTheDocument();
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+  });
+
+  it('shows a fork RAM target on the event when the matched recommendations do not name it', () => {
+    render(
+      <IncidentTimelineView
+        now={T0}
+        incident={incident({
+          entries: [
+            entry({
+              anomalyId: 'fork',
+              metricType: 'fork_memory_risk',
+              message: 'Fork may exhaust RAM',
+              values: [
+                { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
+              ],
+            }),
+          ],
+          sequenceMatches: [
+            {
+              pattern: 'divergence_under_pressure',
+              anomalyIds: ['fork'],
+              steps: [{ anomalyId: 'fork', step: 1 }],
+              diagnosis: 'Writes diverged under pressure',
+              recommendations: [
+                'Watch fork memory and replica output buffers until the resync completes',
+              ],
+              severity: 'critical',
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByText('total_system_memory: 10240 → 13166 MB')).toBeInTheDocument();
+  });
+
   it('shows every rule step of an event that matched more than one rule', () => {
     render(
       <IncidentTimelineView

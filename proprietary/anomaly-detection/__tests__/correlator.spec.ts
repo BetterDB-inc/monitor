@@ -416,6 +416,138 @@ describe('Correlator', () => {
 
       expect(groups[0].anomalies[0].relatedMetrics).toEqual([MetricType.COMMAND_P99]);
     });
+
+    it('names the top clients and their growth in the throttle recommendation', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({
+          metricType: MetricType.RETRY_AMPLIFICATION,
+          message,
+          retryContributors: [
+            {
+              key: 'checkout',
+              keyKind: 'name',
+              commandRateGrowth: 4.2,
+              newConnections: 12,
+              connections: 3,
+            },
+            {
+              key: '10.0.0.7',
+              keyKind: 'ip',
+              commandRateGrowth: null,
+              newConnections: 5,
+              connections: 1,
+            },
+          ],
+        }),
+      ]);
+
+      expect(groups[0].recommendations).toContain(
+        'Throttle or inspect the clients whose command rate grew the most. Top clients: ' +
+          'name checkout (cmds 4.2×, 12 reconnects); ip 10.0.0.7 (5 reconnects).',
+      );
+    });
+
+    it.each([
+      ['unavailable', null],
+      ['empty', []],
+    ])('keeps the fixed throttle recommendation when attribution is %s', (_, retryContributors) => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.RETRY_AMPLIFICATION, message, retryContributors }),
+      ]);
+
+      expect(groups[0].recommendations).toContain(
+        'Throttle or inspect the clients whose command rate grew the most',
+      );
+    });
+  });
+
+  describe('computed recommendation values', () => {
+    it('keeps the larger target when a later reading on the same node is smaller', () => {
+      const base = Date.now();
+      const value = (target: number) => [
+        { setting: 'total_system_memory', current: 1024, target, unit: 'MB' },
+      ];
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: base,
+          connectionId: 'node-a',
+          nodeAddr: '10.0.0.1:6379',
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: value(1400),
+        }),
+        makeAnomaly({
+          timestamp: base + 1,
+          connectionId: 'node-a',
+          nodeAddr: '10.0.0.1:6379',
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: value(1200),
+        }),
+      ]);
+
+      expect(groups[0].values).toEqual([
+        { setting: 'total_system_memory', current: 1024, target: 1400, unit: 'MB', nodeAddr: '10.0.0.1:6379' },
+      ]);
+    });
+
+    it('keeps each node when two nodes report the same setting', () => {
+      const base = Date.now();
+      const value = (target: number) => [
+        { setting: 'total_system_memory', current: 1024, target, unit: 'MB' },
+      ];
+      const groups = correlator.correlate([
+        makeAnomaly({
+          timestamp: base,
+          connectionId: 'seed',
+          nodeAddr: '10.0.0.1:6379',
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: value(1200),
+        }),
+        makeAnomaly({
+          timestamp: base + 1,
+          connectionId: 'seed',
+          nodeAddr: '10.0.0.2:6379',
+          metricType: MetricType.FORK_MEMORY_RISK,
+          values: value(1400),
+        }),
+      ]);
+
+      expect(groups[0].values).toEqual([
+        { setting: 'total_system_memory', current: 1024, target: 1200, unit: 'MB', nodeAddr: '10.0.0.1:6379' },
+        { setting: 'total_system_memory', current: 1024, target: 1400, unit: 'MB', nodeAddr: '10.0.0.2:6379' },
+      ]);
+    });
+
+    it('keeps a separate value per connection when the events name no node', () => {
+      const grouped = new Correlator(5000, () => 'cluster');
+      const base = Date.now();
+      const value = (target: number) => [
+        { setting: 'repl-backlog-size', current: 1, target, unit: 'MB' },
+      ];
+      const groups = grouped.correlate([
+        makeAnomaly({
+          timestamp: base,
+          connectionId: 'node-a',
+          metricType: MetricType.BACKLOG_COVERAGE_RISK,
+          values: value(3),
+        }),
+        makeAnomaly({
+          timestamp: base + 1,
+          connectionId: 'node-b',
+          metricType: MetricType.BACKLOG_COVERAGE_RISK,
+          values: value(9),
+        }),
+      ]);
+
+      expect(groups[0].values).toEqual([value(3)[0], value(9)[0]]);
+    });
+
+    it('leaves values out when no member has any', () => {
+      const groups = correlator.correlate([
+        makeAnomaly({ metricType: MetricType.FORK_MEMORY_RISK }),
+      ]);
+
+      expect(groups[0]).not.toHaveProperty('values');
+    });
   });
 
   describe('pattern precedence', () => {

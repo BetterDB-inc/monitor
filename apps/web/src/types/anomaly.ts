@@ -126,11 +126,20 @@ export interface IncidentTimelineEntry {
   message: string;
   recoveredAt: number | null;
   recoveryState: IncidentEntryRecovery;
+  values?: RecommendationValue[];
 }
 
 export interface IncidentSequenceStep {
   anomalyId: string;
   step: number | null;
+}
+
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+  nodeAddr?: string;
 }
 
 export interface IncidentSequenceMatch {
@@ -139,6 +148,7 @@ export interface IncidentSequenceMatch {
   steps: IncidentSequenceStep[];
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
 }
 

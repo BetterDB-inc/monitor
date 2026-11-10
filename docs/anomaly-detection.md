@@ -384,7 +384,7 @@ The client ids consumed between two captures by connections that no capture list
 - Add exponential backoff with jitter and a retry budget
 - Put a circuit breaker in front of the instance
 - Set client timeouts above the observed P99
-- Throttle the clients whose command rate grew the most, then shed load until latency recovers
+- Throttle the clients whose command rate grew the most, then shed load until latency recovers. The group's recommendation names them (see [Computed values](#computed-values))
 
 ### REPLICATION_DIVERGENCE
 
@@ -872,6 +872,26 @@ GET /api/anomaly/groups?limit=50&pattern=memory_pressure
   ]
 }
 ```
+
+### Computed values
+
+Three detectors work out a target for the setting their recommendation names. The correlated group and the incident sequence match that hold the event carry it as `values`, next to the recommendation text, and so does the event's entry in the incident timeline:
+
+```json
+"values": [{ "setting": "repl-backlog-size", "current": 1, "target": 3, "unit": "MB" }]
+```
+
+| Event | Setting | Target |
+| --- | --- | --- |
+| `backlog_coverage_risk` | `repl-backlog-size` | The size that covers 75s of writes (the 60s warning plus 25%) at the write rate the coverage was measured with |
+| `repl_buffer_pressure` | `client-output-buffer-limit replica hard`, and `soft` when the soft limit is enabled and this buffer is already past 60% of it (a sustained soft-limit breach carries `soft` only) | Twice the replica's observed output buffer, so the same burst sits at 50% of each of those limits |
+| `fork_memory_risk` | `total_system_memory` | The RAM at which the projected fork peak sits at 70%, ten points under the 80% warning |
+
+At 10 MB and above, the target is rounded up to a whole MB and the current value to the nearest MB. Below 10 MB both are shown to one decimal, so a fraction of a megabyte does not display as the same whole number as its target. When an input is unknown (no backlog size, or no per-replica buffer because `CLIENT LIST` was denied or the finding is a resync loop), `values` is left out and the text stays as it is. A group keeps the larger target for each setting on each node, and sets `nodeAddr` when the event names one, so a later smaller replica does not replace a larger one and two nodes do not share a single target. A sequence match keeps only the values whose setting its own recommendations name. The timeline entry still shows the event's own values, including a fork RAM target whose setting the match text does not name.
+
+Values are kept in memory only. A group read back from storage still includes them while that group is in memory, and an incident rebuilt from storage keeps them while the event is still in the live incident buffer, including after it has left the 1,000-event recent list. Once those copies age out, the text remains and `values` is absent. The events endpoint returns the stored copy of a saved event, so it does not include them, and neither do webhook payloads.
+
+For retry amplification, the group's "Throttle or inspect the clients whose command rate grew the most" recommendation names the top clients and their growth (`Top clients: name checkout (cmds 4.2×, 12 reconnects)`), and keeps the fixed text when attribution is unavailable or no client stood out.
 
 ### Get Anomaly Summary
 

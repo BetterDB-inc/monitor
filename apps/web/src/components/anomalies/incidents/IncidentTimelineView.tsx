@@ -134,6 +134,16 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                 ))}
               </ul>
             )}
+            {match.values && match.values.length > 0 && (
+              <ul className="space-y-1 text-sm font-mono">
+                {match.values.map((v) => (
+                  <li key={`${v.nodeAddr ?? ''}:${v.setting}`}>
+                    {v.setting}
+                    {v.nodeAddr ? ` (${v.nodeAddr})` : ''}: {v.current} → {v.target} {v.unit}
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
       ))}
@@ -175,6 +185,16 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
                     )}
                   </div>
                   <p className="text-sm">{entry.message}</p>
+                  {entry.values && entry.values.length > 0 && (
+                    <ul className="space-y-1 text-sm font-mono">
+                      {entry.values.map((v) => (
+                        <li key={`${v.nodeAddr ?? ''}:${v.setting}`}>
+                          {v.setting}
+                          {v.nodeAddr ? ` (${v.nodeAddr})` : ''}: {v.current} → {v.target} {v.unit}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                   <p className="flex items-center gap-1 text-xs text-muted-foreground">
                     <RecoveryIcon entry={entry} />
                     {recoveryText(entry)}

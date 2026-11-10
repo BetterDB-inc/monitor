@@ -398,6 +398,7 @@ import {
   FanoutCoverageReason,
   SpikeDetectorConfig,
   AnomalyEventSink,
+  RecommendationValue,
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
@@ -445,6 +446,46 @@ interface ConnectionPersistenceState {
 }
 
 const INCIDENT_REBUILD_INTERVAL_MS = 30_000;
+const MB = 1024 * 1024;
+
+/**
+ * Whole MB at 10 MB and above. Below that, one decimal, so a 0.6 MB backlog
+ * does not display as the same integer as its target.
+ */
+function megabytes(bytes: number, up: boolean): number {
+  const mb = bytes / MB;
+  const scale = mb > 0 && mb < 10 ? 10 : 1;
+  const scaled = mb * scale;
+  const rounded = up ? Math.ceil(scaled - 1e-9) : Math.round(scaled);
+  return rounded / scale;
+}
+
+/** Twice the observed buffer, so that burst sits at 50% of the limit. */
+function outputBufferValues(
+  limit: { hardBytes: number; softBytes: number; softSeconds: number },
+  omem: number,
+  kind: string,
+): RecommendationValue[] | undefined {
+  if (kind !== 'hard-approach' && kind !== 'soft-sustained') return undefined;
+  const target = megabytes(2 * omem, true);
+  const value = (setting: string, bytes: number): RecommendationValue => ({
+    setting,
+    current: megabytes(bytes, false),
+    target,
+    unit: 'MB',
+  });
+  const values: RecommendationValue[] = [];
+  if (kind === 'hard-approach' && limit.hardBytes > 0) {
+    values.push(value('client-output-buffer-limit replica hard', limit.hardBytes));
+  }
+  const softApplies =
+    limit.softSeconds > 0 && limit.softBytes > 0 && omem >= limit.softBytes * COB_WARN_RATIO;
+  if (softApplies && (kind === 'soft-sustained' || kind === 'hard-approach')) {
+    values.push(value('client-output-buffer-limit replica soft', limit.softBytes));
+  }
+  return values.length > 0 ? values : undefined;
+}
+
 const SEED_RETRY_BASE_MS = 30_000;
 const SEED_RETRY_MAX_MS = 5 * 60_000;
 const OPEN_EVENTS_MAX_RETRY_MS = 60_000;
@@ -4366,6 +4407,7 @@ export class AnomalyService
       message: `${finding.message} ${nodeAddr ? NODE_ATTRIBUTION_UNAVAILABLE : describeRetryAmplificationContributors(contributors)}${spanNote}`,
       relatedMetrics: finding.relatedMetrics,
       retryTrigger: finding.trigger,
+      retryContributors: contributors,
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -4871,6 +4913,22 @@ export class AnomalyService
 
     if (finding === null) return;
 
+    // RAM at which the projected peak sits at 70%, ten points under the 80%
+    // warning. The finding only fires with total_system_memory known.
+    const systemMemory = this.parseNumber(info.total_system_memory);
+    const values = systemMemory
+      ? [
+          {
+            setting: 'total_system_memory',
+            current: megabytes(systemMemory, false),
+            target: megabytes(
+              (finding.projectedFraction * systemMemory) / (FORK_OOM_WARN_FRACTION - 0.1),
+              true,
+            ),
+            unit: 'MB',
+          },
+        ]
+      : undefined;
     const isCritical = finding.level === 'critical';
     const event: AnomalyEvent = {
       id: randomUUID(),
@@ -4884,6 +4942,7 @@ export class AnomalyService
       stdDev: 0,
       // Report the boundary actually crossed, not always the WARN fraction.
       threshold: Math.round((isCritical ? FORK_OOM_CRIT_FRACTION : FORK_OOM_WARN_FRACTION) * 100),
+      ...(values ? { values } : {}),
       message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
       resolved: false,
       connectionId: ctx.connectionId,
@@ -5068,6 +5127,16 @@ export class AnomalyService
     });
 
     for (const finding of findings) {
+      // Twice the replica's observed buffer, so the same burst sits at 50% of
+      // the limit, under the 60% warning. A hard-limit finding also raises the
+      // soft limit when this buffer is already past the soft warning, because
+      // the hard check runs first and would otherwise hide that disconnect.
+      // Aggregate and resync-loop findings have no per-replica buffer.
+      const omem = replicas?.find((r) => r.addr === finding.replicaAddr)?.omem;
+      const values =
+        limit !== null && omem !== undefined && finding.ratio !== null
+          ? outputBufferValues(limit, omem, finding.kind)
+          : undefined;
       const isCritical = finding.level === 'critical';
       const event: AnomalyEvent = {
         id: randomUUID(),
@@ -5081,6 +5150,7 @@ export class AnomalyService
         zScore: 0,
         stdDev: 0,
         threshold: Math.round(COB_WARN_RATIO * 100),
+        ...(values ? { values } : {}),
         message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
@@ -8108,6 +8178,7 @@ export class AnomalyService
           pattern: match.pattern,
           diagnosis: match.diagnosis,
           recommendations: match.recommendations,
+          ...(match.values ? { values: match.values } : {}),
           severity: match.severity,
         });
         if (!recorded) {
@@ -8533,7 +8604,29 @@ export class AnomalyService
           e.scopeId === scope.id ||
           (e.connectionId !== undefined && members.has(e.connectionId))),
     );
-    return [...new Map([...cached, ...stored].map((e) => [e.id, e])).values()];
+    // Computed values live only in memory. recentAnomalies holds the newest
+    // 1,000; incidentEvents still has values for a live incident after that.
+    const valuesOf = new Map<string, RecommendationValue[]>();
+    const rememberValues = (event: AnomalyEvent) => {
+      if (event.values && event.values.length > 0) valuesOf.set(event.id, event.values);
+    };
+    for (const event of cached) rememberValues(event);
+    const live = scope
+      ? [...members].flatMap((id) => this.incidentEvents.get(id) ?? [])
+      : [...this.incidentEventsById.values()];
+    for (const event of live) {
+      if (!valuesOf.has(event.id)) rememberValues(event);
+    }
+    for (const event of stored) {
+      if (valuesOf.has(event.id)) continue;
+      const liveEvent = this.incidentEventsById.get(event.id);
+      if (liveEvent) rememberValues(liveEvent);
+    }
+    const kept = stored.map((event) => {
+      const values = valuesOf.get(event.id);
+      return values ? { ...event, values } : event;
+    });
+    return [...new Map([...cached, ...kept].map((e) => [e.id, e])).values()];
   }
 
   private scopeFilter(connectionId: string): AnomalyScopeFilter {
@@ -8851,8 +8944,12 @@ export class AnomalyService
       (a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id),
     );
 
+    const cachedValues = new Map(
+      this.recentGroups.flatMap((group) => (group.values ? [[group.correlationId, group.values] as const] : [])),
+    );
     return stored.map((s) => {
       const ids = new Set(s.anomalyIds);
+      const values = cachedValues.get(s.correlationId);
       return {
         correlationId: s.correlationId,
         timestamp: s.timestamp,
@@ -8861,6 +8958,7 @@ export class AnomalyService
         diagnosis: s.diagnosis,
         recommendations: s.recommendations,
         anomalies: ordered.filter((a) => a.correlationId === s.correlationId || ids.has(a.id)),
+        ...(values ? { values } : {}),
         ...(truncated.has(s.correlationId) ? { truncated: true } : {}),
       };
     });
@@ -9074,6 +9172,19 @@ export class AnomalyService
     const threshold =
       level === 'critical' ? BACKLOG_COVERAGE_CRITICAL_SEC : BACKLOG_COVERAGE_WARNING_SEC;
     const rate = Math.max(sample.bytesPerSec ?? 0, sample.bytesPerSecEwma ?? 0);
+    // Size to cover the warning window at the rate the coverage was measured
+    // with, plus 25%: 75s, past the 72s at which the warning clears.
+    const values =
+      sample.replBacklogSize !== null && rate > 0
+        ? [
+            {
+              setting: 'repl-backlog-size',
+              current: megabytes(sample.replBacklogSize, false),
+              target: megabytes(rate * BACKLOG_COVERAGE_WARNING_SEC * 1.25, true),
+              unit: 'MB',
+            },
+          ]
+        : undefined;
     const event: AnomalyEvent = {
       id: randomUUID(),
       timestamp: sample.timestamp,
@@ -9085,6 +9196,7 @@ export class AnomalyService
       stdDev: 0,
       zScore: 0,
       threshold,
+      ...(values ? { values } : {}),
       message:
         `Replication backlog covers only ${coverageSec.toFixed(1)}s of writes at ` +
         `${Math.round(rate)} bytes/s: a replica disconnected for longer than that needs a full ` +
