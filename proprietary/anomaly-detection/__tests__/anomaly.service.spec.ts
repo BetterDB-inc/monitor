@@ -13974,6 +13974,7 @@ describe('AnomalyService', () => {
         now = Date.now();
         end = now - 24 * 60 * MIN;
         jest.spyOn(Date, 'now').mockImplementation(() => now);
+        (service as any).incidentHistoryProbe = ({ until }: any) => until ?? null;
       });
 
       const expectDetailToMatchList = async (connectionId?: string, from?: number, to?: number) => {
