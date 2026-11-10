@@ -6,6 +6,7 @@ export enum WebhookEventType {
   WRITES_REJECTED = 'writes.rejected',
   WRITES_RECOVERED = 'writes.recovered',
   ANOMALY_DETECTED = 'anomaly.detected',
+  ANOMALY_SEQUENCE_DETECTED = 'anomaly.sequence.detected',
   SLOWLOG_THRESHOLD = 'slowlog.threshold',
   LATENCY_SPIKE = 'latency.spike',
   CONNECTION_SPIKE = 'connection.spike',
@@ -61,6 +62,7 @@ export const FREE_EVENTS: WebhookEventType[] = [
 export const PRO_EVENTS: WebhookEventType[] = [
   ...FREE_EVENTS,
   WebhookEventType.ANOMALY_DETECTED,
+  WebhookEventType.ANOMALY_SEQUENCE_DETECTED,
   WebhookEventType.SLOWLOG_THRESHOLD,
   WebhookEventType.REPLICATION_LAG,
   WebhookEventType.REPLICATION_DIVERGENCE,
@@ -124,6 +126,7 @@ export const WEBHOOK_EVENT_TIERS: Record<WebhookEventType, Tier> = {
 
   // Pro tier events
   [WebhookEventType.ANOMALY_DETECTED]: Tier.pro,
+  [WebhookEventType.ANOMALY_SEQUENCE_DETECTED]: Tier.pro,
   [WebhookEventType.SLOWLOG_THRESHOLD]: Tier.pro,
   [WebhookEventType.REPLICATION_LAG]: Tier.pro,
   [WebhookEventType.REPLICATION_DIVERGENCE]: Tier.pro,

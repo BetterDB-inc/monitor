@@ -64,6 +64,7 @@ const EVENT_LABELS: Record<WebhookEventType, string> = {
   'writes.rejected': 'Writes Rejected',
   'writes.recovered': 'Writes Recovered',
   'anomaly.detected': 'Anomaly Detected',
+  'anomaly.sequence.detected': 'Anomaly Sequence Detected',
   'slowlog.threshold': 'Slowlog Threshold',
   'replication.lag': 'Replication Lag',
   'replication.divergence': 'Replication Divergence',
