@@ -42,7 +42,7 @@ export function usePolling<T>({
     [queryKey, refetchKey],
   );
 
-  const { data, error, isLoading, dataUpdatedAt } = useQuery<T, Error>({
+  const { data, error, isLoading, isPlaceholderData, dataUpdatedAt } = useQuery<T, Error>({
     queryKey: resolvedKey,
     queryFn: async ({ signal }) => {
       try {
@@ -79,5 +79,12 @@ export function usePolling<T>({
 
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null;
 
-  return { data: data ?? null, error, loading: enabled ? isLoading : false, lastUpdated, refresh };
+  return {
+    data: data ?? null,
+    error,
+    loading: enabled ? isLoading : false,
+    isPlaceholder: enabled ? isPlaceholderData : false,
+    lastUpdated,
+    refresh,
+  };
 }

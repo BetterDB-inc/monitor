@@ -10,6 +10,7 @@ import { usePolling } from './usePolling';
 interface Props {
   refetchKey: string;
   keepPreviousDataFor?: string;
+  enabled?: boolean;
 }
 
 function renderPolling(initialProps: Props) {
@@ -23,8 +24,14 @@ function renderPolling(initialProps: Props) {
     .mockResolvedValueOnce('first')
     .mockImplementationOnce(() => new Promise<string>((resolve) => (release = resolve)));
   const hook = renderHook(
-    ({ refetchKey, keepPreviousDataFor }: Props) =>
-      usePolling<string>({ fetcher, interval: () => false, refetchKey, keepPreviousDataFor }),
+    ({ refetchKey, keepPreviousDataFor, enabled }: Props) =>
+      usePolling<string>({
+        fetcher,
+        interval: () => false,
+        refetchKey,
+        keepPreviousDataFor,
+        enabled,
+      }),
     { wrapper, initialProps },
   );
   return { ...hook, release: (value: string) => release(value) };
@@ -45,6 +52,33 @@ describe('usePolling', () => {
     await waitFor(() => expect(result.current.data).toBe('second'));
   });
 
+  it('says the data is a placeholder until the new key loads', async () => {
+    const { result, rerender, release } = renderPolling({
+      refetchKey: 'conn-1:1',
+      keepPreviousDataFor: 'conn-1',
+    });
+    await waitFor(() => expect(result.current.data).toBe('first'));
+    expect(result.current.isPlaceholder).toBe(false);
+
+    rerender({ refetchKey: 'conn-1:2', keepPreviousDataFor: 'conn-1' });
+    expect(result.current.isPlaceholder).toBe(true);
+
+    release('second');
+    await waitFor(() => expect(result.current.data).toBe('second'));
+    expect(result.current.isPlaceholder).toBe(false);
+  });
+
+  it('reports no placeholder while polling is disabled', async () => {
+    const { result, rerender } = renderPolling({
+      refetchKey: 'conn-1:1',
+      keepPreviousDataFor: 'conn-1',
+    });
+    await waitFor(() => expect(result.current.data).toBe('first'));
+
+    rerender({ refetchKey: 'conn-1:2', keepPreviousDataFor: 'conn-1', enabled: false });
+    expect(result.current.isPlaceholder).toBe(false);
+  });
+
   it('starts empty when the connection changes', async () => {
     const { result, rerender } = renderPolling({
       refetchKey: 'conn-1:1',
@@ -54,6 +88,7 @@ describe('usePolling', () => {
 
     rerender({ refetchKey: 'conn-2:1', keepPreviousDataFor: 'conn-2' });
     expect(result.current.data).toBeNull();
+    expect(result.current.isPlaceholder).toBe(false);
   });
 
   it('starts empty on a new key by default', async () => {

@@ -23,8 +23,27 @@ describe('IncidentList', () => {
 
   it('shows loading instead of the empty state before the first response', () => {
     renderList(undefined, { loading: true });
-    expect(screen.getByText('Loading incidents…')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading incidents…');
     expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
+  });
+
+  it('shows a loading state over the previous incidents while a new range loads', () => {
+    renderList([incident({ incidentId: 'a' })], { refreshing: true });
+    expect(screen.getByRole('status')).toHaveTextContent('Loading incidents…');
+    expect(screen.getByTestId('incident-rows')).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getAllByRole('link')).toHaveLength(1);
+  });
+
+  it('shows loading instead of a previous empty range while a new range loads', () => {
+    renderList([], { refreshing: true });
+    expect(screen.getByRole('status')).toHaveTextContent('Loading incidents…');
+    expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
+  });
+
+  it('shows no loading state once the incidents belong to the selected range', () => {
+    renderList([incident({ incidentId: 'a' })]);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByTestId('incident-rows')).toHaveAttribute('aria-busy', 'false');
   });
 
   it('says when more incidents came back than the limit and keeps the date range on links', () => {
