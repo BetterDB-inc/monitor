@@ -318,7 +318,7 @@ Client analytics keeps two stores. Raw client snapshots (`client_snapshots`) fol
 
 | Variable       | Required | Default | Description                                                                                                                                                                    |
 | -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages and the `incidentUrl` field of `anomaly.detected` and `anomaly.sequence.detected`; unset = messages render without the link and the field is left out |
 
 ### License Configuration
 

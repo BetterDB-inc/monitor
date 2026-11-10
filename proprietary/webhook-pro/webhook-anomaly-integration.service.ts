@@ -1,8 +1,9 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { incidentEventUrl } from '@betterdb/shared';
 import { WebhookProService } from './webhook-pro.service';
 import type { StoragePort, StoredAnomalyEvent, StoredCorrelatedGroup } from '@app/common/interfaces/storage-port.interface';
-import type { AnomalyWebhookSink } from '../anomaly-detection/types';
+import type { AnomalyWebhookSink, CorrelatedAnomalyGroup } from '../anomaly-detection/types';
 
 /**
  * Webhook Anomaly Integration Service
@@ -41,6 +42,7 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
         sourcePort: anomaly.sourcePort,
         nodeAddr: anomaly.nodeAddr,
         connectionId: anomaly.connectionId,
+        ...this.incidentLink(anomaly.id, anomaly.timestamp, anomaly.connectionId),
       };
 
       // Always dispatch the generic anomaly.detected event
@@ -79,6 +81,40 @@ export class WebhookAnomalyIntegrationService implements AnomalyWebhookSink {
     } catch (error) {
       this.logger.error(`Failed to dispatch webhook for anomaly ${anomaly.id}:`, error);
     }
+  }
+
+  async dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void> {
+    const anchor = group.anomalies[0];
+    if (!anchor?.connectionId) return;
+    try {
+      const label = group.pattern.replace(/_/g, ' ');
+      await this.webhookProService.dispatchAnomalySequenceDetected({
+        correlationId: group.correlationId,
+        pattern: group.pattern,
+        severity: group.severity,
+        diagnosis: group.diagnosis,
+        recommendations: group.recommendations,
+        ...(group.values ? { values: group.values } : {}),
+        anomalyIds: group.anomalies.map((a) => a.id),
+        metricTypes: group.anomalies.map((a) => a.metricType),
+        anomalyId: anchor.id,
+        timestamp: anchor.timestamp,
+        message: `${label.charAt(0).toUpperCase()}${label.slice(1)}: ${group.diagnosis}`,
+        ...this.incidentLink(anchor.id, anchor.timestamp, anchor.connectionId),
+        connectionId: anchor.connectionId,
+      });
+    } catch (error) {
+      this.logger.error(`Failed to dispatch webhook for sequence ${group.correlationId}:`, error);
+    }
+  }
+
+  private incidentLink(
+    anomalyId: string,
+    at: number,
+    connectionId?: string,
+  ): { incidentUrl?: string } {
+    const baseUrl = this.configService.get<string>('FRONTEND_URL');
+    return baseUrl ? { incidentUrl: incidentEventUrl(baseUrl, anomalyId, at, connectionId) } : {};
   }
 
   /**

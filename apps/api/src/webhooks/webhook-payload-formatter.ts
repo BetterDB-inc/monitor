@@ -1,12 +1,17 @@
 import type { Webhook, WebhookPayload } from '@betterdb/shared';
-import { WebhookPayloadFormat } from '@betterdb/shared';
+import { WebhookPayloadFormat, incidentEventUrl } from '@betterdb/shared';
 
 const TITLE_LIMIT = 120;
 const SLACK_TEXT_LIMIT = 3000;
 const DISCORD_DESCRIPTION_LIMIT = 4096;
 const ANOMALY_PAGE_EVENTS: ReadonlySet<string> = new Set([
   'anomaly.detected',
+  'anomaly.sequence.detected',
   'retry_amplification.detected',
+]);
+const INCIDENT_LINK_EVENTS: ReadonlySet<string> = new Set([
+  'anomaly.detected',
+  'anomaly.sequence.detected',
 ]);
 
 function num(v: unknown): number | undefined {
@@ -136,6 +141,7 @@ const DISCORD_COLORS: Record<string, number> = {
   'instance.down': 0xe5484d,
   'instance.up': 0x30a46c,
   'anomaly.detected': 0xf5a524,
+  'anomaly.sequence.detected': 0xf5a524,
   'writes.rejected': 0xe5484d,
   'writes.recovered': 0x30a46c,
 };
@@ -175,6 +181,12 @@ export function toDiscord(payload: WebhookPayload, appBaseUrl?: string): Record<
 
 function dashboardLink(payload: WebhookPayload, appBaseUrl?: string): string | undefined {
   if (!appBaseUrl) return undefined;
+  const data = payload.data ?? {};
+  const anomalyId = str(data['anomalyId']);
+  const at = num(data['timestamp']);
+  if (INCIDENT_LINK_EVENTS.has(payload.event) && anomalyId && at !== undefined) {
+    return incidentEventUrl(appBaseUrl, anomalyId, at, str(data['connectionId']));
+  }
   const base = appBaseUrl.replace(/\/$/, '');
   const path = ANOMALY_PAGE_EVENTS.has(payload.event) ? '/anomalies' : '/dashboard';
   return `${base}${path}`;

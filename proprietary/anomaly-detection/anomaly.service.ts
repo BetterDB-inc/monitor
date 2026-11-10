@@ -8173,7 +8173,7 @@ export class AnomalyService
         exclusive.forEach((a) =>
           this.sequenceGroupedAnomalies.set(`${match.pattern}\u0000${a.id}`, a.timestamp),
         );
-        const recorded = await this.recordSequenceGroup({
+        const group: CorrelatedAnomalyGroup = {
           correlationId: randomUUID(),
           timestamp: anomalies[0].timestamp,
           anomalies,
@@ -8182,12 +8182,17 @@ export class AnomalyService
           recommendations: match.recommendations,
           ...(match.values ? { values: match.values } : {}),
           severity: match.severity,
-        });
+        };
+        const recorded = await this.recordSequenceGroup(group);
         if (!recorded) {
           exclusive.forEach((a) =>
             this.sequenceGroupedAnomalies.delete(`${match.pattern}\u0000${a.id}`),
           );
+          continue;
         }
+        this.anomalyWebhookSink?.dispatchSequenceWebhook(group).catch((err) => {
+          this.logger.error(`Failed to dispatch webhook for sequence ${match.pattern}`, err);
+        });
       }
     }
   }
@@ -8867,13 +8872,15 @@ export class AnomalyService
         ),
       );
       for (const group of groups.flat()) {
-        const optional = rules.get(group.pattern as AnomalyPattern)?.optionalMetrics ?? [];
+        const rule = rules.get(group.pattern as AnomalyPattern);
+        const optional = rule?.optionalMetrics ?? [];
+        const latestStepAt = group.timestamp + (rule?.maxSpanMs ?? 0);
         const ids = group.anomalyIds ?? [];
         const typed = group.metricTypes?.length === ids.length;
         ids
           .filter((_, i) => !typed || !optional.includes(group.metricTypes[i] as MetricType))
           .forEach((id) =>
-            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp),
+            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, latestStepAt),
           );
       }
       return true;

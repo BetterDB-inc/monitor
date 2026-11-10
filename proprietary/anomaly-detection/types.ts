@@ -391,4 +391,5 @@ export const ANOMALY_WEBHOOK_SINK = 'ANOMALY_WEBHOOK_SINK';
 
 export interface AnomalyWebhookSink {
   dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
+  dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void>;
 }

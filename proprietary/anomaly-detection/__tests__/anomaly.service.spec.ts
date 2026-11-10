@@ -62,7 +62,7 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
-  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock };
+  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock; dispatchSequenceWebhook: jest.Mock };
   let anomalySavedBus: AnomalySavedBus;
   let clientListCache: ClientListCache;
   let otelEvents: { dispatch: jest.Mock };
@@ -125,7 +125,10 @@ describe('AnomalyService', () => {
       updateFanoutCoverage: jest.fn(),
     };
 
-    anomalyWebhookSink = { dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined) };
+    anomalyWebhookSink = {
+      dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined),
+      dispatchSequenceWebhook: jest.fn().mockResolvedValue(undefined),
+    };
     anomalySavedBus = new AnomalySavedBus();
     clientListCache = new ClientListCache();
     webhookEventsProService = {
@@ -11894,6 +11897,166 @@ describe('AnomalyService', () => {
       diagnosis: 'Connections led to memory growth',
       recommendations: ['Check clients'],
     };
+
+    describe('sequence alert', () => {
+      const useRules = (...rules: unknown[]) => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => rules as any,
+        );
+      };
+      const matched = (now: number) => {
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+      };
+
+      it('alerts once for a sequence match across ticks', async () => {
+        const now = Date.now();
+        matched(now);
+
+        await (service as any).tickIncidentTimelines(now);
+        await (service as any).tickIncidentTimelines(now + 1000);
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+        const [group] = anomalyWebhookSink.dispatchSequenceWebhook.mock.calls[0];
+        expect(group.pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+        expect(group.anomalies.map((a: AnomalyEvent) => a.id)).toEqual(['a', 'b']);
+        expect(group.correlationId).toBe(
+          storage.saveCorrelatedGroup.mock.calls[0][0].correlationId,
+        );
+      });
+
+      it('alerts only once the sequence group is stored', async () => {
+        const now = Date.now();
+        matched(now);
+        storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('db down'));
+
+        await (service as any).tickIncidentTimelines(now);
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+
+        await (service as any).tickIncidentTimelines(now + 1000);
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not alert again for a sequence group stored before a restart', async () => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+        const now = Date.now();
+        matched(now);
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 2 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 2,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(
+          (service as any).recentAnomalies.map((m: AnomalyEvent) => ({
+            ...m,
+            anomalyType: 'spike',
+          })),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+      });
+
+      it('does not alert again once the first event of a stored group ages out', async () => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+        const now = Date.now();
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 6 * MIN }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 6 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 2,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(
+          (service as any).recentAnomalies.map((m: AnomalyEvent) => ({
+            ...m,
+            anomalyType: 'spike',
+          })),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+        await (service as any).tickIncidentTimelines(now + 54 * MIN + 1000);
+
+        expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+      });
+
+      it('alerts again when a more severe sequence replaces the first', async () => {
+        const escalated = {
+          pattern: AnomalyPattern.CONNECTION_LEAK,
+          steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED], [MetricType.OPS_PER_SEC]],
+          supersedes: [rule.pattern],
+          maxSpanMs: 10 * MIN,
+          diagnosis: 'Escalated',
+          recommendations: [],
+        };
+        useRules(rule, escalated);
+        const now = Date.now();
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 3 * MIN }),
+          anomaly({ id: 'b', timestamp: now - 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        await (service as any).tickIncidentTimelines(now - MIN);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'c', timestamp: now - MIN / 2, metricType: MetricType.OPS_PER_SEC }),
+        );
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(
+          anomalyWebhookSink.dispatchSequenceWebhook.mock.calls.map(
+            ([group]: [{ pattern: string }]) => group.pattern,
+          ),
+        ).toEqual([rule.pattern, escalated.pattern]);
+      });
+
+      it('keeps the sequence group when its alert fails', async () => {
+        const now = Date.now();
+        matched(now);
+        anomalyWebhookSink.dispatchSequenceWebhook.mockRejectedValue(new Error('webhook down'));
+
+        await expect((service as any).tickIncidentTimelines(now)).resolves.toBeUndefined();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+        expect(service.getRecentGroups()).toHaveLength(1);
+      });
+
+      it('does not wait for the alert before finishing the tick', async () => {
+        const now = Date.now();
+        matched(now);
+        anomalyWebhookSink.dispatchSequenceWebhook.mockReturnValue(new Promise(() => {}));
+
+        await expect((service as any).tickIncidentTimelines(now)).resolves.toBeUndefined();
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+      });
+    });
 
     it('emits one correlated group per sequence match across ticks', async () => {
       (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
