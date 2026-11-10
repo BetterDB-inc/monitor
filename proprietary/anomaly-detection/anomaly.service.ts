@@ -8411,8 +8411,8 @@ export class AnomalyService
     if (at < Date.now() - MAX_INCIDENT_LOOKBACK_MS) return null;
     const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
     const window = await this.loadIncidentWindow(connectionId, at - 2 * maxSpanMs, at);
-    const [incident] = await this.incidentsOf(window, (all) =>
-      all.filter((t) => t.entries.some((e) => e.anomalyId === anomalyId)),
+    const incident = this.buildIncidents(window.events, window.boundaries).find((t) =>
+      t.entries.some((e) => e.anomalyId === anomalyId),
     );
     return incident?.incidentId ?? null;
   }

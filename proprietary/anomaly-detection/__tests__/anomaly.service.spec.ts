@@ -14890,6 +14890,20 @@ describe('AnomalyService', () => {
         expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
       });
 
+      it('does not wait on later firings of the open signals', async () => {
+        const t = Date.now() - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+        const [listed] = await service.getIncidentTimelines('conn-1', t - MIN, t + MIN);
+        storage.getAnomalyEvents.mockClear();
+
+        await expect(service.findIncidentIdByEvent('a', t, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+        expect(storage.getAnomalyEvents).not.toHaveBeenCalledWith(
+          expect.objectContaining({ order: 'asc', limit: 1 }),
+        );
+      });
+
       it('follows the incident to its new id after a regroup', async () => {
         const t = Date.now() - 10 * MIN;
         (service as any).recentAnomalies.push(
