@@ -8403,6 +8403,20 @@ export class AnomalyService
     return incident ?? null;
   }
 
+  async findIncidentIdByEvent(
+    anomalyId: string,
+    at: number,
+    connectionId?: string,
+  ): Promise<string | null> {
+    if (at < Date.now() - MAX_INCIDENT_LOOKBACK_MS) return null;
+    const { maxSpanMs } = DEFAULT_INCIDENT_TIMELINE_OPTIONS;
+    const window = await this.loadIncidentWindow(connectionId, at - 2 * maxSpanMs, at);
+    const [incident] = await this.incidentsOf(window, (all) =>
+      all.filter((t) => t.entries.some((e) => e.anomalyId === anomalyId)),
+    );
+    return incident?.incidentId ?? null;
+  }
+
   private async nextFiringsAfter(signals: AnomalyEvent[], after: number): Promise<AnomalyEvent[]> {
     const recent = new Map<string, AnomalyEvent>();
     for (const e of this.recentAnomalies) {

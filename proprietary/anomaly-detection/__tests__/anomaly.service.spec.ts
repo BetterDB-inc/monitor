@@ -14853,6 +14853,82 @@ describe('AnomalyService', () => {
 
       expect(event.resolvedAt).toEqual(expect.any(Number));
     });
+
+    describe('findIncidentIdByEvent', () => {
+      it('returns the id the incident list shows for a member event', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: t }),
+          anomaly({ id: 'b', timestamp: t + MIN }),
+        );
+        const [listed] = await service.getIncidentTimelines('conn-1', t - MIN);
+
+        await expect(service.findIncidentIdByEvent('b', t + MIN, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+      });
+
+      it('returns null for an event that is not in any incident at that time', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+
+        await expect(service.findIncidentIdByEvent('missing', t, 'conn-1')).resolves.toBeNull();
+      });
+
+      it('returns null under another connection', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+
+        await expect(service.findIncidentIdByEvent('a', t, 'conn-other')).resolves.toBeNull();
+      });
+
+      it('returns null without loading when the time is past the lookback', async () => {
+        storage.getAnomalyEvents.mockClear();
+        const at = Date.now() - 31 * 24 * 60 * MIN;
+
+        await expect(service.findIncidentIdByEvent('a', at, 'conn-1')).resolves.toBeNull();
+        expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
+      });
+
+      it('follows the incident to its new id after a regroup', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: t }),
+          anomaly({ id: 'b', timestamp: t + MIN }),
+        );
+        const before = await service.findIncidentIdByEvent('b', t + MIN, 'conn-1');
+        (service as any).recentAnomalies.push(anomaly({ id: 'z', timestamp: t - MIN }));
+
+        const after = await service.findIncidentIdByEvent('b', t + MIN, 'conn-1');
+
+        const [listed] = await service.getIncidentTimelines('conn-1', t - 2 * MIN);
+        expect(before).not.toBeNull();
+        expect(after).not.toBe(before);
+        expect(after).toBe(listed.incidentId);
+      });
+
+      it('resolves an event whose incident adopted an earlier stored start', async () => {
+        const t = Date.now() - 3 * 60 * MIN;
+        for (let i = 0; i <= 40; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `e-${i}`, timestamp: t - 40 * MIN + i * MIN }),
+          );
+        }
+        storage.getIncidentBoundaries.mockImplementation(async ({ startTime }: any) =>
+          [
+            { scopeId: 'conn-1', startedAt: t - 40 * MIN, anomalyId: 'e-0' },
+            { scopeId: 'conn-1', startedAt: t, anomalyId: 'e-40' },
+          ].filter((b, i, all) => b.startedAt >= startTime || all[i + 1]?.startedAt >= startTime),
+        );
+        const listed = (await service.getIncidentTimelines('conn-1', t - 50 * MIN)).find((i) =>
+          i.entries.some((e) => e.anomalyId === 'e-40'),
+        )!;
+
+        await expect(service.findIncidentIdByEvent('e-40', t, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+      });
+    });
   });
 
   describe('recovery amplification', () => {
