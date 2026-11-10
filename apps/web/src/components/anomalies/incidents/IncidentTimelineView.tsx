@@ -6,11 +6,12 @@ import { formatDateTime, formatDuration } from '../../../lib/formatters';
 import { IncidentNotice } from './IncidentNotice';
 import { IncidentStatusBadge } from './IncidentStatusBadge';
 import { LiveDuration } from './LiveDuration';
-import { incidentTitle } from './incident-summary';
+import { incidentSubject, incidentTitle, type IncidentConnection } from './incident-summary';
 
 interface IncidentTimelineViewProps {
   incident: IncidentTimeline;
   now?: number;
+  connections?: IncidentConnection[];
 }
 
 function sameDay(a: number, b: number): boolean {
@@ -49,7 +50,11 @@ function RecoveryIcon({ entry }: { entry: IncidentTimelineEntry }) {
   }
 }
 
-export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProps) {
+export function IncidentTimelineView({
+  incident,
+  now,
+  connections = [],
+}: IncidentTimelineViewProps) {
   const entries = incident.entries;
   const namePattern = incident.sequenceMatches.length > 1;
   const entryById = new Map(incident.entries.map((entry) => [entry.anomalyId, entry]));
@@ -65,7 +70,7 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
       stepsOf.set(anomalyId, tags);
     });
   });
-  const connections = incident.connectionIds.length;
+  const connectionCount = incident.connectionIds.length;
   const spansDays = entries.some((e) => !sameDay(e.timestamp, incident.startedAt));
   const eventTime = spansDays ? formatDateTime : formatTime;
   const title = incidentTitle(incident);
@@ -80,13 +85,14 @@ export function IncidentTimelineView({ incident, now }: IncidentTimelineViewProp
         Started {formatDateTime(incident.startedAt)} ·{' '}
         <LiveDuration incident={incident} now={now} /> · {incident.entries.length} event
         {incident.entries.length === 1 ? '' : 's'}
-        {connections > 0 && ` across ${connections} connection${connections === 1 ? '' : 's'}`}
+        {connectionCount > 0 &&
+          ` across ${connectionCount} connection${connectionCount === 1 ? '' : 's'}`}
       </p>
 
       {incident.recovery.status === 'degraded' && (
         <IncidentNotice
           role="alert"
-          title="Recovery debt: the cluster has not returned to its pre-incident state"
+          title={`Recovery debt: ${incidentSubject(incident, connections)} has not returned to its pre-incident state`}
         >
           No new anomalies have fired, but{' '}
           {incident.recovery.openSignals.map(metricLabel).join(', ')}{' '}

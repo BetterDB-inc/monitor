@@ -29,7 +29,7 @@ function pollInterval(latest: IncidentTimeline | undefined, error: Error | null)
 export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
   const [searchParams] = useSearchParams();
-  const { currentConnection } = useConnection();
+  const { currentConnection, connections } = useConnection();
   const startTime = dateRangeFromParams(
     searchParams.get('start'),
     searchParams.get('end'),
@@ -75,7 +75,7 @@ export function IncidentDetail() {
               </div>
             </IncidentNotice>
           )}
-          <IncidentTimelineView incident={incident} />
+          <IncidentTimelineView incident={incident} connections={connections} />
         </>
       ) : notFound ? (
         <EmptyState

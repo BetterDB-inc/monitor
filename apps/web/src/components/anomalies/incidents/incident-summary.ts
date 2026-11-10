@@ -1,4 +1,5 @@
 import { ApiError } from '../../../api/client';
+import type { Connection } from '../../../hooks/useConnection';
 import type { IncidentRecoveryStatus, IncidentTimeline } from '../../../types/anomaly';
 import { metricLabel, patternLabel } from '../anomaly-display';
 
@@ -43,4 +44,18 @@ export function dateRangeQuery(
 export function incidentPath(incidentId: string, query = ''): string {
   const path = `/anomalies/incidents/${encodeURIComponent(incidentId)}`;
   return query ? `${path}?${query}` : path;
+}
+
+export type IncidentConnection = Pick<Connection, 'id' | 'capabilities' | 'membership'>;
+
+export function incidentSubject(
+  incident: IncidentTimeline,
+  connections: IncidentConnection[],
+): string {
+  const involved = connections.filter((c) => incident.connectionIds.includes(c.id));
+  if (involved.some((c) => c.capabilities?.clusterEnabled || c.membership?.source === 'cluster'))
+    return 'the cluster';
+  if (involved.some((c) => c.capabilities?.isSentinel || c.membership?.source === 'sentinel'))
+    return 'the Sentinel deployment';
+  return 'the instance';
 }
