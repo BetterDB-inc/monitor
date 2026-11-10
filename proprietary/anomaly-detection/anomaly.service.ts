@@ -8243,21 +8243,28 @@ export class AnomalyService
       startTime ?? (endTime ?? now) - 24 * 60 * 60_000,
       now - MAX_INCIDENT_LOOKBACK_MS,
     );
-    const { events, boundaries, loadedThrough, openEnded } = await this.loadIncidentWindow(
-      connectionId,
-      from - 2 * maxSpanMs,
-      endTime,
+    const window = await this.loadIncidentWindow(connectionId, from - 2 * maxSpanMs, endTime);
+    return this.incidentsOf(window, (all) =>
+      all
+        .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
+        .reverse()
+        .slice(0, limit),
     );
-    const next = openEnded
-      ? []
-      : await this.nextFiringsAfter(
-          this.unresolvedSignals(events.filter((e) => e.timestamp >= from)),
-          loadedThrough,
-        );
-    return this.buildIncidents([...events, ...next], boundaries)
-      .filter((t) => t.lastEventAt >= from && (endTime === undefined || t.startedAt <= endTime))
-      .reverse()
-      .slice(0, limit);
+  }
+
+  private async incidentsOf(
+    window: IncidentWindow,
+    keep: (all: IncidentTimeline[]) => IncidentTimeline[],
+  ): Promise<IncidentTimeline[]> {
+    const kept = keep(this.buildIncidents(window.events, window.boundaries));
+    if (window.openEnded || kept.length === 0) return kept;
+    const entryIds = new Set(kept.flatMap((t) => t.entries.map((e) => e.anomalyId)));
+    const next = await this.nextFiringsAfter(
+      this.unresolvedSignals(window.events).filter((e) => entryIds.has(e.id)),
+      window.loadedThrough,
+    );
+    if (next.length === 0) return kept;
+    return keep(this.buildIncidents([...window.events, ...next], window.boundaries));
   }
 
   private unresolvedSignals(events: AnomalyEvent[]): AnomalyEvent[] {
@@ -8389,22 +8396,11 @@ export class AnomalyService
       );
       return timelines.find((t) => t.incidentId === incidentId) ?? null;
     }
-    const { events, boundaries, loadedThrough, openEnded } = await this.loadIncidentWindow(
-      connectionId,
-      startedAt,
-      startedAt,
+    const window = await this.loadIncidentWindow(connectionId, startedAt, startedAt);
+    const [incident] = await this.incidentsOf(window, (all) =>
+      all.filter((t) => t.incidentId === incidentId),
     );
-    const find = (all: AnomalyEvent[]) =>
-      this.buildIncidents(all, boundaries).find((t) => t.incidentId === incidentId) ?? null;
-    const draft = find(events);
-    if (!draft) return null;
-    if (openEnded) return draft;
-    const ids = new Set(draft.entries.map((e) => e.anomalyId));
-    const next = await this.nextFiringsAfter(
-      this.unresolvedSignals(events.filter((e) => ids.has(e.id))),
-      loadedThrough,
-    );
-    return next.length > 0 ? find([...events, ...next]) : draft;
+    return incident ?? null;
   }
 
   private async nextFiringsAfter(signals: AnomalyEvent[], after: number): Promise<AnomalyEvent[]> {
