@@ -27,6 +27,7 @@ import {
   metricLabel,
 } from '../components/anomalies/anomaly-display';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { GroupIncidentLink } from '../components/anomalies/incidents/GroupIncidentLink';
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
 import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
@@ -65,6 +66,7 @@ interface AnomalyEvent {
   message: string;
   correlationId?: string;
   resolved?: boolean;
+  connectionId?: string;
 }
 
 interface CorrelatedGroup {
@@ -585,6 +587,8 @@ export function AnomalyDashboard() {
                             <h4 className="text-sm font-semibold mb-2">Diagnosis</h4>
                             <p className="text-sm text-muted-foreground">{group.diagnosis}</p>
                           </div>
+
+                          <GroupIncidentLink group={group} />
 
                           {/* Related Anomalies */}
                           <div>
