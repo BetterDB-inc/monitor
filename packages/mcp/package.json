@@ -1,7 +1,7 @@
 {
   "name": "@betterdb/mcp",
   "mcpName": "io.github.BetterDB-inc/monitor",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "license": "MIT",
   "description": "BetterDB MCP server - Valkey and Redis observability for Claude Code and other MCP clients",
   "keywords": [
@@ -32,7 +32,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "tsc && node --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
