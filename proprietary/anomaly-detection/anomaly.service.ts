@@ -8872,13 +8872,15 @@ export class AnomalyService
         ),
       );
       for (const group of groups.flat()) {
-        const optional = rules.get(group.pattern as AnomalyPattern)?.optionalMetrics ?? [];
+        const rule = rules.get(group.pattern as AnomalyPattern);
+        const optional = rule?.optionalMetrics ?? [];
+        const latestStepAt = group.timestamp + (rule?.maxSpanMs ?? 0);
         const ids = group.anomalyIds ?? [];
         const typed = group.metricTypes?.length === ids.length;
         ids
           .filter((_, i) => !typed || !optional.includes(group.metricTypes[i] as MetricType))
           .forEach((id) =>
-            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp),
+            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, latestStepAt),
           );
       }
       return true;

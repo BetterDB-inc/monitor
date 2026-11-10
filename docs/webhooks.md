@@ -483,8 +483,8 @@ A finding on a primary that a cluster connection reads but that is not registere
 ```
 
 Notes:
-- `anomalyId` and `timestamp` are the first event of the sequence. The alert is
-  sent under that event's connection. A sequence can span several nodes of a
+- `anomalyId` and `timestamp` are the first event listed in `anomalyIds`. The
+  alert is sent under that event's connection. A sequence can span several nodes of a
   cluster; a webhook scoped only to another connection of the same sequence
   does not receive it.
 - `incidentUrl` opens the incident that holds the sequence. It is only present

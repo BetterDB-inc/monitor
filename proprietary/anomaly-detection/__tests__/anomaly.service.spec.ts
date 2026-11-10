@@ -11972,6 +11972,42 @@ describe('AnomalyService', () => {
         expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
       });
 
+      it('does not alert again once the first event of a stored group ages out', async () => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+        const now = Date.now();
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 6 * MIN }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 6 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 2,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(
+          (service as any).recentAnomalies.map((m: AnomalyEvent) => ({
+            ...m,
+            anomalyType: 'spike',
+          })),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+        await (service as any).tickIncidentTimelines(now + 54 * MIN + 1000);
+
+        expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+      });
+
       it('alerts again when a more severe sequence replaces the first', async () => {
         const escalated = {
           pattern: AnomalyPattern.CONNECTION_LEAK,
