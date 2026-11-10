@@ -377,6 +377,72 @@
         "x": 0,
         "y": 12
       }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Hottest slots by CPU",
+      "description": "The ten slots using the most CPU, as a share of one core. A hot slot is usually a few hot keys. Needs cluster-slot-stats-enabled on the nodes; empty without it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "topk(10, rate(betterdb_cluster_slot_cpu_usec_total{job=~\"$job\",connection=~\"$connection\"}[$__rate_interval]) / 1e6)",
+          "legendFormat": "slot {{slot}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Busiest slots by traffic",
+      "description": "The ten slots with the most bytes in plus out. Needs cluster-slot-stats-enabled on the nodes; empty without it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "topk(10, rate(betterdb_cluster_slot_network_bytes_in_total{job=~\"$job\",connection=~\"$connection\"}[$__rate_interval]) + rate(betterdb_cluster_slot_network_bytes_out_total{job=~\"$job\",connection=~\"$connection\"}[$__rate_interval]))",
+          "legendFormat": "slot {{slot}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      }
     }
   ],
   "links": [

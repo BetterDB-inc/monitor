@@ -357,8 +357,10 @@ describe('PrometheusService export profiles', () => {
 });
 
 describe('PrometheusService slot stats', () => {
-  function slot(keys: number): Record<string, number> {
-    return { key_count: keys, expires_count: 0, total_reads: 0, total_writes: 0 };
+  function slot(keys: number, cpu?: number): Record<string, number> {
+    return cpu === undefined
+      ? { key_count: keys }
+      : { key_count: keys, cpu_usec: cpu, network_bytes_in: cpu * 2, network_bytes_out: cpu * 3 };
   }
 
   async function runClusterInfo(harness: Harness): Promise<void> {
@@ -414,6 +416,41 @@ describe('PrometheusService slot stats', () => {
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
   });
 
+  it('exports the usage counters when the server tracks them', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(50, 7) });
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).toContain(`betterdb_cluster_slot_cpu_usec_total{connection="${LABEL}",slot="1"} 7`);
+    expect(text).toContain(`betterdb_cluster_slot_network_bytes_in_total{connection="${LABEL}",slot="1"} 14`);
+    expect(text).toContain(`betterdb_cluster_slot_network_bytes_out_total{connection="${LABEL}",slot="1"} 21`);
+  });
+
+  it('exports no usage series, rather than zeros, when slot stats are disabled', async () => {
+    const harness = buildService();
+    harness.client.getClusterSlotStats.mockResolvedValue({ '1': slot(50) });
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`);
+    expect(text).not.toContain(`betterdb_cluster_slot_cpu_usec_total{`);
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("also exports a node's busiest slots, not only its biggest", async () => {
+    const harness = buildService({ METRICS_SLOT_STATS_TOP_N: '1' });
+    harness.client.getClusterSlotStats.mockImplementation((orderBy: string) =>
+      Promise.resolve(orderBy === 'cpu-usec' ? { '2': slot(3, 900) } : { '1': slot(50, 7) }),
+    );
+    await runSlotStats(harness);
+    const text = await harness.service.getMetrics();
+
+    expect(harness.client.getClusterSlotStats).toHaveBeenCalledWith('cpu-usec', 1);
+    expect(text).toContain(`betterdb_cluster_slot_keys{connection="${LABEL}",slot="1"} 50`);
+    expect(text).toContain(`betterdb_cluster_slot_cpu_usec_total{connection="${LABEL}",slot="2"} 900`);
+  });
+
   it('removes a slot that leaves the top-N instead of zeroing it', async () => {
     const harness = buildService();
     harness.client.getClusterSlotStats.mockResolvedValueOnce({ '1': slot(50), '2': slot(40) });
@@ -459,7 +496,13 @@ describe('PrometheusService slot stats', () => {
     await runSlotStats(harness);
     text = await harness.service.getMetrics();
     expect(text).not.toContain(`slot="9000"`);
-    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith('key-count', 100, 'conn-1', 5_000, 5_000);
+    expect(clusterMetrics.getClusterSlotStatsResult).toHaveBeenCalledWith(
+      ['key-count', 'cpu-usec'],
+      100,
+      'conn-1',
+      5_000,
+      5_000,
+    );
     expect(harness.client.getClusterSlotStats).not.toHaveBeenCalled();
   });
 

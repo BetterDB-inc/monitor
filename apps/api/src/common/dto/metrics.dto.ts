@@ -310,16 +310,10 @@ export class SlotStatsMetricDto implements SlotStatsMetric {
   @ApiProperty({ description: 'Number of keys in slot', example: 100 })
   key_count: number;
 
-  @ApiProperty({ description: 'Number of keys with expiration', example: 25 })
-  expires_count: number;
-
-  @ApiProperty({ description: 'Total read operations', example: 1000 })
-  total_reads: number;
-
-  @ApiProperty({ description: 'Total write operations', example: 500 })
-  total_writes: number;
-
-  @ApiPropertyOptional({ description: 'CPU time spent on the slot (microseconds)', example: 1200 })
+  @ApiPropertyOptional({
+    description: 'CPU time spent on the slot in microseconds, cumulative. Only with cluster-slot-stats-enabled',
+    example: 1200,
+  })
   cpu_usec?: number;
 
   @ApiPropertyOptional({ description: 'Bytes received for commands on the slot', example: 4096 })

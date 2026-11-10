@@ -192,7 +192,7 @@ Patterns are fingerprinted before they become label values. Each key segment is 
 
 ### Worst cases
 
-- **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 400.
+- **Full slot coverage.** With `METRICS_SLOT_STATS_TOP_N=16384` and `cluster-slot-stats-enabled yes`, one cluster connection exports 65,536 slot series. At the default of 100 it exports at most 100 with slot stats off (key counts only) and 800 with them on (the top 100 by keys plus the top 100 by CPU, 4 series each).
 - **Pattern churn.** Fingerprinting does not catch short, non-hex dynamic segments such as `session:ab12x` or `user:alice`. Each distinct key then becomes its own pattern. A workload like this can add up to 128 new slowlog patterns per poll. On servers with COMMANDLOG (Valkey 8.1+) it can also add up to 128 new large-request and 128 new large-reply patterns per poll. Because the pattern families are zeroed rather than removed, over the process lifetime they are bounded only by the number of distinct patterns each source has produced since BetterDB started. The client-name and ACL-username families behave the same way when names are generated per session.
 - **Many databases.** A standalone server that uses all 16 databases adds 48 per-db series.
 - **Keysize buckets.** `betterdb_keysize_bucket_keys` has no top-N knob: it is bounded only by the server (populated databases × data types × log2 buckets, up to D × T × B ≈ 6,144 series for a 16-database Redis 8 connection using every type and bucket; a single-db instance typically emits a few dozen). The only mitigations are `METRICS_EXPORT_PROFILE=vitals` or `metric_relabel_configs`.
@@ -209,7 +209,7 @@ If a worst case applies, use one of these:
 This example uses `full` with 5 standalone primaries and 2 cluster primaries, assuming each connection has:
 
 - 2 populated databases for a standalone primary, or `db0` only for a cluster primary
-- default `METRICS_SLOT_STATS_TOP_N` (100)
+- default `METRICS_SLOT_STATS_TOP_N` (100) and `cluster-slot-stats-enabled no` (the Valkey default), so key counts only
 - 40 active commands
 - no search indexes
 - 20 slowlog patterns
@@ -224,7 +224,7 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | ------------------- | ------------------ | --------------- |
 | `F`                 | 80                 | 87              |
 | Per-db              | 6                  | 3               |
-| Slot stats          | 0                  | 400             |
+| Slot stats          | 0                  | 100             |
 | Commandstats        | 80                 | 80              |
 | Inference latency   | 8                  | 8               |
 | Forecast            | 4                  | 4               |
@@ -232,9 +232,9 @@ This example uses `full` with 5 standalone primaries and 2 cluster primaries, as
 | COMMANDLOG patterns | 20                 | 20              |
 | Client name/user    | 7                  | 7               |
 | ACL reason/user     | 5                  | 5               |
-| **Per connection**  | **270**            | **674**         |
+| **Per connection**  | **270**            | **374**         |
 
-The total with `full` is 55 + 5 × 270 + 2 × 674 = **2,753 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
+The total with `full` is 55 + 5 × 270 + 2 × 374 = **2,153 series**. Add up to 120 more while anomaly detection runs, plus 9 per polled user-added connection (63 for this fleet, if all 7 are user-added) and up to 61 more for each connection with anomalies in the last hour. Anomaly detection also exports up to 5 node signal series per checked primary (connects per second, churn per op, retry state, write rate and backlog coverage; 35 for this fleet), 3 more for each replica those primaries report, 5 `betterdb_anomaly_fanout_primaries` series and up to 1 `betterdb_anomaly_fanout_gap` series per cluster or Sentinel connection, and `betterdb_incident_active` series while incidents are open. `betterdb_retry_amplification_state` is set on every poll, even with no anomaly events.
 
 The same fleet under `vitals` exports 55 + 5 × 33 + 2 × 39 = **298 series**, and that number does not change with key count, database count, pattern churn or cluster size.
 
@@ -498,14 +498,14 @@ Cluster mode health and slot distribution.
 
 #### Cluster Slot Metrics (Valkey 8.0+)
 
-| Metric                               | Type  | Labels | Description                   | Example |
-| ------------------------------------ | ----- | ------ | ----------------------------- | ------- |
-| `betterdb_cluster_slot_keys`         | gauge | `slot` | Keys in cluster slot          | `512`   |
-| `betterdb_cluster_slot_expires`      | gauge | `slot` | Expiring keys in cluster slot | `128`   |
-| `betterdb_cluster_slot_reads_total`  | gauge | `slot` | Total reads for cluster slot  | `45678` |
-| `betterdb_cluster_slot_writes_total` | gauge | `slot` | Total writes for cluster slot | `12345` |
+| Metric                                          | Type  | Labels | Description                                                  | Example   |
+| ----------------------------------------------- | ----- | ------ | ------------------------------------------------------------ | --------- |
+| `betterdb_cluster_slot_keys`                    | gauge | `slot` | Keys in cluster slot                                         | `512`     |
+| `betterdb_cluster_slot_cpu_usec_total`          | gauge | `slot` | CPU time spent on the slot in microseconds, cumulative       | `4560000` |
+| `betterdb_cluster_slot_network_bytes_in_total`  | gauge | `slot` | Bytes received for the slot, cumulative                      | `98765`   |
+| `betterdb_cluster_slot_network_bytes_out_total` | gauge | `slot` | Bytes sent for the slot, cumulative                          | `12345`   |
 
-**Availability**: Only populated when connected to Valkey 8.0+ cluster. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count (default 100; `0` disables). A slot that leaves the top N is removed rather than reported as 0, so a cluster connection exports at most 4 × N slot series. Not exported under `vitals`.
+**Availability**: Only populated when connected to a Valkey 8.0+ cluster. Read from every primary, since a node only reports the slots it owns; with cluster auto-registration only the seed connection exports them, so each slot appears once. Coverage can be partial: a primary that fails or times out keeps its last series until they are older than the staleness bound, and when no primary can be reached directly only the connection's own node is read. The `_total` series need `cluster-slot-stats-enabled yes` on every node and are left out otherwise. They are cumulative, so use `rate()`; they reset when a slot moves or its node restarts. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count plus the top N by cumulative CPU (default 100; `0` disables), so a slot that only just became hot can be missing. A slot that leaves both lists is removed rather than reported as 0. Not exported under `vitals`.
 
 ### Anomaly Detection Metrics
 

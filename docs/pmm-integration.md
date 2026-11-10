@@ -28,9 +28,11 @@ BetterDB Monitor adds the metric families PMM doesn't collect today:
   `betterdb_commandlog_large_reply_by_pattern`: oversized requests and
   replies, grouped by pattern.
 - **Cluster slot distribution** — `betterdb_cluster_slot_keys`,
-  `betterdb_cluster_slot_reads_total`, `betterdb_cluster_slot_writes_total`,
-  `betterdb_cluster_slot_expires`: per-slot key counts and read/write
-  volume, for spotting hot or unbalanced slots.
+  `betterdb_cluster_slot_cpu_usec_total`,
+  `betterdb_cluster_slot_network_bytes_in_total`,
+  `betterdb_cluster_slot_network_bytes_out_total`: per-slot key counts, CPU
+  time and traffic across every primary, for spotting hot or unbalanced
+  slots.
 - **Anomaly and forecast series** — `betterdb_anomaly_events_total`,
   `betterdb_anomaly_by_severity`, `betterdb_correlated_groups_total`,
   `betterdb_metric_forecast_time_to_limit_seconds`: detected anomalies

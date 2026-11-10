@@ -24,11 +24,11 @@ so panels populate on landing. The shipped files here are unchanged.
 - `dashboards/betterdb-query-patterns.json` — slowlog and commandlog pattern
   analysis: top slow-query patterns, large requests/replies, slowest
   commands.
-- `dashboards/betterdb-cluster-slots.json` — cluster health and per-slot key
-  distribution, and the hottest slots by key count. Per-slot CPU and network
-  breakdowns are not here yet: Valkey reports them through
-  `CLUSTER SLOT-STATS` only when `cluster-slot-stats-enabled yes` is set, and
-  the monitor does not read those fields today.
+- `dashboards/betterdb-cluster-slots.json` — cluster health, per-slot key
+  distribution, the biggest slots by key count, and the hottest slots by CPU
+  and traffic. The CPU and traffic panels stay empty unless the nodes run
+  with `cluster-slot-stats-enabled yes`, since Valkey only reports those
+  fields through `CLUSTER SLOT-STATS` when it is set.
 - `dashboards/betterdb-anomalies.json` — anomaly counts by severity and
   metric, correlated groups by pattern, detector baselines, and forecasted
   time to limit.

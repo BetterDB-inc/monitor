@@ -28,7 +28,7 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
-import { InfoResponse } from '../common/types/metrics.types';
+import { InfoResponse, SlotStats } from '../common/types/metrics.types';
 import {
   MultiConnectionPoller,
   ConnectionContext,
@@ -98,6 +98,9 @@ const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
 // Least of the pass left for the slot-stats fan-out to start at all, or half
 // the pass when that is shorter, so a short poll interval still collects.
 const SLOT_STATS_MIN_BUDGET_MS = 1_000;
+// Export the biggest slots and the busiest ones: a hot slot is usually a few
+// heavily used keys, which a key-count ranking alone misses.
+const SLOT_STATS_RANKING = ['key-count', 'cpu-usec'] as const;
 
 const ANOMALY_SERIES: ReadonlySet<string> = new Set([
   'betterdb_anomaly_events_current',
@@ -399,9 +402,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Cluster Slot Metrics (Valkey 8.0+ specific)
   private clusterSlotKeys: Gauge;
-  private clusterSlotExpires: Gauge;
-  private clusterSlotReadsTotal: Gauge;
-  private clusterSlotWritesTotal: Gauge;
+  private clusterSlotCpuUsecTotal: Gauge;
+  private clusterSlotNetworkBytesInTotal: Gauge;
+  private clusterSlotNetworkBytesOutTotal: Gauge;
 
   // Key Size Metrics (from key analytics runs and INFO keysizes)
   private keyPatternMemoryBytes: Gauge;
@@ -1079,19 +1082,21 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     // Cluster Slot Metrics (Valkey 8.0+) - per connection, per slot
     this.clusterSlotKeys = this.createGauge('cluster_slot_keys', 'Keys in cluster slot', ['slot']);
-    this.clusterSlotExpires = this.createGauge(
-      'cluster_slot_expires',
-      'Expiring keys in cluster slot',
+    // The usage counters are cumulative on the owning node and only exist
+    // with cluster-slot-stats-enabled; rate() them to find a hot slot.
+    this.clusterSlotCpuUsecTotal = this.createGauge(
+      'cluster_slot_cpu_usec_total',
+      'CPU time spent on the cluster slot in microseconds (requires cluster-slot-stats-enabled)',
       ['slot'],
     );
-    this.clusterSlotReadsTotal = this.createGauge(
-      'cluster_slot_reads_total',
-      'Total reads for cluster slot',
+    this.clusterSlotNetworkBytesInTotal = this.createGauge(
+      'cluster_slot_network_bytes_in_total',
+      'Bytes received for the cluster slot (requires cluster-slot-stats-enabled)',
       ['slot'],
     );
-    this.clusterSlotWritesTotal = this.createGauge(
-      'cluster_slot_writes_total',
-      'Total writes for cluster slot',
+    this.clusterSlotNetworkBytesOutTotal = this.createGauge(
+      'cluster_slot_network_bytes_out_total',
+      'Bytes sent for the cluster slot (requires cluster-slot-stats-enabled)',
       ['slot'],
     );
 
@@ -2868,7 +2873,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         this.slotStatsFanOuts.add(connectionId);
         try {
           result = await this.clusterMetricsService.getClusterSlotStatsResult(
-            'key-count',
+            SLOT_STATS_RANKING,
             this.slotStatsTopN,
             connectionId,
             Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
@@ -2879,7 +2884,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         }
       } else {
         result = {
-          stats: await client.getClusterSlotStats('key-count', this.slotStatsTopN),
+          stats: await this.readOwnTopSlots(client),
           failedNodes: [],
           failedSlotRanges: [],
         };
@@ -2895,9 +2900,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         newSlotLabels.add(slot);
         state.clusterSlotSeenAt.set(slot, now);
         this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-        this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-        this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-        this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
+        this.setSlotCounter(this.clusterSlotCpuUsecTotal, connLabel, slot, stats.cpu_usec);
+        this.setSlotCounter(this.clusterSlotNetworkBytesInTotal, connLabel, slot, stats.network_bytes_in);
+        this.setSlotCounter(this.clusterSlotNetworkBytesOutTotal, connLabel, slot, stats.network_bytes_out);
       }
 
       // A primary that did not answer is missing from this result; keep the
@@ -2931,6 +2936,27 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         else this.dropExpiredSlotSeries(connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
+    }
+  }
+
+  /**
+   * This node's own top slots by key count plus, when it tracks usage, by CPU.
+   * ORDERBY cpu-usec is an error without cluster-slot-stats-enabled, so only
+   * ask once the key-count read carried the counters.
+   */
+  private async readOwnTopSlots(client: DatabasePort): Promise<SlotStats> {
+    const byKeys = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+    const tracksUsage = Object.values(byKeys).some((row) => row.cpu_usec !== undefined);
+    return tracksUsage
+      ? { ...byKeys, ...(await client.getClusterSlotStats('cpu-usec', this.slotStatsTopN)) }
+      : byKeys;
+  }
+
+  private setSlotCounter(gauge: Gauge, connLabel: string, slot: string, value: number | undefined): void {
+    if (value === undefined) {
+      gauge.remove(connLabel, slot);
+    } else {
+      gauge.labels(connLabel, slot).set(value);
     }
   }
 
@@ -2970,9 +2996,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   private removeSlotSeries(connLabel: string, slot: string): void {
     this.clusterSlotKeys.remove(connLabel, slot);
-    this.clusterSlotExpires.remove(connLabel, slot);
-    this.clusterSlotReadsTotal.remove(connLabel, slot);
-    this.clusterSlotWritesTotal.remove(connLabel, slot);
+    this.clusterSlotCpuUsecTotal.remove(connLabel, slot);
+    this.clusterSlotNetworkBytesInTotal.remove(connLabel, slot);
+    this.clusterSlotNetworkBytesOutTotal.remove(connLabel, slot);
   }
 
   private async updateAclMetrics(

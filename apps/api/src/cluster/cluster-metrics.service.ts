@@ -68,12 +68,19 @@ export function ownedSlotStats(stats: SlotStats, ranges: number[][]): SlotStats 
 }
 
 /**
- * Merge per-node CLUSTER SLOT-STATS replies and keep the overall top `limit` by
- * the requested metric. Each node's reply is expected to be filtered to the
- * slots it owns; a slot reported twice keeps its first entry.
+ * One ranking, or several whose top `limit` lists are combined: the biggest
+ * slots and the busiest ones are rarely the same.
  */
-export function mergeSlotStats(perNode: SlotStats[], orderBy: SlotStatsOrder, limit: number): SlotStats {
-  const metric = orderBy === 'cpu-usec' ? 'cpu_usec' : 'key_count';
+export type SlotStatsRanking = SlotStatsOrder | readonly SlotStatsOrder[];
+
+/**
+ * Merge per-node CLUSTER SLOT-STATS replies and keep the overall top `limit` by
+ * each requested metric. Each node's reply is expected to be filtered to the
+ * slots it owns; a slot reported twice keeps its first entry. A `cpu-usec`
+ * ranking in a list is skipped when no slot reports CPU, since it would only
+ * pick arbitrary slots.
+ */
+export function mergeSlotStats(perNode: SlotStats[], orderBy: SlotStatsRanking, limit: number): SlotStats {
   const bySlot = new Map<string, SlotStats[string]>();
   for (const stats of perNode) {
     for (const [slot, value] of Object.entries(stats)) {
@@ -81,8 +88,22 @@ export function mergeSlotStats(perNode: SlotStats[], orderBy: SlotStatsOrder, li
     }
   }
   const all = [...bySlot.entries()];
-  all.sort(([, a], [, b]) => (b[metric] ?? 0) - (a[metric] ?? 0));
-  return Object.fromEntries(all.slice(0, limit));
+  if (typeof orderBy === 'string') return Object.fromEntries(topBy(all, orderBy, limit));
+  const tracksUsage = all.some(([, value]) => value.cpu_usec !== undefined);
+  return Object.fromEntries(
+    orderBy
+      .filter((order) => order !== 'cpu-usec' || tracksUsage)
+      .flatMap((order) => topBy(all, order, limit)),
+  );
+}
+
+function topBy(
+  slots: [string, SlotStats[string]][],
+  orderBy: SlotStatsOrder,
+  limit: number,
+): [string, SlotStats[string]][] {
+  const metric = orderBy === 'cpu-usec' ? 'cpu_usec' : 'key_count';
+  return [...slots].sort(([, a], [, b]) => (b[metric] ?? 0) - (a[metric] ?? 0)).slice(0, limit);
 }
 
 export interface ClusterSlowlogEntry extends SlowLogEntry {
@@ -574,7 +595,7 @@ export class ClusterMetricsService {
    * what is left of it in `timeoutMs`).
    */
   async getClusterSlotStatsResult(
-    orderBy: SlotStatsOrder = 'key-count',
+    orderBy: SlotStatsRanking = 'key-count',
     limit: number = 100,
     connectionId?: string,
     timeoutMs: number = NODE_COMMAND_TIMEOUT_MS,
@@ -703,14 +724,17 @@ export class ClusterMetricsService {
       // Its own error is the one to report: a NOPERM or "not supported" here
       // says more than a primary's timeout on an address it cannot reach.
       const fallbackTimeoutMs = Math.max(remainingMs - nodeTimeoutMs, budgetEnd - Date.now());
-      const stats = await withTimeout(
-        this.connectionRegistry.get(connectionId).getClusterSlotStats(orderBy, validLimit),
+      // The node's own reply is ranked server-side by one metric; a combined
+      // ranking is taken from that node's top N by key count.
+      const ownOrder = typeof orderBy === 'string' ? orderBy : 'key-count';
+      const ownStats = await withTimeout(
+        this.connectionRegistry.get(connectionId).getClusterSlotStats(ownOrder, validLimit),
         fallbackTimeoutMs,
         `The connection did not answer CLUSTER SLOT-STATS within ${fallbackTimeoutMs}ms`,
       );
       const self = owners.find((node) => node.flags?.includes('myself'));
       return {
-        stats,
+        stats: typeof orderBy === 'string' ? ownStats : mergeSlotStats([ownStats], orderBy, validLimit),
         failedNodes: failedNodes.filter((address) => address !== self?.address),
         failedSlotRanges: self ? failedSlotRanges.filter((range) => !self.slots.includes(range)) : failedSlotRanges,
       };
