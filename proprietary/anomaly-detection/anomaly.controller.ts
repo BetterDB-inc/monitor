@@ -211,6 +211,26 @@ export class AnomalyController {
     );
   }
 
+  @Get('incidents/by-event/:anomalyId')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: false, description: 'Connection ID to filter by' })
+  async getIncidentByEvent(
+    @Param('anomalyId') anomalyId: string,
+    @ConnectionId() connectionId?: string,
+    @Query('at') at?: string,
+  ): Promise<{ incidentId: string | null }> {
+    const eventTime = parseOptionalInt(at, 'at');
+    if (eventTime === undefined) throw new BadRequestException('at is required');
+    return {
+      incidentId: await this.anomalyService.findIncidentIdByEvent(
+        anomalyId,
+        eventTime,
+        connectionId,
+      ),
+    };
+  }
+
   @Get('incidents/:incidentId')
   @UseGuards(LicenseGuard)
   @RequiresFeature(Feature.ANOMALY_DETECTION)

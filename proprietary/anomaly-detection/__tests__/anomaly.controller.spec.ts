@@ -132,3 +132,34 @@ describe('AnomalyController fan-out coverage', () => {
     expect(service.getFanoutCoverage).toHaveBeenCalledWith(undefined);
   });
 });
+
+describe('AnomalyController incident by event', () => {
+  const service = { findIncidentIdByEvent: jest.fn() };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the incident id the service finds for the event', async () => {
+    service.findIncidentIdByEvent.mockResolvedValue('incident-1');
+
+    await expect(controller.getIncidentByEvent('a', 'c1', '1000.5')).resolves.toEqual({
+      incidentId: 'incident-1',
+    });
+    expect(service.findIncidentIdByEvent).toHaveBeenCalledWith('a', 1000, 'c1');
+  });
+
+  it('answers with a null id instead of failing when no incident holds the event', async () => {
+    service.findIncidentIdByEvent.mockResolvedValue(null);
+
+    await expect(controller.getIncidentByEvent('a', 'c1', '1000')).resolves.toEqual({
+      incidentId: null,
+    });
+  });
+
+  it.each([undefined, '', 'abc'])('rejects an event time of %j', async (at) => {
+    await expect(controller.getIncidentByEvent('a', 'c1', at)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(service.findIncidentIdByEvent).not.toHaveBeenCalled();
+  });
+});

@@ -43,6 +43,7 @@ import { CacheSimulatorGuard } from '../CacheSimulatorGuard';
 import { CacheProposals } from '../../pages/CacheProposals';
 import { Monitor } from '../../pages/Monitor';
 import { MonitorSession } from '../../pages/MonitorSession';
+import { IncidentByEvent } from '../../pages/IncidentByEvent';
 import { IncidentDetail } from '../../pages/IncidentDetail';
 import { Security } from '../../pages/Security';
 
@@ -210,6 +211,14 @@ function AppLayoutInner(): ReactElement {
                 element={
                   <NoConnectionsGuard>
                     <AnomalyDashboard />
+                  </NoConnectionsGuard>
+                }
+              />
+              <Route
+                path="/anomalies/incidents/by-event/:anomalyId"
+                element={
+                  <NoConnectionsGuard>
+                    <IncidentByEvent />
                   </NoConnectionsGuard>
                 }
               />
