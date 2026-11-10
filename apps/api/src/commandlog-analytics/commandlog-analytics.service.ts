@@ -13,6 +13,16 @@ import { analyzeScanSkew, ScanSkewReport } from './scan-skew-analyzer';
 import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import {
+  LOG_CATCH_UP_MAX_FETCH,
+  LOG_POLL_BATCH,
+  mergeById,
+  planCatchUpFetch,
+  readRunId,
+} from '../log-capture/capture-gap';
+import { MaxLenCacheEntry, readServerMaxLen } from '../log-capture/max-len-reader';
+import { LOG_CAPTURE_MAX_LEN_PARAMETER } from '@betterdb/shared';
+import { recordCaptureGap } from '../log-capture/capture-gap-recorder';
 
 @Injectable()
 export class CommandLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -28,6 +38,16 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
   private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
   private cachedAnalysis = new Map<string, Map<CommandLogType, SlowLogPatternAnalysis | null>>();
   private lastCacheUpdate = new Map<string, number>();
+
+  // connectionId -> (type -> end of the last successful poll). A missing entry
+  // means this process has not completed a poll yet (classifies capture gaps).
+  private lastPollAt = new Map<string, Map<CommandLogType, number>>();
+
+  // connectionId -> server run_id seen on the previous poll (changes on restart)
+  private lastRunId = new Map<string, string>();
+
+  // Cached `*-max-len` reads (only used to split fetch_limit gaps)
+  private maxLenCache = new Map<string, MaxLenCacheEntry>();
 
   constructor(
     connectionRegistry: ConnectionRegistry,
@@ -94,18 +114,31 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
       }
     }
 
+    // A restarted server restarts its id counters, which can climb past
+    // lastSeenId before the next poll; run_id tells the two cases apart.
+    const runId = await readRunId(ctx.client);
+    const previousRunId = this.lastRunId.get(ctx.connectionId);
+    const restarted = runId !== null && previousRunId !== undefined && runId !== previousRunId;
+    if (runId !== null) this.lastRunId.set(ctx.connectionId, runId);
+    if (restarted) {
+      this.logger.log(`Commandlog for ${ctx.connectionName}: server restarted (run_id changed), resetting capture baseline`);
+      for (const type of this.LOG_TYPES) connectionLastSeenIds.set(type, null);
+    }
+
     const now = Date.now();
     const connectionCachedEntries = this.cachedEntries.get(ctx.connectionId)!;
     const connectionCachedAnalysis = this.cachedAnalysis.get(ctx.connectionId)!;
 
     for (const type of this.LOG_TYPES) {
       try {
-        const entries = await ctx.client.getCommandLog(128, type);
+        const batch = await ctx.client.getCommandLog(LOG_POLL_BATCH, type);
+        let entries: CommandLogEntry[] = batch;
         const lastSeenId = connectionLastSeenIds.get(type) ?? null;
 
-        // Update cache for Prometheus metrics
-        connectionCachedEntries.set(type, entries);
-        connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(entries));
+        // Update cache for Prometheus metrics (always the regular batch, so the
+        // pattern metrics keep their 128-entry window even after a catch-up read)
+        connectionCachedEntries.set(type, batch);
+        connectionCachedAnalysis.set(type, analyzeSlowLogPatterns(batch));
         this.lastCacheUpdate.set(ctx.connectionId, now);
 
         // Detect ID wraparound (e.g., after COMMANDLOG RESET)
@@ -121,6 +154,32 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
         // Re-fetch lastSeenId after potential reset
         const currentLastSeenId = connectionLastSeenIds.get(type) ?? null;
+        const pollTimes = this.pollTimesFor(ctx.connectionId);
+
+        // The regular batch only holds the newest 128 entries. When more than
+        // that arrived since the last poll, read back to the last seen id (up
+        // to LOG_CATCH_UP_MAX_FETCH) instead of silently skipping the rest.
+        let requested = LOG_POLL_BATCH;
+        let received = batch.length;
+        const catchUp = planCatchUpFetch({
+          lastSeenId: currentLastSeenId,
+          batch,
+          batchLimit: LOG_POLL_BATCH,
+          maxFetch: LOG_CATCH_UP_MAX_FETCH,
+        });
+        if (catchUp !== null) {
+          try {
+            const extra = await ctx.client.getCommandLog(catchUp, type);
+            requested = catchUp;
+            received = extra.length;
+            entries = mergeById(batch, extra);
+          } catch (error) {
+            // The poll saves the regular batch and advances normally.
+            this.logger.warn(
+              `Catch-up read failed for ${ctx.connectionName} (${type}), keeping the regular batch: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
 
         // Filter out entries we've already seen
         const newEntries = currentLastSeenId !== null
@@ -128,6 +187,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           : entries;
 
         if (newEntries.length === 0) {
+          pollTimes.set(type, Date.now());
           continue;
         }
 
@@ -148,11 +208,29 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
         const saved = await this.storage.saveCommandLogEntries(storedEntries, ctx.connectionId);
 
+        await recordCaptureGap(this.storage, this.logger, {
+          connectionId: ctx.connectionId,
+          connectionName: ctx.connectionName,
+          logType: `commandlog-${type}`,
+          lastSeenId: currentLastSeenId,
+          entries,
+          requested,
+          received,
+          readServerMaxLen: () => {
+            const parameter = LOG_CAPTURE_MAX_LEN_PARAMETER[`commandlog-${type}`];
+            return readServerMaxLen(ctx.client, parameter, this.maxLenCache, `${ctx.connectionId}:${parameter}`, Date.now());
+          },
+          previousPollAt: pollTimes.get(type) ?? null,
+          intervalMs: this.getIntervalMs(),
+          now,
+        });
+
         // Update lastSeenId to the highest ID we've seen
         const maxId = Math.max(...newEntries.map(e => e.id));
         if (currentLastSeenId === null || maxId > currentLastSeenId) {
           connectionLastSeenIds.set(type, maxId);
         }
+        pollTimes.set(type, Date.now());
 
         this.logger.debug(`Saved ${saved} new ${type} command log entries for ${ctx.connectionName}`);
       } catch (error) {
@@ -165,8 +243,22 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     }
   }
 
+  private pollTimesFor(connectionId: string): Map<CommandLogType, number> {
+    let pollTimes = this.lastPollAt.get(connectionId);
+    if (pollTimes === undefined) {
+      pollTimes = new Map();
+      this.lastPollAt.set(connectionId, pollTimes);
+    }
+    return pollTimes;
+  }
+
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.lastPollAt.delete(connectionId);
+    this.lastRunId.delete(connectionId);
+    for (const type of this.LOG_TYPES) {
+      this.maxLenCache.delete(`${connectionId}:${LOG_CAPTURE_MAX_LEN_PARAMETER[`commandlog-${type}`]}`);
+    }
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);
