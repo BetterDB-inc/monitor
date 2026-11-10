@@ -29,7 +29,7 @@ function pollInterval(latest: IncidentTimeline | undefined, error: Error | null)
 export function IncidentDetail() {
   const { incidentId = '' } = useParams<{ incidentId: string }>();
   const [searchParams] = useSearchParams();
-  const { currentConnection } = useConnection();
+  const { currentConnection, connections } = useConnection();
   const startTime = dateRangeFromParams(
     searchParams.get('start'),
     searchParams.get('end'),
@@ -63,19 +63,19 @@ export function IncidentDetail() {
           {error && (
             <IncidentNotice>
               <div className="flex flex-wrap items-center gap-3">
-                <p>
+                <span>
                   {notFound
                     ? 'This incident can no longer be found. Its events may have been regrouped into another incident.'
                     : `Could not refresh the incident: ${error.message}.`}{' '}
                   Showing the last timeline loaded.
-                </p>
+                </span>
                 <Button variant="outline" size="sm" onClick={() => void refresh()}>
                   Try again
                 </Button>
               </div>
             </IncidentNotice>
           )}
-          <IncidentTimelineView incident={incident} />
+          <IncidentTimelineView incident={incident} connections={connections} />
         </>
       ) : notFound ? (
         <EmptyState

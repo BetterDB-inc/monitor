@@ -27,8 +27,10 @@ vi.mock('../api/metrics', () => ({
   metricsApi: { getIncident: (id: string, startTime?: number) => getIncident(id, startTime) },
 }));
 
+const connections: { id: string; capabilities?: Record<string, unknown> }[] = [];
+
 vi.mock('../hooks/useConnection', () => ({
-  useConnection: () => ({ currentConnection: { id: 'conn-1' } }),
+  useConnection: () => ({ currentConnection: { id: 'conn-1' }, connections }),
 }));
 
 vi.mock('../hooks/usePolling', () => ({
@@ -60,6 +62,7 @@ describe('IncidentDetail', () => {
   beforeEach(() => {
     getIncident.mockReset();
     polling.refresh.mockReset();
+    connections.length = 0;
     polling.state = { data: null, error: null, loading: true, lastUpdated: null };
   });
 
@@ -159,6 +162,19 @@ describe('IncidentDetail', () => {
     );
   });
 
+  it('does not put the refresh warning in a paragraph that takes the alert margin', () => {
+    polling.state = {
+      data: incident(),
+      error: new ApiError('Storage unavailable', 500),
+      loading: false,
+      lastUpdated: new Date(),
+    };
+
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(screen.getByRole('status').querySelector('p:not(:last-child)')).toBeNull();
+  });
+
   it('keeps the connection on the back link', () => {
     polling.state = { data: incident(), error: null, loading: false, lastUpdated: new Date() };
 
@@ -167,6 +183,31 @@ describe('IncidentDetail', () => {
     expect(screen.getByRole('link', { name: /Back to incidents/ })).toHaveAttribute(
       'href',
       '/anomalies?tab=incidents&connection=conn-2',
+    );
+  });
+
+  it('names the cluster in the recovery-debt callout for a cluster connection', () => {
+    connections.push({
+      id: 'conn-1',
+      capabilities: { dbType: 'valkey', version: '8.1.0', clusterEnabled: true },
+    });
+    polling.state = {
+      data: incident({
+        recovery: {
+          status: 'degraded',
+          openSignals: ['memory_used'],
+          unknownSignals: [],
+          recoveredAt: null,
+        },
+      }),
+      error: null,
+      loading: false,
+      lastUpdated: new Date(),
+    };
+    renderAt('/anomalies/incidents/123-abc');
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Recovery debt: the cluster has not returned to its pre-incident state',
     );
   });
 

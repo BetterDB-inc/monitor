@@ -151,6 +151,35 @@ describe('NoConnectionsGuard - empty state', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Connect your database.');
   });
 
+  it('shows the incident copy on an incident detail route', () => {
+    renderAt('/anomalies/incidents/conn-1%3A1762344000000');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      'Follow an incident from start to recovery.',
+    );
+  });
+
+  it('keeps the anomalies copy on the anomalies route', () => {
+    renderAt('/anomalies');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      'Catch anomalies automatically.',
+    );
+  });
+
+  it.each([
+    ['/anomalies/incidents/conn-1%3A1762344000000', '/anomalies/incidents/:incidentId'],
+    ['/anomalies/incidents/conn-2%3A1762347600000', '/anomalies/incidents/:incidentId'],
+    ['/monitor/sessions/session-42', '/monitor/sessions/:id'],
+    ['/slowlog', '/slowlog'],
+    ['/some-unknown-route', '/some-unknown-route'],
+  ])('reports %s to telemetry as the page %s', (path, page) => {
+    renderAt(path);
+    fireEvent.click(screen.getByRole('link', { name: 'Upstash' }));
+    expect(mockCapture).toHaveBeenCalledWith('provider_guide_clicked', {
+      page,
+      provider: 'upstash',
+    });
+  });
+
   it('shows provider guide links and the trust line', () => {
     renderAt('/');
     const upstash = screen.getByRole('link', { name: 'Upstash' });

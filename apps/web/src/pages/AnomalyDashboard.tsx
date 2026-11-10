@@ -242,6 +242,7 @@ export function AnomalyDashboard() {
     data: incidents,
     error: incidentsError,
     loading: incidentsLoading,
+    isPlaceholder: incidentsPlaceholder,
   } = usePolling<IncidentTimeline[]>({
     fetcher: (signal) =>
       metricsApi.getIncidents({ startTime, endTime, limit: INCIDENT_LIST_LIMIT + 1 }, signal),
@@ -377,6 +378,7 @@ export function AnomalyDashboard() {
                   <IncidentList
                     incidents={incidents ?? undefined}
                     loading={incidentsLoading}
+                    refreshing={incidentsPlaceholder}
                     limit={INCIDENT_LIST_LIMIT}
                     linkQuery={rangeQuery}
                   />

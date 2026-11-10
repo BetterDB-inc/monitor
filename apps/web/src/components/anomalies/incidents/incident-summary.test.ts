@@ -4,6 +4,7 @@ import {
   dateRangeQuery,
   incidentDurationMs,
   incidentPath,
+  incidentSubject,
   incidentTitle,
 } from './incident-summary';
 
@@ -72,5 +73,59 @@ describe('incident summary helpers', () => {
       ),
     ).toBe('Connections');
     expect(incidentTitle(incident({ entries: [] }))).toBe('Incident');
+  });
+});
+
+describe('incidentSubject', () => {
+  const membership = (source: 'cluster' | 'sentinel') => ({
+    seedId: 'seed',
+    nodeId: 'node',
+    origin: 'auto' as const,
+    source,
+  });
+  const capabilities = { dbType: 'valkey' as const, version: '8.1.0' };
+
+  it.each([
+    [
+      'a cluster connection',
+      { capabilities: { ...capabilities, clusterEnabled: true } },
+      'the cluster',
+    ],
+    ['a registered cluster node', { membership: membership('cluster') }, 'the cluster'],
+    [
+      'a Sentinel connection',
+      { capabilities: { ...capabilities, isSentinel: true } },
+      'the Sentinel deployment',
+    ],
+    [
+      'a node found through Sentinel',
+      { membership: membership('sentinel') },
+      'the Sentinel deployment',
+    ],
+    ['a standalone connection', { capabilities }, 'the instance'],
+  ])('names %s', (_label, connection, subject) => {
+    expect(incidentSubject(incident(), [{ id: 'conn-1', ...connection }])).toBe(subject);
+  });
+
+  it('names the instance when the connection is not loaded', () => {
+    expect(incidentSubject(incident(), [])).toBe('the instance');
+  });
+
+  it('ignores connections outside the incident', () => {
+    expect(
+      incidentSubject(incident(), [
+        { id: 'conn-1', capabilities },
+        { id: 'conn-2', capabilities: { ...capabilities, clusterEnabled: true } },
+      ]),
+    ).toBe('the instance');
+  });
+
+  it('names the cluster when the incident spans a cluster and its Sentinel-found nodes', () => {
+    expect(
+      incidentSubject(incident({ connectionIds: ['conn-1', 'conn-2'] }), [
+        { id: 'conn-1', membership: membership('sentinel') },
+        { id: 'conn-2', capabilities: { ...capabilities, clusterEnabled: true } },
+      ]),
+    ).toBe('the cluster');
   });
 });

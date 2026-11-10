@@ -350,6 +350,51 @@ describe('IncidentTimelineView', () => {
     expect(screen.getByText('Degraded')).toBeInTheDocument();
   });
 
+  it.each([
+    [{ dbType: 'valkey' as const, version: '8.1.0' }, 'the instance'],
+    [{ dbType: 'valkey' as const, version: '8.1.0', clusterEnabled: true }, 'the cluster'],
+    [{ dbType: 'valkey' as const, version: '8.1.0', isSentinel: true }, 'the Sentinel deployment'],
+  ])('names what carries the recovery debt', (capabilities, subject) => {
+    render(
+      <IncidentTimelineView
+        now={T0 + 3_600_000}
+        connections={[{ id: 'conn-1', capabilities }]}
+        incident={incident({
+          recovery: {
+            status: 'degraded',
+            openSignals: ['memory_used'],
+            unknownSignals: [],
+            recoveredAt: null,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      `Recovery debt: ${subject} has not returned to its pre-incident state`,
+    );
+  });
+
+  it('does not say cluster when the connection is unknown', () => {
+    render(
+      <IncidentTimelineView
+        now={T0 + 3_600_000}
+        incident={incident({
+          recovery: {
+            status: 'degraded',
+            openSignals: ['memory_used'],
+            unknownSignals: [],
+            recoveredAt: null,
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Recovery debt: the instance has not returned to its pre-incident state',
+    );
+  });
+
   it('does not show recovery debt once recovered', () => {
     render(<IncidentTimelineView now={T0} incident={incident()} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
