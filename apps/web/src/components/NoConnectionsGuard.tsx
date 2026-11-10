@@ -25,6 +25,12 @@ const MONITOR_PAGE_STATE: PageEmptyState = {
     'Connect a database to stream every command in real time, with filtering and recorded sessions.',
 };
 
+const INCIDENT_PAGE_STATE: PageEmptyState = {
+  headline: 'Follow an incident from start to recovery.',
+  description:
+    'Connect a database and BetterDB will group related anomalies into incidents, with a timeline of what fired and what recovered.',
+};
+
 const PAGE_STATES: Record<string, PageEmptyState> = {
   '/fleet': {
     headline: 'See every instance at a glance.',
@@ -116,11 +122,8 @@ const PAGE_STATES: Record<string, PageEmptyState> = {
     description:
       'Connect a database to capture authentication failures and permission denials from ACL LOG.',
   },
-  '/anomalies/incidents/:incidentId': {
-    headline: 'Follow an incident from start to recovery.',
-    description:
-      'Connect a database and BetterDB will group related anomalies into incidents, with a timeline of what fired and what recovered.',
-  },
+  '/anomalies/incidents/by-event/:anomalyId': INCIDENT_PAGE_STATE,
+  '/anomalies/incidents/:incidentId': INCIDENT_PAGE_STATE,
   '/monitor': MONITOR_PAGE_STATE,
   '/monitor/sessions/:id': MONITOR_PAGE_STATE,
   '/webhooks': {
