@@ -482,6 +482,12 @@ export const metricsApi = {
     );
   },
 
+  findIncidentByEvent: (anomalyId: string, at: number, signal?: AbortSignal) =>
+    fetchApi<{ incidentId: string | null }>(
+      `/anomaly/incidents/by-event/${encodeURIComponent(anomalyId)}?at=${at}`,
+      { signal },
+    ),
+
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {
       method: 'POST',
