@@ -24,6 +24,8 @@ let failingHosts = new Set<string>();
 let sourceKeyCount = 0;
 let onScan: (() => void) | undefined;
 let pendingQuits: Array<() => void> | undefined;
+let scanCursor = '1';
+let onDbsize: (() => void) | undefined;
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; connectionName?: string; tls?: { servername?: string } }) => {
@@ -48,10 +50,13 @@ jest.mock('iovalkey', () => {
           }),
       ),
       call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'CLUSTER' ? clusterNodesRaw : null)),
-      dbsize: jest.fn().mockImplementation(async () => sourceKeyCount),
+      dbsize: jest.fn().mockImplementation(async () => {
+        onDbsize?.();
+        return sourceKeyCount;
+      }),
       scan: jest.fn().mockImplementation(async () => {
         onScan?.();
-        return ['1', []];
+        return [scanCursor, []];
       }),
     };
     clients.push(client);
@@ -255,6 +260,8 @@ describe('runCommandMigration through an SSH tunnel', () => {
     sourceKeyCount = 0;
     onScan = undefined;
     pendingQuits = undefined;
+    scanCursor = '1';
+    onDbsize = undefined;
   });
 
   it('dials both instances at their local tunnel ports', async () => {
@@ -329,5 +336,30 @@ describe('runCommandMigration through an SSH tunnel', () => {
 
     expect(disconnectedWhileQuitting).toEqual([true, true]);
     expect(job.dropConnections).toBeUndefined();
+  });
+
+  it('does not report completion when a tunnel drops during the last scan', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    scanCursor = '0';
+    onScan = () => {
+      job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(job.progress).not.toBe(100);
+    expect(job.logs.join('\n')).not.toContain('Migration complete');
+  });
+
+  it('does not report completion when a tunnel drops while an empty source is counted', async () => {
+    const job = makeJob();
+    onDbsize = () => {
+      job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(job.progress).not.toBe(100);
   });
 });

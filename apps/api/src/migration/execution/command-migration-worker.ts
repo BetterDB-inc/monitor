@@ -101,6 +101,8 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
     job.totalKeys = totalKeys;
     log(job, maxLogLines, `Total keys to migrate: ${totalKeys.toLocaleString()}`);
 
+    if (isCancelled(job)) return;
+
     if (totalKeys === 0) {
       log(job, maxLogLines, 'No keys to migrate');
       job.progress = 100;
@@ -177,6 +179,8 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
         }
       } while (cursor !== '0');
     }
+
+    if (isCancelled(job)) return;
 
     job.progress = 100;
     log(job, maxLogLines,
