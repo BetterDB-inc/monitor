@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { Navigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { SearchX } from 'lucide-react';
+import { SearchX, Unplug } from 'lucide-react';
 import { metricsApi } from '../api/metrics';
 import { useConnection } from '../hooks/useConnection';
 import { CONNECTION_PARAM } from '../lib/connectionParam';
@@ -19,15 +20,22 @@ function eventTime(raw: string | null): number | null {
 export function IncidentByEvent() {
   const { anomalyId = '' } = useParams<{ anomalyId: string }>();
   const [searchParams] = useSearchParams();
-  const { currentConnection } = useConnection();
+  const { currentConnection, connections, loading } = useConnection();
   const connectionId = currentConnection?.id;
-  const at = eventTime(searchParams.get('at'));
-  const linkedConnection = searchParams.get(CONNECTION_PARAM);
-  const connectionReady = linkedConnection === null || linkedConnection === connectionId;
+  const rawAt = searchParams.get('at');
+  const at = eventTime(rawAt);
+  const linkKey = `${anomalyId}\u0000${rawAt}`;
+  const inUrl = searchParams.get(CONNECTION_PARAM);
+  const [link, setLink] = useState({ key: linkKey, connection: inUrl });
+  if (link.key !== linkKey) setLink({ key: linkKey, connection: inUrl });
+  const linkedConnection = link.key === linkKey ? link.connection : inUrl;
+  const connectionReady = inUrl === null || inUrl === connectionId;
+  const connectionMissing =
+    linkedConnection !== null && !loading && !connections.some((c) => c.id === linkedConnection);
   const lookup = useQuery({
     queryKey: ['incident-by-event', connectionId ?? '', anomalyId, at],
     queryFn: ({ signal }) => metricsApi.findIncidentByEvent(anomalyId, at ?? 0, signal),
-    enabled: at !== null && connectionReady,
+    enabled: at !== null && connectionReady && !connectionMissing,
     retry: false,
     staleTime: 0,
   });
@@ -38,6 +46,20 @@ export function IncidentByEvent() {
   if (data?.incidentId) {
     const query = connectionId ? `${CONNECTION_PARAM}=${encodeURIComponent(connectionId)}` : '';
     return <Navigate replace to={incidentPath(data.incidentId, query)} />;
+  }
+  if (connectionMissing) {
+    return (
+      <EmptyState
+        icon={Unplug}
+        title="Connection not available"
+        description="This link points to a connection that is not set up here, so its incident cannot be opened."
+        action={
+          <ConnectionLink to="/anomalies" className="text-sm underline">
+            Back to anomalies
+          </ConnectionLink>
+        }
+      />
+    );
   }
   if (at === null || data) {
     return (
