@@ -3016,6 +3016,12 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
       conditions.push(this.scopeCondition(options.scope));
       params.push(options.scope.id, ...options.scope.connectionIds);
     }
+    if (options.nodeAddr) {
+      conditions.push('node_addr = ?');
+      params.push(options.nodeAddr);
+    } else if (options.nodeAddr !== undefined) {
+      conditions.push("(node_addr IS NULL OR node_addr = '')");
+    }
     const direction = options.order === 'asc' ? 'ASC' : 'DESC';
     if (options.after) {
       const past = direction === 'ASC' ? '>' : '<';

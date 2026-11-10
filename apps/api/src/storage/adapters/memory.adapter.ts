@@ -763,6 +763,10 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     if (options.resolved !== undefined)
       filtered = filtered.filter((e) => e.resolved === options.resolved);
     if (options.scope) filtered = filtered.filter(this.inScope(options.scope));
+    if (options.nodeAddr !== undefined) {
+      const nodeAddr = options.nodeAddr ?? '';
+      filtered = filtered.filter((e) => (e.nodeAddr ?? '') === nodeAddr);
+    }
 
     const direction = options.order === 'asc' ? 1 : -1;
     const compare = (a: AnomalyEventCursor, b: AnomalyEventCursor) =>
