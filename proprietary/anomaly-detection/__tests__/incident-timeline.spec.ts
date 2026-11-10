@@ -1503,6 +1503,185 @@ describe('IncidentTimelineBuilder', () => {
     });
   });
 
+  describe('a dropped incident start', () => {
+    const rising: SequenceRule = {
+      ...escalation,
+      steps: [[MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+      directions: { [MetricType.OPS_PER_SEC]: 'rise' },
+    };
+    const restored = (anomalyType: AnomalyType) => {
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [rising]).build(
+        [event({ id: 'held', timestamp: T0 + MIN })],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.OPS_PER_SEC,
+            connectionId: 'conn-a',
+            members: [{ metricType: MetricType.OPS_PER_SEC, anomalyType, connectionId: 'conn-a', timestamp: T0 }],
+          },
+        ],
+        new Map([['conn-a', T0]]),
+      );
+      return incident;
+    };
+
+    it('takes its direction from the member it was stored as', () => {
+      expect(incidentStartOf(restored(AnomalyType.DROP).incidentId)).toBe(T0);
+      expect(restored(AnomalyType.DROP).matchedPatterns).toEqual([]);
+    });
+
+    it('still fills a rise step when its member rose', () => {
+      expect(restored(AnomalyType.SPIKE).matchedPatterns).toEqual([rising.pattern]);
+    });
+  });
+
+  describe('superseding rules', () => {
+    const component: SequenceRule = {
+      ...escalation,
+      pattern: AnomalyPattern.RESHARD_UNDER_WRITES,
+      steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
+    };
+    const compound: SequenceRule = {
+      ...escalation,
+      pattern: AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
+      steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPL_BUFFER_PRESSURE]],
+      supersedes: [AnomalyPattern.RESHARD_UNDER_WRITES],
+    };
+
+    it('drops a superseded match that shares only a dropped event with the compound match', () => {
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [component, compound]).build(
+        [
+          event({ id: 'div', timestamp: T0 + MIN, metricType: MetricType.REPLICATION_DIVERGENCE }),
+          event({ id: 'buf', timestamp: T0 + MIN, metricType: MetricType.REPL_BUFFER_PRESSURE }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.RESHARD_SHARD_SKEW,
+            connectionId: 'conn-a',
+          },
+        ],
+        new Map([['conn-a', T0]]),
+      );
+
+      expect(incident.matchedPatterns).toEqual([AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE]);
+    });
+
+    it('matches a live step against dropped steps from the same node', () => {
+      const node = '10.0.0.9:6379';
+      const sameNode: SequenceRule = { ...compound, sameConnection: true };
+      const [incident] = new IncidentTimelineBuilder({}, () => 'conn-a', () => [sameNode]).build(
+        [event({ id: 'buf', timestamp: T0 + MIN, metricType: MetricType.REPL_BUFFER_PRESSURE, nodeAddr: node })],
+        T0 + 20 * MIN,
+        neverRecovers,
+        [
+          {
+            scopeId: 'conn-a',
+            startedAt: T0,
+            anomalyId: 'z-gone',
+            metricType: MetricType.RESHARD_SHARD_SKEW,
+            connectionId: 'conn-a',
+            members: [
+              {
+                metricType: MetricType.RESHARD_SHARD_SKEW,
+                anomalyType: AnomalyType.SPIKE,
+                connectionId: 'conn-a',
+                nodeAddr: node,
+                timestamp: T0,
+              },
+            ],
+          },
+        ],
+        new Map([['conn-a', T0]]),
+      );
+
+      expect(incident.matchedPatterns).toEqual([AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE]);
+    });
+
+    it('keeps a match that shares only an optional event with the compound match', () => {
+      const ops: SequenceRule = {
+        ...escalation,
+        pattern: AnomalyPattern.RESHARD_UNDER_WRITES,
+        steps: [[MetricType.OPS_PER_SEC], [MetricType.MEMORY_USED]],
+      };
+      const withOptional: SequenceRule = {
+        ...compound,
+        steps: [[MetricType.RESHARD_SHARD_SKEW], [MetricType.REPLICATION_DIVERGENCE]],
+        optionalMetrics: [MetricType.OPS_PER_SEC],
+      };
+      const [incident] = new IncidentTimelineBuilder({}, undefined, () => [ops, withOptional]).build(
+        [
+          event({ metricType: MetricType.RESHARD_SHARD_SKEW }),
+          event({ timestamp: T0 + MIN, metricType: MetricType.REPLICATION_DIVERGENCE }),
+          event({ timestamp: T0 + MIN, metricType: MetricType.OPS_PER_SEC }),
+          event({ timestamp: T0 + 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incident.matchedPatterns).toEqual([
+        AnomalyPattern.RESHARD_UNDER_WRITES,
+        AnomalyPattern.RESHARD_DIVERGENCE_PRESSURE,
+      ]);
+    });
+  });
+
+  describe('an optional signal after a quiet gap', () => {
+    const withOptional: SequenceRule = { ...escalation, optionalMetrics: [MetricType.EVICTED_KEYS] };
+    const build = (...earlier: MetricType[]) =>
+      new IncidentTimelineBuilder({}, undefined, () => [withOptional]).build(
+        [
+          ...earlier.map((metricType, i) => event({ timestamp: T0 + i * MIN, metricType })),
+          event({ timestamp: T0 + 5 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+    it('joins an incident in which its rule matched within the span', () => {
+      expect(build(MetricType.CONNECTIONS, MetricType.MEMORY_USED)).toHaveLength(1);
+    });
+
+    it('does not join an incident in which its rule only started', () => {
+      expect(build(MetricType.CONNECTIONS)).toHaveLength(2);
+    });
+
+    it('does not join an incident without its rule', () => {
+      expect(build(MetricType.FRAGMENTATION_RATIO)).toHaveLength(2);
+    });
+
+    it('measures the span from the first step, not from an earlier lead step', () => {
+      const led: SequenceRule = {
+        ...escalation,
+        steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED], [MetricType.FRAGMENTATION_RATIO]],
+        optionalMetrics: [MetricType.EVICTED_KEYS],
+        leadMs: { 2: 10 * MIN },
+      };
+      const incidents = new IncidentTimelineBuilder({}, undefined, () => [led]).build(
+        [
+          event({ metricType: MetricType.FRAGMENTATION_RATIO }),
+          event({ timestamp: T0 + 8 * MIN, metricType: MetricType.CONNECTIONS }),
+          event({ timestamp: T0 + 9 * MIN, metricType: MetricType.MEMORY_USED }),
+          event({ timestamp: T0 + 15 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        ],
+        T0 + 20 * MIN,
+        neverRecovers,
+      );
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([escalation.pattern]);
+    });
+  });
+
   describe('mergeRuleSteps', () => {
     const step = (metricType: MetricType, at: number) => ({
       metricType,

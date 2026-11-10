@@ -1,7 +1,7 @@
 import type { RegressionKind } from '../latency-regression/types';
 import { createHash } from 'crypto';
 import { AnomalyEvent, AnomalyPattern, AnomalySeverity, MetricType } from './types';
-import { SequenceRule, leadOf } from './sequence-rules';
+import { SequenceRule, fills, leadOf, opensAt } from './sequence-rules';
 import { SUSTAINED_COOLDOWN_MS } from '../latency-regression/regression-detector';
 
 export type IncidentScopeResolver = (connectionId: string) => string;
@@ -59,7 +59,8 @@ export interface IncidentTimeline {
   };
 }
 
-export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'nodeAddr' | 'timestamp'>;
+export type RuleStepEvent = Pick<AnomalyEvent, 'metricType' | 'connectionId' | 'nodeAddr' | 'timestamp'> &
+  Partial<Pick<AnomalyEvent, 'anomalyType' | 'retryTrigger'>>;
 
 type EventSource = Pick<AnomalyEvent, 'connectionId' | 'nodeAddr'>;
 
@@ -169,29 +170,39 @@ export function incidentStartOf(incidentId: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-export function matchSequence(
-  entries: IncidentTimelineEntry[],
+export function stepNumberOf(rule: SequenceRule, matched: readonly RuleStepEvent[], position: number): number | null {
+  const opened = opensAt(rule, matched[0]) ?? 0;
+  return position < rule.steps.length - opened ? position + opened + 1 : null;
+}
+
+export function requiredOf<E extends RuleStepEvent>(rule: SequenceRule, matched: readonly E[]): E[] {
+  return matched.slice(0, rule.steps.length - (opensAt(rule, matched[0]) ?? 0));
+}
+
+export function matchSequence<E extends RuleStepEvent>(
+  entries: E[],
   rule: SequenceRule,
-  accept: (matched: IncidentTimelineEntry[]) => boolean = () => true,
-): IncidentTimelineEntry[] | null {
-  const extend = (matched: IncidentTimelineEntry[]): IncidentTimelineEntry[] | 'unreachable' | 'rejected' => {
-    if (matched.length === rule.steps.length) return accept(matched) ? matched : 'rejected';
+  accept: (matched: E[]) => boolean = () => true,
+): E[] | null {
+  const extend = (matched: E[], opened: number): E[] | 'unreachable' | 'rejected' => {
+    const index = matched.length + opened;
+    if (index === rule.steps.length) return accept(matched) ? matched : 'rejected';
     const first = matched[0];
     const reached = Math.max(...matched.map((e) => e.timestamp));
     const earliest = Math.min(...matched.map((e) => e.timestamp));
-    const step = rule.steps[matched.length];
-    const lead = leadOf(rule, matched.length);
+    const step = rule.steps[index];
+    const lead = leadOf(rule, index);
     const options = entries.filter(
       (e) =>
         !matched.includes(e) &&
-        step.includes(e.metricType) &&
+        fills(rule, step, e) &&
         (!rule.sameConnection || sameSource(e, first)) &&
         e.timestamp >= reached - lead &&
         Math.max(reached, e.timestamp) - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
     );
     let outcome: 'unreachable' | 'rejected' = 'unreachable';
     for (const next of options) {
-      const found = extend([...matched, next]);
+      const found = extend([...matched, next], opened);
       if (found === 'unreachable') {
         if (lead === 0) break;
         continue;
@@ -203,13 +214,14 @@ export function matchSequence(
   };
 
   for (const first of entries) {
-    if (!rule.steps[0].includes(first.metricType)) continue;
-    const matched = extend([first]);
+    const opened = opensAt(rule, first);
+    if (opened === null) continue;
+    const matched = extend([first], opened);
     if (typeof matched === 'string') continue;
     const optional = entries.filter(
       (e) =>
         !matched.includes(e) &&
-        rule.optionalMetrics?.includes(e.metricType) &&
+        fills(rule, rule.optionalMetrics, e) &&
         (!rule.sameConnection || sameSource(e, first)) &&
         Math.abs(e.timestamp - first.timestamp) <= rule.maxSpanMs,
     );
@@ -232,17 +244,18 @@ export function reachesStep(
     )
     .sort((a, b) => a.timestamp - b.timestamp);
   return candidates.some((first) => {
-    if (!rule.steps[0].includes(first.metricType)) return false;
+    const opened = opensAt(rule, first);
+    if (opened === null || opened >= stepIndex) return false;
     if (event.timestamp - first.timestamp > rule.maxSpanMs) return false;
     const used: RuleStepEvent[] = [first];
     let reached = first.timestamp;
     let earliest = first.timestamp;
-    for (let i = 1; i < stepIndex; i++) {
+    for (let i = opened + 1; i < stepIndex; i++) {
       const lead = leadOf(rule, i);
       const next = candidates.find(
         (e) =>
           !used.includes(e) &&
-          rule.steps[i].includes(e.metricType) &&
+          fills(rule, rule.steps[i], e) &&
           e.timestamp >= reached - lead &&
           event.timestamp - Math.min(earliest, e.timestamp) <= rule.maxSpanMs,
       );
@@ -253,6 +266,17 @@ export function reachesStep(
     }
     return true;
   });
+}
+
+export function matchedBefore(
+  earlier: readonly RuleStepEvent[],
+  event: RuleStepEvent,
+  rule: SequenceRule,
+): boolean {
+  const pool = earlier.filter(
+    (e) => e.timestamp <= event.timestamp && (!rule.sameConnection || sameSource(e, event)),
+  );
+  return matchSequence(pool, rule, (matched) => event.timestamp - matched[0].timestamp <= rule.maxSpanMs) !== null;
 }
 
 export function precedesLeadStep(
@@ -266,7 +290,7 @@ export function precedesLeadStep(
       lead > 0 &&
       earlier.some(
         (e) =>
-          step.includes(e.metricType) &&
+          fills(rule, step, e) &&
           (!rule.sameConnection || sameSource(e, event)) &&
           e.timestamp <= event.timestamp &&
           event.timestamp - e.timestamp <= lead,
@@ -275,12 +299,12 @@ export function precedesLeadStep(
   });
 }
 
-export function matchSequences(
-  entries: IncidentTimelineEntry[],
+export function matchSequences<E extends RuleStepEvent>(
+  entries: E[],
   rule: SequenceRule,
-  accept?: (matched: IncidentTimelineEntry[]) => boolean,
-): IncidentTimelineEntry[][] {
-  const matches: IncidentTimelineEntry[][] = [];
+  accept?: (matched: E[]) => boolean,
+): E[][] {
+  const matches: E[][] = [];
   let remaining = entries;
   for (
     let matched = matchSequence(remaining, rule, accept);
@@ -288,7 +312,7 @@ export function matchSequences(
     matched = matchSequence(remaining, rule, accept)
   ) {
     matches.push(matched);
-    const used = matched;
+    const used = requiredOf(rule, matched);
     remaining = remaining.filter((e) => !used.includes(e));
   }
   return matches;
@@ -545,8 +569,13 @@ export class IncidentTimelineBuilder {
   }
 
   private droppedPrefix(stored: IncidentBoundary, droppedAt: number): RuleStepEvent[] {
+    const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
+    const isAnchor = (member: RuleStepEvent) =>
+      member.metricType === stored.metricType &&
+      member.connectionId === stored.connectionId &&
+      member.timestamp === stored.startedAt;
     const anchor: RuleStepEvent[] =
-      stored.metricType === undefined
+      stored.metricType === undefined || dropped.some(isAnchor)
         ? []
         : [
             {
@@ -555,7 +584,6 @@ export class IncidentTimelineBuilder {
               timestamp: stored.startedAt,
             },
           ];
-    const dropped = (stored.members ?? []).filter((member) => member.timestamp <= droppedAt);
     return [...anchor, ...dropped];
   }
 
@@ -572,15 +600,17 @@ export class IncidentTimelineBuilder {
   }
 
   private followsRuleStep(current: readonly RuleStepEvent[], event: AnomalyEvent): boolean {
-    return this.rules().some((rule) =>
-      rule.steps.some(
-        (step, i) =>
-          step.includes(event.metricType) &&
-          (i === 0
-            ? precedesLeadStep(current, event, rule)
-            : reachesStep(current, event, rule, i) ||
-              (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
-      ),
+    return this.rules().some(
+      (rule) =>
+        rule.steps.some(
+          (step, i) =>
+            fills(rule, step, event) &&
+            (i === 0
+              ? precedesLeadStep(current, event, rule)
+              : reachesStep(current, event, rule, i) ||
+                (leadOf(rule, i) > 0 && reachesStep(current, event, rule, i - 1))),
+        ) ||
+        (fills(rule, rule.optionalMetrics, event) && matchedBefore(current, event, rule)),
     );
   }
 
@@ -626,45 +656,72 @@ export class IncidentTimelineBuilder {
       if (!sequence.includes(entry.metricType)) sequence.push(entry.metricType);
     }
 
+    type Candidate = IncidentTimelineEntry & Pick<RuleStepEvent, 'anomalyType' | 'retryTrigger'>;
     const dropped = prefix.map(
-      (step): IncidentTimelineEntry => ({
+      (step): Candidate => ({
         anomalyId: '',
         connectionId: step.connectionId ?? '',
         timestamp: step.timestamp,
         metricType: step.metricType,
+        ...(step.nodeAddr ? { nodeAddr: step.nodeAddr } : {}),
+        ...(step.anomalyType ? { anomalyType: step.anomalyType } : {}),
+        ...(step.retryTrigger ? { retryTrigger: step.retryTrigger } : {}),
         severity: AnomalySeverity.INFO,
         message: '',
         recoveredAt: null,
         recoveryState: 'open',
       }),
     );
-    const candidates = [...dropped, ...entries].sort((a, b) => a.timestamp - b.timestamp);
+    const typed = entries.map(
+      (entry, i): Candidate => ({
+        ...entry,
+        anomalyType: events[i].anomalyType,
+        ...(events[i].retryTrigger ? { retryTrigger: events[i].retryTrigger } : {}),
+      }),
+    );
+    const candidates = [...dropped, ...typed].sort((a, b) => a.timestamp - b.timestamp);
+    const found: { rule: SequenceRule; matched: Candidate[]; match: IncidentSequenceMatch }[] = [];
+    for (const rule of this.rules()) {
+      const holdsStep = (matched: Candidate[]) =>
+        matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => fills(rule, step, e)));
+      for (const matched of matchSequences(candidates, rule, holdsStep)) {
+        const live = matched.filter((e) => !dropped.includes(e));
+        found.push({
+          rule,
+          matched,
+          match: {
+            pattern: rule.pattern,
+            anomalyIds: live.map((e) => e.anomalyId),
+            steps: live.map((e) => ({
+              anomalyId: e.anomalyId,
+              step: stepNumberOf(rule, matched, matched.indexOf(e)),
+            })),
+            diagnosis: rule.diagnosis,
+            recommendations: rule.recommendations,
+            severity: maxSeverity(live.map((e) => e.severity)),
+          },
+        });
+      }
+    }
+    const superseded = ({ rule, match, matched }: (typeof found)[number]) => {
+      const required = requiredOf(rule, matched);
+      return found.some(
+        (other) =>
+          other.rule.supersedes?.includes(match.pattern) &&
+          requiredOf(other.rule, other.matched).some((e) => required.includes(e)),
+      );
+    };
     const sequenceMatches: IncidentSequenceMatch[] = [];
     const recommendedBy = new Map<string, AnomalyPattern>();
-    for (const rule of this.rules()) {
-      const holdsStep = (matched: IncidentTimelineEntry[]) =>
-        matched.some((e) => !dropped.includes(e) && rule.steps.some((step) => step.includes(e.metricType)));
-      for (const matched of matchSequences(candidates, rule, holdsStep)) {
-        const held = matched.filter((e) => !dropped.includes(e));
-        sequenceMatches.push({
-          pattern: rule.pattern,
-          anomalyIds: held.map((e) => e.anomalyId),
-          steps: held.map((e) => {
-            const position = matched.indexOf(e);
-            return {
-              anomalyId: e.anomalyId,
-              step: position < rule.steps.length ? position + 1 : null,
-            };
-          }),
-          diagnosis: rule.diagnosis,
-          recommendations: rule.recommendations.filter(
-            (r) => (recommendedBy.get(r) ?? rule.pattern) === rule.pattern,
-          ),
-          severity: maxSeverity(held.map((e) => e.severity)),
-        });
-        for (const r of rule.recommendations) {
-          if (!recommendedBy.has(r)) recommendedBy.set(r, rule.pattern);
-        }
+    for (const { match } of found.filter((f) => !superseded(f))) {
+      sequenceMatches.push({
+        ...match,
+        recommendations: match.recommendations.filter(
+          (r) => (recommendedBy.get(r) ?? match.pattern) === match.pattern,
+        ),
+      });
+      for (const r of match.recommendations) {
+        if (!recommendedBy.has(r)) recommendedBy.set(r, match.pattern);
       }
     }
 

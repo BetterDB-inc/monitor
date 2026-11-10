@@ -401,6 +401,7 @@ import {
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
+  isRetryTrigger,
 } from './types';
 
 /** A topology the fan-out does not dial, and how many of its primaries that leaves unchecked. */
@@ -7421,6 +7422,7 @@ export class AnomalyService
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
       kind: anomaly.kind,
+      ...(anomaly.retryTrigger ? { retryTrigger: anomaly.retryTrigger } : {}),
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs:
@@ -7994,8 +7996,17 @@ export class AnomalyService
       const seen = incident.entries.flatMap((entry) => {
         const event = this.liveEventsById.get(entry.anomalyId);
         if (!event) return [];
-        const { metricType, connectionId, nodeAddr, timestamp } = event;
-        return [{ metricType, connectionId, ...(nodeAddr ? { nodeAddr } : {}), timestamp }];
+        const { metricType, anomalyType, retryTrigger, connectionId, nodeAddr, timestamp } = event;
+        return [
+          {
+            metricType,
+            anomalyType,
+            ...(retryTrigger ? { retryTrigger } : {}),
+            connectionId,
+            ...(nodeAddr ? { nodeAddr } : {}),
+            timestamp,
+          },
+        ];
       });
       return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
     };
@@ -8079,13 +8090,15 @@ export class AnomalyService
 
     for (const incident of this.liveIncidents) {
       for (const match of incident.sequenceMatches) {
-        const keys = match.anomalyIds.map((id) => `${match.pattern}\u0000${id}`);
+        const required = match.steps.filter((s) => s.step !== null).map((s) => s.anomalyId);
+        const keys = required.map((id) => `${match.pattern}\u0000${id}`);
         if (keys.some((key) => this.sequenceGroupedAnomalies.has(key))) continue;
         const anomalies = match.anomalyIds
           .map((id) => this.liveEventsById.get(id))
           .filter((a): a is AnomalyEvent => a !== undefined);
         if (anomalies.length === 0) continue;
-        anomalies.forEach((a) =>
+        const exclusive = anomalies.filter((a) => required.includes(a.id));
+        exclusive.forEach((a) =>
           this.sequenceGroupedAnomalies.set(`${match.pattern}\u0000${a.id}`, a.timestamp),
         );
         const recorded = await this.recordSequenceGroup({
@@ -8098,7 +8111,7 @@ export class AnomalyService
           severity: match.severity,
         });
         if (!recorded) {
-          anomalies.forEach((a) =>
+          exclusive.forEach((a) =>
             this.sequenceGroupedAnomalies.delete(`${match.pattern}\u0000${a.id}`),
           );
         }
@@ -8672,6 +8685,7 @@ export class AnomalyService
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
+      ...(isRetryTrigger(s.retryTrigger) ? { retryTrigger: s.retryTrigger } : {}),
       kind: s.kind,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
@@ -8768,7 +8782,8 @@ export class AnomalyService
   }
 
   private async seedSequenceDedupe(since: number): Promise<boolean> {
-    const patterns = new Set(getSequenceRules().map((r) => r.pattern));
+    const rules = new Map(getSequenceRules().map((r) => [r.pattern, r]));
+    const patterns = new Set(rules.keys());
     if (patterns.size === 0) return true;
     try {
       const groups = await Promise.all(
@@ -8777,9 +8792,14 @@ export class AnomalyService
         ),
       );
       for (const group of groups.flat()) {
-        for (const id of group.anomalyIds ?? []) {
-          this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp);
-        }
+        const optional = rules.get(group.pattern as AnomalyPattern)?.optionalMetrics ?? [];
+        const ids = group.anomalyIds ?? [];
+        const typed = group.metricTypes?.length === ids.length;
+        ids
+          .filter((_, i) => !typed || !optional.includes(group.metricTypes[i] as MetricType))
+          .forEach((id) =>
+            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp),
+          );
       }
       return true;
     } catch (error) {
