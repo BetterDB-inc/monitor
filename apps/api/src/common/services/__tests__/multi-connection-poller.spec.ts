@@ -210,6 +210,57 @@ describe('MultiConnectionPoller startAfter', () => {
   });
 });
 
+describe('MultiConnectionPoller stalled polls', () => {
+  class StallingPoller extends TestPoller {
+    readonly stall = new Set<string>();
+    release!: () => void;
+
+    protected getPollTimeoutMs(): number {
+      return 20;
+    }
+
+    protected async pollConnection(ctx: ConnectionContext): Promise<void> {
+      if (this.stall.has(ctx.connectionId)) {
+        await new Promise<void>((resolve) => (this.release = resolve));
+      }
+      await super.pollConnection(ctx);
+    }
+  }
+
+  it('finishes the tick without a stalled connection and skips it until it settles', async () => {
+    const statuses = [status('stuck', 'direct'), status('ok', 'direct')];
+    const registry = { list: () => statuses, get: () => ({}) } as unknown as ConnectionRegistry;
+    const poller = new StallingPoller(registry);
+    poller.stall.add('stuck');
+
+    await poller.tickNow();
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok']);
+
+    poller.stall.clear();
+    poller.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    await poller.tickNow();
+    expect(poller.polled.map((c) => c.connectionId)).toEqual(['ok', 'ok', 'stuck', 'stuck', 'ok']);
+  });
+
+  it('cleans up again when a connection removed mid-poll finishes its poll', async () => {
+    let statuses = [status('stuck', 'direct'), status('ok', 'direct')];
+    const registry = { list: () => statuses, get: () => ({}) } as unknown as ConnectionRegistry;
+    const poller = new StallingPoller(registry);
+    poller.stall.add('stuck');
+
+    await poller.tickNow();
+    statuses = [status('ok', 'direct')];
+    await poller.tickNow();
+    expect(poller.removed).toEqual(['stuck']);
+
+    poller.release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(poller.removed).toEqual(['stuck', 'stuck']);
+  });
+});
+
 describe('MultiConnectionPoller sentinel handling', () => {
   function sentinelSetup(throwing = false) {
     const statuses = [status('d', 'direct'), status('s', 'direct')];

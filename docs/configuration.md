@@ -581,7 +581,8 @@ Once running, access the web interface at:
 | Endpoint                  | Description                   |
 | ------------------------- | ----------------------------- |
 | `/`                       | Web UI dashboard              |
-| `/api/health`             | Health check endpoint         |
+| `/api/health`             | Health check endpoint (waits on the monitored database) |
+| `/api/health/live`        | Liveness: answers once the API is up. A probe that sends no cookie and no `Authorization` header does not touch storage. With user control on, a request that includes either resolves the caller against storage first, so a stalled database can delay it. Probes must omit both. |
 | `/docs`                   | Swagger/OpenAPI documentation |
 | `/api/prometheus/metrics` | Prometheus metrics endpoint   |
 
@@ -604,7 +605,7 @@ curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
 curl -b cookies.txt -c cookies.txt http://localhost:3001/api/connections
 ```
 
-These routes stay open without a session: `/api/health`, `/api/version`,
+These routes stay open without a session: `/api/health` (including `/api/health/live`), `/api/version`,
 `/api/system/workspace`, `/api/prometheus/metrics`, the Swagger UI at `/docs`, the `/api/auth` and
 `/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
 changes — approving or rejecting cache and memory proposals — need a session too.

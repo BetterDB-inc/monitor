@@ -350,6 +350,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      sourceRunId: row.source_run_id ?? '',
       connectionId: row.connection_id,
     };
   }
@@ -369,6 +370,7 @@ export class RowMappers {
       capturedAt: typeof row.captured_at === 'string' ? parseInt(row.captured_at, 10) : row.captured_at,
       sourceHost: row.source_host,
       sourcePort: row.source_port,
+      sourceRunId: row.source_run_id ?? '',
       connectionId: row.connection_id,
     };
   }

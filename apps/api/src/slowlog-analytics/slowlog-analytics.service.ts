@@ -8,7 +8,12 @@ import {
 import { SettingsService } from '../settings/settings.service';
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
-import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+  describeLogSource,
+  LogSourceTracker,
+} from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
@@ -18,6 +23,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   // Per-connection state tracking
   private lastSeenIds = new Map<string, number | null>();
+  // Server process each connection's lastSeenId belongs to. Slowlog IDs are per
+  // process, so when a connection lands on another one the tracker restarts
+  // from that process's own last stored ID.
+  private readonly logSources: LogSourceTracker;
 
   // Per-connection cache for Prometheus metrics
   private cachedEntries = new Map<string, SlowLogEntry[]>();
@@ -34,6 +43,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
+    this.logSources = new LogSourceTracker((id) => this.storage.hasRunIdLogEntries(id));
   }
 
   protected getIntervalMs(): number {
@@ -51,15 +61,37 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     }
 
     try {
+      const read = await this.logSources.read(ctx);
+      if (!read) {
+        this.logger.debug(`Slow log source for ${ctx.connectionName} is unknown; skipping this poll`);
+        return;
+      }
+      const { source } = read;
+      const moved = this.logSources.track(ctx.connectionId, read);
+      if (moved.changed) {
+        if (moved.previous !== undefined) {
+          this.logger.log(
+            `Slow log source for ${ctx.connectionName} moved from ${moved.previous} to ${describeLogSource(source)}`,
+          );
+        }
+        this.lastSeenIds.delete(ctx.connectionId);
+      }
+
       // Initialize lastSeenId from storage if not already set
       if (!this.lastSeenIds.has(ctx.connectionId)) {
-        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId);
+        const lastId = await this.storage.getLatestSlowLogId(ctx.connectionId, source);
         this.lastSeenIds.set(ctx.connectionId, lastId);
         this.logger.debug(`Initialized lastSeenId for ${ctx.connectionName}: ${lastId}`);
       }
 
       // Fetch slow log from Valkey/Redis (up to 128 entries)
       const entries = await ctx.client.getSlowLog(128);
+      // A reconnect during the awaits above moves the socket to another
+      // process; its entries must not be stored under this source.
+      if (!(await this.logSources.unchanged(ctx, read))) {
+        this.logger.debug(`Slow log source for ${ctx.connectionName} changed during the read; skipping this poll`);
+        return;
+      }
       const now = Date.now();
       const lastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
 
@@ -99,8 +131,9 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         clientAddress: e.clientAddress || '',
         clientName: e.clientName || '',
         capturedAt: now,
-        sourceHost: ctx.host,
-        sourcePort: ctx.port,
+        sourceHost: source.host,
+        sourcePort: source.port,
+        sourceRunId: source.runId,
         connectionId: ctx.connectionId,
       }));
 
@@ -126,6 +159,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.logSources.forget(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

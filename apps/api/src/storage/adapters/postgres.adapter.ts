@@ -2,6 +2,7 @@ import { Client, ClientBase, ClientConfig, Pool, PoolConfig } from 'pg';
 import { KV_CACHE_SAMPLE_COUNTER_COLUMNS } from './kv-cache-sample-columns';
 import { isTrueFlag } from '../../config/env-normalize';
 import { chunkedPostgresDelete } from './postgres-chunked-delete';
+import { LOG_RUN_ID_UNIQUE_INDEXES } from './log-run-id-indexes';
 import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
@@ -15,6 +16,7 @@ import type {
   KvCacheFootprintQuery,
   KvCacheSampleQuery,
   KvCacheSampleTotals,
+  LogSource,
 } from '../../common/interfaces/storage-port.interface';
 import type {
   ReadinessDimension,
@@ -532,6 +534,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           await this.createSchema();
           if (!(await this.hasAnomalyKindColumn())) await this.addAnomalyKindColumn();
           await this.ensureOtelIngestedIndex();
+          await this.migrateLogSourceKeys();
           await this.backfillMemoryProposalDiscriminators();
         } finally {
           await lockClient.query('SELECT pg_advisory_unlock($1)', [lockKey]);
@@ -2098,8 +2101,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(slowlog_id, source_host, source_port, connection_id)
+        UNIQUE(slowlog_id, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_slowlog_timestamp ON slow_log_entries(timestamp DESC);
@@ -2109,43 +2113,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_slowlog_captured_at ON slow_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_slowlog_connection_id ON slow_log_entries(connection_id);
 
-      -- Drop old unique constraint without connection_id if it exists
-      DO $$
-      BEGIN
-        ALTER TABLE slow_log_entries
-        DROP CONSTRAINT IF EXISTS slow_log_entries_slowlog_id_source_host_source_port_key;
-      EXCEPTION WHEN undefined_object THEN
-        -- Constraint doesn't exist, ignore
-      END $$;
-
-      -- Add unique constraint if missing (for tables created before this constraint was added)
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint c
-          JOIN pg_class t ON c.conrelid = t.oid
-          WHERE t.relname = 'slow_log_entries'
-            AND c.contype = 'u'
-            AND c.conkey @> ARRAY(
-              SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('slowlog_id', 'source_host', 'source_port', 'connection_id')
-            )
-        ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM slow_log_entries a USING slow_log_entries b
-          WHERE a.pk < b.pk
-            AND a.slowlog_id = b.slowlog_id
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
-          ALTER TABLE slow_log_entries
-          ADD CONSTRAINT slow_log_entries_slowlog_id_source_host_source_port_conn_key
-          UNIQUE (slowlog_id, source_host, source_port, connection_id);
-        END IF;
-      EXCEPTION WHEN duplicate_object THEN
-        -- Constraint already exists, ignore
-      END $$;
+      -- Log IDs are per server process: source_run_id (INFO server run_id) joins
+      -- the unique key, so the same id from two processes behind one address
+      -- (a restart, a reused pod IP) is kept. Legacy rows keep source_run_id = ''.
+      -- The widened key and the lookup indexes are built CONCURRENTLY after this
+      -- batch, and the narrower legacy keys dropped, see migrateLogSourceKeys()
+      -- and ensureAnalyticsIndexes().
+      ALTER TABLE slow_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
 
       -- Command Log Entries Table (Valkey-specific)
       CREATE TABLE IF NOT EXISTS command_log_entries (
@@ -2160,8 +2134,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         captured_at BIGINT NOT NULL,
         source_host TEXT NOT NULL,
         source_port INTEGER NOT NULL,
+        source_run_id TEXT NOT NULL DEFAULT '',
         connection_id TEXT NOT NULL DEFAULT 'env-default',
-        UNIQUE(commandlog_id, log_type, source_host, source_port, connection_id)
+        UNIQUE(commandlog_id, log_type, source_host, source_port, source_run_id, connection_id)
       );
 
       CREATE INDEX IF NOT EXISTS idx_commandlog_timestamp ON command_log_entries(timestamp DESC);
@@ -2171,44 +2146,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       CREATE INDEX IF NOT EXISTS idx_commandlog_captured_at ON command_log_entries(captured_at DESC);
       CREATE INDEX IF NOT EXISTS idx_commandlog_connection_id ON command_log_entries(connection_id);
 
-      -- Drop old unique constraint without connection_id if it exists
-      DO $$
-      BEGIN
-        ALTER TABLE command_log_entries
-        DROP CONSTRAINT IF EXISTS command_log_entries_commandlog_id_log_type_source_host_sour_key;
-      EXCEPTION WHEN undefined_object THEN
-        -- Constraint doesn't exist, ignore
-      END $$;
-
-      -- Add unique constraint if missing (for tables created before this constraint was added)
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint c
-          JOIN pg_class t ON c.conrelid = t.oid
-          WHERE t.relname = 'command_log_entries'
-            AND c.contype = 'u'
-            AND c.conkey @> ARRAY(
-              SELECT attnum FROM pg_attribute
-              WHERE attrelid = t.oid AND attname IN ('commandlog_id', 'log_type', 'source_host', 'source_port', 'connection_id')
-            )
-        ) THEN
-          -- Remove duplicates first (keep the one with highest pk)
-          DELETE FROM command_log_entries a USING command_log_entries b
-          WHERE a.pk < b.pk
-            AND a.commandlog_id = b.commandlog_id
-            AND a.log_type = b.log_type
-            AND a.source_host = b.source_host
-            AND a.source_port = b.source_port
-            AND a.connection_id = b.connection_id;
-
-          ALTER TABLE command_log_entries
-          ADD CONSTRAINT command_log_entries_cmdlog_id_type_host_port_conn_key
-          UNIQUE (commandlog_id, log_type, source_host, source_port, connection_id);
-        END IF;
-      EXCEPTION WHEN duplicate_object THEN
-        -- Constraint already exists, ignore
-      END $$;
+      -- See slow_log_entries: the widened key is built by migrateLogSourceKeys().
+      ALTER TABLE command_log_entries ADD COLUMN IF NOT EXISTS source_run_id TEXT NOT NULL DEFAULT '';
 
       -- Latency Snapshots Table
       CREATE TABLE IF NOT EXISTS latency_snapshots (
@@ -4119,9 +4058,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return this.slowlogRepo.getSlowLogEntries(options);
   }
 
-  async getLatestSlowLogId(connectionId?: string): Promise<number | null> {
+  async getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
-    return this.slowlogRepo.getLatestSlowLogId(connectionId);
+    return this.slowlogRepo.getLatestSlowLogId(connectionId, source);
   }
 
   async pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -4144,7 +4083,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       placeholders.push(`(
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         entry.id,
@@ -4157,6 +4096,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         entry.capturedAt,
         entry.sourceHost,
         entry.sourcePort,
+        entry.sourceRunId ?? '',
         connectionId,
       );
     }
@@ -4164,9 +4104,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const query = `
       INSERT INTO command_log_entries (
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
       ) VALUES ${placeholders.join(', ')}
-      ON CONFLICT (commandlog_id, log_type, source_host, source_port, connection_id) DO NOTHING
+      ON CONFLICT DO NOTHING
     `;
 
     const result = await this.pool.query(query, values);
@@ -4224,7 +4164,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const result = await this.pool.query(
       `SELECT
         commandlog_id, timestamp, duration, command,
-        client_address, client_name, log_type, captured_at, source_host, source_port, connection_id
+        client_address, client_name, log_type, captured_at, source_host, source_port, source_run_id, connection_id
       FROM command_log_entries
       ${whereClause}
       ${orderBy}
@@ -4235,25 +4175,41 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     return result.rows.map((row) => this.mappers.mapCommandLogEntryRow(row));
   }
 
-  async getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null> {
+  async getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null> {
     if (!this.pool) throw new Error('Database not initialized');
 
-    if (connectionId) {
-      const result = await this.pool.query(
-        'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1 AND connection_id = $2',
-        [type, connectionId],
-      );
-      const maxId = result.rows[0]?.max_id;
-      return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    const add = (sql: string, value: unknown) => {
+      params.push(value);
+      conditions.push(sql.replace('?', `$${params.length}`));
+    };
+    add('log_type = ?', type);
+    if (connectionId) add('connection_id = ?', connectionId);
+    if (source) {
+      add('source_run_id = ?', source.runId ?? '');
+      if (!source.runId) {
+        add('source_host = ?', source.host);
+        add('source_port = ?', source.port);
+      }
     }
-
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
     const result = await this.pool.query(
-      'SELECT MAX(commandlog_id) as max_id FROM command_log_entries WHERE log_type = $1',
-      [type],
+      `SELECT MAX(commandlog_id) as max_id FROM command_log_entries${where}`,
+      params,
     );
-
     const maxId = result.rows[0]?.max_id;
     return maxId !== null && maxId !== undefined ? Number(maxId) : null;
+  }
+
+  async hasRunIdLogEntries(connectionId: string): Promise<boolean> {
+    if (!this.pool) throw new Error('Database not initialized');
+    const result = await this.pool.query(
+      `SELECT EXISTS (SELECT 1 FROM slow_log_entries WHERE connection_id = $1 AND source_run_id <> '')
+           OR EXISTS (SELECT 1 FROM command_log_entries WHERE connection_id = $1 AND source_run_id <> '') AS found`,
+      [connectionId],
+    );
+    return result.rows[0]?.found === true;
   }
 
   async pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number> {
@@ -5803,6 +5759,102 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
   }
 
   /**
+   * Move the slow/command log tables to their run-id keys without blocking
+   * writers on a large table: the widened unique key is built CONCURRENTLY and
+   * attached as a constraint, and only then are the narrower constraints (which
+   * would reject the same id from another process) dropped. A table without any
+   * unique key is deduplicated on the new key first. Rows with a run id
+   * also get a partial unique index on (id, run id), so one process read through
+   * two addresses is stored once; rows duplicated that way are collapsed first.
+   * Only this schema's constraints are considered.
+   *
+   * If a CONCURRENTLY build fails, the build falls back to a blocking one that
+   * holds a SHARE lock, so log inserts from other replicas wait until it ends.
+   * That wait is not bounded on purpose: a build given up on a timeout would
+   * leave the tables on their old keys until the next start, storing one
+   * process's entries again under each address it is read through.
+   *
+   * The constraints dropped below are the ones the previous version's inserts
+   * name. Stop that version before this one starts. Leaving it running makes
+   * every slow log and command log insert fail until it is replaced. See
+   * docs/updating.md.
+   */
+  private async migrateLogSourceKeys(): Promise<void> {
+    if (!this.pool) return;
+    const tables = [
+      {
+        table: 'slow_log_entries',
+        constraint: 'slow_log_entries_id_host_port_run_conn_key',
+        columns: ['slowlog_id', 'source_host', 'source_port', 'source_run_id', 'connection_id'],
+      },
+      {
+        table: 'command_log_entries',
+        constraint: 'command_log_entries_id_type_host_port_run_conn_key',
+        columns: ['commandlog_id', 'log_type', 'source_host', 'source_port', 'source_run_id', 'connection_id'],
+      },
+    ];
+    const uniqueConstraints = `
+      SELECT c.conname, c.conkey @> ARRAY(
+               SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = ANY($2::text[])
+             ) AS covers,
+             c.conkey @> ARRAY(
+               SELECT attnum FROM pg_attribute WHERE attrelid = t.oid AND attname = 'source_run_id'
+             ) AS has_run_id
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE t.relname = $1 AND n.nspname = current_schema() AND c.contype = 'u'`;
+
+    const client = await this.pool.connect();
+    try {
+      for (const { table, constraint, columns } of tables) {
+        let existing = (await client.query(uniqueConstraints, [table, columns])).rows;
+        if (!existing.some((row) => row.covers)) {
+          // Any unique key these tables had is narrower than the new one, so
+          // only a table with none at all (created before the first) can hold
+          // rows the new key rejects; keep the first copy of each.
+          if (existing.length === 0) {
+            await client.query(
+              `DELETE FROM ${table} a USING ${table} b
+               WHERE a.pk > b.pk AND ${columns.map((column) => `a.${column} = b.${column}`).join(' AND ')}`,
+            );
+          }
+          const built = await this.ensureIndexConcurrently(client, constraint, table, columns.join(', '), {
+            unique: true,
+          });
+          if (!built) await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${constraint} ON ${table}(${columns.join(', ')})`);
+          await client.query(`ALTER TABLE ${table} ADD CONSTRAINT ${constraint} UNIQUE USING INDEX ${constraint}`);
+          existing = (await client.query(uniqueConstraints, [table, columns])).rows;
+        }
+        for (const row of existing) {
+          if (!row.has_run_id) await client.query(`ALTER TABLE ${table} DROP CONSTRAINT ${row.conname}`);
+        }
+      }
+
+      for (const { table, index, columns } of LOG_RUN_ID_UNIQUE_INDEXES) {
+        if (await this.isIndexValid(client, index, table)) continue;
+        await client.query(
+          `DELETE FROM ${table} a USING ${table} b
+           WHERE a.source_run_id <> '' AND a.pk > b.pk
+             AND ${columns
+               .split(', ')
+               .map((column) => `a.${column} = b.${column}`)
+               .join(' AND ')}`,
+        );
+        const built = await this.ensureIndexConcurrently(client, index, table, columns, {
+          unique: true,
+          where: "source_run_id <> ''",
+        });
+        if (!built) {
+          await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ${index} ON ${table}(${columns}) WHERE source_run_id <> ''`);
+        }
+      }
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * A connection outside the pool with the pool's settings (connection
    * string, SSL) and, like the pool's on-connect hook, the schema's
    * search_path. Used for builds close() must be able to cut short: pool.end()
@@ -5853,6 +5905,16 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ['idx_acl_connection_captured', 'acl_audit', 'connection_id, captured_at'],
       ['idx_anomaly_events_scope', 'anomaly_events', 'scope_id, timestamp DESC'],
       ['idx_correlated_groups_scope', 'correlated_anomaly_groups', 'scope_id, timestamp DESC'],
+      [
+        'idx_slowlog_connection_source',
+        'slow_log_entries',
+        'connection_id, source_run_id, source_host, source_port, slowlog_id',
+      ],
+      [
+        'idx_commandlog_connection_source',
+        'command_log_entries',
+        'log_type, connection_id, source_run_id, source_host, source_port, commandlog_id',
+      ],
     ];
     if (this.closing) return;
     // A dedicated connection, not a pooled one, so close() can end it
@@ -5991,6 +6053,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     indexName: string,
     tableName: string,
     columns: string,
+    options: { unique?: boolean; where?: string } = {},
   ): Promise<boolean> {
     // Keyed on this schema's table oid, not a constant: advisory locks are
     // database-wide, so with per-tenant schemas in one database a shared key
@@ -6003,11 +6066,13 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     );
     if (!lock.rows[0]?.locked) return false;
     const lockKey: number = lock.rows[0].key;
+    const unique = options.unique ? 'UNIQUE ' : '';
+    const where = options.where ? ` WHERE ${options.where}` : '';
     try {
       try {
         await this.dropInvalidIndex(client, indexName, tableName, true);
         await client.query(
-          `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`,
+          `CREATE ${unique}INDEX CONCURRENTLY IF NOT EXISTS ${indexName} ON ${tableName}(${columns})${where}`,
         );
       } catch (error) {
         // close() ended the connection: nothing to fall back on.
@@ -6020,7 +6085,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         );
         // The failed concurrent build may have left its own invalid index.
         await this.dropInvalidIndex(client, indexName, tableName, false);
-        await client.query(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})`);
+        await client.query(`CREATE ${unique}INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${columns})${where}`);
       }
     } finally {
       // A closed connection has already released its session lock.

@@ -17,6 +17,7 @@ import { createUpgradeRouter } from './common/websocket/upgrade-router';
 import { resolveWorkspaceConfig } from './auth/workspace-config';
 import { resolveAgentGateway } from './agent/resolve-agent-gateway';
 import { registerOtlpBodyParsing } from './ai-observability/otlp-body-parsing';
+import { SLOT_STATS_FAILED_NODES_HEADER } from './metrics/metrics.service';
 
 async function bootstrap(): Promise<void> {
   // Validate environment variables before anything else
@@ -178,6 +179,7 @@ async function bootstrap(): Promise<void> {
         callback(new Error('Not allowed by CORS'), false);
       },
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      exposedHeaders: [SLOT_STATS_FAILED_NODES_HEADER],
       credentials: true,
     });
   }

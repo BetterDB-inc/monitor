@@ -10,6 +10,7 @@ import {
   ClusterShard,
   ClusterShardNode,
   SlotStats,
+  SlotStatsMetric,
   SentinelNodeInfo,
 } from '../../common/types/metrics.types';
 import { InfoParser } from './info.parser';
@@ -25,6 +26,13 @@ export const KEYSPACE_DB_KEY = /^db\d+$/;
 export interface ParseInfoOptions {
   omitAbsentKeyspaceFields?: boolean;
 }
+
+const SLOT_STAT_FIELDS: Record<string, keyof SlotStatsMetric> = {
+  'key-count': 'key_count',
+  'cpu-usec': 'cpu_usec',
+  'network-bytes-in': 'network_bytes_in',
+  'network-bytes-out': 'network_bytes_out',
+};
 
 export class MetricsParser {
   static parseInfoToTyped(
@@ -522,42 +530,29 @@ export class MetricsParser {
       if (!Array.isArray(entry) || entry.length < 2) continue;
 
       const slot = entry[0];
-      const metricPair = entry[1];
+      const metrics = entry[1];
 
-      if (typeof slot !== 'number' || !Array.isArray(metricPair) || metricPair.length < 2) {
-        continue;
-      }
-
-      const metricName = metricPair[0];
-      const metricValue = metricPair[1];
-
-      if (typeof metricName !== 'string' || typeof metricValue !== 'number') {
+      if (typeof slot !== 'number' || !Array.isArray(metrics) || metrics.length < 2) {
         continue;
       }
 
       const slotKey = slot.toString();
       if (!stats[slotKey]) {
-        stats[slotKey] = {
-          key_count: 0,
-          expires_count: 0,
-          total_reads: 0,
-          total_writes: 0,
-        };
+        stats[slotKey] = { key_count: 0 };
       }
 
-      switch (metricName.toLowerCase()) {
-        case 'key-count':
-          stats[slotKey].key_count = metricValue;
-          break;
-        case 'expires-count':
-          stats[slotKey].expires_count = metricValue;
-          break;
-        case 'total-reads':
-          stats[slotKey].total_reads = metricValue;
-          break;
-        case 'total-writes':
-          stats[slotKey].total_writes = metricValue;
-          break;
+      // Each slot carries a flat name/value list with every metric the server
+      // reports (Valkey 9: key-count, cpu-usec, network-bytes-in/out).
+      for (let i = 0; i + 1 < metrics.length; i += 2) {
+        const metricName = metrics[i];
+        const metricValue = metrics[i + 1];
+        if (typeof metricName !== 'string' || typeof metricValue !== 'number') {
+          continue;
+        }
+        const field = SLOT_STAT_FIELDS[metricName.toLowerCase()];
+        if (field) {
+          stats[slotKey][field] = metricValue;
+        }
       }
     }
 

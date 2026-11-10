@@ -233,9 +233,10 @@ export interface ClusterNode {
 
 export interface SlotStatsMetric {
   key_count: number;
-  expires_count: number;
-  total_reads: number;
-  total_writes: number;
+  // Cumulative, and only reported with cluster-slot-stats-enabled.
+  cpu_usec?: number;
+  network_bytes_in?: number;
+  network_bytes_out?: number;
 }
 
 export interface SlotStats {

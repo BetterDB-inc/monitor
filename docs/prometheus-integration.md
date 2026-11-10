@@ -21,7 +21,7 @@ See the **[full metrics reference](prometheus-metrics.md)** for every metric, it
 | Replication       | `betterdb_replication_offset`, `betterdb_connected_slaves`, `betterdb_repl_output_buffer_ratio`                  | `INFO replication`                 |
 | Command stats     | `betterdb_commandstats_calls_total`, `betterdb_commandstats_latency_us`                                          | `INFO commandstats`                |
 | Cluster           | `betterdb_cluster_size`, `betterdb_cluster_slots_ok`/`_fail`/`_pfail`, `betterdb_cluster_known_nodes`            | `CLUSTER INFO`                     |
-| Per-slot stats    | `betterdb_cluster_slot_keys`, `betterdb_cluster_slot_reads_total`, `betterdb_cluster_slot_writes_total`          | `CLUSTER SLOT-STATS` (Valkey 8.0+) |
+| Per-slot stats    | `betterdb_cluster_slot_keys`, `betterdb_cluster_slot_cpu_usec_total`, `betterdb_cluster_slot_network_bytes_*`     | `CLUSTER SLOT-STATS` (Valkey 8.0+) |
 | Slowlog patterns  | `betterdb_slowlog_pattern_count`, `betterdb_slowlog_pattern_avg_duration_us`                                     | Persisted slowlog history          |
 | COMMANDLOG        | `betterdb_commandlog_large_request_by_pattern`, `betterdb_commandlog_large_reply_by_pattern`                     | `COMMANDLOG` (Valkey 8.1+)         |
 | ACL audit         | `betterdb_acl_denied`, `betterdb_acl_denied_by_user`                                                             | Persisted `ACL LOG` history        |
@@ -52,7 +52,7 @@ A ready-made set of dashboards ships in `deploy/observability/dashboards/`:
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
 | **BetterDB · Instance Vitals** | Is the instance healthy — memory, CPU, ops/sec, hit rate, clients, replication, uptime?                                  |
 | **BetterDB · Query Patterns**  | Which query patterns are slow or oversized, and how often?                                                               |
-| **BetterDB · Cluster Slots**   | Is the cluster balanced — slot health, key distribution, hottest slots by reads/writes?                                  |
+| **BetterDB · Cluster Slots**   | Is the cluster balanced — slot health, key distribution, hottest slots by CPU and traffic?                               |
 | **BetterDB · Anomalies**       | What's anomalous right now, grouped by severity and correlated pattern, and how close is a metric to its forecast limit? |
 
 Each dashboard is templated on a `connection` variable, so one Grafana can
@@ -75,8 +75,8 @@ rate(betterdb_keyspace_hits_total[5m])
 # Memory utilization vs maxmemory
 betterdb_memory_used_bytes / betterdb_memory_max_bytes > 0.9
 
-# Hottest cluster slots by write volume
-topk(10, rate(betterdb_cluster_slot_writes_total[5m]))
+# Hottest cluster slots by CPU (needs cluster-slot-stats-enabled)
+topk(10, rate(betterdb_cluster_slot_cpu_usec_total[5m]))
 
 # Slowest command patterns
 topk(5, betterdb_slowlog_pattern_avg_duration_us)

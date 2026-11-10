@@ -8,6 +8,7 @@ import {
   exceedsRetirementThreshold,
   parseNodeAddress,
   retirementKey,
+  seedIsAlias,
 } from '../membership-diff';
 
 function node(id: string, address: string, flags: string[] = ['master']): DiscoveredNode {
@@ -45,6 +46,20 @@ describe('desiredFromDiscovery', () => {
     expect(desired).toEqual([{ host: '10.0.0.5', port: 7005, nodeId: 'e', source: 'cluster' }]);
   });
 
+  it('keeps myself when the seed is an alias for several nodes', () => {
+    const desired = desiredFromDiscovery(
+      { host: 'valkey.svc', port: 6379 },
+      [
+        node('a', '10.0.0.1:6379@16379', ['myself', 'master']),
+        node('b', ':0@0', ['master', 'noaddr']),
+        node('c', '10.0.0.3:6379@16379', ['handshake']),
+        node('d', '10.0.0.4:6379@16379', ['slave']),
+      ],
+      { seedIsAlias: true },
+    );
+    expect(desired.map((n) => n.nodeId)).toEqual(['a', 'd']);
+  });
+
   it('carries the hostname a node announces', () => {
     const desired = desiredFromDiscovery({ host: 'seed', port: 7001 }, [
       { ...node('a', '10.0.0.2:7002@17002'), hostname: 'node-2.cluster.local' },
@@ -59,6 +74,65 @@ describe('desiredFromDiscovery', () => {
   it('stamps cluster source in desiredFromDiscovery', () => {
     const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, healthy: true }];
     expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
+  });
+});
+
+describe('seedIsAlias', () => {
+  const seed = { host: 'seed.example', port: 6379 };
+  const nodes = [
+    node('a', '10.0.0.1:6379@16379', ['myself', 'master']),
+    node('b', '10.0.0.2:6379@16379', ['slave']),
+  ];
+
+  it.each([
+    ['resolves to the answering node only', ['10.0.0.1'], false],
+    ['is dual-stack for the answering node', ['10.0.0.1', 'fd00::1'], false],
+    ['resolves to several nodes', ['10.0.0.1', '10.0.0.2'], true],
+    ['resolves to another node only', ['10.0.0.2'], true],
+  ])('a seed that %s', (_label, addresses, expected) => {
+    expect(seedIsAlias(seed, addresses as string[], nodes)).toBe(expected);
+  });
+
+  it.each([
+    ['a Service VIP', { host: 'seed.example', port: 6379 }, ['10.96.0.10']],
+    ['an IP literal reached through NAT', { host: '192.168.5.5', port: 6379 }, ['192.168.5.5']],
+    ['an IP literal on a mapped port', { host: '10.0.0.1', port: 7001 }, ['10.0.0.1']],
+    ['localhost on a forwarded port', { host: 'localhost', port: 7001 }, ['127.0.0.1', '::1']],
+    ['a name on a mapped port', { host: 'node1.example.com', port: 16379 }, ['203.0.113.5']],
+  ])('leaves %s that matches no node undecided', (_label, unmatched, addresses) => {
+    expect(seedIsAlias(unmatched, addresses, nodes)).toBeNull();
+  });
+
+  it('ignores a failed or handshaking node left behind on the seed address', () => {
+    const single = { host: 'valkey-0.svc', port: 6379 };
+    for (const flags of [['master', 'fail'], ['master', 'fail?'], ['master', 'noaddr'], ['handshake']]) {
+      const withGhost = [node('a', '10.0.0.1:6379@16379', ['myself', 'master']), node('old', '10.0.0.1:6379@16379', flags)];
+      expect(seedIsAlias(single, ['10.0.0.1'], withGhost)).toBe(false);
+    }
+  });
+
+  it('matches an IPv6 address whatever form DNS or the node spells it in', () => {
+    const ipv6Nodes = [
+      node('a', '[fd00:0:0:0:0:0:0:1]:6379@16379', ['myself', 'master']),
+      node('b', '[FD00::2]:6379@16379', ['slave']),
+    ];
+    expect(seedIsAlias(seed, ['fd00::1'], ipv6Nodes)).toBe(false);
+    expect(seedIsAlias(seed, ['fd00:0000::2'], ipv6Nodes)).toBe(true);
+  });
+
+  it('ignores addresses on another port', () => {
+    expect(seedIsAlias(seed, ['10.0.0.1'], [node('a', '10.0.0.1:7000@17000', ['myself', 'master'])])).toBeNull();
+  });
+
+  it('does not take an announced hostname alone as the seed being one node', () => {
+    // A Service VIP that matches no node address, and the answering node announces the seed name.
+    const named = [{ ...node('a', '10.0.0.1:6379@16379', ['myself', 'master']), hostname: 'SEED.example' }];
+    expect(seedIsAlias(seed, ['192.0.2.1'], named)).toBeNull();
+  });
+
+  it('matches a node whose address is the seed host itself', () => {
+    const byName = [node('a', 'SEED.example:6379@16379', ['myself', 'master']), node('b', 'other.example:6379@16379', ['slave'])];
+    expect(seedIsAlias(seed, ['192.0.2.1'], byName)).toBe(false);
   });
 });
 

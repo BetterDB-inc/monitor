@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-router-dom';
 
 const findIncidentByEvent = vi.fn();
-const current = { id: 'conn-1' };
+const current = { id: 'conn-1', known: ['conn-1', 'conn-2'] };
 
 vi.mock('../api/metrics', () => ({
   metricsApi: {
@@ -13,10 +13,27 @@ vi.mock('../api/metrics', () => ({
 }));
 
 vi.mock('../hooks/useConnection', () => ({
-  useConnection: () => ({ currentConnection: { id: current.id }, connections: [] }),
+  useConnection: () => ({
+    currentConnection: { id: current.id },
+    connections: current.known.map((id) => ({ id })),
+    loading: false,
+  }),
 }));
 
 import { IncidentByEvent } from './IncidentByEvent';
+import { useConnectionUrlSync } from '../hooks/useConnectionUrlSync';
+import type { Connection } from '../hooks/useConnection';
+
+function UrlSync() {
+  useConnectionUrlSync({
+    connectionId: current.id,
+    connections: current.known.map((id) => ({ id }) as Connection),
+    loading: false,
+    error: null,
+    setConnection: vi.fn(),
+  });
+  return null;
+}
 
 function IncidentStub() {
   const { incidentId } = useParams<{ incidentId: string }>();
@@ -28,7 +45,7 @@ function IncidentStub() {
   );
 }
 
-function renderAt(path: string, client = new QueryClient()) {
+function renderAt(path: string, client = new QueryClient(), syncUrl = false) {
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
@@ -36,6 +53,7 @@ function renderAt(path: string, client = new QueryClient()) {
           <Route path="/anomalies/incidents/by-event/:anomalyId" element={<IncidentByEvent />} />
           <Route path="/anomalies/incidents/:incidentId" element={<IncidentStub />} />
         </Routes>
+        {syncUrl && <UrlSync />}
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -45,6 +63,7 @@ describe('IncidentByEvent', () => {
   beforeEach(() => {
     findIncidentByEvent.mockReset();
     current.id = 'conn-1';
+    current.known = ['conn-1', 'conn-2'];
   });
 
   it('opens the incident that holds the event', async () => {
@@ -80,6 +99,17 @@ describe('IncidentByEvent', () => {
     renderAt('/anomalies/incidents/by-event/ev-1?at=1000&connection=conn-2');
 
     expect(screen.getByRole('status')).toHaveTextContent('Finding the incident…');
+    expect(findIncidentByEvent).not.toHaveBeenCalled();
+  });
+
+  it('says the connection is not available instead of looking under another one', async () => {
+    current.known = ['conn-1'];
+
+    renderAt('/anomalies/incidents/by-event/ev-1?at=1000&connection=conn-gone', undefined, true);
+
+    expect(await screen.findByText('Connection not available')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Back to anomalies' })).toBeInTheDocument();
+    expect(screen.queryByText('No incident for this event')).not.toBeInTheDocument();
     expect(findIncidentByEvent).not.toHaveBeenCalled();
   });
 

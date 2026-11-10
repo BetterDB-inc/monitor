@@ -479,11 +479,16 @@ export interface ClusterShard {
   nodes: ClusterShardNode[];
 }
 
+/**
+ * One slot's row from `CLUSTER SLOT-STATS`. `key_count` is always reported;
+ * the usage counters only exist while `cluster-slot-stats-enabled` is on, and
+ * are cumulative on the node that owns the slot.
+ */
 export interface SlotStatsMetric {
   key_count: number;
-  expires_count: number;
-  total_reads: number;
-  total_writes: number;
+  cpu_usec?: number;
+  network_bytes_in?: number;
+  network_bytes_out?: number;
 }
 
 export interface SlotStats {

@@ -1,5 +1,6 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
+import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
@@ -18,6 +19,7 @@ import { ReplicationLag } from '../components/cluster/ReplicationLag';
 import { SlotMigrations } from '../components/cluster/SlotMigrations';
 import { RaftHealthPanel } from '../components/cluster/RaftHealthPanel';
 import { buildSlotNodeMap } from '../types/cluster';
+import { formatBytes, formatDurationUs } from '../lib/utils';
 
 export function ClusterDashboard() {
   const { currentConnection } = useConnection();
@@ -30,6 +32,7 @@ export function ClusterDashboard() {
     masters,
     replicas,
     slotStats,
+    slotStatsFailedNodes,
     hasSlotStats,
     health,
     refetch,
@@ -80,7 +83,19 @@ export function ClusterDashboard() {
   // Memoize slot-to-node mapping separately for reuse
   const slotNodeMap = useMemo(() => buildSlotNodeMap(nodes), [nodes]);
 
-  // Top slots by key count
+  // CPU and network per slot only come back with cluster-slot-stats-enabled.
+  const tracksUsage = useMemo(
+    () => !!slotStats && Object.values(slotStats).some((s) => s.cpu_usec !== undefined),
+    [slotStats]
+  );
+  const [slotRank, setSlotRank] = useState<'keys' | 'cpu'>('keys');
+  // Drop a CPU pick once CPU data goes away, so it can't silently come back
+  // when the counters do.
+  if (!tracksUsage && slotRank === 'cpu') {
+    setSlotRank('keys');
+  }
+  const rankByCpu = tracksUsage && slotRank === 'cpu';
+
   const topSlots = useMemo(() => {
     if (!slotStats) return [];
 
@@ -93,16 +108,16 @@ export function ClusterDashboard() {
         return {
           slot: slotNum,
           keyCount: stats.key_count,
-          expiresCount: stats.expires_count,
-          totalReads: stats.total_reads,
-          totalWrites: stats.total_writes,
+          cpuUsec: stats.cpu_usec ?? 0,
+          bytesIn: stats.network_bytes_in ?? 0,
+          bytesOut: stats.network_bytes_out ?? 0,
           nodeId: slotNodeMap.get(slotNum) || 'unknown',
         };
       })
-      .filter((s): s is NonNullable<typeof s> => s !== null && s.keyCount > 0)
-      .sort((a, b) => b.keyCount - a.keyCount)
+      .filter((s): s is NonNullable<typeof s> => s !== null && (rankByCpu ? s.cpuUsec : s.keyCount) > 0)
+      .sort((a, b) => (rankByCpu ? b.cpuUsec - a.cpuUsec : b.keyCount - a.keyCount))
       .slice(0, 10);
-  }, [slotStats, slotNodeMap]);
+  }, [slotStats, slotNodeMap, rankByCpu]);
 
   // Find node address by ID
   const getNodeAddress = (nodeId: string): string => {
@@ -218,17 +233,50 @@ export function ClusterDashboard() {
 
           {/* Heatmap + Migrations */}
           <div className="grid md:grid-cols-2 gap-4">
-            <SlotHeatmap slotStats={slotStats} nodes={nodes} hasSlotStats={hasSlotStats} />
+            <SlotHeatmap
+              slotStats={slotStats}
+              failedNodes={slotStatsFailedNodes}
+              nodes={nodes}
+              hasSlotStats={hasSlotStats}
+            />
             <SlotMigrations migrations={migrations || undefined} />
           </div>
 
           {/* Top Slots */}
           <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">Top Slots by Key Count</CardTitle>
-              <p className="text-sm text-muted-foreground mt-1">
-                Slots with the highest number of keys
-              </p>
+            <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+              <div>
+                <CardTitle className="text-lg">
+                  {rankByCpu ? 'Top Slots by CPU' : 'Top Slots by Key Count'}
+                </CardTitle>
+                <p className="text-sm text-muted-foreground mt-1">
+                  {rankByCpu
+                    ? 'Slots that have used the most CPU since their node started tracking them'
+                    : tracksUsage || !hasSlotStats
+                      ? 'Slots with the highest number of keys'
+                      : 'Slots with the highest number of keys. Set cluster-slot-stats-enabled to also rank slots by CPU and network.'}
+                </p>
+              </div>
+              {tracksUsage && (
+                <div className="flex gap-1 shrink-0">
+                  <Button
+                    size="sm"
+                    aria-pressed={!rankByCpu}
+                    variant={rankByCpu ? 'outline' : 'default'}
+                    onClick={() => setSlotRank('keys')}
+                  >
+                    Keys
+                  </Button>
+                  <Button
+                    size="sm"
+                    aria-pressed={rankByCpu}
+                    variant={rankByCpu ? 'default' : 'outline'}
+                    onClick={() => setSlotRank('cpu')}
+                  >
+                    CPU
+                  </Button>
+                </div>
+              )}
             </CardHeader>
             <CardContent>
               {hasSlotStats && topSlots.length > 0 ? (
@@ -249,15 +297,29 @@ export function ClusterDashboard() {
                           </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="font-bold">{slotData.keyCount.toLocaleString()}</div>
-                        <div className="text-xs text-muted-foreground">keys</div>
-                      </div>
+                      {rankByCpu ? (
+                        <div className="text-right">
+                          <div className="font-bold">{formatDurationUs(slotData.cpuUsec)}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {slotData.keyCount.toLocaleString()} keys · {formatBytes(slotData.bytesIn)} in ·{' '}
+                            {formatBytes(slotData.bytesOut)} out
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-right">
+                          <div className="font-bold">{slotData.keyCount.toLocaleString()}</div>
+                          <div className="text-xs text-muted-foreground">keys</div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
               ) : hasSlotStats ? (
-                <EmptyState variant="inline" icon={Info} title="No keys found in cluster" />
+                <EmptyState
+                  variant="inline"
+                  icon={Info}
+                  title={rankByCpu ? 'No slot has used CPU yet' : 'No keys found in cluster'}
+                />
               ) : (
                 <EmptyState
                   variant="inline"

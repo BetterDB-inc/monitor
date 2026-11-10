@@ -216,33 +216,33 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
   });
 
   describe('parseSlotStats', () => {
-    it('should parse CLUSTER SLOT-STATS response', () => {
+    // Shape of a real Valkey 9.1 reply with cluster-slot-stats-enabled on.
+    it('reads every field of a slot, not only the first', () => {
       const rawResponse = [
-        [0, ['key-count', 100]],
-        [0, ['expires-count', 10]],
-        [0, ['total-reads', 1000]],
-        [0, ['total-writes', 500]],
-        [1, ['key-count', 200]],
-        [1, ['expires-count', 20]],
-        [1, ['total-reads', 2000]],
-        [1, ['total-writes', 1000]],
+        [16287, ['key-count', 5, 'cpu-usec', 53, 'network-bytes-in', 150, 'network-bytes-out', 25]],
+        [12182, ['key-count', 1, 'cpu-usec', 23, 'network-bytes-in', 31, 'network-bytes-out', 5]],
       ];
 
       const stats = MetricsParser.parseSlotStats(rawResponse);
 
-      expect(stats['0']).toEqual({
-        key_count: 100,
-        expires_count: 10,
-        total_reads: 1000,
-        total_writes: 500,
+      expect(stats['16287']).toEqual({
+        key_count: 5,
+        cpu_usec: 53,
+        network_bytes_in: 150,
+        network_bytes_out: 25,
       });
+      expect(stats['12182']).toEqual({
+        key_count: 1,
+        cpu_usec: 23,
+        network_bytes_in: 31,
+        network_bytes_out: 5,
+      });
+    });
 
-      expect(stats['1']).toEqual({
-        key_count: 200,
-        expires_count: 20,
-        total_reads: 2000,
-        total_writes: 1000,
-      });
+    it('leaves the usage counters out when slot stats are disabled', () => {
+      const stats = MetricsParser.parseSlotStats([[16287, ['key-count', 5]]]);
+
+      expect(stats['16287']).toEqual({ key_count: 5 });
     });
 
     it('should handle empty response', () => {
@@ -265,31 +265,11 @@ ghi789jkl012 192.168.1.12:6379@16379 master - 0 1234567890000 2 connected 5461-1
     });
 
     it('should ignore unknown metric names', () => {
-      const rawResponse = [
-        [0, ['key-count', 100]],
-        [0, ['unknown-metric', 999]],
-      ];
+      const rawResponse = [[0, ['key-count', 100, 'unknown-metric', 999]]];
 
       const stats = MetricsParser.parseSlotStats(rawResponse);
 
-      expect(stats['0'].key_count).toBe(100);
-      expect(stats['0']).not.toHaveProperty('unknown_metric');
-    });
-
-    it('should handle partial metric data', () => {
-      const rawResponse = [
-        [0, ['key-count', 100]],
-        // Missing other metrics for slot 0
-      ];
-
-      const stats = MetricsParser.parseSlotStats(rawResponse);
-
-      expect(stats['0']).toEqual({
-        key_count: 100,
-        expires_count: 0,
-        total_reads: 0,
-        total_writes: 0,
-      });
+      expect(stats['0']).toEqual({ key_count: 100 });
     });
 
     it('should handle non-array input', () => {

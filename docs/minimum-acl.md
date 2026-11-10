@@ -25,7 +25,7 @@ When a command is blocked (`NOPERM`, or "command not available" on a managed ser
 This user can poll the server metrics BetterDB collects in the background. It has no key permissions, so it can't read or write keys, and the AI cache and agent memory panels stay empty until you add the [AI observability](#ai-observability) rules. `reset` clears any passwords, key patterns and selectors an existing user already has, so running the line again gives the same user:
 
 ```
-ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +select +client|setname +client|getname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|myid +command|info +dbsize +lastsave +time +module|list
+ACL SETUSER betterdb reset on >CHANGE_ME -@all +ping +info +select +client|setname +client|getname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|getslotmigrations +cluster|myid +command|info +dbsize +lastsave +time +module|list
 ```
 
 This user can still see and change some things:
@@ -34,7 +34,7 @@ This user can still see and change some things:
 - `ACL LOG` also allows `ACL LOG RESET`, which clears the ACL log. `RESET` is an argument, not a subcommand, and ACLs can't allow a subcommand without its arguments.
 - `SLOWLOG`, `COMMANDLOG` and `CLIENT LIST` return command arguments, which can include key names and values.
 
-If `ACL SETUSER` rejects a rule with `Unknown command or category name`, your server doesn't have that command. Remove the rule and run it again. For example, Redis and Valkey before 8.1 have no `COMMANDLOG`, so drop `+commandlog|get` and `+commandlog|len`.
+If `ACL SETUSER` rejects a rule with `Unknown command or category name`, your server doesn't have that command. Remove the rule and run it again. For example, Redis and Valkey before 8.1 have no `COMMANDLOG`, so drop `+commandlog|get` and `+commandlog|len`. Servers before Valkey 9.0 have no `CLUSTER GETSLOTMIGRATIONS`, so drop `+cluster|getslotmigrations` there.
 
 Persist the user with `ACL SAVE` (when using an ACL file) or `CONFIG REWRITE`, then set the connection's username and password in BetterDB.
 
@@ -120,6 +120,7 @@ The migration analysis report on the source. Add the key sampling rules too.
 | `ROLE` | Role lookups, key analytics node selection on clusters | Key analytics can't pick which nodes to scan |
 | `CLUSTER INFO`, `NODES`, `SHARDS`, `MYID` | Cluster page, node discovery, auto-registration, anomaly detection | Cluster views and per-node metrics are missing |
 | `CLUSTER SLOT-STATS` | Slot stats page, hot-slot and orphaned-key detection | Slot stats show as unavailable |
+| `CLUSTER GETSLOTMIGRATIONS` | Slot migration progress for atomic slot migrations (Valkey 9.0+) | Atomic migrations don't show; `MIGRATING`/`IMPORTING` moves still do |
 | `COMMAND INFO` | Classifying commands in cluster node stats, checking whether the server supports `MONITOR` | Node stats can't classify unfamiliar commands |
 | `DBSIZE`, `LASTSAVE`, `TIME` | Key counts, persistence checks, config hazard checks | Those values are empty |
 | `MODULE LIST` | CVE scan of loaded modules | Module CVEs aren't checked |
