@@ -99,7 +99,11 @@ export interface ReplicationDivergenceWindow {
   gapBytes: number;
   bytesPerSec: number | null;
   secondsBehind: number | null;
+  replicaGapBytes: number | null;
+  replicaView: ReplicaViewStatus | null;
 }
+
+export type ReplicaViewStatus = 'ok' | 'unreachable' | 'replid_mismatch' | 'not_replica';
 
 export interface ReplicaDivergenceHistory {
   replica: string;

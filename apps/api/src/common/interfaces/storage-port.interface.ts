@@ -173,6 +173,7 @@ export interface StoredAnomalyEvent {
   commands?: string[];
   eventSequence?: number;
   kind?: AnomalyKind;
+  retryTrigger?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;
@@ -432,7 +433,11 @@ export interface StoredReplicationDivergenceWindow {
   gapBytes: number;
   bytesPerSec: number | null;
   secondsBehind: number | null;
+  replicaGapBytes: number | null;
+  replicaView: ReplicaViewStatus | null;
 }
+
+export type ReplicaViewStatus = 'ok' | 'unreachable' | 'replid_mismatch' | 'not_replica';
 
 export interface ReplicationDivergenceWindowQueryOptions {
   connectionId: string;

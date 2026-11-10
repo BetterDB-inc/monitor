@@ -13,6 +13,7 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [How It Works](#how-it-works)
 - [Detected Patterns](#detected-patterns)
 - [Incident Sequence Rules](#incident-sequence-rules)
+- [Per-node coverage](#per-node-coverage)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -450,16 +451,21 @@ Alerts from these primaries carry the primary's address as `nodeAddr` and the ad
 
 Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap, as long as the rule's span and the incident's 30-minute limit allow it.
 
-A rule's span is measured from its earliest matched event to its latest, using the time each event is stamped with. It is not how long a signal stays open: a warning raised earlier than the span allows does not count, however long it stays active. Optional signals are taken in when they are stamped within one span of the first step, before or after it.
+A rule's span is measured from its earliest matched event to its latest, using the time each event is stamped with. It is not how long a signal stays open: a warning raised earlier than the span allows does not count, however long it stays active. Optional signals are taken in when they are stamped within one span of the first step, before or after it. One optional signal can be taken into every match of a rule it falls within. An optional signal also joins an incident across a quiet gap once the rule has matched in it, when it is stamped within one span of that match's first step.
 
 Steps count in order: each step must come after the steps before it, within the span. A step with a lead may also come before the steps before it, by up to its lead. A later step alone never joins or extends an incident. A lead step joins across a quiet gap once the steps before the step it may precede were seen. A first step joins an incident across a quiet gap only when the incident already holds a lead step of the rule, stamped within that lead. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster. When two rules match the same incident and give the same recommendation, it is listed once, on the first match.
 
+A metric marked ↑ only counts when it rose. A drop in that metric does not fill the step or optional signal, so a fall in ops/sec cannot stand in for a write rise. An event whose direction is not known, such as an incident's first event read back from storage, still counts.
+
+A compound rule replaces the rules it combines. When `reshard_divergence_pressure` matches, a `reshard_under_writes` or `divergence_under_pressure` match that shares a step event with it is not listed. Optional signals they share do not count, so the incident shows one diagnosis instead of two. A sequence group recorded for one of those rules before the compound rule matched stays recorded.
+
 | Rule | Steps | Lead | Optional | Span | Same connection |
 | --- | --- | --- | --- | --- | --- |
-| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`, `memory_overhead` or `output_kbps` | — | `connection_churn` | 10 min | yes |
-| `divergence_under_pressure` | `ops_per_sec` or `input_kbps` → `replication_divergence` → `memory_used`, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`, `evicted_clients`, `fork_memory_risk` | 15 min | yes |
+| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`↑, `memory_overhead` or `output_kbps`↑ | — | `connection_churn`↑ | 10 min | yes |
+| `divergence_under_pressure` | `ops_per_sec`↑ or `input_kbps`↑ → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | yes |
 | `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | — | `command_p99` | 15 min | no |
-| `retry_storm` | `command_p99` or `error_replies` → `retry_amplification` → `client_saturation`, `load_saturation`, `rejected_connections` or `client_lockout_risk` | saturation step: 10 min | `connection_churn` | 10 min | yes |
+| `reshard_divergence_pressure` | `reshard_shard_skew` → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `ops_per_sec`↑, `input_kbps`↑, `command_p99`, `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | yes |
+| `retry_storm` | `command_p99`↑, `error_replies`↑ or `connection_churn`↑ → `retry_amplification` | — | `client_saturation`, `load_saturation`, `rejected_connections`, `client_lockout_risk` | 10 min | yes |
 | `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | `resync_escalation`: 5 min | — | 30 min | yes |
 
 Why each span is that long:
@@ -467,10 +473,28 @@ Why each span is that long:
 - **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
 - **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that. The divergence detector counts memory and buffer pressure seen since its divergence span began, so pressure may come before the divergence anywhere in the span.
 - **reshard_under_writes**: skew only fires during an active reshard, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
-- **retry_storm**: retry amplification needs a sustained run of hot polls, and saturation shows up within minutes of it or it has another cause. The retry detector rates a storm critical on saturation it already holds, so saturation may come before the retry amplification anywhere in the span.
+- **reshard_divergence_pressure**: it combines `reshard_under_writes` and `divergence_under_pressure`, so it keeps their 15 minute span and the pressure step's lead. All three must come from the same node. A skew on one shard and divergence on another can still match `reshard_under_writes`, which chains events from any node of the cluster. Each failure slows the others' recovery: slot migration adds writes the lagging replicas must apply, the unapplied writes hold memory and buffer space on the primary, memory pressure can fail slot imports and keep the reshard running, and a full replica buffer drops the link and forces a resync.
+- **retry_storm**: retry amplification needs a sustained run of hot polls after the slow commands, errors or reconnects that start it. A retry amplification alert that names reconnects as its trigger fills both steps on its own, because the retry detector reads connection churn itself and a separate `connection_churn` alert often never fires, as on a fan-out primary. Saturation shows up within minutes of it or it has another cause. It is optional, because a retry loop that the server still absorbs is worth naming too, and it may come before the retry amplification anywhere in the span, since the retry detector rates a storm critical on saturation it already holds.
 - **backlog_exhaustion**: a coverage warning can be raised well before the disconnect that exhausts it, so this rule allows the full incident span from the warning to the resync. A resync escalation is stamped with the time the replica disconnected, up to five minutes before it is raised, so it may be stamped up to five minutes before the coverage warning.
 
 `reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
+
+## Per-node coverage
+
+When a cluster or Sentinel group is registered through one connection (the seed), the seed runs every detector. Every other primary it reaches, up to 64, is read in parallel on each poll and runs:
+
+- replication divergence
+- retry amplification, without client names: the alert says client names are not available because the node is not a registered connection
+- backlog coverage risk and resync escalation
+- fork memory risk
+- replica output-buffer pressure, without the per-replica Prometheus gauge
+- reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+
+Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
+
+A node's divergence, backlog coverage, resync escalation, fork memory and output-buffer events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Retry amplification alerts are not closed this way; they stay open, as they do on the seed. Open backlog coverage, resync escalation, fork memory and output-buffer events are picked up again per node after a restart, so a node that is still at risk does not raise a duplicate, and the events of a node that did not come back are closed. An output-buffer event is picked up for the replica it was raised on, and a picked-up resync-loop event keeps its 5 minute cooldown. Events of a node whose seed is removed before they are picked up are closed too.
+
+Each command to a primary gets 2 seconds of its own. One that does not answer in time drops that primary's connection once the poll's other commands on it have answered or timed out, so the next poll starts on a fresh one instead of queueing behind it. A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them. A primary whose replication ID matches a registered primary is treated as that connection and skipped, so a node Sentinel reports by IP is not checked twice when it is registered by hostname. The skip lasts while that connection is connected and polling; once it disconnects, or goes three poll intervals (at least 30 seconds) without a poll, the fan-out checks the primary again.
 
 ## Severity Levels
 

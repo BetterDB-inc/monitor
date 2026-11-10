@@ -98,6 +98,10 @@ function severityScore(level: ForkRiskLevel, kind: ForkRiskKind): number {
   return levelPart * 10 + kindPart;
 }
 
+export function forkAlertScore(state: ForkMemoryState): number {
+  return severityScore(state.ackedLevel, state.ackedKind);
+}
+
 export function createForkMemoryState(): ForkMemoryState {
   return { ackedLevel: 'none', ackedKind: 'projected-fork-oom' };
 }

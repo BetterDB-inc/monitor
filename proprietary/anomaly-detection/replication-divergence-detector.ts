@@ -1,4 +1,5 @@
 import { formatBytes } from '@app/scaling-readiness/dimension-inputs';
+import type { ReplicaViewStatus } from '@app/common/interfaces/storage-port.interface';
 import { median } from '../latency-regression/regression-detector';
 import { ReplicationStreamSample } from './replication-stream';
 import { MetricType } from './types';
@@ -28,11 +29,14 @@ export const DIVERGENCE_WINDOW_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const DIVERGENCE_WINDOW_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 export const DIVERGENCE_STALE_WARN_WINDOWS = 2;
 export const DIVERGENCE_STALE_CRIT_WINDOWS = 4;
+export const DIVERGENCE_DISAGREE_WINDOWS = 3;
+export const REPLICA_VIEWS_DEDUPE_KEY = 'replica-views';
 
 export type DivergenceLevel = 'none' | 'warning' | 'critical';
 export type ReplicaObservedLevel = DivergenceLevel | 'behind' | 'unobserved';
 export type OrphanAssessment = 'pending' | 'diverging' | 'caught_up' | 'unobserved';
 export type DivergenceReason = 'growth' | 'ceiling' | 'not_catching_up' | 'not_applying' | 'not_acking';
+export type { ReplicaViewStatus };
 
 export interface DivergenceWindow {
   start: number;
@@ -40,6 +44,15 @@ export interface DivergenceWindow {
   gapBytes: number;
   bytesPerSec: number | null;
   secondsBehind: number | null;
+  replicaGapBytes?: number | null;
+  replicaView?: ReplicaViewStatus | null;
+}
+
+export interface ReplicaViewReading {
+  status: ReplicaViewStatus;
+  gapBytes: number | null;
+  linkUp: boolean;
+  primaryGapBytes: number | null;
 }
 
 interface ReplicaWindowAccumulator {
@@ -72,6 +85,11 @@ export interface ReplicaDivergenceState {
   staleClearWindows: number;
   staleSince: number | null;
   announced: boolean;
+  disagreeWindows: number;
+  disagreeSince: number | null;
+  disagreeLastWindow: DivergenceWindow | null;
+  unconfirmedWindows: number;
+  disagreeEventId: string | null;
 }
 
 export interface ClosedDivergenceWindow extends DivergenceWindow {
@@ -88,6 +106,7 @@ export interface DivergenceConnectionState {
   lastGapMs: number;
   accumulators: Map<string, ReplicaWindowAccumulator>;
   staleGaps: Map<string, StaleAckAccumulator>;
+  staleAckWindows: Map<string, DivergenceWindow>;
   rateHistory: number[];
   replid: string | null;
   replicas: Map<string, ReplicaDivergenceState>;
@@ -125,13 +144,29 @@ export interface DivergenceRecovery {
   gapBytes: number | null;
 }
 
-export type DivergenceOutcome = DivergenceFinding | DivergenceRecovery;
+export interface ViewDisagreement {
+  kind: 'views_disagree';
+  addr: string;
+  primaryGapBytes: number;
+  replicaGapBytes: number;
+  bytesPerSec: number | null;
+  windowCount: number;
+  spanStart: number;
+}
+
+export interface ViewAgreement {
+  kind: 'views_agree';
+  addr: string;
+  eventId: string;
+}
+
+export type DivergenceOutcome = DivergenceFinding | DivergenceRecovery | ViewDisagreement | ViewAgreement;
 
 export interface ReplicaDivergenceHistory {
   replica: string;
   level: ReplicaObservedLevel;
-  latest: DivergenceWindow | null;
-  windows: DivergenceWindow[];
+  latest: Required<DivergenceWindow> | null;
+  windows: Required<DivergenceWindow>[];
 }
 
 const LEVEL_RANK: Record<DivergenceLevel, number> = { none: 0, warning: 1, critical: 2 };
@@ -151,6 +186,7 @@ export function createDivergenceState(): DivergenceConnectionState {
     lastGapMs: 0,
     accumulators: new Map(),
     staleGaps: new Map(),
+    staleAckWindows: new Map(),
     rateHistory: [],
     replid: null,
     replicas: new Map(),
@@ -200,6 +236,11 @@ function createReplicaState(addr: string): ReplicaDivergenceState {
     staleClearWindows: 0,
     staleSince: null,
     announced: false,
+    disagreeWindows: 0,
+    disagreeSince: null,
+    disagreeLastWindow: null,
+    unconfirmedWindows: 0,
+    disagreeEventId: null,
   };
 }
 
@@ -408,21 +449,32 @@ function clearStaleStreak(replica: ReplicaDivergenceState): void {
   replica.staleSince = null;
 }
 
+function clearDisagreementStreak(replica: ReplicaDivergenceState): void {
+  replica.disagreeWindows = 0;
+  replica.disagreeSince = null;
+  replica.disagreeLastWindow = null;
+  replica.unconfirmedWindows = 0;
+}
+
 function dropReplica(
   state: DivergenceConnectionState,
   replica: ReplicaDivergenceState,
   at: number,
-): DivergenceRecovery[] {
+): DivergenceOutcome[] {
   if (replica.windows.length > 0) state.windowsHeldSince = at;
+  const outcomes: DivergenceOutcome[] = replica.disagreeEventId
+    ? [{ kind: 'views_agree', addr: replica.addr, eventId: replica.disagreeEventId }]
+    : [];
+  clearDisagreementStreak(replica);
   if (replica.level === 'none') {
     state.replicas.delete(replica.addr);
-    return [];
+    return outcomes;
   }
   replica.windows = [];
   replica.subside = null;
   replica.belowFloorStreak = 0;
   clearStaleStreak(replica);
-  return [{ kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
+  return [...outcomes, { kind: 'cleared', addr: replica.addr, eventId: replica.eventId, gapBytes: null }];
 }
 
 function hasGapReading(state: DivergenceConnectionState, addr: string): boolean {
@@ -445,6 +497,7 @@ function closeWindow(
   const outcomes: DivergenceOutcome[] = [];
   state.closedWindowCount++;
   state.lastWindowEnd = end;
+  state.staleAckWindows = new Map();
   state.windowsHeldSince ??= start;
   if (rate !== null) {
     state.rateHistory.push(rate);
@@ -461,6 +514,10 @@ function closeWindow(
     if (gapBytes === null) continue;
     const replica = state.replicas.get(addr) ?? createReplicaState(addr);
     state.replicas.set(addr, replica);
+    const secondsBehind = rate === null || rate === 0 ? null : gapBytes / rate;
+    const window: DivergenceWindow = { start, end, gapBytes, bytesPerSec: rate, secondsBehind };
+    state.staleAckWindows.set(addr, window);
+    state.closedWindows.push({ addr, ...window });
     const finding = staleAckFinding(replica, gapBytes, start, rate);
     if (finding) outcomes.push(finding);
   }
@@ -516,6 +573,7 @@ export function observeDivergence(
     state.lastRateEwma = null;
     state.accumulators = new Map();
     state.staleGaps = new Map();
+    state.staleAckWindows = new Map();
     state.observed = new Set();
     state.staleAcks = new Set();
     state.replid = null;
@@ -578,6 +636,10 @@ export function observeDivergence(
   }
 
   return outcomes;
+}
+
+export function withReplicaView(window: DivergenceWindow): Required<DivergenceWindow> {
+  return { ...window, replicaGapBytes: window.replicaGapBytes ?? null, replicaView: window.replicaView ?? null };
 }
 
 export function divergenceWindowsHeld(
@@ -676,6 +738,144 @@ export function acknowledgeRecovery(state: DivergenceConnectionState, addr: stri
 export function markDivergenceAnnounced(state: DivergenceConnectionState, addr: string): void {
   const replica = state.replicas.get(addr);
   if (replica) replica.announced = true;
+}
+
+function viewsDisagree(reading: ReplicaViewReading, bytesPerSec: number | null): boolean | null {
+  if (reading.status !== 'ok' || reading.gapBytes === null || reading.primaryGapBytes === null) return null;
+  const difference = Math.abs(reading.primaryGapBytes - reading.gapBytes);
+  if (difference < DIVERGENCE_FLOOR_BYTES) return false;
+  return bytesPerSec === null || bytesPerSec === 0 || difference / bytesPerSec >= DIVERGENCE_FLOOR_SECONDS;
+}
+
+function replicaViewBehind(reading: ReplicaViewReading, bytesPerSec: number | null): boolean {
+  if (reading.status !== 'ok' || reading.gapBytes === null) return false;
+  if (!reading.linkUp) return true;
+  const secondsBehind = bytesPerSec === null || bytesPerSec === 0 ? null : reading.gapBytes / bytesPerSec;
+  return isBehind({ gapBytes: reading.gapBytes, secondsBehind });
+}
+
+function tagClosedWindow(state: DivergenceConnectionState, addr: string, window: DivergenceWindow): void {
+  for (let i = state.closedWindows.length - 1; i >= 0; i--) {
+    const closed = state.closedWindows[i];
+    if (closed.addr !== addr || closed.end !== window.end) continue;
+    closed.replicaGapBytes = window.replicaGapBytes;
+    closed.replicaView = window.replicaView;
+    return;
+  }
+}
+
+function trackDisagreement(
+  replica: ReplicaDivergenceState,
+  window: DivergenceWindow | null,
+  reading: ReplicaViewReading | undefined,
+): DivergenceOutcome | null {
+  if (window && reading && viewsDisagree(reading, window.bytesPerSec) === true) {
+    const previous = replica.disagreeLastWindow;
+    if (!previous || !contiguous(previous, window)) replica.disagreeWindows = 0;
+    if (replica.disagreeWindows === 0) replica.disagreeSince = window.start;
+    replica.disagreeLastWindow = window;
+    replica.disagreeWindows++;
+    replica.unconfirmedWindows = 0;
+    if (replica.disagreeEventId !== null || replica.disagreeWindows < DIVERGENCE_DISAGREE_WINDOWS) return null;
+    return {
+      kind: 'views_disagree',
+      addr: replica.addr,
+      primaryGapBytes: reading.primaryGapBytes as number,
+      replicaGapBytes: reading.gapBytes as number,
+      bytesPerSec: window.bytesPerSec,
+      windowCount: replica.disagreeWindows,
+      spanStart: replica.disagreeSince as number,
+    };
+  }
+  replica.disagreeWindows = 0;
+  replica.disagreeSince = null;
+  replica.disagreeLastWindow = null;
+  if (replica.disagreeEventId === null) return null;
+  replica.unconfirmedWindows++;
+  if (replica.unconfirmedWindows < DIVERGENCE_RECOVERED_WINDOWS) return null;
+  return { kind: 'views_agree', addr: replica.addr, eventId: replica.disagreeEventId };
+}
+
+export function applyReplicaViews(
+  state: DivergenceConnectionState,
+  outcomes: DivergenceOutcome[],
+  readings: ReadonlyMap<string, ReplicaViewReading>,
+): DivergenceOutcome[] {
+  const end = state.lastWindowEnd;
+  const currentWindow = (replica: ReplicaDivergenceState | undefined) => {
+    if (!replica) return null;
+    const last = replica.windows[replica.windows.length - 1];
+    if (last !== undefined && last.end === end) return last;
+    return state.staleAckWindows.get(replica.addr) ?? null;
+  };
+  const applied = outcomes.filter((outcome) => {
+    if (outcome.kind !== 'recovered') return true;
+    const reading = readings.get(outcome.addr);
+    const rate = currentWindow(state.replicas.get(outcome.addr))?.bytesPerSec ?? state.rateHistory.at(-1) ?? null;
+    return !reading || !replicaViewBehind(reading, rate);
+  });
+  for (const replica of state.replicas.values()) {
+    const window = currentWindow(replica);
+    const reading = readings.get(replica.addr);
+    if (window && reading) {
+      window.replicaGapBytes = reading.gapBytes;
+      window.replicaView = reading.status;
+      tagClosedWindow(state, replica.addr, window);
+    }
+    const outcome = trackDisagreement(replica, window, reading);
+    if (outcome) applied.push(outcome);
+  }
+  return applied;
+}
+
+export function replicasToSample(state: DivergenceConnectionState, outcomes: DivergenceOutcome[]): string[] {
+  const end = state.lastWindowEnd;
+  const windowed = [...state.replicas.values()]
+    .filter((replica) => replica.windows[replica.windows.length - 1]?.end === end)
+    .map((replica) => replica.addr)
+    .concat([...state.staleAckWindows.keys()]);
+  const alerting = outcomes
+    .filter((outcome) => outcome.kind === 'divergence' || outcome.kind === 'recovered')
+    .map((outcome) => outcome.addr);
+  return [...new Set([...windowed, ...alerting])];
+}
+
+export function replicaEventIds(replica: ReplicaDivergenceState): string[] {
+  return [replica.eventId, replica.disagreeEventId].filter((id): id is string => id !== null);
+}
+
+export function acknowledgeViewDisagreement(
+  state: DivergenceConnectionState,
+  addr: string,
+  eventId: string,
+): void {
+  const replica = state.replicas.get(addr);
+  if (!replica) return;
+  replica.disagreeEventId = eventId;
+  replica.unconfirmedWindows = 0;
+}
+
+export function acknowledgeViewAgreement(
+  state: DivergenceConnectionState,
+  addr: string,
+  eventId: string,
+): void {
+  const replica = state.replicas.get(addr);
+  if (!replica || replica.disagreeEventId !== eventId) return;
+  replica.disagreeEventId = null;
+  clearDisagreementStreak(replica);
+}
+
+export function describeViewDisagreement(outcome: ViewDisagreement): string {
+  const cause =
+    outcome.primaryGapBytes > outcome.replicaGapBytes
+      ? 'the replica is further along than it has acknowledged, so its acknowledgements are late or lost on the way to the primary'
+      : 'the replica reports less than it has acknowledged, so the primary is tracking an offset the replica no longer has';
+  return (
+    `WARNING: Replica ${outcome.addr} and its primary disagree on how far behind it is: ` +
+    `the primary sees ${formatBytes(outcome.primaryGapBytes)}, the replica reports ` +
+    `${formatBytes(outcome.replicaGapBytes)}, for ${outcome.windowCount} windows in a row; ${cause}.`
+  );
 }
 
 export const DIVERGENCE_COMPOUND_SIGNALS: ReadonlyMap<MetricType, string> = new Map([

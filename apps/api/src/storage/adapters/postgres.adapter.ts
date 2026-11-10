@@ -1770,6 +1770,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS commands TEXT[];
       ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS event_sequence BIGINT;
+      ALTER TABLE anomaly_events ADD COLUMN IF NOT EXISTS retry_trigger TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_timestamp ON anomaly_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_anomaly_events_severity ON anomaly_events(severity, timestamp DESC);
@@ -2303,6 +2304,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         bytes_per_sec DOUBLE PRECISION,
         seconds_behind DOUBLE PRECISION
       );
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_gap_bytes DOUBLE PRECISION;
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_view TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
         ON replication_divergence_windows(connection_id, replica_addr, window_end);
@@ -2895,9 +2898,9 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
       ON CONFLICT (id) DO UPDATE SET
         correlation_id = COALESCE(EXCLUDED.correlation_id, anomaly_events.correlation_id),
         related_metrics = COALESCE(EXCLUDED.related_metrics, anomaly_events.related_metrics),
@@ -2908,6 +2911,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
         kind = COALESCE(anomaly_events.kind, EXCLUDED.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, EXCLUDED.retry_trigger),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -2931,6 +2935,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.commands ?? null,
         event.eventSequence ?? null,
         event.kind ?? null,
+        event.retryTrigger ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2958,7 +2963,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
         $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++}, $${paramIndex++},
-        $${paramIndex++}
+        $${paramIndex++}, $${paramIndex++}
       )`);
       values.push(
         event.id,
@@ -2980,6 +2985,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         event.commands ?? null,
         event.eventSequence ?? null,
         event.kind ?? null,
+        event.retryTrigger ?? null,
         event.resolved,
         event.resolvedAt || null,
         event.durationMs || null,
@@ -2995,7 +3001,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       ) VALUES ${placeholders.join(', ')}
       ON CONFLICT (id) DO UPDATE SET
@@ -3008,6 +3014,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         commands = COALESCE(anomaly_events.commands, EXCLUDED.commands),
         event_sequence = COALESCE(anomaly_events.event_sequence, EXCLUDED.event_sequence),
         kind = COALESCE(anomaly_events.kind, EXCLUDED.kind),
+        retry_trigger = COALESCE(anomaly_events.retry_trigger, EXCLUDED.retry_trigger),
         resolved = anomaly_events.resolved OR EXCLUDED.resolved,
         resolved_at = COALESCE(anomaly_events.resolved_at, EXCLUDED.resolved_at),
         duration_ms = COALESCE(anomaly_events.duration_ms, EXCLUDED.duration_ms)`,
@@ -3071,7 +3078,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM anomaly_events
       ${whereClause}
@@ -3317,7 +3324,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         id, timestamp, metric_type, anomaly_type, severity,
         value, baseline, std_dev, z_score, threshold,
         message, correlation_id, related_metrics, replica_addr, node_addr, dedupe_key, commands, event_sequence,
-        kind, resolved, resolved_at, duration_ms,
+        kind, retry_trigger, resolved, resolved_at, duration_ms,
         source_host, source_port, connection_id, scope_id
       FROM (
         SELECT *, ROW_NUMBER() OVER (
@@ -5350,7 +5357,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const placeholders: string[] = [];
     for (const w of windows) {
       const base = values.length;
-      placeholders.push(`(${Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      placeholders.push(`(${Array.from({ length: 10 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
       values.push(
         randomUUID(),
         connectionId,
@@ -5360,12 +5367,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         w.gapBytes,
         w.bytesPerSec,
         w.secondsBehind,
+        w.replicaGapBytes,
+        w.replicaView,
       );
     }
 
     const result = await this.pool.query(
       `INSERT INTO replication_divergence_windows
-         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+          replica_gap_bytes, replica_view)
        VALUES ${placeholders.join(', ')}
        ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
       values,
@@ -5388,7 +5398,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const startIdx = params.length - 2;
 
     const result = await this.pool.query(
-      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+              replica_gap_bytes, replica_view
        FROM (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
          FROM replication_divergence_windows
@@ -5409,6 +5420,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       gapBytes: Number(row.gap_bytes),
       bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
       secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+      replicaGapBytes: row.replica_gap_bytes === null ? null : Number(row.replica_gap_bytes),
+      replicaView: row.replica_view ?? null,
     }));
   }
 

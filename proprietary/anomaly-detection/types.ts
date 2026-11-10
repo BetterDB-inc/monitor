@@ -156,6 +156,7 @@ export enum AnomalyPattern {
   RESHARD_UNDER_WRITES = 'reshard_under_writes',
   RETRY_STORM = 'retry_storm',
   BACKLOG_EXHAUSTION = 'backlog_exhaustion',
+  RESHARD_DIVERGENCE_PRESSURE = 'reshard_divergence_pressure',
   UNKNOWN = 'unknown',
 }
 
@@ -196,6 +197,12 @@ export function mergeRecommendationValues(
     }
   }
   return [...best.values()];
+}
+
+const RETRY_AMPLIFICATION_TRIGGERS: ReadonlySet<string> = new Set<RetryAmplificationTrigger>(['latency', 'errors', 'churn']);
+
+export function isRetryTrigger(value: unknown): value is RetryAmplificationTrigger {
+  return typeof value === 'string' && RETRY_AMPLIFICATION_TRIGGERS.has(value);
 }
 
 export interface AnomalyEvent {

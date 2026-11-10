@@ -2064,7 +2064,7 @@ server.tool(
 
 server.tool(
   'get_replication_divergence',
-  'Get replication divergence for a primary: the per-replica offset gap series (bytes behind, write rate, seconds behind, live alert level, `behind` when it lags under the alert thresholds or has an event left open by a restart, or `unobserved` when the replica is not connected) and the divergence events from the anomaly store; `eventsUnavailable: true` means the events could not be read, not that there are none. Use when a replica is falling behind under write load, to see whether the gap is growing, at a ceiling, or not closing after the burst. Companion to get_anomalies.',
+  'Get replication divergence for a primary: the per-replica offset gap series (bytes behind as the primary sees it, write rate, seconds behind, `replicaGapBytes` as the replica reports it with `replicaView` saying whether it could be read (`ok`, `unreachable`, `replid_mismatch`, `not_replica`, or null when it was not sampled), live alert level, `behind` when it lags under the alert thresholds or has an event left open by a restart, or `unobserved` when the replica is not connected) and the divergence events from the anomaly store; `eventsUnavailable: true` means the events could not be read, not that there are none. Use when a replica is falling behind under write load, to see whether the gap is growing, at a ceiling, or not closing after the burst, and whether the replica agrees with the primary on how far behind it is. Companion to get_anomalies.',
   {
     limit: z.number().optional().describe('Max divergence events to return (default 100)'),
     startTime: z

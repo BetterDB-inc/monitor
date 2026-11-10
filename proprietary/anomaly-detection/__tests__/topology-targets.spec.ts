@@ -5,6 +5,7 @@ import {
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
+  normalizeIp,
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
@@ -247,6 +248,18 @@ describe('topology targets', () => {
       expect(isTopologyStateKeyOf(key, 'conn-1')).toBe(true);
       expect(isTopologyStateKeyOf('conn-1', 'conn-1')).toBe(true);
       expect(isTopologyStateKeyOf('conn-10', 'conn-1')).toBe(false);
+    });
+  });
+
+  describe('normalizeIp', () => {
+    it('compares IPv6 addresses in their canonical form', () => {
+      expect(normalizeIp('2001:0DB8:0000:0000:0000:0000:0000:0001')).toBe(normalizeIp('2001:db8::1'));
+    });
+
+    it('reads IPv4-mapped addresses as IPv4 in either notation', () => {
+      expect(normalizeIp('::ffff:10.0.0.2')).toBe('10.0.0.2');
+      expect(normalizeIp('::ffff:a00:2')).toBe('10.0.0.2');
+      expect(normalizeIp('10.0.0.2')).toBe('10.0.0.2');
     });
   });
 

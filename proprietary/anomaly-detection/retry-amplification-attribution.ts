@@ -580,6 +580,9 @@ export function rankRetryAmplificationContributors(
   return ranked;
 }
 
+export const NODE_ATTRIBUTION_UNAVAILABLE =
+  'Client names are not available for this node because it is not a registered connection.';
+
 export function describeRetryAmplificationContributors(
   contributors: RetryAmplificationContributor[] | null,
 ): string {

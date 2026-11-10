@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -187,6 +189,7 @@ import {
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
 import { isWriteCommand } from '@app/cluster/write-commands';
+import { parseLatencyStatsSection } from '@app/metrics/latencystats-parser';
 import {
   ClusterNode,
   ClusterShard,
@@ -218,6 +221,10 @@ import {
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
+  applyRestoredCobLevels,
+  createRestoredCobLevels,
+  holdRestoredCobFinding,
+  type RestoredCobLevels,
 } from './cob-pressure-detector';
 import {
   MemoryOverheadState,
@@ -234,6 +241,7 @@ import {
   forkMemoryRearm,
   createForkMemoryState,
   evaluateForkMemoryRisk,
+  forkAlertScore,
 } from './fork-memory-risk-detector';
 import { ReplicationStreamSample, ReplicationStreamTracker } from './replication-stream';
 import { OutboxEntry, PersistenceOutbox } from './anomaly-persistence-outbox';
@@ -246,11 +254,24 @@ import {
   OPEN_EVENT_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
+  DivergenceOutcome,
   DivergenceRecovery,
   DivergenceWindow,
   OrphanedDivergence,
   ReplicaDivergenceHistory,
+  ReplicaDivergenceState,
+  ReplicaViewReading,
+  ViewAgreement,
+  ViewDisagreement,
   acknowledgeDivergence,
+  acknowledgeViewAgreement,
+  acknowledgeViewDisagreement,
+  applyReplicaViews,
+  describeViewDisagreement,
+  replicaEventIds,
+  replicasToSample,
+  REPLICA_VIEWS_DEDUPE_KEY,
+  withReplicaView,
   assessOrphanedReplica,
   acknowledgeRecovery,
   divergenceWindowsHeld,
@@ -275,11 +296,20 @@ import {
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
+  normalizeIp,
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
 } from './topology-targets';
-import { ReplicaView, describeReplicaView, readReplicaView, replicaCaughtUp } from './replica-cross-check';
+import {
+  ReplicaSample,
+  ReplicaView,
+  UNREACHABLE_REPLICA,
+  describeReplicaView,
+  replicaCaughtUp,
+  replicaReadings,
+  sampleReplicaView,
+} from './replica-cross-check';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -325,6 +355,7 @@ import {
   ClientCommandSnapshot,
   RetryAmplificationContributor,
   describeRetryAmplificationContributors,
+  NODE_ATTRIBUTION_UNAVAILABLE,
   attributionSpanMinutes,
   describeAttributionSpan,
   fitAttributionSpan,
@@ -371,6 +402,7 @@ import {
   MetricSample,
   ANOMALY_WEBHOOK_SINK,
   AnomalyWebhookSink,
+  isRetryTrigger,
 } from './types';
 
 /** A topology the fan-out does not dial, and how many of its primaries that leaves unchecked. */
@@ -467,6 +499,19 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.RAFT_HEALTH,
 ];
 
+const NODE_ADOPTED_METRICS: MetricType[] = [MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE];
+
+interface PendingNodeEvents {
+  backlog: StoredAnomalyEvent[];
+  resync: StoredAnomalyEvent[];
+  fork: StoredAnomalyEvent[];
+  cob: StoredAnomalyEvent[];
+}
+
+interface FanoutSocket {
+  stalled: boolean;
+}
+
 interface SeedBackoff {
   failures: number;
   retryAt: number;
@@ -485,6 +530,11 @@ interface CachedFiring {
 interface IncidentCutoffs {
   anchored: Set<string>;
   earlier: Map<string, number>;
+}
+
+interface CobReads {
+  limit(): Promise<string | null>;
+  replicas(): Promise<ReplicaObservation[]>;
 }
 
 interface TrackedResyncEvent {
@@ -704,6 +754,7 @@ export class AnomalyService
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
   private sentinelReplicaAddrs = new Map<string, Set<string>>();
   private crossCheckDeadline = new Map<string, number | null>();
+  private replicaReadsInFlight = new Set<string>();
   // Monitor-clock ms the masters snapshot above was last refreshed, and the value
   // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
   // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
@@ -751,6 +802,9 @@ export class AnomalyService
   private legacyReplicaSlotEvents = new Map<string, LegacyReplicaSlotEvent[]>();
   private resyncEscalationEvents = new Map<string, TrackedResyncEvent[]>();
   private resyncEscalation = new Map<string, ResyncEscalationState>();
+  private pendingNodeOpenEvents = new Map<string, Map<string, PendingNodeEvents>>();
+  private restoredCobLevel = new Map<string, RestoredCobLevels>();
+  private registeredPrimaryReplids = new Map<string, { replid: string; seenAt: number }>();
   private readonly lastDivergencePrune = new Map<string, number>();
   private divergenceState = new Map<string, DivergenceConnectionState>();
   private divergenceOrphansSwept = new Set<string>();
@@ -795,6 +849,7 @@ export class AnomalyService
   private cobLimitCache = new Map<string, SlaveOutputBufferLimit>();
   private cobLimitRecheck = new Map<string, number>();
   private cobLastSyncFull = new Map<string, number>();
+  private fanoutNodeEventIds = new Map<string, Map<string, string>>();
   // Non-dataset memory overhead (valkey#1792): per-connection hysteresis state
   // and the last-seen evicted_keys counter for computing the per-poll delta.
   private memoryOverheadState = new Map<string, MemoryOverheadState>();
@@ -1167,10 +1222,12 @@ export class AnomalyService
     this.lastPersistenceState.delete(connectionId);
     this.activeTopologyConflicts.delete(connectionId);
     this.closeConnectionEventsOnRemoval(connectionId);
+    for (const key of this.nodeDetectorKeysOf(connectionId)) this.forgetNodeDetectors(key);
     this.openEventsAdopted.delete(connectionId);
     this.openEventsRetry.delete(connectionId);
     this.adoptedReshardEventIds.delete(connectionId);
     this.adoptedNodeReshardEventIds.delete(connectionId);
+    this.pendingNodeOpenEvents.delete(connectionId);
     this.legacyReplicaSlotEvents.delete(connectionId);
     this.resyncEscalationEvents.delete(connectionId);
     this.clientSaturationLevel.delete(connectionId);
@@ -1197,6 +1254,7 @@ export class AnomalyService
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
+    this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
     this.reshardWatchedSince.delete(connectionId);
@@ -1225,6 +1283,7 @@ export class AnomalyService
     this.sentinelModeLast.delete(connectionId);
     this.sentinelMastersSnapshot.delete(connectionId);
     this.sentinelReplicaAddrs.delete(connectionId);
+    this.registeredPrimaryReplids.delete(connectionId);
     this.sentinelMastersSnapshotAt.delete(connectionId);
     this.sentinelMastersConsumedAt.delete(connectionId);
     this.replicaSlotFirstSeen.delete(connectionId);
@@ -1400,6 +1459,11 @@ export class AnomalyService
       }
       await this.adoptOpenEvents(ctx, timestamp);
       replicationSample = this.replicationStream.observe(ctx.connectionId, info, timestamp);
+      if (info.role === 'master' && info.master_replid) {
+        this.registeredPrimaryReplids.set(ctx.connectionId, { replid: info.master_replid, seenAt: timestamp });
+      } else {
+        this.registeredPrimaryReplids.delete(ctx.connectionId);
+      }
       let cpuUtilizationSample: number | null = null;
       let cpuCounterReset = false;
 
@@ -2108,7 +2172,7 @@ export class AnomalyService
     }
   }
 
-  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication'] as const;
+  private static readonly FANOUT_INFO_SECTIONS = ['clients', 'memory', 'stats', 'replication', 'persistence'] as const;
   private static readonly CLIENT_SATURATION_WARN = 0.8;
   private static readonly CLIENT_SATURATION_CRIT = 0.95;
   private static readonly SATURATION_RANK = { none: 0, warning: 1, critical: 2 } as const;
@@ -2289,7 +2353,7 @@ export class AnomalyService
     if (retry && timestamp < retry.at) return;
     try {
       const open = new Map<MetricType, StoredAnomalyEvent[]>();
-      for (const metricType of ADOPTED_METRICS) {
+      for (const metricType of [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]) {
         open.set(metricType, await this.readOpenEvents(connectionId, metricType));
       }
       if (!this.connectionRegistry.getConfig(connectionId)) return;
@@ -2303,15 +2367,15 @@ export class AnomalyService
         this.clientSaturationEventIds.set(connectionId, [...tracked, ...untracked]);
       }
       this.seedClientSaturationLevel(connectionId, rows(MetricType.CLIENT_SATURATION));
-      this.seedBacklogCoverageLevel(connectionId, rows(MetricType.BACKLOG_COVERAGE_RISK));
-
-      const current = this.backlogCoverageEventIds.get(connectionId);
-      const stale = rows(MetricType.BACKLOG_COVERAGE_RISK)
-        .map((e) => e.id)
-        .filter((id) => id !== current);
-      if (stale.length > 0) this.staleBacklogEventIds.set(connectionId, stale);
-
-      this.adoptResyncEvents(connectionId, rows(MetricType.RESYNC_ESCALATION));
+      const seedRows = (metricType: MetricType) => rows(metricType).filter((e) => !e.nodeAddr);
+      this.adoptBacklogEvents(connectionId, seedRows(MetricType.BACKLOG_COVERAGE_RISK));
+      this.adoptResyncEvents(connectionId, seedRows(MetricType.RESYNC_ESCALATION));
+      this.holdNodeOpenEvents(connectionId, {
+        backlog: rows(MetricType.BACKLOG_COVERAGE_RISK),
+        resync: rows(MetricType.RESYNC_ESCALATION),
+        fork: rows(MetricType.FORK_MEMORY_RISK),
+        cob: rows(MetricType.REPL_BUFFER_PRESSURE),
+      });
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
@@ -2345,6 +2409,91 @@ export class AnomalyService
     if (AnomalyService.SATURATION_RANK[level] > AnomalyService.SATURATION_RANK[current]) {
       this.clientSaturationLevel.set(connectionId, level);
     }
+  }
+
+  private holdNodeOpenEvents(connectionId: string, open: PendingNodeEvents): void {
+    const byNode = new Map<string, PendingNodeEvents>();
+    for (const kind of Object.keys(open) as (keyof PendingNodeEvents)[]) {
+      for (const event of open[kind]) {
+        if (!event.nodeAddr) continue;
+        const pending = byNode.get(event.nodeAddr) ?? { backlog: [], resync: [], fork: [], cob: [] };
+        pending[kind].push(event);
+        byNode.set(event.nodeAddr, pending);
+      }
+    }
+    if (byNode.size > 0) this.pendingNodeOpenEvents.set(connectionId, byNode);
+  }
+
+  private pendingEventsOf(pending: PendingNodeEvents): StoredAnomalyEvent[] {
+    return [...pending.backlog, ...pending.resync, ...pending.fork, ...pending.cob];
+  }
+
+  private adoptNodeOpenEvents(connectionId: string, key: string, nodeAddr: string): void {
+    const byNode = this.pendingNodeOpenEvents.get(connectionId);
+    const pending = byNode?.get(nodeAddr);
+    if (!byNode || !pending) return;
+    byNode.delete(nodeAddr);
+    if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
+    this.adoptBacklogEvents(key, pending.backlog);
+    this.adoptResyncEvents(key, pending.resync);
+    this.adoptNodeForkEvents(key, pending.fork);
+    this.adoptNodeCobEvents(key, pending.cob);
+  }
+
+  private adoptNodeForkEvents(key: string, open: StoredAnomalyEvent[]): void {
+    if (open.length === 0) return;
+    const restored = open
+      .map((event) => ({
+        ackedLevel: event.severity === AnomalySeverity.CRITICAL ? ('critical' as const) : ('warning' as const),
+        ackedKind: event.dedupeKey === 'projected-fork-oom' ? ('projected-fork-oom' as const) : ('live-cow-oom' as const),
+      }))
+      .reduce((a, b) => (forkAlertScore(b) > forkAlertScore(a) ? b : a));
+    this.forkMemoryState.set(key, restored);
+    this.trackAdoptedNodeEvents(key, open);
+  }
+
+  private adoptNodeCobEvents(key: string, open: StoredAnomalyEvent[]): void {
+    if (open.length === 0) return;
+    const state = this.cobState.get(key) ?? createCobConnectionState();
+    const restored = createRestoredCobLevels();
+    for (const event of open) {
+      const level = event.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning';
+      holdRestoredCobFinding(state, restored, event.dedupeKey, level, event.timestamp);
+    }
+    this.cobState.set(key, state);
+    if (restored.aggregate) this.restoredCobLevel.set(key, restored);
+    this.trackAdoptedNodeEvents(key, open);
+  }
+
+  private trackAdoptedNodeEvents(key: string, open: StoredAnomalyEvent[]): void {
+    const oldestFirst = [...open].sort((a, b) => a.timestamp - b.timestamp);
+    for (const event of oldestFirst) {
+      this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey ?? ''}`);
+    }
+  }
+
+  private closePendingNodeEvents(connectionId: string, active: Set<string>): void {
+    const byNode = this.pendingNodeOpenEvents.get(connectionId);
+    if (!byNode) return;
+    for (const [nodeAddr, pending] of [...byNode]) {
+      if (active.has(topologyStateKey(connectionId, nodeAddr))) continue;
+      for (const event of this.pendingEventsOf(pending)) this.closeLater(event.id);
+      byNode.delete(nodeAddr);
+    }
+    if (byNode.size === 0) this.pendingNodeOpenEvents.delete(connectionId);
+  }
+
+  private pendingNodeEventIds(connectionId: string): string[] {
+    return [...(this.pendingNodeOpenEvents.get(connectionId)?.values() ?? [])].flatMap((pending) =>
+      this.pendingEventsOf(pending).map((event) => event.id),
+    );
+  }
+
+  private adoptBacklogEvents(key: string, open: StoredAnomalyEvent[]): void {
+    this.seedBacklogCoverageLevel(key, open);
+    const current = this.backlogCoverageEventIds.get(key);
+    const stale = open.map((e) => e.id).filter((id) => id !== current);
+    if (stale.length > 0) this.staleBacklogEventIds.set(key, stale);
   }
 
   private seedBacklogCoverageLevel(connectionId: string, open: StoredAnomalyEvent[]): void {
@@ -4255,7 +4404,7 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: RETRY_AMP_CMDS_PER_CLIENT_RATIO,
-      message: `${finding.message} ${describeRetryAmplificationContributors(contributors)}${spanNote}`,
+      message: `${finding.message} ${nodeAddr ? NODE_ATTRIBUTION_UNAVAILABLE : describeRetryAmplificationContributors(contributors)}${spanNote}`,
       relatedMetrics: finding.relatedMetrics,
       retryTrigger: finding.trigger,
       retryContributors: contributors,
@@ -4717,30 +4866,36 @@ export class AnomalyService
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    nodeAddr?: string,
   ): Promise<void> {
-    const state = this.forkMemoryState.get(ctx.connectionId) ?? createForkMemoryState();
-    this.forkMemoryState.set(ctx.connectionId, state);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    const state = this.forkMemoryState.get(key) ?? createForkMemoryState();
+    this.forkMemoryState.set(key, state);
 
     // Current write rate from the per-poll delta of rdb_changes_since_last_save.
     // max(0, …) absorbs the counter reset on an RDB save (and server restart);
     // null on the first poll (no baseline yet) so the projected path stays quiet
     // until a rate can be measured.
     let writeRatePerSec: number | null = null;
+    let rateBaselineMissing = false;
     const currentChanges = this.parseNumber(info.rdb_changes_since_last_save);
     if (currentChanges !== null) {
-      const prev = this.forkMemLastChanges.get(ctx.connectionId);
+      const prev = this.forkMemLastChanges.get(key);
+      rateBaselineMissing = prev === undefined;
       if (prev !== undefined) {
         const dtSec = (timestamp - prev.ts) / 1000;
         if (dtSec > 0) {
           writeRatePerSec = Math.max(0, currentChanges - prev.changes) / dtSec;
         }
       }
-      this.forkMemLastChanges.set(ctx.connectionId, { changes: currentChanges, ts: timestamp });
+      this.forkMemLastChanges.set(key, { changes: currentChanges, ts: timestamp });
     }
 
     const usedMemoryRss = this.parseNumber(info.used_memory_rss);
     const usedMemory = this.parseNumber(info.used_memory) ?? usedMemoryRss;
     if (usedMemory === null) return;
+    const saving = info.rdb_bgsave_in_progress === '1' || info.aof_rewrite_in_progress === '1';
+    if (rateBaselineMissing && !saving) return;
 
     const finding = evaluateForkMemoryRisk(state, {
       bgsaveInProgress: info.rdb_bgsave_in_progress === '1',
@@ -4791,9 +4946,14 @@ export class AnomalyService
       message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
       resolved: false,
       connectionId: ctx.connectionId,
+      dedupeKey: finding.kind,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, forkMemoryRearm(state));
+    if (nodeAddr) this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey}`);
+    await this.addLatchedAnomaly(event, ctx, key, forkMemoryRearm(state), () =>
+      this.untrackFanoutNodeEvent(key, event.id),
+    );
     acknowledgeForkMemoryFinding(state, finding);
   }
 
@@ -4866,15 +5026,14 @@ export class AnomalyService
     info: Record<string, string>,
     ctx: ConnectionContext,
     timestamp: number,
+    nodeAddr?: string,
+    reads: CobReads = this.seedCobReads(ctx),
   ): Promise<void> {
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
     if (info.role !== 'master') {
-      // A demoted node keeps no COB history: pressure memory and the
-      // sync_full baseline from its master era would otherwise turn a
-      // legitimate first sync after failback into a false resync-loop
-      // CRITICAL, and its per-replica gauges would go stale.
-      const hadState = this.cobState.delete(ctx.connectionId);
-      this.cobLastSyncFull.delete(ctx.connectionId);
-      if (hadState) {
+      const hadState = this.cobState.delete(key);
+      this.cobLastSyncFull.delete(key);
+      if (hadState && !nodeAddr) {
         try {
           this.prometheusService.updateReplBufferPressure(ctx.connectionId, []);
         } catch (promErr) {
@@ -4891,32 +5050,31 @@ export class AnomalyService
     let syncFullDelta = 0;
     const syncFull = this.parseNumber(info.sync_full);
     if (syncFull !== null) {
-      const prev = this.cobLastSyncFull.get(ctx.connectionId);
+      const prev = this.cobLastSyncFull.get(key);
       if (prev !== undefined && syncFull > prev) {
         syncFullDelta = syncFull - prev;
       }
-      this.cobLastSyncFull.set(ctx.connectionId, syncFull);
+      this.cobLastSyncFull.set(key, syncFull);
     }
 
-    const state = this.cobState.get(ctx.connectionId) ?? createCobConnectionState();
-    this.cobState.set(ctx.connectionId, state);
+    const state = this.cobState.get(key) ?? createCobConnectionState();
+    this.cobState.set(key, state);
 
     if (connectedSlaves === 0 && state.replicas.size === 0 && syncFullDelta === 0) {
       return;
     }
 
-    let limit = this.cobLimitCache.get(ctx.connectionId) ?? null;
-    const countdown = this.cobLimitRecheck.get(ctx.connectionId) ?? 0;
+    let limit = this.cobLimitCache.get(key) ?? null;
+    const countdown = this.cobLimitRecheck.get(key) ?? 0;
     if (countdown > 0) {
-      this.cobLimitRecheck.set(ctx.connectionId, countdown - 1);
+      this.cobLimitRecheck.set(key, countdown - 1);
     } else {
       try {
-        const raw = await ctx.client.getConfigValue('client-output-buffer-limit');
-        const parsed = parseSlaveOutputBufferLimit(raw);
+        const parsed = parseSlaveOutputBufferLimit(await reads.limit());
         if (parsed !== null) {
           limit = parsed;
-          this.cobLimitCache.set(ctx.connectionId, parsed);
-          this.cobLimitRecheck.set(ctx.connectionId, AnomalyService.COB_LIMIT_RECHECK_POLLS);
+          this.cobLimitCache.set(key, parsed);
+          this.cobLimitRecheck.set(key, AnomalyService.COB_LIMIT_RECHECK_POLLS);
         }
       } catch (cobErr) {
         this.logger.debug(
@@ -4928,10 +5086,7 @@ export class AnomalyService
     let replicas: ReplicaObservation[] | null = [];
     if (connectedSlaves > 0) {
       try {
-        const clients = await ctx.client.getClients({ type: 'replica' });
-        replicas = clients.map((c) => {
-          return { addr: c.addr, omem: c.omem };
-        });
+        replicas = await reads.replicas();
       } catch (listErr) {
         this.logger.debug(
           `CLIENT LIST TYPE replica failed for ${ctx.connectionName}: ${listErr instanceof Error ? listErr.message : listErr}`,
@@ -4940,23 +5095,26 @@ export class AnomalyService
       }
     }
 
-    // Published even when ratios are uncomputable (unlimited/unreadable limit,
-    // CLIENT LIST denied): an empty set removes stale per-replica series so a
-    // runtime switch to `slave 0 0 0` doesn't leave dashboards showing
-    // outdated pressure.
-    const hardBytes = limit !== null ? limit.hardBytes : 0;
-    const gaugeEntries =
-      replicas !== null && hardBytes > 0
-        ? replicas.map((r) => {
-            return { replica: r.addr, ratio: r.omem / hardBytes };
-          })
-        : [];
-    try {
-      this.prometheusService.updateReplBufferPressure(ctx.connectionId, gaugeEntries);
-    } catch (promErr) {
-      this.logger.debug(
-        `Failed to update repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
-      );
+    const restored = this.restoredCobLevel.get(key);
+    if (restored && applyRestoredCobLevels(state, restored, replicas !== null, timestamp)) {
+      this.restoredCobLevel.delete(key);
+    }
+
+    if (!nodeAddr) {
+      const hardBytes = limit !== null ? limit.hardBytes : 0;
+      const gaugeEntries =
+        replicas !== null && hardBytes > 0
+          ? replicas.map((r) => {
+              return { replica: r.addr, ratio: r.omem / hardBytes };
+            })
+          : [];
+      try {
+        this.prometheusService.updateReplBufferPressure(ctx.connectionId, gaugeEntries);
+      } catch (promErr) {
+        this.logger.debug(
+          `Failed to update repl buffer gauge for ${ctx.connectionName}: ${promErr instanceof Error ? promErr.message : promErr}`,
+        );
+      }
     }
 
     const findings = evaluateCobPressure(state, {
@@ -4996,16 +5154,103 @@ export class AnomalyService
         message: `${isCritical ? 'CRITICAL' : 'WARNING'}: ${finding.message}`,
         resolved: false,
         connectionId: ctx.connectionId,
+        dedupeKey: cobPressureLatch(finding),
+        ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
+      if (nodeAddr) this.trackFanoutNodeEvent(key, event.id, `${event.metricType}:${event.dedupeKey}`);
       await this.addLatchedAnomaly(
         event,
         ctx,
-        `${ctx.connectionId}:${cobPressureLatch(finding)}`,
+        `${key}:${event.dedupeKey}`,
         cobPressureRearm(state, finding),
+        () => this.untrackFanoutNodeEvent(key, event.id),
       );
       acknowledgeCobFinding(state, finding);
     }
+  }
+
+  private seedCobReads(ctx: ConnectionContext): CobReads {
+    return {
+      limit: () => ctx.client.getConfigValue('client-output-buffer-limit'),
+      replicas: async () =>
+        (await ctx.client.getClients({ type: 'replica' })).map((c) => {
+          return { addr: c.addr, omem: c.omem };
+        }),
+    };
+  }
+
+  private cobReadsNeeded(key: string, info: Record<string, string>): { limit: boolean; replicas: boolean } {
+    if (info.role !== 'master') return { limit: false, replicas: false };
+    const connectedSlaves = this.parseNumber(info.connected_slaves) ?? 0;
+    const syncFull = this.parseNumber(info.sync_full);
+    const lastSyncFull = this.cobLastSyncFull.get(key);
+    const active =
+      connectedSlaves > 0 ||
+      (this.cobState.get(key)?.replicas.size ?? 0) > 0 ||
+      (syncFull !== null && lastSyncFull !== undefined && syncFull > lastSyncFull);
+    return {
+      limit: active && (this.cobLimitRecheck.get(key) ?? 0) === 0,
+      replicas: connectedSlaves > 0,
+    };
+  }
+
+  private async readFanoutCob(
+    client: { call(...args: string[]): Promise<unknown> },
+    socket: FanoutSocket,
+    key: string,
+    addr: string,
+    info: Record<string, string>,
+  ): Promise<CobReads> {
+    const needed = this.cobReadsNeeded(key, info);
+    const send = <T>(suffix: string, what: string, read: () => Promise<T>): Promise<T> =>
+      this.fanoutRead(
+        socket,
+        `${key}#${suffix}`,
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `${what} to ${addr} timed out`,
+        read,
+      );
+    const [limit, replicas] = await Promise.allSettled([
+      needed.limit
+        ? send('cob-limit', 'CONFIG GET', async () => {
+            const raw = await client.call('CONFIG', 'GET', 'client-output-buffer-limit');
+            return MetricsParser.parseConfigGet(raw as string[])['client-output-buffer-limit'] ?? null;
+          })
+        : Promise.resolve(null),
+      needed.replicas
+        ? send('replicas', 'CLIENT LIST', async () => {
+            const raw = String(await client.call('CLIENT', 'LIST', 'TYPE', 'replica'));
+            return raw.trim()
+              ? MetricsParser.parseClientList(raw).map((c) => {
+                  return { addr: c.addr, omem: c.omem };
+                })
+              : [];
+          })
+        : Promise.resolve([]),
+    ]);
+    const settled = <T>(result: PromiseSettledResult<T>): Promise<T> =>
+      result.status === 'fulfilled' ? Promise.resolve(result.value) : Promise.reject(result.reason);
+    return { limit: () => settled(limit), replicas: () => settled(replicas) };
+  }
+
+  private trackFanoutNodeEvent(key: string, id: string, latch: string): void {
+    const events = this.fanoutNodeEventIds.get(key) ?? new Map<string, string>();
+    events.set(id, latch);
+    const latest = new Map([...events].map(([eventId, eventLatch]) => [eventLatch, eventId]));
+    for (const [eventId, eventLatch] of [...events]) {
+      if (events.size <= AnomalyService.FANOUT_NODE_EVENT_LIMIT) break;
+      if (latest.get(eventLatch) === eventId) continue;
+      events.delete(eventId);
+      this.closeLater(eventId);
+    }
+    this.fanoutNodeEventIds.set(key, events);
+  }
+
+  private untrackFanoutNodeEvent(key: string, id: string): void {
+    const ids = this.fanoutNodeEventIds.get(key);
+    if (!ids?.delete(id)) return;
+    if (ids.size === 0) this.fanoutNodeEventIds.delete(key);
   }
 
   /**
@@ -5147,6 +5392,7 @@ export class AnomalyService
       .filter((a) => {
         return (
           a.connectionId === ctx.connectionId &&
+          !a.nodeAddr &&
           timestamp - a.timestamp <= SATURATION_CORROBORATION_WINDOW_MS &&
           CONTROL_PLANE_CORROBORATING_METRICS.includes(a.metricType) &&
           isControlPlaneSaturationEvent(a) === false
@@ -5967,7 +6213,10 @@ export class AnomalyService
       opsPerSec: this.parseNumber(info.instantaneous_ops_per_sec) ?? 0,
       cpuUtilization,
       usedMemory: this.parseNumber(info.used_memory) ?? 0,
-      writeP99Us: key === connectionOfStateKey(key) ? (previous?.writeP99Us ?? null) : null,
+      writeP99Us:
+        key === connectionOfStateKey(key)
+          ? (previous?.writeP99Us ?? null)
+          : this.freshNodeWriteP99(key, timestamp),
       timestamp,
     };
   }
@@ -6060,14 +6309,17 @@ export class AnomalyService
 
   private async readNodeSelf(
     client: { call(...args: string[]): Promise<unknown> },
+    socket: FanoutSocket,
     addr: string,
     stateKey: string,
   ): Promise<ClusterNode | null> {
     try {
-      const raw = await withTimeout(
-        this.fanoutCommand(`${stateKey}#nodes`, () => client.call('CLUSTER', 'NODES')),
+      const raw = await this.fanoutRead(
+        socket,
+        `${stateKey}#nodes`,
         AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
         `CLUSTER NODES to ${addr} timed out`,
+        () => client.call('CLUSTER', 'NODES'),
       );
       const self = MetricsParser.parseClusterNodes(raw as string).find((n) => n.flags.includes('myself')) ?? null;
       if (self) this.reshardNodeSelves.set(stateKey, { self, readAt: Date.now() });
@@ -6089,6 +6341,49 @@ export class AnomalyService
       shards.set(snapshot.shardId, snapshot);
     }
     return [...shards.values()];
+  }
+
+  private async readNodeWriteP99(
+    client: { info(section: string): Promise<string> },
+    socket: FanoutSocket,
+    key: string,
+    addr: string,
+    timestamp: number,
+  ): Promise<{ readAt: number; value: number | null } | null> {
+    if (timestamp - (this.reshardWriteP99.get(key)?.readAt ?? -Infinity) < AnomalyService.RESHARD_P99_REFRESH_MS) {
+      return null;
+    }
+    try {
+      const raw = await this.fanoutRead(
+        socket,
+        `${key}#latency`,
+        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
+        `INFO latencystats to ${addr} timed out`,
+        () => client.info('latencystats'),
+      );
+      const parsed = InfoParser.parse(raw) as Record<string, Record<string, string> | undefined>;
+      const writes = parseLatencyStatsSection(parsed.latencystats ?? parsed.Latencystats)
+        .filter((row) => isWriteCommand(row.command))
+        .map((row) => row.p99Us);
+      return { readAt: timestamp, value: writes.length > 0 ? Math.max(...writes) : null };
+    } catch (err) {
+      this.logger.debug(`Write P99 read failed for ${addr}: ${err instanceof Error ? err.message : err}`);
+      return null;
+    }
+  }
+
+  private freshNodeWriteP99(key: string, timestamp: number): number | null {
+    const cached = this.reshardWriteP99.get(key);
+    if (!cached || timestamp - cached.readAt > AnomalyService.RESHARD_P99_LOOKBACK_MS) return null;
+    return cached.value;
+  }
+
+  private forgetNodeWriteP99(connectionId: string, keep: Set<string> = new Set()): void {
+    for (const key of [...this.reshardWriteP99.keys()]) {
+      if (key !== connectionId && isTopologyStateKeyOf(key, connectionId) && !keep.has(key)) {
+        this.reshardWriteP99.delete(key);
+      }
+    }
   }
 
   private async latestWriteP99(connectionId: string, timestamp: number): Promise<number | null> {
@@ -6702,6 +6997,9 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+  private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
+  private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
+  private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
   /**
    * Detects a replica wrongly reporting slot migrating/importing/owned state
@@ -7194,6 +7492,7 @@ export class AnomalyService
       commands: anomaly.commands,
       eventSequence: anomaly.eventSequence,
       kind: anomaly.kind,
+      ...(anomaly.retryTrigger ? { retryTrigger: anomaly.retryTrigger } : {}),
       resolved: anomaly.resolved || false,
       resolvedAt: anomaly.resolvedAt,
       durationMs:
@@ -7767,8 +8066,17 @@ export class AnomalyService
       const seen = incident.entries.flatMap((entry) => {
         const event = this.liveEventsById.get(entry.anomalyId);
         if (!event) return [];
-        const { metricType, connectionId, nodeAddr, timestamp } = event;
-        return [{ metricType, connectionId, ...(nodeAddr ? { nodeAddr } : {}), timestamp }];
+        const { metricType, anomalyType, retryTrigger, connectionId, nodeAddr, timestamp } = event;
+        return [
+          {
+            metricType,
+            anomalyType,
+            ...(retryTrigger ? { retryTrigger } : {}),
+            connectionId,
+            ...(nodeAddr ? { nodeAddr } : {}),
+            timestamp,
+          },
+        ];
       });
       return { ...boundary, members: mergeRuleSteps(boundary.members ?? [], seen) };
     };
@@ -7852,13 +8160,15 @@ export class AnomalyService
 
     for (const incident of this.liveIncidents) {
       for (const match of incident.sequenceMatches) {
-        const keys = match.anomalyIds.map((id) => `${match.pattern}\u0000${id}`);
+        const required = match.steps.filter((s) => s.step !== null).map((s) => s.anomalyId);
+        const keys = required.map((id) => `${match.pattern}\u0000${id}`);
         if (keys.some((key) => this.sequenceGroupedAnomalies.has(key))) continue;
         const anomalies = match.anomalyIds
           .map((id) => this.liveEventsById.get(id))
           .filter((a): a is AnomalyEvent => a !== undefined);
         if (anomalies.length === 0) continue;
-        anomalies.forEach((a) =>
+        const exclusive = anomalies.filter((a) => required.includes(a.id));
+        exclusive.forEach((a) =>
           this.sequenceGroupedAnomalies.set(`${match.pattern}\u0000${a.id}`, a.timestamp),
         );
         const recorded = await this.recordSequenceGroup({
@@ -7872,7 +8182,7 @@ export class AnomalyService
           severity: match.severity,
         });
         if (!recorded) {
-          anomalies.forEach((a) =>
+          exclusive.forEach((a) =>
             this.sequenceGroupedAnomalies.delete(`${match.pattern}\u0000${a.id}`),
           );
         }
@@ -8468,6 +8778,7 @@ export class AnomalyService
       dedupeKey: s.dedupeKey,
       commands: s.commands,
       eventSequence: s.eventSequence,
+      ...(isRetryTrigger(s.retryTrigger) ? { retryTrigger: s.retryTrigger } : {}),
       kind: s.kind,
       resolved: s.resolved,
       resolvedAt: s.resolvedAt,
@@ -8564,7 +8875,8 @@ export class AnomalyService
   }
 
   private async seedSequenceDedupe(since: number): Promise<boolean> {
-    const patterns = new Set(getSequenceRules().map((r) => r.pattern));
+    const rules = new Map(getSequenceRules().map((r) => [r.pattern, r]));
+    const patterns = new Set(rules.keys());
     if (patterns.size === 0) return true;
     try {
       const groups = await Promise.all(
@@ -8573,9 +8885,14 @@ export class AnomalyService
         ),
       );
       for (const group of groups.flat()) {
-        for (const id of group.anomalyIds ?? []) {
-          this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp);
-        }
+        const optional = rules.get(group.pattern as AnomalyPattern)?.optionalMetrics ?? [];
+        const ids = group.anomalyIds ?? [];
+        const typed = group.metricTypes?.length === ids.length;
+        ids
+          .filter((_, i) => !typed || !optional.includes(group.metricTypes[i] as MetricType))
+          .forEach((id) =>
+            this.sequenceGroupedAnomalies.set(`${group.pattern}\u0000${id}`, group.timestamp),
+          );
       }
       return true;
     } catch (error) {
@@ -8710,6 +9027,8 @@ export class AnomalyService
           gapBytes: row.gapBytes,
           bytesPerSec: row.bytesPerSec,
           secondsBehind: row.secondsBehind,
+          replicaGapBytes: row.replicaGapBytes,
+          replicaView: row.replicaView,
         });
         series.set(row.replicaAddr, windows);
       }
@@ -8755,14 +9074,13 @@ export class AnomalyService
           reachesNow ? windows[windows.length - 1] : undefined,
         );
         const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
+        const latest =
+          level === 'unobserved' ? null : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null);
         return {
           replica,
           level,
-          latest:
-            level === 'unobserved'
-              ? null
-              : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null),
-          windows,
+          latest: latest && withReplicaView(latest),
+          windows: windows.map(withReplicaView),
         };
       });
   }
@@ -8771,9 +9089,11 @@ export class AnomalyService
     sample: ReplicationStreamSample,
     info: Record<string, string>,
     ctx: ConnectionContext,
+    nodeAddr?: string,
   ): Promise<void> {
-    const coverage = this.backlogCoverage.get(ctx.connectionId) ?? createBacklogCoverageState();
-    this.backlogCoverage.set(ctx.connectionId, coverage);
+    const key = nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId;
+    const coverage = this.backlogCoverage.get(key) ?? createBacklogCoverageState();
+    this.backlogCoverage.set(key, coverage);
     const coverageSec = observeBacklogCoverage(coverage, sample);
     const levelBefore = coverage.level;
     const step = stepBacklogCoverage(coverage, coverageSec);
@@ -8785,20 +9105,22 @@ export class AnomalyService
           coverageSec!,
           step.escalatedTo,
           levelBefore,
+          key,
+          nodeAddr,
         );
       } catch (err) {
         coverage.level = levelBefore;
         throw err;
       }
     }
-    if (step.cleared) await this.settleBacklogCoverageEvent(ctx.connectionId);
+    if (step.cleared) await this.settleBacklogCoverageEvent(key);
     if (backlogCoverageRecovered(coverageSec)) {
-      await this.settleEvents(this.staleBacklogEventIds, ctx.connectionId);
+      await this.settleEvents(this.staleBacklogEventIds, key);
     }
-    await this.settleResyncEvents(sample, ctx.connectionId);
+    await this.settleResyncEvents(sample, key);
 
     if (sample.role !== 'primary') {
-      this.resyncEscalation.delete(ctx.connectionId);
+      this.resyncEscalation.delete(key);
       return;
     }
     const counters = {
@@ -8806,13 +9128,13 @@ export class AnomalyService
       partialOk: this.parseNumber(info.sync_partial_ok) ?? 0,
       partialErr: this.parseNumber(info.sync_partial_err) ?? 0,
     };
-    const state = this.resyncEscalation.get(ctx.connectionId) ?? createResyncEscalationState();
-    this.resyncEscalation.set(ctx.connectionId, state);
+    const state = this.resyncEscalation.get(key) ?? createResyncEscalationState();
+    this.resyncEscalation.set(key, state);
     for (const escalation of observeResyncEscalation(state, sample, counters, coverageSec)) {
-      const event = this.buildResyncEscalationEvent(ctx, escalation);
+      const event = this.buildResyncEscalationEvent(ctx, escalation, nodeAddr);
       await this.addAnomaly(event, ctx);
-      this.resyncEscalationEvents.set(ctx.connectionId, [
-        ...(this.resyncEscalationEvents.get(ctx.connectionId) ?? []),
+      this.resyncEscalationEvents.set(key, [
+        ...(this.resyncEscalationEvents.get(key) ?? []),
         { id: event.id, addr: escalation.addr, since: sample.timestamp },
       ]);
     }
@@ -8820,9 +9142,9 @@ export class AnomalyService
 
   private async settleResyncEvents(
     sample: ReplicationStreamSample,
-    connectionId: string,
+    key: string,
   ): Promise<void> {
-    const tracked = this.resyncEscalationEvents.get(connectionId);
+    const tracked = this.resyncEscalationEvents.get(key);
     if (!tracked) return;
     const pending: TrackedResyncEvent[] = [];
     for (const event of tracked) {
@@ -8833,8 +9155,8 @@ export class AnomalyService
         pending.push(event);
       }
     }
-    if (pending.length > 0) this.resyncEscalationEvents.set(connectionId, pending);
-    else this.resyncEscalationEvents.delete(connectionId);
+    if (pending.length > 0) this.resyncEscalationEvents.set(key, pending);
+    else this.resyncEscalationEvents.delete(key);
   }
 
   private async emitBacklogCoverageRisk(
@@ -8843,6 +9165,8 @@ export class AnomalyService
     coverageSec: number,
     level: BacklogCoverageLevel,
     levelBefore: BacklogCoverageLevel,
+    key: string,
+    nodeAddr?: string,
   ): Promise<void> {
     const severity = level === 'critical' ? AnomalySeverity.CRITICAL : AnomalySeverity.WARNING;
     const threshold =
@@ -8879,38 +9203,37 @@ export class AnomalyService
         `resync. Raise repl-backlog-size or reduce the write rate.`,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-    const previous = this.backlogCoverageEventIds.get(ctx.connectionId);
-    this.backlogCoverageEventIds.set(ctx.connectionId, event.id);
-    await this.addLatchedAnomaly(event, ctx, ctx.connectionId, () => {
-      const coverage = this.backlogCoverage.get(ctx.connectionId);
+    const previous = this.backlogCoverageEventIds.get(key);
+    this.backlogCoverageEventIds.set(key, event.id);
+    await this.addLatchedAnomaly(event, ctx, key, () => {
+      const coverage = this.backlogCoverage.get(key);
       if (coverage?.level === level) coverage.level = levelBefore;
-      if (this.backlogCoverageEventIds.get(ctx.connectionId) === event.id) {
-        this.backlogCoverageEventIds.delete(ctx.connectionId);
+      if (this.backlogCoverageEventIds.get(key) === event.id) {
+        this.backlogCoverageEventIds.delete(key);
       }
     });
-    if (previous) await this.closeBacklogEvent(ctx.connectionId, previous);
+    if (previous) await this.closeBacklogEvent(key, previous);
   }
 
-  private async settleBacklogCoverageEvent(connectionId: string): Promise<void> {
-    const id = this.backlogCoverageEventIds.get(connectionId);
+  private async settleBacklogCoverageEvent(key: string): Promise<void> {
+    const id = this.backlogCoverageEventIds.get(key);
     if (!id) return;
-    this.backlogCoverageEventIds.delete(connectionId);
-    await this.closeBacklogEvent(connectionId, id);
+    this.backlogCoverageEventIds.delete(key);
+    await this.closeBacklogEvent(key, id);
   }
 
-  private async closeBacklogEvent(connectionId: string, id: string): Promise<void> {
+  private async closeBacklogEvent(key: string, id: string): Promise<void> {
     if ((await this.resolveAnomalyOutcome(id)) !== 'retry') return;
-    this.staleBacklogEventIds.set(connectionId, [
-      ...(this.staleBacklogEventIds.get(connectionId) ?? []),
-      id,
-    ]);
+    this.staleBacklogEventIds.set(key, [...(this.staleBacklogEventIds.get(key) ?? []), id]);
   }
 
   private buildResyncEscalationEvent(
     ctx: ConnectionContext,
     escalation: ResyncEscalation,
+    nodeAddr?: string,
   ): AnomalyEvent {
     const seconds = escalation.disconnectedForMs / 1000;
     const coverage =
@@ -8943,6 +9266,7 @@ export class AnomalyService
       replicaAddr: escalation.addr,
       resolved: false,
       connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
     };
     this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
     return event;
@@ -8963,9 +9287,16 @@ export class AnomalyService
         await this.collectOrphanedDivergenceEvents(state, ctx, key, nodeAddr);
       }
 
-      for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+      const windowsBefore = state.closedWindowCount;
+      const observed = observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()));
+      const windowClosed = state.closedWindowCount > windowsBefore;
+      const samples = windowClosed
+        ? await this.sampleReplicas(ctx, replicasToSample(state, observed), !nodeAddr, readPrimary)
+        : new Map<string, ReplicaSample>();
+      const outcomes = windowClosed ? applyReplicaViews(state, observed, replicaReadings(samples)) : observed;
+      for (const outcome of outcomes) {
         if (outcome.kind === 'divergence') {
-          const view = await this.crossCheckReplica(ctx, outcome.addr, readPrimary);
+          const view = samples.get(outcome.addr)?.view ?? null;
           if (view && outcome.reason !== 'not_acking' && replicaCaughtUp(view)) {
             this.logger.debug(
               `Replica ${outcome.addr} of ${ctx.connectionName} reports it is caught up; skipping the divergence alert.`,
@@ -8973,6 +9304,10 @@ export class AnomalyService
             continue;
           }
           await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr, view);
+        } else if (outcome.kind === 'views_disagree') {
+          await this.emitViewDisagreement(state, outcome, ctx, sample.timestamp, nodeAddr);
+        } else if (outcome.kind === 'views_agree') {
+          await this.resolveViewDisagreement(state, outcome, key);
         } else {
           await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
         }
@@ -9033,6 +9368,53 @@ export class AnomalyService
     }
   }
 
+  private nodeDetectorKeysOf(connectionId: string): string[] {
+    const keys = new Set<string>();
+    for (const map of this.nodeDetectorMaps()) {
+      for (const key of map.keys()) {
+        if (key !== connectionId && isTopologyStateKeyOf(key, connectionId)) keys.add(key);
+      }
+    }
+    return [...keys];
+  }
+
+  private nodeDetectorMaps(): Map<string, unknown>[] {
+    return [
+      this.backlogCoverage,
+      this.backlogCoverageEventIds,
+      this.staleBacklogEventIds,
+      this.resyncEscalation,
+      this.resyncEscalationEvents,
+      this.forkMemoryState,
+      this.forkMemLastChanges,
+      this.cobState,
+      this.cobLastSyncFull,
+      this.cobLimitCache,
+      this.cobLimitRecheck,
+      this.fanoutNodeEventIds,
+      this.restoredCobLevel,
+    ];
+  }
+
+  private nodeDetectorEventIds(key: string): string[] {
+    const current = this.backlogCoverageEventIds.get(key);
+    return [
+      ...(current ? [current] : []),
+      ...(this.staleBacklogEventIds.get(key) ?? []),
+      ...(this.resyncEscalationEvents.get(key) ?? []).map((e) => e.id),
+      ...(this.fanoutNodeEventIds.get(key)?.keys() ?? []),
+    ];
+  }
+
+  private retireNodeDetectors(key: string): void {
+    for (const id of this.nodeDetectorEventIds(key)) this.closeLater(id);
+    this.forgetNodeDetectors(key);
+  }
+
+  private forgetNodeDetectors(key: string): void {
+    for (const map of this.nodeDetectorMaps()) map.delete(key);
+  }
+
   private clearFanoutNodeSignals(connectionId: string): void {
     const keys = new Set([...this.divergenceKeysOf(connectionId), ...this.retryAmplificationKeysOf(connectionId)]);
     for (const key of keys) {
@@ -9054,69 +9436,125 @@ export class AnomalyService
     return this.convertInfoToRecord(await client.getInfoParsed(['replication']));
   }
 
-  private async crossCheckReplica(
+  private async sampleReplicas(
+    ctx: ConnectionContext,
+    addrs: string[],
+    ownPrimary: boolean,
+    readPrimary: () => Promise<Record<string, string>>,
+  ): Promise<Map<string, ReplicaSample>> {
+    const read = await Promise.all(
+      addrs.map(async (addr) => [addr, await this.readReplica(ctx, addr, ownPrimary)] as const),
+    );
+    const attempted = read.filter(
+      (entry): entry is readonly [string, Record<string, string> | Error] => entry[1] !== null,
+    );
+    if (attempted.length === 0) return new Map();
+    let primary: Record<string, string> | null = null;
+    if (attempted.some(([, replica]) => !(replica instanceof Error))) {
+      try {
+        const budget = this.crossCheckBudget(ctx.connectionId);
+        primary = await withTimeout(readPrimary(), budget, 'Re-reading the primary timed out');
+      } catch (err) {
+        this.logger.debug(
+          `Could not re-read the primary of ${ctx.connectionName} for the replica cross-check: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+        return new Map();
+      }
+    }
+    return new Map(
+      attempted.map(([addr, replica]) => [
+        addr,
+        replica instanceof Error || primary === null ? UNREACHABLE_REPLICA : sampleReplicaView(replica, primary, addr),
+      ]),
+    );
+  }
+
+  private async readReplica(
     ctx: ConnectionContext,
     replicaAddr: string,
-    readPrimary: () => Promise<Record<string, string>>,
-  ): Promise<ReplicaView | null> {
+    ownPrimary: boolean,
+  ): Promise<Record<string, string> | Error | null> {
     const address = splitHostPort(replicaAddr);
     if (!address) return null;
+    const reader = this.replicaReader(ctx, address.host, address.port, ownPrimary);
+    if (!reader) return null;
+    const inFlight = `${ctx.connectionId}:${replicaAddr}:${reader.via}`;
     try {
-      const readReplica = this.replicaReader(ctx.connectionId, address.host, address.port);
-      if (!readReplica) return null;
-      let deadline = this.crossCheckDeadline.get(ctx.connectionId);
-      if (deadline === null) {
-        deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
-        this.crossCheckDeadline.set(ctx.connectionId, deadline);
-      }
-      const budget = Math.min(
-        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-        deadline === undefined ? Infinity : deadline - Date.now(),
-      );
-      if (budget <= 0) throw new Error('no time left in this poll');
-      return await withTimeout(
-        (async () => {
-          const replica = await readReplica();
-          return readReplicaView(replica, await readPrimary());
-        })(),
-        budget,
-        `Reading replica ${replicaAddr} timed out`,
-      );
+      const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
+      if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
+      this.replicaReadsInFlight.add(inFlight);
+      const pending = reader.read(Date.now() + budget);
+      const release = () => {
+        this.replicaReadsInFlight.delete(inFlight);
+      };
+      pending.then(release, release);
+      return await withTimeout(pending, budget, `Reading replica ${replicaAddr} timed out`);
     } catch (err) {
       this.logger.debug(
         `Could not read replica ${replicaAddr} of ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
-      return null;
+      return err instanceof Error ? err : new Error(String(err));
     }
   }
 
+  private crossCheckBudget(connectionId: string, reserveMs = 0): number {
+    let deadline = this.crossCheckDeadline.get(connectionId);
+    if (deadline === null) {
+      deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+      this.crossCheckDeadline.set(connectionId, deadline);
+    }
+    const budget =
+      Math.min(AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, deadline === undefined ? Infinity : deadline - Date.now()) -
+      reserveMs;
+    if (budget <= 0) throw new Error('no time left in this poll');
+    return budget;
+  }
+
   private replicaReader(
-    connectionId: string,
+    ctx: ConnectionContext,
     host: string,
     port: number,
-  ): (() => Promise<Record<string, string>>) | null {
+    ownPrimary: boolean,
+  ): { via: string; read: (deadline: number) => Promise<Record<string, string>> } | null {
+    const connectionId = ctx.connectionId;
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
     if (
       registeredId &&
       registeredId !== connectionId &&
       this.connectionRegistry.list().some((c) => c.id === registeredId && c.isConnected)
     ) {
-      return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
+      return { via: registeredId, read: () => this.readReplicationInfo(this.connectionRegistry.get(registeredId)) };
     }
     const discovery = this.clusterDiscovery;
     if (!discovery || !this.dialsDataNodes(connectionId)) return null;
-    const readNode = async (client: Promise<{ info(section: string): Promise<string> }>) =>
-      this.convertInfoToRecord(InfoParser.parse(await (await client).info('replication')));
+    const readNode = async (
+      pending: Promise<{ info(section: string): Promise<string>; disconnect(): void }>,
+      deadline: number,
+    ) => {
+      const client = await pending;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('no time left to read the replica');
+      try {
+        const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
+        return this.convertInfoToRecord(InfoParser.parse(reply));
+      } catch (err) {
+        if (err instanceof Error && err.message === AnomalyService.REPLICA_READ_TIMED_OUT) client.disconnect();
+        throw err;
+      }
+    };
+    const discovered = (read: (deadline: number) => Promise<Record<string, string>>) => ({ via: 'discovered', read });
     if (this.clusterViews.has(connectionId)) {
-      return async () => {
+      return discovered(async (deadline) => {
         const nodes = await discovery.discoverNodes(connectionId);
         const node = nodes.find((n) => {
           const nodeAddress = splitHostPort(n.address);
           return n.role === 'replica' && nodeAddress?.host === host && nodeAddress.port === port;
         });
         if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
-        return readNode(discovery.getNodeConnection(node.id, connectionId));
-      };
+        return readNode(discovery.getNodeConnection(node.id, connectionId), deadline);
+      });
     }
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     const seedId = membership?.source === 'sentinel' ? membership.seedId : connectionId;
@@ -9124,9 +9562,35 @@ export class AnomalyService
     const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
     const sentinelAddress = reported ? splitHostPort(reported) : null;
     if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
-      return () => readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId));
+      return discovered((deadline) =>
+        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), deadline),
+      );
+    }
+    if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
+      return discovered(async (deadline) => {
+        const [peers, addresses] = await Promise.all([
+          ctx.client.getClients({ type: 'replica' }),
+          this.resolveHost(host),
+        ]);
+        const connectedFrom = new Set(
+          peers.flatMap((peer) => {
+            const peerHost = splitHostPort(peer.addr)?.host;
+            return peerHost === undefined ? [] : [normalizeIp(peerHost)];
+          }),
+        );
+        const verified = [...addresses].find((address) => connectedFrom.has(address));
+        if (!verified) throw new Error(`no replica is connected to the primary from ${host}`);
+        const hostname = isIP(host) ? [] : [host];
+        return readNode(discovery.getReplicaConnection(verified, port, connectionId, ...hostname), deadline);
+      });
     }
     return null;
+  }
+
+  private async resolveHost(host: string): Promise<Set<string>> {
+    if (isIP(host)) return new Set([normalizeIp(host)]);
+    const resolved = await lookup(host, { all: true });
+    return new Set(resolved.map(({ address }) => normalizeIp(address)));
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
@@ -9440,6 +9904,9 @@ export class AnomalyService
         this.clearNodeSignals(ctx.connectionId, key);
       }
     }
+    for (const key of this.nodeDetectorKeysOf(ctx.connectionId)) {
+      if (!active.has(key)) this.retireNodeDetectors(key);
+    }
     for (const key of this.reshardSnapshotKeysOf(ctx.connectionId)) {
       if (key !== ctx.connectionId && !active.has(key)) {
         this.reshardSnapshot.delete(key);
@@ -9447,11 +9914,13 @@ export class AnomalyService
         this.reshardNodeSelves.delete(key);
       }
     }
+    this.forgetNodeWriteP99(ctx.connectionId, active);
     const read = new Set(targets.map((t) => t.addr));
     for (const addr of kept) {
       const key = topologyStateKey(ctx.connectionId, addr);
       if (!read.has(addr) && this.reshardSnapshot.has(key)) this.reshardMissedReads.add(key);
     }
+    this.closePendingNodeEvents(ctx.connectionId, active);
     for (const nodeAddr of [...(this.adoptedNodeReshardEventIds.get(ctx.connectionId)?.keys() ?? [])]) {
       if (active.has(topologyStateKey(ctx.connectionId, nodeAddr))) continue;
       const adopted = this.takeAdoptedNodeReshardEvent(ctx.connectionId, nodeAddr);
@@ -9503,20 +9972,30 @@ export class AnomalyService
           `Connecting to ${target.addr} timed out`,
         );
         const stateKey = topologyStateKey(ctx.connectionId, target.addr);
-        const [raw, self] = await Promise.all([
-          withTimeout(
-            this.fanoutCommand(stateKey, () =>
-              Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
-            ),
+        const socket: FanoutSocket = { stalled: false };
+        try {
+          const raw = await this.fanoutRead(
+            socket,
+            stateKey,
             AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
             `INFO to ${target.addr} timed out`,
-          ),
-          target.nodeId
-            ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
-              this.readNodeSelf(client, target.addr, stateKey))
-            : Promise.resolve(null),
-        ]);
-        return { info: this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n'))), self };
+            () => Promise.all(AnomalyService.FANOUT_INFO_SECTIONS.map((section) => client.info(section))),
+          );
+          const info = this.convertInfoToRecord(InfoParser.parse(raw.join('\r\n')));
+          const cobRead = this.readFanoutCob(client, socket, stateKey, target.addr, info);
+          const [self, writeP99, cob] = await Promise.all([
+            target.nodeId
+              ? (this.cachedNodeSelf(ctx.connectionId, stateKey, target.nodeId, timestamp) ??
+                this.readNodeSelf(client, socket, target.addr, stateKey))
+              : Promise.resolve(null),
+            target.nodeId ? this.readNodeWriteP99(client, socket, stateKey, target.addr, timestamp) : null,
+            cobRead,
+          ]);
+          if (writeP99) this.reshardWriteP99.set(stateKey, writeP99);
+          return { info, self, cob };
+        } finally {
+          if (socket.stalled) client.disconnect();
+        }
       }),
     );
 
@@ -9562,10 +10041,19 @@ export class AnomalyService
         host: target.host,
         port: target.port,
       };
-      const { info, self } = result.value;
+      const { info, self, cob } = result.value;
+      if (this.isRegisteredPrimary(info, now, staleMs)) {
+        this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
+        this.retireFanoutNode(ctx, key);
+        continue;
+      }
       if (target.nodeId) this.recordNodeReshardSnapshot(ctx, key, self, info, timestamp);
+      this.adoptNodeOpenEvents(ctx.connectionId, key, target.addr);
+      await this.detectForkMemoryRisk(info, nodeCtx, timestamp, target.addr);
+      await this.detectCobPressure(info, nodeCtx, timestamp, target.addr, cob);
       const sample = this.replicationStream.observe(key, info, timestamp);
       if (sample) {
+        await this.detectRecoveryAmplification(sample, info, nodeCtx, target.addr);
         await this.detectReplicationDivergence(sample, nodeCtx, target.addr, () =>
           this.readTargetReplicationInfo(ctx.connectionId, target),
         );
@@ -9578,7 +10066,7 @@ export class AnomalyService
     if (unreachable !== previous) {
       if (unreachable > 0) {
         this.logger.warn(
-          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable${authFailed > 0 ? ` (${authFailed} refused the credentials)` : ''} — replication divergence, retry amplification and reshard skew are not checked on them.`,
+          `Node fan-out for ${ctx.connectionName}: ${unreachable}/${claimed.length} primaries unreachable${authFailed > 0 ? ` (${authFailed} refused the credentials)` : ''} — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.`,
         );
       } else {
         this.logger.log(
@@ -9599,6 +10087,39 @@ export class AnomalyService
     return this.convertInfoToRecord(InfoParser.parse(await client.info('replication')));
   }
 
+  private isRegisteredPrimary(info: Record<string, string>, now: number, staleMs: number): boolean {
+    if (info.role !== 'master' || !info.master_replid) return false;
+    const connected = new Set(this.connectionRegistry.list().filter((c) => c.isConnected).map((c) => c.id));
+    return [...this.registeredPrimaryReplids].some(
+      ([connectionId, seen]) =>
+        connected.has(connectionId) && seen.replid === info.master_replid && now - seen.seenAt <= staleMs,
+    );
+  }
+
+  private retireFanoutNode(ctx: ConnectionContext, key: string): void {
+    this.retireDivergenceScope(key, ctx);
+    this.forgetRetryAmplification(key);
+    this.retireNodeDetectors(key);
+    this.reshardSnapshot.delete(key);
+    this.reshardMissedReads.delete(key);
+    this.reshardNodeSelves.delete(key);
+    this.reshardWriteP99.delete(key);
+    this.clearNodeSignals(ctx.connectionId, key);
+  }
+
+  private fanoutRead<T>(
+    socket: FanoutSocket,
+    key: string,
+    timeoutMs: number,
+    message: string,
+    send: () => Promise<T>,
+  ): Promise<T> {
+    return withTimeout(this.fanoutCommand(key, send), timeoutMs, message).catch((err: unknown) => {
+      if (err instanceof Error && err.message === message) socket.stalled = true;
+      throw err;
+    });
+  }
+
   private fanoutCommand<T>(key: string, send: () => Promise<T>): Promise<T> {
     if (this.fanoutInFlight.has(key)) {
       return Promise.reject(new Error(`Previous command to ${key} has not answered`));
@@ -9615,7 +10136,7 @@ export class AnomalyService
   private retireDivergenceScope(key: string, ctx: ConnectionContext): void {
     const state = this.divergenceState.get(key);
     const ids = [
-      ...[...(state?.replicas.values() ?? [])].flatMap((r) => (r.eventId ? [r.eventId] : [])),
+      ...[...(state?.replicas.values() ?? [])].flatMap(replicaEventIds),
       ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
     ];
     for (const replica of state?.replicas.keys() ?? []) {
@@ -9654,7 +10175,7 @@ export class AnomalyService
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
       const tracked = new Set(
         this.divergenceKeysOf(ctx.connectionId).flatMap((key) => [
-          ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+          ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].flatMap(replicaEventIds),
           ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
         ]),
       );
@@ -9671,6 +10192,10 @@ export class AnomalyService
         if (!active.has(event.nodeAddr!)) continue;
         const key = topologyStateKey(ctx.connectionId, event.nodeAddr!);
         if (this.divergenceOrphansSwept.has(key)) continue;
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          await this.closeRestoredDisagreements(key, [event]);
+          continue;
+        }
         const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
@@ -9738,13 +10263,18 @@ export class AnomalyService
     nodeAddr: string | undefined,
   ): Promise<void> {
     try {
-      const seen = new Set([...state.replicas.values()].map((r) => r.eventId));
+      const seen = new Set([...state.replicas.values()].flatMap(replicaEventIds));
       const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
+      const disagreements: StoredAnomalyEvent[] = [];
       for (const event of open) {
         if (event.nodeAddr !== nodeAddr) continue;
         if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
         seen.add(event.id);
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          disagreements.push(event);
+          continue;
+        }
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
           eventIds: new Set<string>(),
@@ -9756,6 +10286,7 @@ export class AnomalyService
       }
       if (orphans.size > 0) this.divergenceOrphans.set(key, orphans);
       this.divergenceOrphansSwept.add(key);
+      await this.closeRestoredDisagreements(key, disagreements);
     } catch (err) {
       this.logger.warn(
         `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
@@ -9801,6 +10332,14 @@ export class AnomalyService
       }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(key);
+  }
+
+  private async closeRestoredDisagreements(key: string, events: StoredAnomalyEvent[]): Promise<void> {
+    for (const event of events) {
+      await this.resolveAnomalyOutcome(event.id, () => {
+        this.retireDivergenceEvent(connectionOfStateKey(key), event.id);
+      });
+    }
   }
 
   private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
@@ -9873,6 +10412,8 @@ export class AnomalyService
           gapBytes: w.gapBytes,
           bytesPerSec: w.bytesPerSec,
           secondsBehind: w.secondsBehind,
+          replicaGapBytes: w.replicaGapBytes ?? null,
+          replicaView: w.replicaView ?? null,
         })),
         ctx.connectionId,
       );
@@ -9902,6 +10443,8 @@ export class AnomalyService
           gapBytes: w.gapBytes,
           bytesPerSec: w.bytesPerSec,
           secondsBehind: w.secondsBehind,
+          replicaGapBytes: w.replicaGapBytes ?? null,
+          replicaView: w.replicaView ?? null,
         })),
         ctx.connectionId,
       );
@@ -9920,7 +10463,8 @@ export class AnomalyService
       try {
         const open: StoredAnomalyEvent[] = [];
         for (const metricType of metricTypes) {
-          open.push(...(await this.readOpenEvents(connectionId, metricType)));
+          const rows = await this.readOpenEvents(connectionId, metricType);
+          open.push(...(NODE_ADOPTED_METRICS.includes(metricType) ? rows.filter((e) => e.nodeAddr) : rows));
         }
         if (!this.removedConnectionSweeps.delete(connectionId)) continue;
         for (const event of open) {
@@ -9943,6 +10487,7 @@ export class AnomalyService
     this.removedConnectionSweeps.set(connectionId, [
       MetricType.REPLICATION_DIVERGENCE,
       ...ADOPTED_METRICS,
+      ...NODE_ADOPTED_METRICS,
     ]);
   }
 
@@ -9987,8 +10532,10 @@ export class AnomalyService
       this.adoptedReshardEventIds.get(connectionId),
       ...(this.adoptedNodeReshardEventIds.get(connectionId)?.values() ?? []),
       ...(this.resyncEscalationEvents.get(connectionId) ?? []).map((e) => e.id),
+      ...this.nodeDetectorKeysOf(connectionId).flatMap((key) => this.nodeDetectorEventIds(key)),
+      ...this.pendingNodeEventIds(connectionId),
       ...divergenceKeys.flatMap((key) => [
-        ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+        ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].flatMap(replicaEventIds),
         ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
       ]),
       ...(this.divergenceRetired.get(connectionId) ?? []),
@@ -9999,7 +10546,9 @@ export class AnomalyService
       (divergenceKeys.length === 1 || this.divergenceRetiredSwept.has(connectionId));
     this.removedConnectionSweeps.set(connectionId, [
       ...(divergenceSwept ? [] : [MetricType.REPLICATION_DIVERGENCE]),
-      ...(this.openEventsAdopted.has(connectionId) ? [MetricType.RAFT_HEALTH] : ADOPTED_METRICS),
+      ...(this.openEventsAdopted.has(connectionId)
+        ? [MetricType.RAFT_HEALTH]
+        : [...ADOPTED_METRICS, ...NODE_ADOPTED_METRICS]),
     ]);
     this.closeRemovedEvents(connectionId, ids).catch((err) => {
       this.logger.error('Failed to resolve events of a removed connection', err);
@@ -10085,6 +10634,51 @@ export class AnomalyService
         this.retryDroppedDivergenceClose(key, finding.addr, previousEventId);
       });
     }
+  }
+
+  private async emitViewDisagreement(
+    state: DivergenceConnectionState,
+    outcome: ViewDisagreement,
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodeAddr: string | undefined,
+  ): Promise<void> {
+    const message = describeViewDisagreement(outcome);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: Math.abs(outcome.primaryGapBytes - outcome.replicaGapBytes),
+      baseline: DIVERGENCE_FLOOR_BYTES,
+      zScore: 0,
+      stdDev: 0,
+      threshold: DIVERGENCE_FLOOR_BYTES,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+      replicaAddr: outcome.addr,
+      dedupeKey: REPLICA_VIEWS_DEDUPE_KEY,
+      ...(nodeAddr ? { nodeAddr } : {}),
+    };
+    this.anomalySaveHooks.set(event, () => undefined);
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
+    await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${outcome.addr}:views`, () => {
+      acknowledgeViewAgreement(state, outcome.addr, event.id);
+    });
+    acknowledgeViewDisagreement(state, outcome.addr, event.id);
+  }
+
+  private async resolveViewDisagreement(
+    state: DivergenceConnectionState,
+    outcome: ViewAgreement,
+    key: string,
+  ): Promise<void> {
+    await this.resolveAnomalyOutcome(outcome.eventId, () => {
+      this.retireDivergenceEvent(connectionOfStateKey(key), outcome.eventId);
+    });
+    acknowledgeViewAgreement(state, outcome.addr, outcome.eventId);
   }
 
   private async resolveReplicationDivergence(

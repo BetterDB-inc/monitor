@@ -284,6 +284,11 @@ registerSequenceRule({
     ],
   ],
   optionalMetrics: [MetricType.CONNECTION_CHURN],
+  directions: {
+    [MetricType.MEMORY_USED]: 'rise',
+    [MetricType.OUTPUT_KBPS]: 'rise',
+    [MetricType.CONNECTION_CHURN]: 'rise',
+  },
   maxSpanMs: RECOVERY_AMPLIFICATION_MAX_SPAN_MS,
   sameConnection: true,
   diagnosis:
