@@ -34,7 +34,11 @@ export function IncidentList({
   linkQuery,
 }: IncidentListProps) {
   if (!incidents?.length && (loading || refreshing)) {
-    return <p className="text-sm text-muted-foreground">Loading incidents…</p>;
+    return (
+      <p role="status" className="text-sm text-muted-foreground">
+        Loading incidents…
+      </p>
+    );
   }
   if (!incidents?.length) {
     return (

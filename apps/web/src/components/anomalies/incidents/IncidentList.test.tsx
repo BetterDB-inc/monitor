@@ -23,7 +23,7 @@ describe('IncidentList', () => {
 
   it('shows loading instead of the empty state before the first response', () => {
     renderList(undefined, { loading: true });
-    expect(screen.getByText('Loading incidents…')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading incidents…');
     expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
   });
 
@@ -36,7 +36,7 @@ describe('IncidentList', () => {
 
   it('shows loading instead of a previous empty range while a new range loads', () => {
     renderList([], { refreshing: true });
-    expect(screen.getByText('Loading incidents…')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading incidents…');
     expect(screen.queryByText('No incidents in this time range')).not.toBeInTheDocument();
   });
 

@@ -162,7 +162,7 @@ describe('IncidentDetail', () => {
     );
   });
 
-  it('keeps the refresh warning text level with its retry button', () => {
+  it('does not put the refresh warning in a paragraph that takes the alert margin', () => {
     polling.state = {
       data: incident(),
       error: new ApiError('Storage unavailable', 500),
