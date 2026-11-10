@@ -2303,6 +2303,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         bytes_per_sec DOUBLE PRECISION,
         seconds_behind DOUBLE PRECISION
       );
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_gap_bytes DOUBLE PRECISION;
+      ALTER TABLE replication_divergence_windows ADD COLUMN IF NOT EXISTS replica_view TEXT;
 
       CREATE INDEX IF NOT EXISTS idx_repl_div_replica_end
         ON replication_divergence_windows(connection_id, replica_addr, window_end);
@@ -5350,7 +5352,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const placeholders: string[] = [];
     for (const w of windows) {
       const base = values.length;
-      placeholders.push(`(${Array.from({ length: 8 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
+      placeholders.push(`(${Array.from({ length: 10 }, (_, i) => `$${base + i + 1}`).join(', ')})`);
       values.push(
         randomUUID(),
         connectionId,
@@ -5360,12 +5362,15 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         w.gapBytes,
         w.bytesPerSec,
         w.secondsBehind,
+        w.replicaGapBytes,
+        w.replicaView,
       );
     }
 
     const result = await this.pool.query(
       `INSERT INTO replication_divergence_windows
-         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind)
+         (id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+          replica_gap_bytes, replica_view)
        VALUES ${placeholders.join(', ')}
        ON CONFLICT (connection_id, replica_addr, window_start, window_end) DO NOTHING`,
       values,
@@ -5388,7 +5393,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     const startIdx = params.length - 2;
 
     const result = await this.pool.query(
-      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind
+      `SELECT id, connection_id, replica_addr, window_start, window_end, gap_bytes, bytes_per_sec, seconds_behind,
+              replica_gap_bytes, replica_view
        FROM (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY replica_addr ORDER BY window_end DESC) AS rn
          FROM replication_divergence_windows
@@ -5409,6 +5415,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
       gapBytes: Number(row.gap_bytes),
       bytesPerSec: row.bytes_per_sec === null ? null : Number(row.bytes_per_sec),
       secondsBehind: row.seconds_behind === null ? null : Number(row.seconds_behind),
+      replicaGapBytes: row.replica_gap_bytes === null ? null : Number(row.replica_gap_bytes),
+      replicaView: row.replica_view ?? null,
     }));
   }
 

@@ -706,6 +706,61 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('getReplicaConnection', () => {
+    it("dials the replica with the primary connection's credentials", async () => {
+      await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection');
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.1.6',
+          port: 6381,
+          username: 'testuser',
+          password: 'testpass',
+        }),
+      );
+    });
+
+    it('dials the verified address while checking TLS against the announced hostname', async () => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { username: 'u', password: 'p', tls: { servername: 'seed.example', ca: 'seed-ca' } },
+      });
+
+      await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection', 'replica-0.cache.svc');
+
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: '10.0.1.6',
+          tls: { ca: 'seed-ca', servername: 'replica-0.cache.svc', checkServerIdentity: expect.any(Function) },
+        }),
+      );
+    });
+
+    it('reuses the client for the same replica', async () => {
+      const first = await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection');
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      const second = await service.getReplicaConnection('10.0.1.6', 6381, 'test-connection');
+
+      expect(second).toBe(first);
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
+    });
+
+    it.each([
+      ['reached through the agent', { id: 'test-connection', host: 'agent', port: 0 }],
+      ['that is a Sentinel member', { id: 'test-connection', host: 'localhost', port: 6379, membership: { source: 'sentinel', seedId: 's', nodeId: 'n' } }],
+      ['behind an SSH tunnel', { id: 'test-connection', host: 'localhost', port: 6379, sshTunnel: { enabled: true } }],
+      ['with no config', null],
+    ])('refuses to dial for a connection %s', async (_label, config) => {
+      mockConnectionRegistry.getConfig.mockReturnValue(config);
+      const calls = jest.mocked(Valkey).mock.calls.length;
+
+      await expect(service.getReplicaConnection('10.0.1.6', 6381, 'test-connection')).rejects.toThrow(
+        /cannot dial (its replica )?10\.0\.1\.6:6381 directly/,
+      );
+      expect(jest.mocked(Valkey).mock.calls.length).toBe(calls);
+    });
+  });
+
   describe('discoverNodesIsolated', () => {
     const seedOptions = { host: 'seed.example', port: 7001, username: 'u', password: 'p', tls: { servername: 'seed.example' } };
 

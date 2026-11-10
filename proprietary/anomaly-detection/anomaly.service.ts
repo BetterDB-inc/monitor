@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -252,11 +254,24 @@ import {
   OPEN_EVENT_PAGE_SIZE,
   DivergenceConnectionState,
   DivergenceFinding,
+  DivergenceOutcome,
   DivergenceRecovery,
   DivergenceWindow,
   OrphanedDivergence,
   ReplicaDivergenceHistory,
+  ReplicaDivergenceState,
+  ReplicaViewReading,
+  ViewAgreement,
+  ViewDisagreement,
   acknowledgeDivergence,
+  acknowledgeViewAgreement,
+  acknowledgeViewDisagreement,
+  applyReplicaViews,
+  describeViewDisagreement,
+  replicaEventIds,
+  replicasToSample,
+  REPLICA_VIEWS_DEDUPE_KEY,
+  withReplicaView,
   assessOrphanedReplica,
   acknowledgeRecovery,
   divergenceWindowsHeld,
@@ -281,11 +296,20 @@ import {
   clusterTargets,
   connectionOfStateKey,
   isTopologyStateKeyOf,
+  normalizeIp,
   sentinelTargets,
   splitHostPort,
   topologyStateKey,
 } from './topology-targets';
-import { ReplicaView, describeReplicaView, readReplicaView, replicaCaughtUp } from './replica-cross-check';
+import {
+  ReplicaSample,
+  ReplicaView,
+  UNREACHABLE_REPLICA,
+  describeReplicaView,
+  replicaCaughtUp,
+  replicaReadings,
+  sampleReplicaView,
+} from './replica-cross-check';
 import {
   CONTROL_PLANE_CORROBORATING_METRICS,
   ControlPlaneState,
@@ -688,6 +712,7 @@ export class AnomalyService
   private sentinelMastersSnapshot = new Map<string, SentinelNodeInfo[]>();
   private sentinelReplicaAddrs = new Map<string, Set<string>>();
   private crossCheckDeadline = new Map<string, number | null>();
+  private replicaReadsInFlight = new Set<string>();
   // Monitor-clock ms the masters snapshot above was last refreshed, and the value
   // the loop-stall misdirected streak last consumed. The snapshot refreshes on the
   // slow SENTINEL probe cadence (~15s), so the streak advances only when a NEW
@@ -6901,6 +6926,8 @@ export class AnomalyService
    * Matches the spirit of healthCheckNode's 2s ping race.
    */
   private static readonly FANOUT_COMMAND_TIMEOUT_MS = 2_000;
+  private static readonly PRIMARY_REREAD_RESERVE_MS = 500;
+  private static readonly REPLICA_READ_TIMED_OUT = 'Reading the replica timed out';
   private static readonly FANOUT_NODE_EVENT_LIMIT = 8;
 
   /**
@@ -8882,6 +8909,8 @@ export class AnomalyService
           gapBytes: row.gapBytes,
           bytesPerSec: row.bytesPerSec,
           secondsBehind: row.secondsBehind,
+          replicaGapBytes: row.replicaGapBytes,
+          replicaView: row.replicaView,
         });
         series.set(row.replicaAddr, windows);
       }
@@ -8927,14 +8956,13 @@ export class AnomalyService
           reachesNow ? windows[windows.length - 1] : undefined,
         );
         const level = observed === 'none' && orphaned.has(replica) ? 'behind' : observed;
+        const latest =
+          level === 'unobserved' ? null : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null);
         return {
           replica,
           level,
-          latest:
-            level === 'unobserved'
-              ? null
-              : (staleAckWindow(state, replica) ?? windows[windows.length - 1] ?? null),
-          windows,
+          latest: latest && withReplicaView(latest),
+          windows: windows.map(withReplicaView),
         };
       });
   }
@@ -9127,9 +9155,16 @@ export class AnomalyService
         await this.collectOrphanedDivergenceEvents(state, ctx, key, nodeAddr);
       }
 
-      for (const outcome of observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()))) {
+      const windowsBefore = state.closedWindowCount;
+      const observed = observeDivergence(state, sample, divergenceWindowMs(this.getIntervalMs()));
+      const windowClosed = state.closedWindowCount > windowsBefore;
+      const samples = windowClosed
+        ? await this.sampleReplicas(ctx, replicasToSample(state, observed), !nodeAddr, readPrimary)
+        : new Map<string, ReplicaSample>();
+      const outcomes = windowClosed ? applyReplicaViews(state, observed, replicaReadings(samples)) : observed;
+      for (const outcome of outcomes) {
         if (outcome.kind === 'divergence') {
-          const view = await this.crossCheckReplica(ctx, outcome.addr, readPrimary);
+          const view = samples.get(outcome.addr)?.view ?? null;
           if (view && outcome.reason !== 'not_acking' && replicaCaughtUp(view)) {
             this.logger.debug(
               `Replica ${outcome.addr} of ${ctx.connectionName} reports it is caught up; skipping the divergence alert.`,
@@ -9137,6 +9172,10 @@ export class AnomalyService
             continue;
           }
           await this.emitReplicationDivergence(state, outcome, ctx, sample.timestamp, key, nodeAddr, view);
+        } else if (outcome.kind === 'views_disagree') {
+          await this.emitViewDisagreement(state, outcome, ctx, sample.timestamp, nodeAddr);
+        } else if (outcome.kind === 'views_agree') {
+          await this.resolveViewDisagreement(state, outcome, key);
         } else {
           await this.resolveReplicationDivergence(state, outcome, ctx, sample.timestamp, key);
         }
@@ -9265,69 +9304,125 @@ export class AnomalyService
     return this.convertInfoToRecord(await client.getInfoParsed(['replication']));
   }
 
-  private async crossCheckReplica(
+  private async sampleReplicas(
+    ctx: ConnectionContext,
+    addrs: string[],
+    ownPrimary: boolean,
+    readPrimary: () => Promise<Record<string, string>>,
+  ): Promise<Map<string, ReplicaSample>> {
+    const read = await Promise.all(
+      addrs.map(async (addr) => [addr, await this.readReplica(ctx, addr, ownPrimary)] as const),
+    );
+    const attempted = read.filter(
+      (entry): entry is readonly [string, Record<string, string> | Error] => entry[1] !== null,
+    );
+    if (attempted.length === 0) return new Map();
+    let primary: Record<string, string> | null = null;
+    if (attempted.some(([, replica]) => !(replica instanceof Error))) {
+      try {
+        const budget = this.crossCheckBudget(ctx.connectionId);
+        primary = await withTimeout(readPrimary(), budget, 'Re-reading the primary timed out');
+      } catch (err) {
+        this.logger.debug(
+          `Could not re-read the primary of ${ctx.connectionName} for the replica cross-check: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+        return new Map();
+      }
+    }
+    return new Map(
+      attempted.map(([addr, replica]) => [
+        addr,
+        replica instanceof Error || primary === null ? UNREACHABLE_REPLICA : sampleReplicaView(replica, primary, addr),
+      ]),
+    );
+  }
+
+  private async readReplica(
     ctx: ConnectionContext,
     replicaAddr: string,
-    readPrimary: () => Promise<Record<string, string>>,
-  ): Promise<ReplicaView | null> {
+    ownPrimary: boolean,
+  ): Promise<Record<string, string> | Error | null> {
     const address = splitHostPort(replicaAddr);
     if (!address) return null;
+    const reader = this.replicaReader(ctx, address.host, address.port, ownPrimary);
+    if (!reader) return null;
+    const inFlight = `${ctx.connectionId}:${replicaAddr}:${reader.via}`;
     try {
-      const readReplica = this.replicaReader(ctx.connectionId, address.host, address.port);
-      if (!readReplica) return null;
-      let deadline = this.crossCheckDeadline.get(ctx.connectionId);
-      if (deadline === null) {
-        deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
-        this.crossCheckDeadline.set(ctx.connectionId, deadline);
-      }
-      const budget = Math.min(
-        AnomalyService.FANOUT_COMMAND_TIMEOUT_MS,
-        deadline === undefined ? Infinity : deadline - Date.now(),
-      );
-      if (budget <= 0) throw new Error('no time left in this poll');
-      return await withTimeout(
-        (async () => {
-          const replica = await readReplica();
-          return readReplicaView(replica, await readPrimary());
-        })(),
-        budget,
-        `Reading replica ${replicaAddr} timed out`,
-      );
+      const budget = this.crossCheckBudget(ctx.connectionId, AnomalyService.PRIMARY_REREAD_RESERVE_MS);
+      if (this.replicaReadsInFlight.has(inFlight)) throw new Error('the previous read has not returned');
+      this.replicaReadsInFlight.add(inFlight);
+      const pending = reader.read(Date.now() + budget);
+      const release = () => {
+        this.replicaReadsInFlight.delete(inFlight);
+      };
+      pending.then(release, release);
+      return await withTimeout(pending, budget, `Reading replica ${replicaAddr} timed out`);
     } catch (err) {
       this.logger.debug(
         `Could not read replica ${replicaAddr} of ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
       );
-      return null;
+      return err instanceof Error ? err : new Error(String(err));
     }
   }
 
+  private crossCheckBudget(connectionId: string, reserveMs = 0): number {
+    let deadline = this.crossCheckDeadline.get(connectionId);
+    if (deadline === null) {
+      deadline = Date.now() + AnomalyService.FANOUT_COMMAND_TIMEOUT_MS;
+      this.crossCheckDeadline.set(connectionId, deadline);
+    }
+    const budget =
+      Math.min(AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, deadline === undefined ? Infinity : deadline - Date.now()) -
+      reserveMs;
+    if (budget <= 0) throw new Error('no time left in this poll');
+    return budget;
+  }
+
   private replicaReader(
-    connectionId: string,
+    ctx: ConnectionContext,
     host: string,
     port: number,
-  ): (() => Promise<Record<string, string>>) | null {
+    ownPrimary: boolean,
+  ): { via: string; read: (deadline: number) => Promise<Record<string, string>> } | null {
+    const connectionId = ctx.connectionId;
     const registeredId = this.connectionRegistry.findIdByHostPort(host, port);
     if (
       registeredId &&
       registeredId !== connectionId &&
       this.connectionRegistry.list().some((c) => c.id === registeredId && c.isConnected)
     ) {
-      return () => this.readReplicationInfo(this.connectionRegistry.get(registeredId));
+      return { via: registeredId, read: () => this.readReplicationInfo(this.connectionRegistry.get(registeredId)) };
     }
     const discovery = this.clusterDiscovery;
     if (!discovery || !this.dialsDataNodes(connectionId)) return null;
-    const readNode = async (client: Promise<{ info(section: string): Promise<string> }>) =>
-      this.convertInfoToRecord(InfoParser.parse(await (await client).info('replication')));
+    const readNode = async (
+      pending: Promise<{ info(section: string): Promise<string>; disconnect(): void }>,
+      deadline: number,
+    ) => {
+      const client = await pending;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('no time left to read the replica');
+      try {
+        const reply = await withTimeout(client.info('replication'), remainingMs, AnomalyService.REPLICA_READ_TIMED_OUT);
+        return this.convertInfoToRecord(InfoParser.parse(reply));
+      } catch (err) {
+        if (err instanceof Error && err.message === AnomalyService.REPLICA_READ_TIMED_OUT) client.disconnect();
+        throw err;
+      }
+    };
+    const discovered = (read: (deadline: number) => Promise<Record<string, string>>) => ({ via: 'discovered', read });
     if (this.clusterViews.has(connectionId)) {
-      return async () => {
+      return discovered(async (deadline) => {
         const nodes = await discovery.discoverNodes(connectionId);
         const node = nodes.find((n) => {
           const nodeAddress = splitHostPort(n.address);
           return n.role === 'replica' && nodeAddress?.host === host && nodeAddress.port === port;
         });
         if (!node) throw new Error(`${host}:${port} is not a replica in CLUSTER NODES`);
-        return readNode(discovery.getNodeConnection(node.id, connectionId));
-      };
+        return readNode(discovery.getNodeConnection(node.id, connectionId), deadline);
+      });
     }
     const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
     const seedId = membership?.source === 'sentinel' ? membership.seedId : connectionId;
@@ -9335,9 +9430,35 @@ export class AnomalyService
     const reported = [...(this.sentinelReplicaAddrs.get(seedId) ?? [])].find((a) => a.toLowerCase() === wanted);
     const sentinelAddress = reported ? splitHostPort(reported) : null;
     if (sentinelAddress && this.connectionRegistry.sentinelDataNodeCredentials(seedId) !== null) {
-      return () => readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId));
+      return discovered((deadline) =>
+        readNode(discovery.getAddressConnection(sentinelAddress.host, sentinelAddress.port, seedId), deadline),
+      );
+    }
+    if (ownPrimary && !membership && !AnomalyService.connectionIsSentinel(ctx)) {
+      return discovered(async (deadline) => {
+        const [peers, addresses] = await Promise.all([
+          ctx.client.getClients({ type: 'replica' }),
+          this.resolveHost(host),
+        ]);
+        const connectedFrom = new Set(
+          peers.flatMap((peer) => {
+            const peerHost = splitHostPort(peer.addr)?.host;
+            return peerHost === undefined ? [] : [normalizeIp(peerHost)];
+          }),
+        );
+        const verified = [...addresses].find((address) => connectedFrom.has(address));
+        if (!verified) throw new Error(`no replica is connected to the primary from ${host}`);
+        const hostname = isIP(host) ? [] : [host];
+        return readNode(discovery.getReplicaConnection(verified, port, connectionId, ...hostname), deadline);
+      });
     }
     return null;
+  }
+
+  private async resolveHost(host: string): Promise<Set<string>> {
+    if (isIP(host)) return new Set([normalizeIp(host)]);
+    const resolved = await lookup(host, { all: true });
+    return new Set(resolved.map(({ address }) => normalizeIp(address)));
   }
 
   private static readonly TOPOLOGY_CLAIM_STALE_MS = 30_000;
@@ -9883,7 +10004,7 @@ export class AnomalyService
   private retireDivergenceScope(key: string, ctx: ConnectionContext): void {
     const state = this.divergenceState.get(key);
     const ids = [
-      ...[...(state?.replicas.values() ?? [])].flatMap((r) => (r.eventId ? [r.eventId] : [])),
+      ...[...(state?.replicas.values() ?? [])].flatMap(replicaEventIds),
       ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
     ];
     for (const replica of state?.replicas.keys() ?? []) {
@@ -9922,7 +10043,7 @@ export class AnomalyService
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
       const tracked = new Set(
         this.divergenceKeysOf(ctx.connectionId).flatMap((key) => [
-          ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+          ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].flatMap(replicaEventIds),
           ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
         ]),
       );
@@ -9939,6 +10060,10 @@ export class AnomalyService
         if (!active.has(event.nodeAddr!)) continue;
         const key = topologyStateKey(ctx.connectionId, event.nodeAddr!);
         if (this.divergenceOrphansSwept.has(key)) continue;
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          await this.closeRestoredDisagreements(key, [event]);
+          continue;
+        }
         const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
@@ -10006,13 +10131,18 @@ export class AnomalyService
     nodeAddr: string | undefined,
   ): Promise<void> {
     try {
-      const seen = new Set([...state.replicas.values()].map((r) => r.eventId));
+      const seen = new Set([...state.replicas.values()].flatMap(replicaEventIds));
       const orphans = this.divergenceOrphans.get(key) ?? new Map<string, OrphanedDivergence>();
       const open = await this.readOpenDivergenceEvents(ctx.connectionId);
+      const disagreements: StoredAnomalyEvent[] = [];
       for (const event of open) {
         if (event.nodeAddr !== nodeAddr) continue;
         if (seen.has(event.id) || this.persistenceOutbox.has(event.id)) continue;
         seen.add(event.id);
+        if (event.dedupeKey === REPLICA_VIEWS_DEDUPE_KEY) {
+          disagreements.push(event);
+          continue;
+        }
         const replica = event.replicaAddr ?? 'unknown';
         const orphan = orphans.get(replica) ?? {
           eventIds: new Set<string>(),
@@ -10024,6 +10154,7 @@ export class AnomalyService
       }
       if (orphans.size > 0) this.divergenceOrphans.set(key, orphans);
       this.divergenceOrphansSwept.add(key);
+      await this.closeRestoredDisagreements(key, disagreements);
     } catch (err) {
       this.logger.warn(
         `Failed to read orphaned replication divergence events for ${ctx.connectionName}: ${
@@ -10069,6 +10200,14 @@ export class AnomalyService
       }
     }
     if (orphans.size === 0) this.divergenceOrphans.delete(key);
+  }
+
+  private async closeRestoredDisagreements(key: string, events: StoredAnomalyEvent[]): Promise<void> {
+    for (const event of events) {
+      await this.resolveAnomalyOutcome(event.id, () => {
+        this.retireDivergenceEvent(connectionOfStateKey(key), event.id);
+      });
+    }
   }
 
   private dispatchOrphanRecovered(replica: string, ctx: ConnectionContext): void {
@@ -10141,6 +10280,8 @@ export class AnomalyService
           gapBytes: w.gapBytes,
           bytesPerSec: w.bytesPerSec,
           secondsBehind: w.secondsBehind,
+          replicaGapBytes: w.replicaGapBytes ?? null,
+          replicaView: w.replicaView ?? null,
         })),
         ctx.connectionId,
       );
@@ -10170,6 +10311,8 @@ export class AnomalyService
           gapBytes: w.gapBytes,
           bytesPerSec: w.bytesPerSec,
           secondsBehind: w.secondsBehind,
+          replicaGapBytes: w.replicaGapBytes ?? null,
+          replicaView: w.replicaView ?? null,
         })),
         ctx.connectionId,
       );
@@ -10260,7 +10403,7 @@ export class AnomalyService
       ...this.nodeDetectorKeysOf(connectionId).flatMap((key) => this.nodeDetectorEventIds(key)),
       ...this.pendingNodeEventIds(connectionId),
       ...divergenceKeys.flatMap((key) => [
-        ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].map((r) => r.eventId),
+        ...[...(this.divergenceState.get(key)?.replicas.values() ?? [])].flatMap(replicaEventIds),
         ...[...(this.divergenceOrphans.get(key)?.values() ?? [])].flatMap((o) => [...o.eventIds]),
       ]),
       ...(this.divergenceRetired.get(connectionId) ?? []),
@@ -10359,6 +10502,51 @@ export class AnomalyService
         this.retryDroppedDivergenceClose(key, finding.addr, previousEventId);
       });
     }
+  }
+
+  private async emitViewDisagreement(
+    state: DivergenceConnectionState,
+    outcome: ViewDisagreement,
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodeAddr: string | undefined,
+  ): Promise<void> {
+    const message = describeViewDisagreement(outcome);
+    const event: AnomalyEvent = {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: Math.abs(outcome.primaryGapBytes - outcome.replicaGapBytes),
+      baseline: DIVERGENCE_FLOOR_BYTES,
+      zScore: 0,
+      stdDev: 0,
+      threshold: DIVERGENCE_FLOOR_BYTES,
+      message,
+      resolved: false,
+      connectionId: ctx.connectionId,
+      replicaAddr: outcome.addr,
+      dedupeKey: REPLICA_VIEWS_DEDUPE_KEY,
+      ...(nodeAddr ? { nodeAddr } : {}),
+    };
+    this.anomalySaveHooks.set(event, () => undefined);
+    this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${message}`);
+    await this.addLatchedAnomaly(event, ctx, `${ctx.connectionId}:${outcome.addr}:views`, () => {
+      acknowledgeViewAgreement(state, outcome.addr, event.id);
+    });
+    acknowledgeViewDisagreement(state, outcome.addr, event.id);
+  }
+
+  private async resolveViewDisagreement(
+    state: DivergenceConnectionState,
+    outcome: ViewAgreement,
+    key: string,
+  ): Promise<void> {
+    await this.resolveAnomalyOutcome(outcome.eventId, () => {
+      this.retireDivergenceEvent(connectionOfStateKey(key), outcome.eventId);
+    });
+    acknowledgeViewAgreement(state, outcome.addr, outcome.eventId);
   }
 
   private async resolveReplicationDivergence(
