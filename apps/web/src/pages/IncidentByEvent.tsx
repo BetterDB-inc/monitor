@@ -29,6 +29,7 @@ export function IncidentByEvent() {
     queryFn: ({ signal }) => metricsApi.findIncidentByEvent(anomalyId, at ?? 0, signal),
     enabled: at !== null && connectionReady,
     retry: false,
+    staleTime: 0,
   });
   const data = lookup.isFetchedAfterMount ? lookup.data : undefined;
   const error = lookup.isFetchedAfterMount ? lookup.error : null;

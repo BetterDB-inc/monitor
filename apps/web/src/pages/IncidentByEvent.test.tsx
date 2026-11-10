@@ -96,7 +96,7 @@ describe('IncidentByEvent', () => {
   });
 
   it('looks the incident up again when the link is opened a second time', async () => {
-    const client = new QueryClient();
+    const client = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000 } } });
     findIncidentByEvent.mockResolvedValueOnce({ incidentId: 'inc-1' });
     findIncidentByEvent.mockResolvedValueOnce({ incidentId: 'inc-9' });
     const first = renderAt('/anomalies/incidents/by-event/ev-1?at=1000', client);
