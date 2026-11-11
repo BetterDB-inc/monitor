@@ -852,7 +852,11 @@ export class ClusterMetricsService {
   async checkSlotMigrations(connectionId?: string): Promise<SlotMigrationCheck> {
     let nodes: DiscoveredNode[];
     try {
-      nodes = await this.discoveryService.discoverNodes(connectionId);
+      nodes = await withTimeout(
+        this.discoveryService.discoverNodes(connectionId),
+        NODE_COMMAND_TIMEOUT_MS,
+        `Cluster discovery did not answer within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,

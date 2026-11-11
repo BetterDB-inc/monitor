@@ -2148,6 +2148,61 @@ describe('AnomalyService', () => {
       expect(service.getHotShards('conn-a')).toEqual([]);
     });
 
+    it('closes an open event after five minutes of polls that fail at INFO', async () => {
+      await step(HOT, 6);
+      (ctx.client.getInfoParsed as jest.Mock).mockRejectedValue(new Error('INFO did not answer'));
+      const failedPoll = async (ms: number) => {
+        clock += ms;
+        await expect(poll(ctx)).rejects.toThrow('INFO did not answer');
+      };
+      await failedPoll(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      await failedPoll(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('asks about migrations before it replaces an event that was resolved by hand', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+      checkSlotMigrations.mockClear();
+      checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 4);
+
+      expect(hotEvents()).toHaveLength(1);
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+    });
+
+    it('replaces an event resolved by hand at once when no slot is migrating', async () => {
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+    });
+
     it('raises nothing while the shard load is not measured', async () => {
       for (let n = 0; n < 30; n += 1) await idle(STEP_MS);
 
