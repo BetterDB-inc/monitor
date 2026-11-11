@@ -106,6 +106,66 @@ describe('ClusterDiscoveryService', () => {
       expect(replica?.masterId).toBe('node1-id-abc123');
     });
 
+    it('attaches the availability zone and shard id from CLUSTER SHARDS', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
+        {
+          shardId: 'shard-1',
+          slots: [[0, 5460]],
+          nodes: [
+            { id: 'node1-id-abc123', role: 'master', availabilityZone: 'us-east-1a' },
+            { id: 'node2-id-def456', role: 'replica' },
+          ],
+        },
+      ]);
+
+      const nodes = await service.discoverNodes();
+
+      expect(nodes[0]).toMatchObject({ id: 'node1-id-abc123', availabilityZone: 'us-east-1a', shardId: 'shard-1' });
+      expect(nodes[1]).toMatchObject({ id: 'node2-id-def456', shardId: 'shard-1' });
+      expect(nodes[1]).not.toHaveProperty('availabilityZone');
+    });
+
+    it('returns the same nodes as before when CLUSTER SHARDS fails', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+
+      const nodes = await service.discoverNodes();
+
+      expect(mockDbClient.getClusterShards).toHaveBeenCalledTimes(1);
+      expect(nodes).toEqual([
+        {
+          id: 'node1-id-abc123',
+          address: '192.168.1.10:6379',
+          role: 'master',
+          masterId: undefined,
+          slots: [[0, 5460]],
+          configEpoch: 1,
+          healthy: true,
+          flags: ['master', 'myself'],
+        },
+        {
+          id: 'node2-id-def456',
+          address: '192.168.1.11:6379',
+          role: 'replica',
+          masterId: 'node1-id-abc123',
+          slots: [],
+          configEpoch: 1,
+          healthy: true,
+          flags: ['slave'],
+        },
+      ]);
+      expect(nodes[0]).not.toHaveProperty('availabilityZone');
+      expect(nodes[0]).not.toHaveProperty('shardId');
+    });
+
+    it('reads CLUSTER SHARDS once per cached discovery', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([]);
+
+      await service.discoverNodes();
+      await service.discoverNodes();
+
+      expect(mockDbClient.getClusterShards).toHaveBeenCalledTimes(1);
+    });
+
     it('should cache discovery results', async () => {
       await service.discoverNodes();
       await service.discoverNodes();

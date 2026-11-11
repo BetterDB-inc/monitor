@@ -809,7 +809,7 @@ server.tool(
 
 server.tool(
   'get_cluster_nodes',
-  'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. Returns an error message if this instance is not running in cluster mode.',
+  'Discover all nodes in the Valkey cluster — role (master/replica), address, health status, and slot ranges. On Valkey 9.1+ each node also carries shardId, and availabilityZone when the node has one configured. Returns an error message if this instance is not running in cluster mode.',
   { instanceId: z.string().optional().describe('Optional instance ID override') },
   async ({ instanceId }) =>
     withTelemetry('get_cluster_nodes', async () => {

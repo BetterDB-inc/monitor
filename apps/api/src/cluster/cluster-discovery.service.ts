@@ -6,6 +6,7 @@ import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
+import { readClusterShards, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
   id: string;
@@ -17,6 +18,8 @@ export interface DiscoveredNode {
   healthy: boolean;
   flags: string[];
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface NodeConnection {
@@ -77,7 +80,9 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
       try {
-        const nodes = await this.connectionRegistry.get(connectionId).getClusterNodes();
+        const client = this.connectionRegistry.get(connectionId);
+        const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
+        const nodes = withShardMetadata(clusterNodes, shards);
         if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
         return this.remember(cacheKey, nodes);
       } catch (error) {
@@ -182,6 +187,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
         healthy: isHealthy,
         flags: node.flags,
         ...(node.hostname ? { hostname: node.hostname } : {}),
+        ...(node.availabilityZone ? { availabilityZone: node.availabilityZone } : {}),
+        ...(node.shardId ? { shardId: node.shardId } : {}),
       });
     }
     return discovered;

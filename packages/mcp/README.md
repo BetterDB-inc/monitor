@@ -175,7 +175,7 @@ Clients that load skills from a plugin (Connect Apps and other skill-aware clien
 | `get_retry_amplification` | Live retry-amplification state, last episode and top clients *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
-| `get_cluster_nodes` | Cluster node discovery — roles, health, slot ranges |
+| `get_cluster_nodes` | Cluster node discovery — roles, health, slot ranges, plus availability zone and shard id on Valkey 9.1+ |
 | `get_cluster_node_stats` | Per-node performance stats across the cluster |
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |
