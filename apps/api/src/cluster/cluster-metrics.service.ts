@@ -956,7 +956,9 @@ export class ClusterMetricsService {
     };
 
     // A new primary has no slots until its first import lands, so include every primary.
-    const primaries = nodes.filter((node) => node.role === 'master' && node.healthy);
+    const masters = nodes.filter((node) => node.role === 'master');
+    const primaries = masters.filter((node) => node.healthy);
+    if (masters.some((node) => !node.healthy && node.slots.length > 0)) complete = false;
     await Promise.all(
       primaries.map((primary) =>
         this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {

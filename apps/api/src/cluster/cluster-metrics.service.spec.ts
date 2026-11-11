@@ -620,6 +620,32 @@ used_cpu_user:20.3\r
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
       });
 
+      it('is incomplete when a failed primary that still owns slots is not asked', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'fail'], healthy: false },
+          primaries[2],
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+        expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalledWith(
+          'def456node2',
+          undefined,
+        );
+      });
+
+      it('stays complete when the failed primary it skips owns no slots', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          primaries[1],
+          { ...primaries[2], flags: ['master', 'fail'], healthy: false },
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+      });
+
       it('is incomplete when the topology cannot be discovered', async () => {
         mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Discovery failed'));
 
