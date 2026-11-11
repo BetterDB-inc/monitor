@@ -313,7 +313,7 @@ CONFIG SET availability-zone us-east-1a
 
 Valkey 8.1 and 9.0 accept the `availability-zone` config but do not return it, or the shard id, in `CLUSTER SHARDS`. On those versions, on Valkey 8.0 and earlier, and on Redis, both fields are left out of the API responses and the Cluster page shows no zone. Everything else on the Cluster page works as before.
 
-BetterDB reads the fields with the `CLUSTER SHARDS` command (`+cluster|shards` in the [minimum ACL](minimum-acl)). If that command fails, the nodes are returned without the two fields.
+BetterDB reads the fields with the `CLUSTER SHARDS` command (`+cluster|shards` in the [minimum ACL](minimum-acl)). The command runs on a short-lived connection of its own with a 5-second limit, so a node that does not answer it cannot hold up the other monitoring commands. If the command fails or does not answer in time, the nodes are returned without the two fields.
 
 ## Auto-Detection (DB_TYPE=auto)
 

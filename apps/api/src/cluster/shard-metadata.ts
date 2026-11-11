@@ -1,5 +1,7 @@
+import type Valkey from 'iovalkey';
 import type { ClusterShard } from '../common/types/metrics.types';
 import { withTimeout } from '../common/utils/with-timeout';
+import { MetricsParser } from '../database/parsers/metrics.parser';
 
 export const CLUSTER_SHARDS_TIMEOUT_MS = 5_000;
 
@@ -10,11 +12,50 @@ export interface ShardMetadata {
 
 export interface ClusterShardsReader {
   getClusterShards(): Promise<ClusterShard[]>;
+  getClient(): Valkey;
 }
 
-export async function readClusterShards(client: ClusterShardsReader): Promise<ClusterShard[] | undefined> {
+function ownSocket(reader: ClusterShardsReader, timeoutMs: number): Valkey | undefined {
   try {
-    return await withTimeout(client.getClusterShards(), CLUSTER_SHARDS_TIMEOUT_MS);
+    return reader.getClient().duplicate({
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+      connectTimeout: timeoutMs,
+      commandTimeout: timeoutMs,
+      connectionName: 'BetterDB-Monitor-Shards',
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function queryShards(socket: Valkey): Promise<ClusterShard[]> {
+  await socket.connect();
+  return MetricsParser.parseClusterShards((await socket.call('CLUSTER', 'SHARDS')) as unknown[]);
+}
+
+async function readOverOwnSocket(socket: Valkey, timeoutMs: number): Promise<ClusterShard[]> {
+  socket.on('error', () => undefined);
+  try {
+    return await withTimeout(queryShards(socket), timeoutMs);
+  } finally {
+    socket.disconnect();
+  }
+}
+
+export async function readClusterShards(
+  reader: ClusterShardsReader,
+  timeoutMs = CLUSTER_SHARDS_TIMEOUT_MS,
+): Promise<ClusterShard[] | undefined> {
+  try {
+    const socket = ownSocket(reader, timeoutMs);
+    if (socket) {
+      return await readOverOwnSocket(socket, timeoutMs);
+    }
+    return await withTimeout(reader.getClusterShards(), timeoutMs);
   } catch {
     return undefined;
   }
