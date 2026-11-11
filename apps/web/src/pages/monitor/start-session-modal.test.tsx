@@ -72,7 +72,6 @@ describe('StartSessionModal', () => {
     renderModal({ hotPrimary: { nodeId: 'm2', address: '10.0.0.2:6379' } });
 
     expect(screen.getByLabelText('Duration')).toHaveValue(10);
-    await screen.findByText('Cluster node');
     await start();
 
     expect(screen.getByText(/already hot \(10\.0\.0\.2:6379\)/)).toBeInTheDocument();
@@ -80,6 +79,33 @@ describe('StartSessionModal', () => {
       durationMs: 10_000,
       targetNodeId: 'm2',
     });
+  });
+
+  it('keeps a capture on the hot primary: no fan-out and no other node to pick', async () => {
+    renderModal({ hotPrimary: { nodeId: 'm2', address: '10.0.0.2:6379' } });
+
+    await waitFor(() => expect(listConnectionNodes).toHaveBeenCalled());
+    await start();
+
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cluster node')).not.toBeInTheDocument();
+    expect(screen.getByText(/The capture runs on this primary only/)).toBeInTheDocument();
+    expect(startSession).toHaveBeenCalledWith({
+      connectionId: 'conn-1',
+      durationMs: 10_000,
+      requestedBy: undefined,
+      targetNodeId: 'm2',
+      fanOut: undefined,
+    });
+  });
+
+  it('fans out across the primaries when asked to, without a hot primary', async () => {
+    renderModal();
+
+    fireEvent.click(await screen.findByRole('checkbox'));
+    await start();
+
+    expect(startSession.mock.calls[0][0]).toMatchObject({ fanOut: true, targetNodeId: undefined });
   });
 
   it('sends no node for a connection that is not a cluster', async () => {

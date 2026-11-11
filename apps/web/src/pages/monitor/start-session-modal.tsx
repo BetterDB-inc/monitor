@@ -100,11 +100,7 @@ export function StartSessionModal({
   const isCluster = clusterNodes.length > 0;
 
   useEffect(() => {
-    if (!open || targetNodeId) return;
-    if (hotNodeId) {
-      setTargetNodeId(hotNodeId);
-      return;
-    }
+    if (!open || targetNodeId || hotNodeId) return;
     if (isCluster) {
       const firstMaster = clusterNodes.find((n) => n.role === 'master') ?? clusterNodes[0];
       if (firstMaster) setTargetNodeId(firstMaster.id);
@@ -172,8 +168,8 @@ export function StartSessionModal({
         connectionId,
         durationMs,
         requestedBy: requestedBy.trim() || undefined,
-        targetNodeId: (isCluster || hotNodeId) && !fanOut ? targetNodeId || undefined : undefined,
-        fanOut: isCluster && fanOut ? true : undefined,
+        targetNodeId: hotNodeId ?? (isCluster && !fanOut ? targetNodeId || undefined : undefined),
+        fanOut: !hotNodeId && isCluster && fanOut ? true : undefined,
       });
       onStarted(session);
       onOpenChange(false);
@@ -238,7 +234,7 @@ export function StartSessionModal({
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
               <p className="font-medium text-amber-800 dark:text-amber-200">
                 MONITOR adds load to a primary that is already hot ({hotPrimary.address}). Keep the
-                capture short.
+                capture short. The capture runs on this primary only.
               </p>
               <p className="mt-1 text-xs text-amber-700/90 dark:text-amber-200/80">
                 The pre-flight estimate below is read from the node this connection points at. When
@@ -247,7 +243,7 @@ export function StartSessionModal({
             </div>
           )}
 
-          {isCluster && (
+          {isCluster && !hotPrimary && (
             <div className="space-y-2">
               <label className="flex items-center gap-2 text-sm">
                 <input

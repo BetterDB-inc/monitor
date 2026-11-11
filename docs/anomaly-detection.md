@@ -701,7 +701,7 @@ In each of these cases the event is raised without key names, the detail has `ke
 
 **A capture can show the keys when the read cannot.** When the event has no key names and the monitor connects to the cluster nodes directly, the message ends with one more sentence, for example `Key names are not available (no LFU policy); a capture on this primary can show them.`, and the detail has `captureAvailable: true`. Nothing is started for you: a person starts a [MONITOR capture](monitor.md) on the hot primary.
 
-- In the UI, the open event on the Anomalies page gets a **Capture on hot primary** action. It opens the usual start dialog with the hot primary selected and a duration of 10 seconds instead of 30. Both can be changed. The session page then lists the **Top keys in this capture**.
+- In the UI, the Anomalies page shows a notice for each open hot shard without key names, with a **Capture on hot primary** action. The notice does not depend on the selected date range. The action opens the usual start dialog at a duration of 10 seconds instead of 30, which can be changed. The capture stays on the hot primary: the dialog offers no other node and no fan-out. The session page then lists the **Top keys in this capture**.
 - By API, take `shardId` from [`GET /api/anomaly/hot-shards`](#get-hot-shards) and send it as `targetNodeId`:
 
   ```http
