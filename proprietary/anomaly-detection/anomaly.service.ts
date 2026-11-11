@@ -6348,25 +6348,26 @@ export class AnomalyService
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardKeys.get(connectionId);
     const kept = new Map<string, HotShardKeyDetail>();
+    const due: Array<{ signature: string; shardId: string }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const wanted =
         eventIds?.has(signature) || this.isHotShardAboutToRaise(connectionId, sampledAt, finding);
       if (!wanted) continue;
       const last = known?.get(signature);
-      const due =
-        last?.keysSampledAt === undefined || timestamp - last.keysSampledAt >= HOT_KEY_REFRESH_MS;
-      if (!due) {
-        kept.set(signature, last);
-        continue;
-      }
-      const read = await this.readHotShardKeys(
-        connectionId,
-        finding.shardId,
-        topSlots.get(finding.shardId) ?? [],
-      );
-      this.logHotKeySource(ctx, read);
-      kept.set(signature, { ...read, keysSampledAt: timestamp });
+      const fresh =
+        last?.keysSampledAt !== undefined && timestamp - last.keysSampledAt < HOT_KEY_REFRESH_MS;
+      if (fresh) kept.set(signature, last);
+      else due.push({ signature, shardId: finding.shardId });
+    }
+    const reads = await Promise.all(
+      due.map(({ shardId }) =>
+        this.readHotShardKeys(connectionId, shardId, topSlots.get(shardId) ?? []),
+      ),
+    );
+    for (const [index, { signature }] of due.entries()) {
+      this.logHotKeySource(ctx, reads[index]);
+      kept.set(signature, { ...reads[index], keysSampledAt: timestamp });
     }
     if (kept.size > 0) this.hotShardKeys.set(connectionId, kept);
     else this.hotShardKeys.delete(connectionId);

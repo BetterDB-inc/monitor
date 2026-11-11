@@ -224,6 +224,38 @@ describe('sampleHotKeys', () => {
     });
   });
 
+  it.each([
+    'CLUSTERDOWN Hash slot not served',
+    'LOADING Valkey is loading the dataset in memory',
+    'NOAUTH Authentication required.',
+  ])('fails on an OBJECT FREQ error it does not expect: %s', async (message) => {
+    const failure = new Error(message);
+    const client = node({
+      5: [
+        ['a', failure],
+        ['b', failure],
+      ],
+      6: [['c', 4]],
+    });
+
+    await expect(sampleHotKeys(client, [5, 6])).rejects.toBe(failure);
+    expect(objectFreqCalls(client)).toHaveLength(1);
+    expect(keysInSlotCalls(client)).toHaveLength(1);
+  });
+
+  it('fails on an unexpected error that follows keys it could read', async () => {
+    const failure = new Error('CLUSTERDOWN Hash slot not served');
+    const client = node({
+      5: [
+        ['a', 3],
+        ['b', 2],
+        ['c', failure],
+      ],
+    });
+
+    await expect(sampleHotKeys(client, [5])).rejects.toBe(failure);
+  });
+
   it('finds no keys in empty slots without calling that a failure', async () => {
     await expect(sampleHotKeys(node({}), [5, 6])).resolves.toEqual({
       keySource: 'lfu',

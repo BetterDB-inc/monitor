@@ -691,7 +691,7 @@ What the read can miss, and when it is skipped:
 
 - `CLUSTER GETKEYSINSLOT` returns the first 500 names of a slot, not the hottest. In a slot with more keys the hottest one can be missed. Compare `keysSampled` with the `keyCount` of the top slots to see how much was covered.
 - Without an LFU policy the node keeps no access frequency. The read stops at the first refusal, normally after one `OBJECT FREQ`.
-- The monitoring user may lack the two commands (see the [minimum ACL](minimum-acl.md#hot-shard-keys)), the read may time out, or the connection may reach the cluster through an agent, which does not dial the nodes.
+- The monitoring user may lack the two commands (see the [minimum ACL](minimum-acl.md#hot-shard-keys)), the read may time out, the node may answer with another error such as `CLUSTERDOWN` or `LOADING`, or the connection may reach the cluster through an agent, which does not dial the nodes.
 
 In each of these cases the event is raised without key names, the detail has `keySource: "unavailable"` and a `keyNote` with the reason, and the reason is logged once per connection. A name that is not valid UTF-8 is still read, and is shown with replacement characters.
 

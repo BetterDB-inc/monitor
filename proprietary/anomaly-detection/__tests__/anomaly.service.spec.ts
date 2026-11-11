@@ -2446,6 +2446,77 @@ describe('AnomalyService', () => {
         expect(discovery.evictNodeClient).not.toHaveBeenCalled();
       });
 
+      it('says why the names are missing when the hot primary refuses every key', async () => {
+        const down = new Error('CLUSTERDOWN Hash slot not served');
+        keys = { 0: [['user:42', down]], 1: [['cart:{9}', down]] };
+        const discovery = dial(hotNode());
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: CLUSTERDOWN Hash slot not served',
+          keysSampled: 0,
+          topKeys: [],
+        });
+        expect(discovery.evictNodeClient).not.toHaveBeenCalled();
+      });
+
+      it('reads the keys of several hot shards at the same time', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [
+          [0, 1],
+          [10, 11],
+          [20, 21],
+          [30, 31],
+          [40, 41],
+        ];
+        keys = { 0: [['user:42', 255]], 10: [['cart:{9}', 201]] };
+        try {
+          const waitsForTheOther = () => {
+            const client = hotNode();
+            const answer = client.callBuffer.getMockImplementation()!;
+            let ask!: () => void;
+            const asked = new Promise<void>((resolve) => {
+              ask = resolve;
+            });
+            return { client, answer, ask, asked };
+          };
+          const first = waitsForTheOther();
+          const second = waitsForTheOther();
+          first.client.callBuffer.mockImplementation(async (...args) => {
+            first.ask();
+            await second.asked;
+            return first.answer(...args);
+          });
+          second.client.callBuffer.mockImplementation(async (...args) => {
+            second.ask();
+            await first.asked;
+            return second.answer(...args);
+          });
+          const discovery = dial(first.client);
+          discovery.getNodeConnection.mockImplementation(async (nodeId: string) =>
+            nodeId === 'a0000000' ? first.client : second.client,
+          );
+
+          await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+
+          const read = service
+            .getHotShards('conn-a')
+            .map(({ shardId, keySource, topKeys }) => [shardId, keySource, topKeys[0]?.key])
+            .sort();
+          expect(read).toEqual([
+            ['a0000000', 'lfu', 'user:42'],
+            ['b0000000', 'lfu', 'cart:{9}'],
+          ]);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
       it('reads no keys while a slot migration delays the raise', async () => {
         (service as any).clusterMetrics = {
           checkSlotMigrations: jest

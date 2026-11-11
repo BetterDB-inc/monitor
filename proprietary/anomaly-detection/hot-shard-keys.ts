@@ -6,6 +6,7 @@ export const HOT_KEY_NAME_LIMIT = 64;
 
 const MESSAGE_KEYS = 3;
 const UNSAFE_IN_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}"\\]/gu;
+const SLOT_MOVED = /^(MOVED|ASK) /;
 
 export type HotKeySource = 'lfu' | 'unavailable';
 
@@ -109,9 +110,10 @@ export async function sampleHotKeys(
       for (const [index, name] of batch.entries()) {
         const [error, freq] = replies[index] ?? [null, null];
         if (error) {
+          if (SLOT_MOVED.test(error.message)) continue;
           const note = objectFreqRefusal(error);
-          if (note !== undefined) return hotKeysUnavailable(note);
-          continue;
+          if (note === undefined) throw error;
+          return hotKeysUnavailable(note);
         }
         if (typeof freq !== 'number') continue;
         read.push({ key: name.toString('utf8'), slot, freq, slotRank });
