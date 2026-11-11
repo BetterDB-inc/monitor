@@ -179,4 +179,4 @@ Expect ≤ 22 `cluster_topology` events, each with `scope: 'cluster'` and `obser
 - Harness: `benchmarks/operator-sim/` (branch `bench/operator-sim`), `FINDINGS.md` ("BetterDB emitted 676 cluster_topology events … across 37 connections").
 - Runs: `benchmarks/operator-sim/runs/2026-11-10T18-35-22-462-s42/SUMMARY.md` ("cluster_topology ×676"), plus the other three runs listed above.
 - Code: `proprietary/anomaly-detection/anomaly.service.ts:686`, `1024-1025`, `1896-1925`, `1994-2010`, `6018-6080`, `6096`, `6098-6180`, `6456-6500`, `7203-7300`, `7425-7456`, `7608-7613`, `7645`, `7683-7701`, `7875-7888`, `7920-7935`; `correlator.ts:434-450`; `proprietary/webhook-pro/webhook-anomaly-integration.service.ts:27-30`; `stuck-replica-detector.ts:67-98`.
-- Related drafts: roll-aware alerting (08), stale role view detector (07), primary without replicas (06).
+- Related issues: roll-aware alerting (#716), stale role view detector (#715), primary without replicas (#714).

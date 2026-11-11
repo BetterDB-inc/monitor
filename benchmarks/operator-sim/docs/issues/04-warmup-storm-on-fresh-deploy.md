@@ -132,7 +132,7 @@ Check:
 
 - **Should the first leader wait for the window?** Waiting `ANOMALY_FLEET_WINDOW_MS` before dispatching the leader would let its first webhook already say "cluster-wide", at the cost of 10 s of detection latency. The proposal above dispatches immediately and updates afterwards. Would webhook consumers prefer a follow-up "updated" event?
 - **Scope size during rolls.** During a rolling update, the number of live connections changes (children retire and re-register on new IPs). The fraction should use the connections that polled successfully in the window, not the registered count.
-- **Per-connection duplication of state-based cluster findings** (`cluster_topology`, `node_failover` repeated by every connection during a roll) is a related but separate problem with its own issue. This proposal is limited to `SpikeDetector` findings.
+- **Per-connection duplication of state-based cluster findings** (`cluster_topology`, `node_failover` repeated by every connection during a roll) is a related but separate problem, tracked in #717. This proposal is limited to `SpikeDetector` findings.
 - **Near-constant metrics** (fragmentation 1.01 → 1.02, CPU 1.7 % → 2.5 %) are part of this storm, but they are fixed by the floors in the issue on z-score floors. Both fixes are needed.
 
 ## References

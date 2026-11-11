@@ -148,7 +148,7 @@ Rules:
 4. **Persistence.** Fire only after the same `(nodeId, kind, stale epoch)` signature persists for `ANOMALY_VIEW_DISAGREEMENT_MIN_PERSIST_MS` (default **120000**). This is above the 5–45 s re-join churn seen in every roll and above typical `cluster-node-timeout` values. Implement with `applyTopologyPersistenceGate` (`anomaly.service.ts:7203`), keyed by cluster rather than by connection.
 5. **Quorum of evidence.** Require the node's own self view (from its connection or the fan-out). If the node is unreachable, do not fire; that case belongs to the failure detectors. Require ≥ `ANOMALY_VIEW_DISAGREEMENT_MIN_OBSERVERS` (default **1**) stale observers.
 6. **Severity.** WARNING by default. CRITICAL if the stale view involves slots: peers believe a node that reports itself as a replica owns slots, or a node owning slots is seen by peers as a replica. That case means clients may be redirected wrongly.
-7. **One finding per cluster**, not per connection. `connectionId` = seed. The message and event carry the node and the observer list (see the de-duplication issue).
+7. **One finding per cluster**, not per connection. `connectionId` = seed. The message and event carry the node and the observer list (see #717).
 
 Message example:
 
@@ -219,4 +219,4 @@ Look for `cluster_view` samples with a non-empty `slotlessPrimaries` list in `ru
 - Repro script: `benchmarks/operator-sim/scripts/repro-ghost-master.sh`. Captured output: `runs/repro-ghost/{ghost.log,evidence.txt}` (not committed, attach).
 - Runs: `benchmarks/operator-sim/runs/2026-11-11T14-01-50-665-s42/SUMMARY.md` (final run), `…/2026-11-10T19-54-07-874-s42/SUMMARY.md`.
 - Code: `apps/web/src/hooks/useCluster.ts:77-92`, `apps/web/src/pages/ClusterDashboard.tsx:193`, `:223-227`, `apps/web/src/components/cluster/ClusterTopology.tsx:24`, `proprietary/anomaly-detection/ghost-membership-detector.ts:3-41`, `:207`, `duplicate-primary-detector.ts:3-14`, `anomaly.service.ts:1984-2010`, `6315`, `7098`, `7203`, `7875-7888`.
-- Related drafts: cluster-wide de-duplication (09), roll-aware alerting (08).
+- Related issues: cluster-wide de-duplication (#717), roll-aware alerting (#716).

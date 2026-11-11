@@ -38,7 +38,7 @@ A value 0.0–0.5% above its baseline is rated CRITICAL. The same mechanism appl
 With `173a4a3f`, same harness, final full run (`runs/2026-11-11T14-01-50-665-s42`):
 
 - The `memoryPressure` injection (maxmemory lowered to 64 MB plus a write flood) is detected through the rate. Example: `CRITICAL: keyspace_misses spike detected. Value: 2.10K/s, Baseline: 17/s (11930.2% above normal, Z-score: 12.75)`. Elsewhere in the run: `Value: 102/s, Baseline: 11/s`.
-- `keyspace_misses` findings outside fault windows: 5. All of them came in the 6-minute warm-up, when application load started on an idle cluster, which is a real step change in the rate (see the warm-up issue). There were 0 in the 34 minutes after that. The previous full run had 1.
+- `keyspace_misses` findings outside fault windows: 5. All of them came in the 6-minute warm-up, when application load started on an idle cluster, which is a real step change in the rate (see #712). There were 0 in the 34 minutes after that. The previous full run had 1.
 
 ## Expected behaviour
 
@@ -134,7 +134,7 @@ PHASES=memoryPressure make scenario && make report
 2. **Skip the reset poll or use `max(0, delta)`?** On a reset the commit skips the sample and calls `resetRun()`. The alternative is to feed `max(0, value − last)`, which is 0. That adds a sample and keeps the buffer cadence, but puts an artificial 0 into the baseline. Skipping seemed safer. A gap: the code detects a reset only when the counter goes backwards. A connection that silently starts pointing at a different server process with a higher counter will produce one bogus large positive rate. This can happen after a failover behind a Service, or when a child connection is re-pointed after an IP change. A fix would compare `INFO server.run_id` between polls (available as `info.run_id`, already read at `anomaly.service.ts:4310`) and treat a change as a reset.
 3. **Interval floor.** The elapsed time is floored at `getIntervalMs()`, which comes from the runtime setting `anomalyPollIntervalMs`. Right after that setting is raised (e.g. 1 s → 5 s), the first rate is divided by the new, larger interval and under-reports once. That is conservative and harmless. CPU utilization (`anomaly.service.ts:1504-1508`) uses the actual `dt` with no floor, so the two derived rates are not consistent. It would be worth making them consistent in a follow-up.
 4. **Units differ between detectors.** `rejected_connections` and `slowlog_last_id` are per-poll deltas, while these three and `error_replies` are per-second rates. That is not a bug, but it is confusing in the settings UI.
-5. Near-constant baselines and the warm-up storm are separate issues (see the related issues).
+5. Near-constant baselines and the warm-up storm are separate issues (see #711 and #712).
 
 ## References
 

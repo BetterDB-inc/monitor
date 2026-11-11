@@ -43,7 +43,7 @@ group  CRITICAL  node_failover     Node failover detected with correlated slowlo
 
 Each `replication_role` event also fires the `failover.started` / `failover.completed` webhooks. Every stored anomaly also goes out as `anomaly.detected`. Only 7 of the 12 demotions were seen, because each restarted pod gets a new IP and a new BetterDB connection id, and the per-connection "last role" is lost (tracked separately).
 
-Not all of this is noise. During the same rolls every shard spent 6–37 s with **no replica attached to its primary** (tracked in its own issue, "Detect a slot-owning primary that has no attached (or no synced) replica"). Some nodes really did report `cluster_state:fail` for ~6.5 s. A useful roll-aware mode must quiet the expected steps and keep those signals loud.
+Not all of this is noise. During the same rolls every shard spent 6–37 s with **no replica attached to its primary** (tracked in #714). Some nodes really did report `cluster_state:fail` for ~6.5 s. A useful roll-aware mode must quiet the expected steps and keep those signals loud.
 
 ## Expected behaviour
 
@@ -196,11 +196,11 @@ Compare `runs/<run>/betterdb.jsonl` against the baseline table above: `replicati
 - Scheduled or recurring windows (cron), and approval flows. Start with ad-hoc windows.
 - Whether auto windows should be on by default for the heuristic path. Proposed: on, downgrade only.
 - Mapping a BetterDB connection to a `ValkeyCluster` automatically when the seed is not the operator's Service.
-- Per-connection identity breaking on pod IP change (role history lost for restarted pods) is a separate issue. It undercounts role changes today (7 of 12 seen).
+- Per-connection identity breaking on pod IP change (role history lost for restarted pods) is tracked in #718. It undercounts role changes today (7 of 12 seen).
 
 ## References
 
 - Harness: `benchmarks/operator-sim/` (branch `bench/operator-sim`), `FINDINGS.md`. Runs `2026-11-10T19-26-16-778-s42`, `2026-11-10T19-54-07-874-s42`, `2026-11-11T14-01-50-665-s42` (`SUMMARY.md` committed; raw JSONL gitignored).
 - Code: `proprietary/anomaly-detection/anomaly.service.ts:1660-1750`, `1896-1925`, `7613`, `7683-7701`; `correlator.ts:113-146`, `565-585`; `proprietary/webhook-pro/webhook-anomaly-integration.service.ts:27-30`; `apps/api/src/settings/settings.controller.ts:95-114`; `apps/api/src/monitor/health-gate.service.ts:117-128`; `charts/betterdb-monitor/templates/`.
 - valkey-operator v0.8.0 `api/v1alpha1/valkeycluster_types.go` (`ClusterState`, `Reason*` constants), `api/v1alpha1/valkeynode_types.go` (`WorkloadRevision`).
-- Related drafts: primary without replicas (06), stale role view (07), cluster-wide de-duplication (09).
+- Related issues: primary without replicas (#714), stale role view (#715), cluster-wide de-duplication (#717).

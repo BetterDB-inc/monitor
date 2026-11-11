@@ -111,7 +111,7 @@ First on-target detection per injected fault, before and after the floors: spike
 ### API / DTO / UI
 
 - `DetectorConfig` and `AnomalyDetectorConfigEntry` (`packages/shared/src/types/anomaly-detector-settings.types.ts`) gain `minAbsoluteChange?`, `minRelativeChange?` and `minStdDev?`.
-- `apps/api/src/settings/dto/update-anomaly-detectors.dto.ts`, `DetectorConfigDto`: `@IsOptionalNotNull() @IsNumber() @Min(0)` for all three, and `@Max(10)` for `minRelativeChange`. As with the absolute fields, `0` disables the floor.
+- `apps/api/src/settings/dto/update-anomaly-detectors.dto.ts`, `DetectorConfigDto`: `@IsOptionalNotNull() @IsNumber() @Min(0)` for all three, and `@Max(#718)` for `minRelativeChange`. As with the absolute fields, `0` disables the floor.
 - `anomaly.types.ts`: add the fields to `DETECTOR_DEFAULTS`, `FINITE_FIELDS`, `resolveDetectorConfig`, `toApiDetectorConfig` and `toSpikeDetectorConfig`. `GET /api/settings/anomaly/detectors` returns them in `defaults`, `overrides` and `resolved`, and `PATCH` accepts them.
 - Add `cpu_utilization` to `ANOMALY_DETECTOR_METRICS` and to the API `MetricType` enum (the compile-time sync check in `anomaly.types.ts:31-35` enforces this), with the current hard-coded values as defaults. `detectDrops: true` stays fixed at construction, as it is today.
 - `DetectorPanel.tsx`: a "Noise floors" sub-section with the three inputs and the metric's unit (`METRIC_UNITS`).
@@ -162,7 +162,7 @@ In `runs/<id>/SUMMARY.md`, the result line should read `7/7 injections detected`
 - **Robust statistics.** Using a median and MAD (median absolute deviation) in place of mean and standard deviation would also help with heavy-tailed metrics. That is a larger change to `MetricBuffer`. The floors here are a smaller step and the two can coexist.
 - **Should the current sample be excluded from its own baseline?** Today the sample is added before scoring (`anomaly.service.ts:1487-1489`). Excluding it would make z larger (for slowlog, z = ∞ against a zero standard deviation), so the stddev floor becomes *required* if this ever changes.
 - **Defaults per deployment size.** Absolute floors such as 100 ops/s or 16 MiB suit the per-node scale in our test. They may be too coarse for tiny instances. Relative floors scale on their own, so maybe use relative floors only for throughput metrics?
-- The warm-up storm and the counting of BetterDB's own SLOWLOG entries are tracked separately (see the related issues). They overlap with this issue but need their own fixes.
+- The warm-up storm and the counting of BetterDB's own SLOWLOG entries are tracked separately (see #712 and #710). They overlap with this issue but need their own fixes.
 
 ## References
 

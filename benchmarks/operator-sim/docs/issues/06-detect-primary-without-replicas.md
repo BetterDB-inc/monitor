@@ -40,7 +40,7 @@ Runs (data under `benchmarks/operator-sim/runs/`; raw JSONL is gitignored, `SUMM
 
 So for about 11 s the shard's only copy of the data was the primary. Counting "no replica with `master_link_status:up`" (5 s resolution) gives windows of 10–40 s per shard. In the final run: shard 0 10–30 s, shard 2 100–115 s and 125–165 s, shard 3 140–165 s, and so on.
 
-**What BetterDB raised during the roll** (final run, roll window): `replication_role` 7 CRITICAL ("Node role changed from master to replica — possible failover or split-brain detected") and 2 WARNING; `node_failover` correlated groups 12 CRITICAL and 4 WARNING; `cluster_state` 13 CRITICAL and 14 WARNING; and 678 `cluster_topology` WARNINGs about stuck replicas (see the related de-duplication issue). **No finding mentions a primary without replicas.** None of the existing detectors checks this condition (see Root cause).
+**What BetterDB raised during the roll** (final run, roll window): `replication_role` 7 CRITICAL ("Node role changed from master to replica — possible failover or split-brain detected") and 2 WARNING; `node_failover` correlated groups 12 CRITICAL and 4 WARNING; `cluster_state` 13 CRITICAL and 14 WARNING; and 678 `cluster_topology` WARNINGs about stuck replicas (see #717). **No finding mentions a primary without replicas.** None of the existing detectors checks this condition (see Root cause).
 
 This is the risk that valkey-operator tracks in [valkey-io/valkey-operator#552](https://github.com/valkey-io/valkey-operator/issues/552) ("Without persistence, draining two nodes in a row loses a shard"). [#563](https://github.com/valkey-io/valkey-operator/issues/563) ("Within a shard, the next node rolls before replica streaming finishes") was closed as a duplicate of #552. The fix, [PR #562](https://github.com/valkey-io/valkey-operator/pull/562) ("wait for a caught-up replica before draining a primary"), was still open and unmerged as of 2026-11-11. Other operators, Helm charts and hand-written StatefulSets can produce the same window, so BetterDB should detect it no matter which tool caused it.
 
@@ -112,8 +112,8 @@ Rules:
    - `synced === 0` for ≥ `ANOMALY_PRIMARY_NO_REPLICA_WARN_MS` (default **5000**) → **WARNING**.
    - `synced === 0` for ≥ `ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS` (default **30000**) → escalate to **CRITICAL**. Escalate immediately at the warning threshold when `persistenceOff` is true and `attached === 0`. If persistence cannot be determined with the minimal-ACL user, treat it as unknown and do not escalate early.
    - Set either threshold to `0` to disable that level. Changes are hot-reloadable through the existing per-detector settings (`PATCH /settings/anomaly/detectors`) if the threshold DTO is extended. Otherwise env-only in the first iteration.
-5. **One event per shard episode.** Emit once at WARNING. Emit an escalation event at CRITICAL that is linked by `correlationId`. Resolve both when `synced ≥ 1` for 2 consecutive polls. When several connections observe the same shard (the seed fan-out and the per-node connection), dedupe on `(clusterKey, shardKey)`, not on `connectionId` (see the de-duplication issue).
-6. **Not suppressed during rolls.** If roll-aware alerting lands (separate issue), this detector is explicitly exempt from downgrade or suppression. Its message gains "during an operator roll" context instead.
+5. **One event per shard episode.** Emit once at WARNING. Emit an escalation event at CRITICAL that is linked by `correlationId`. Resolve both when `synced ≥ 1` for 2 consecutive polls. When several connections observe the same shard (the seed fan-out and the per-node connection), dedupe on `(clusterKey, shardKey)`, not on `connectionId` (see #717).
+6. **Not suppressed during rolls.** If roll-aware alerting (#716) lands, this detector is explicitly exempt from downgrade or suppression. Its message gains "during an operator roll" context instead.
 
 Message example:
 
@@ -182,7 +182,7 @@ What to look for:
 ## Out of scope / open questions
 
 - **Determining "persistence off" with a minimal-ACL user.** `CONFIG GET save` may be denied. INFO only gives `aof_enabled`, `rdb_last_bgsave_status` and `rdb_changes_since_last_save`. Proposal: escalate early only on positive evidence. Is that enough?
-- **Expected replica count from the deployment.** On Kubernetes the `ValkeyCluster.spec.replicas` field is authoritative, but BetterDB has no Kubernetes API access today (see the roll-awareness issue). The high-water mark is the portable fallback.
+- **Expected replica count from the deployment.** On Kubernetes the `ValkeyCluster.spec.replicas` field is authoritative, but BetterDB has no Kubernetes API access today (see #716). The high-water mark is the portable fallback.
 - **Multiple replicas expected but only one synced** (`synced < expected` but ≥ 1): useful as INFO-level "reduced redundancy"? Not proposed here.
 - Fixing the operator behaviour is upstream: valkey-operator #552 / PR #562.
 
@@ -192,4 +192,4 @@ What to look for:
 - Runs: `benchmarks/operator-sim/runs/2026-11-10T19-26-16-778-s42/SUMMARY.md`, `…/2026-11-10T19-54-07-874-s42/SUMMARY.md`, `…/2026-11-11T14-01-50-665-s42/SUMMARY.md`.
 - valkey-operator: [#552](https://github.com/valkey-io/valkey-operator/issues/552) (open), [#563](https://github.com/valkey-io/valkey-operator/issues/563) (closed as duplicate of #552), [PR #562](https://github.com/valkey-io/valkey-operator/pull/562) (open).
 - Code: `proprietary/anomaly-detection/types.ts:5-126`, `anomaly.service.ts:1429-1458`, `1660-1735`, `1984-2000`, `5053-5068`, `7203`, `7425-7456`, `failover-churn-detector.ts:68-83`, `apps/api/src/database/parsers/replication-info.parser.ts:28-44`.
-- Related drafts: roll-aware alerting (08), cluster-wide de-duplication (09).
+- Related issues: roll-aware alerting (#716), cluster-wide de-duplication (#717).
