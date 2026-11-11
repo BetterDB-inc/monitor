@@ -861,7 +861,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number> {
     if (!this.pool) {
       throw new Error('Database not initialized');
     }
@@ -871,11 +871,11 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         this.pool,
         'acl_audit',
         'captured_at < $1 AND connection_id = $2',
-        [olderThanTimestamp, connectionId],
+        [olderThanSeconds, connectionId],
       );
     }
 
-    return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanTimestamp]);
+    return chunkedPostgresDelete(this.pool, 'acl_audit', 'captured_at < $1', [olderThanSeconds]);
   }
 
   async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {

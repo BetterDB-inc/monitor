@@ -1,4 +1,4 @@
-# Publish BetterDB MCP server to npm
+# Publish BetterDB MCP server to npm and the official MCP registry
 #
 # Required secrets:
 #   NPM_TOKEN — npmjs.com automation token
@@ -139,3 +139,44 @@ jobs:
           VERSION: ${{ needs.publish-npm.outputs.version }}
         run: |
           npm view @betterdb/mcp@$VERSION || echo "Package not yet available"
+
+  # The registry checks that the npm package's mcpName matches server.json,
+  # so this runs after the package is on npm. io.github.BetterDB-inc/* names
+  # authenticate with GitHub OIDC, so no secret is needed. Dispatching with
+  # skip_npm publishes an already-released version to the registry alone.
+  publish-registry:
+    needs: [publish-npm, verify]
+    if: ${{ !cancelled() && (inputs.skip_npm || needs.verify.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install mcp-publisher
+        env:
+          PUBLISHER_VERSION: v1.8.7
+          PUBLISHER_SHA256: 00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Publish to the MCP registry
+        working-directory: packages/mcp
+        run: |
+          ../../mcp-publisher validate server.json
+          ../../mcp-publisher login github-oidc
+          # npm can take a few minutes to serve a new version to the registry
+          for attempt in 1 2 3 4 5; do
+            ../../mcp-publisher publish server.json && exit 0
+            echo "Publish attempt $attempt failed, retrying in 60s"
+            sleep 60
+          done
+          exit 1
