@@ -143,6 +143,15 @@ describe('withConfiguredZones', () => {
     expect(zoneOf('2001:db8::1:7001@17001', { '2001:db8::1:7001': 'us-east-1a' })).toBe('us-east-1a');
   });
 
+  it('matches an IPv6 node whichever spelling of the address either side uses', () => {
+    expect(zoneOf('2001:db8::1:7001@17001', { '2001:db8:0:0:0:0:0:1:7001': 'us-east-1a' })).toBe('us-east-1a');
+    expect(zoneOf('[2001:db8:0:0:0:0:0:1]:7001@17001', { '2001:db8::1:7001': 'us-east-1a' })).toBe('us-east-1a');
+    expect(zoneOf('2001:0db8:0000:0000:0000:0000:0000:0001:7001@17001', { '[2001:DB8::1]:7001': 'us-east-1a' })).toBe(
+      'us-east-1a',
+    );
+    expect(zoneOf('2001:db8::2:7001@17001', { '2001:db8:0:0:0:0:0:1:7001': 'us-east-1a' })).toBeUndefined();
+  });
+
   it('matches the host without regard to case', () => {
     expect(zoneOf('Node-7.Internal:7007@17007', { 'NODE-7.internal:7007': 'us-east-1a' })).toBe('us-east-1a');
   });

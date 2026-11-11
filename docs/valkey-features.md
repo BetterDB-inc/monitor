@@ -325,7 +325,7 @@ When the server does not report zones, you can tell BetterDB which zone each nod
 node-3.internal:7003=us-east-1c
 ```
 
-- The address is the node's `host:port` as `CLUSTER NODES` shows it (without the `@` cluster bus port), or its announced hostname and port. On a TLS connection that is the TLS port. The host is not case-sensitive, and an IPv6 address can be written with or without brackets (`[2001:db8::1]:7001`).
+- The address is the node's `host:port` as `CLUSTER NODES` shows it (without the `@` cluster bus port), or its announced hostname and port. On a TLS connection that is the TLS port. The host is not case-sensitive. An IPv6 address can be written with or without brackets (`[2001:db8::1]:7001`) and in its long or short form (`2001:db8:0:0:0:0:0:1` is the same node as `2001:db8::1`); it is stored and shown in the short form without brackets.
 - An entry that matches no node is kept but has no effect, so a node that changes address shows no zone until its line is updated.
 - A zone the server reports itself always wins. The map only fills nodes with no reported zone, so it can stay in place through an upgrade to Valkey 9.1.
 - A line with no zone is ignored, and saving with no zones clears the map.

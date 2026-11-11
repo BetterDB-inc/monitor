@@ -263,6 +263,15 @@ export type NodeAvailabilityZonesResult =
   | { ok: true; zones: NodeAvailabilityZones | undefined }
   | { ok: false; error: string };
 
+function canonicalHost(host: string): string {
+  if (!host.includes(':')) return host;
+  try {
+    return new URL(`http://[${host}]/`).hostname.slice(1, -1);
+  } catch {
+    return host;
+  }
+}
+
 function normalizeNodeAddress(address: string): string | undefined {
   const trimmed = address.trim().toLowerCase();
   const separator = trimmed.lastIndexOf(':');
@@ -273,7 +282,16 @@ function normalizeNodeAddress(address: string): string | undefined {
   if (!host || /[\s=@,\[\]]/.test(host) || !/^\d{1,5}$/.test(port)) return undefined;
   const portNumber = Number(port);
   if (portNumber < 1 || portNumber > 65535) return undefined;
-  return `${host}:${portNumber}`;
+  return `${canonicalHost(host)}:${portNumber}`;
+}
+
+export function nodeAddressKeys(node: { address: string; hostname?: string }): string[] {
+  const byAddress = normalizeNodeAddress(node.address.split('@')[0]);
+  if (!byAddress) return [];
+  if (!node.hostname) return [byAddress];
+  const port = byAddress.slice(byAddress.lastIndexOf(':') + 1);
+  const byHostname = normalizeNodeAddress(`${node.hostname}:${port}`);
+  return byHostname && byHostname !== byAddress ? [byAddress, byHostname] : [byAddress];
 }
 
 export function normalizeNodeAvailabilityZones(value: unknown): NodeAvailabilityZonesResult {

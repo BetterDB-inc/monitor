@@ -55,6 +55,55 @@ describe('formatZoneLines', () => {
   it('is empty with no nodes and no map', () => {
     expect(formatZoneLines([], undefined)).toBe('');
   });
+
+  it('keeps the zone of a bracketed IPv6 node on that node line', () => {
+    const nodes = [
+      clusterNode({ address: '[2001:db8::1]:7001@17001' }),
+      clusterNode({ id: 'b'.repeat(40), address: '[2001:db8::2]:7002@17002' }),
+    ];
+
+    expect(formatZoneLines(nodes, { '2001:db8::1:7001': 'us-east-1a' })).toBe(
+      '2001:db8::1:7001=us-east-1a\n2001:db8::2:7002=',
+    );
+  });
+
+  it('keeps the zone of an IPv6 node that CLUSTER NODES prints in the long form', () => {
+    const nodes = [clusterNode({ address: '2001:DB8:0:0:0:0:0:1:7001@17001' })];
+
+    expect(formatZoneLines(nodes, { '2001:db8::1:7001': 'us-east-1a' })).toBe(
+      '2001:db8::1:7001=us-east-1a',
+    );
+  });
+});
+
+describe('zone lines round trip', () => {
+  const nodes = [
+    clusterNode({ address: '[2001:db8::1]:7001@17001' }),
+    clusterNode({ id: 'b'.repeat(40), address: '[2001:db8::2]:7002@17002' }),
+    clusterNode({
+      id: 'c'.repeat(40),
+      address: '10.0.0.3:7003@17003',
+      hostname: 'Node-3.internal',
+    }),
+  ];
+
+  it('gives back the saved map for bracketed CLUSTER NODES addresses', () => {
+    const zones = { '2001:db8::1:7001': 'us-east-1a', 'node-3.internal:7003': 'us-east-1c' };
+
+    expect(parseZoneLines(formatZoneLines(nodes, zones))).toEqual({ ok: true, zones });
+  });
+
+  it('saves a zone filled in on the blank line of a bracketed IPv6 node', () => {
+    const text = formatZoneLines(nodes, { '2001:db8::1:7001': 'us-east-1a' }).replace(
+      '2001:db8::2:7002=',
+      '2001:db8::2:7002=us-east-1b',
+    );
+
+    expect(parseZoneLines(text)).toEqual({
+      ok: true,
+      zones: { '2001:db8::1:7001': 'us-east-1a', '2001:db8::2:7002': 'us-east-1b' },
+    });
+  });
 });
 
 describe('parseZoneLines', () => {

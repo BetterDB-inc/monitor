@@ -32,6 +32,33 @@ describe('normalizeNodeAvailabilityZones', () => {
     });
   });
 
+  it('stores an IPv6 address in its compressed form, whichever spelling was entered', () => {
+    expect(
+      normalizeNodeAvailabilityZones({
+        '2001:db8:0:0:0:0:0:1:7001': 'a',
+        '[2001:0DB8:0000:0000:0000:0000:0000:0002]:7002': 'b',
+      }),
+    ).toEqual({
+      ok: true,
+      zones: { '2001:db8::1:7001': 'a', '2001:db8::2:7002': 'b' },
+    });
+  });
+
+  it('rejects two spellings of one IPv6 address', () => {
+    expect(
+      normalizeNodeAvailabilityZones({ '2001:db8::1:7001': 'a', '2001:db8:0:0:0:0:0:1:7001': 'b' }),
+    ).toEqual({
+      ok: false,
+      error: "Duplicate node address '2001:db8::1:7001'",
+    });
+  });
+
+  it('reads a stored map with a long-form IPv6 key in its compressed form', () => {
+    expect(parseNodeAvailabilityZones('{"2001:db8:0:0:0:0:0:1:7001":"a"}')).toEqual({
+      '2001:db8::1:7001': 'a',
+    });
+  });
+
   it('treats an empty map, null and undefined as no map', () => {
     expect(normalizeNodeAvailabilityZones({})).toEqual({ ok: true, zones: undefined });
     expect(normalizeNodeAvailabilityZones(null)).toEqual({ ok: true, zones: undefined });

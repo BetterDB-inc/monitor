@@ -1,19 +1,13 @@
-import { normalizeNodeAvailabilityZones, type NodeAvailabilityZones } from '@betterdb/shared';
+import {
+  nodeAddressKeys,
+  normalizeNodeAvailabilityZones,
+  type NodeAvailabilityZones,
+} from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 
 export type ZoneLinesResult =
   | { ok: true; zones: NodeAvailabilityZones }
   | { ok: false; error: string };
-
-function nodeAddressKeys(node: ClusterNode): string[] {
-  const hostPort = node.address.split('@')[0].toLowerCase();
-  const separator = hostPort.lastIndexOf(':');
-  if (separator <= 0) {
-    return [];
-  }
-  const port = hostPort.slice(separator + 1);
-  return node.hostname ? [hostPort, `${node.hostname.toLowerCase()}:${port}`] : [hostPort];
-}
 
 export function formatZoneLines(
   nodes: ClusterNode[],

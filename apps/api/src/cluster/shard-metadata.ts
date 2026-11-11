@@ -1,7 +1,6 @@
-import type { NodeAvailabilityZones } from '@betterdb/shared';
+import { nodeAddressKeys, type NodeAvailabilityZones } from '@betterdb/shared';
 import type { ClusterShard } from '../common/types/metrics.types';
 import { withTimeout } from '../common/utils/with-timeout';
-import { parseNodeAddress } from '../topology/membership-diff';
 
 export const CLUSTER_SHARDS_TIMEOUT_MS = 5_000;
 
@@ -62,15 +61,12 @@ interface ZonedNode {
 }
 
 function configuredZone(node: ZonedNode, zones: NodeAvailabilityZones): string | undefined {
-  const parsed = parseNodeAddress(node.address);
-  if (!parsed) {
-    return undefined;
+  for (const key of nodeAddressKeys(node)) {
+    if (zones[key]) {
+      return zones[key];
+    }
   }
-  const byAddress = zones[`${parsed.host}:${parsed.port}`.toLowerCase()];
-  if (byAddress || !node.hostname) {
-    return byAddress;
-  }
-  return zones[`${node.hostname}:${parsed.port}`.toLowerCase()];
+  return undefined;
 }
 
 export function withConfiguredZones<T extends ZonedNode>(nodes: T[], zones: NodeAvailabilityZones | undefined): T[] {
