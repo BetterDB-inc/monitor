@@ -1255,19 +1255,19 @@ export class SqliteAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number> {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
     if (connectionId) {
       return chunkedSqliteDelete(this.db, 'acl_audit', 'captured_at < ? AND connection_id = ?', [
-        olderThanTimestamp,
+        olderThanSeconds,
         connectionId,
       ]);
     }
 
-    return chunkedSqliteDelete(this.db, 'acl_audit', 'captured_at < ?', [olderThanTimestamp]);
+    return chunkedSqliteDelete(this.db, 'acl_audit', 'captured_at < ?', [olderThanSeconds]);
   }
 
   async saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number> {
