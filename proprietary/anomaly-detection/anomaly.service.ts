@@ -97,6 +97,14 @@ import {
   judgeHotShards,
 } from './hot-shard-detector';
 import {
+  HOT_KEY_REFRESH_MS,
+  HOT_KEY_SLOTS,
+  HotKeyRead,
+  HotShardKeyDetail,
+  hotKeysUnavailable,
+  sampleHotKeys,
+} from './hot-shard-keys';
+import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
   BacklogCoverageLevel,
@@ -717,6 +725,8 @@ export class AnomalyService
   private hotShardJudgedAt = new Map<string, number>();
   private hotShardDetails = new Map<string, Map<string, HotShardDetail>>();
   private hotShardSince = new Map<string, Map<string, number>>();
+  private hotShardKeys = new Map<string, Map<string, HotShardKeyDetail>>();
+  private hotKeyNoteLogged = new Map<string, string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -1293,6 +1303,8 @@ export class AnomalyService
     this.hotShardJudgedAt.delete(connectionId);
     this.hotShardDetails.delete(connectionId);
     this.hotShardSince.delete(connectionId);
+    this.hotShardKeys.delete(connectionId);
+    this.hotKeyNoteLogged.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
@@ -6270,6 +6282,7 @@ export class AnomalyService
         this.restartHotShardHold(connectionId);
         return;
       }
+      await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
       await this.applyHotShardGate(ctx, timestamp, sample.timestamp, findings, topSlots, selfId);
       this.rememberHotShards(connectionId, sample.timestamp, findings, topSlots);
     } catch (err) {
@@ -6303,18 +6316,102 @@ export class AnomalyService
     findings: HotShardFinding[],
   ): Promise<boolean> {
     if (!this.clusterMetrics) return false;
-    const firstSeen = this.hotShardFirstSeen.get(connectionId);
-    const eventIds = this.hotShardEventIds.get(connectionId);
-    const aboutToRaise = findings.some((finding) => {
-      const signature = hotShardSignature(finding.shardId);
-      const seenAt = firstSeen?.get(signature);
-      return (
-        seenAt !== undefined && !eventIds?.has(signature) && sampledAt - seenAt >= HOT_SHARD_HOLD_MS
-      );
-    });
-    if (!aboutToRaise) return false;
+    if (!findings.some((finding) => this.isHotShardAboutToRaise(connectionId, sampledAt, finding))) {
+      return false;
+    }
     const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
     return !check.complete || check.migrations.length > 0;
+  }
+
+  private isHotShardAboutToRaise(
+    connectionId: string,
+    sampledAt: number,
+    finding: HotShardFinding,
+  ): boolean {
+    const signature = hotShardSignature(finding.shardId);
+    const seenAt = this.hotShardFirstSeen.get(connectionId)?.get(signature);
+    return (
+      seenAt !== undefined &&
+      !this.hotShardEventIds.get(connectionId)?.has(signature) &&
+      sampledAt - seenAt >= HOT_SHARD_HOLD_MS
+    );
+  }
+
+  private async refreshHotShardKeys(
+    ctx: ConnectionContext,
+    timestamp: number,
+    sampledAt: number,
+    findings: HotShardFinding[],
+    topSlots: ReadonlyMap<string, HotShardSlot[]>,
+  ): Promise<void> {
+    const connectionId = ctx.connectionId;
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const known = this.hotShardKeys.get(connectionId);
+    const kept = new Map<string, HotShardKeyDetail>();
+    for (const finding of findings) {
+      const signature = hotShardSignature(finding.shardId);
+      const wanted =
+        eventIds?.has(signature) || this.isHotShardAboutToRaise(connectionId, sampledAt, finding);
+      if (!wanted) continue;
+      const last = known?.get(signature);
+      const due =
+        last?.keysSampledAt === undefined || timestamp - last.keysSampledAt >= HOT_KEY_REFRESH_MS;
+      if (!due) {
+        kept.set(signature, last);
+        continue;
+      }
+      const read = await this.readHotShardKeys(
+        connectionId,
+        finding.shardId,
+        topSlots.get(finding.shardId) ?? [],
+      );
+      this.logHotKeySource(ctx, read);
+      kept.set(signature, { ...read, keysSampledAt: timestamp });
+    }
+    if (kept.size > 0) this.hotShardKeys.set(connectionId, kept);
+    else this.hotShardKeys.delete(connectionId);
+  }
+
+  private async readHotShardKeys(
+    connectionId: string,
+    shardId: string,
+    topSlots: HotShardSlot[],
+  ): Promise<HotKeyRead> {
+    const discovery = this.clusterDiscovery;
+    if (!discovery || !this.dialsDataNodes(connectionId)) {
+      return hotKeysUnavailable('the monitor does not connect to the cluster nodes directly');
+    }
+    const slots = topSlots.slice(0, HOT_KEY_SLOTS).map((slot) => slot.slot);
+    const timedOut = 'reading the keys from the hot primary timed out';
+    let client: Awaited<ReturnType<ClusterDiscoveryService['getNodeConnection']>> | undefined;
+    let abandoned = false;
+    const reading = (async () => {
+      client = await discovery.getNodeConnection(shardId, connectionId);
+      if (abandoned) throw new Error(timedOut);
+      return sampleHotKeys(client, slots);
+    })();
+    try {
+      return await withTimeout(reading, AnomalyService.FANOUT_COMMAND_TIMEOUT_MS, timedOut);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      if (reason !== timedOut) {
+        return hotKeysUnavailable(`reading the keys from the hot primary failed: ${reason}`);
+      }
+      abandoned = true;
+      if (client) discovery.evictNodeClient(client);
+      return hotKeysUnavailable(timedOut);
+    }
+  }
+
+  private logHotKeySource(ctx: ConnectionContext, read: HotKeyRead): void {
+    if (read.keySource === 'lfu') {
+      this.hotKeyNoteLogged.delete(ctx.connectionId);
+      return;
+    }
+    const note = read.keyNote ?? '';
+    if (this.hotKeyNoteLogged.get(ctx.connectionId) === note) return;
+    this.hotKeyNoteLogged.set(ctx.connectionId, note);
+    this.logger.warn(`Hot keys are not available for ${ctx.connectionName}: ${note}`);
   }
 
   private restartHotShardHold(connectionId: string): void {
@@ -6397,7 +6494,12 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: HOT_SHARD_RAISE_FACTOR,
-      message: describeHotShard(finding, topSlots, sampledAt - since),
+      message: describeHotShard(
+        finding,
+        topSlots,
+        sampledAt - since,
+        this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.topKeys,
+      ),
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -6414,6 +6516,8 @@ export class AnomalyService
     const eventIds = this.hotShardEventIds.get(connectionId);
     const since = this.hotShardSince.get(connectionId);
     const details = new Map<string, HotShardDetail>();
+    const keys = this.hotShardKeys.get(connectionId);
+    if (findings.length === 0) this.hotShardKeys.delete(connectionId);
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       if (!eventIds?.has(signature)) continue;
@@ -6427,6 +6531,7 @@ export class AnomalyService
         network: finding.network,
         rankedBy: finding.over[0],
         topSlots: topSlots.get(finding.shardId) ?? [],
+        ...(keys?.get(signature) ?? hotKeysUnavailable('the keys have not been read yet')),
       });
     }
     if (details.size > 0) this.hotShardDetails.set(connectionId, details);

@@ -1937,6 +1937,11 @@ describe('AnomalyService', () => {
               shareOfShard: 0.25,
             },
           ],
+          topKeys: [],
+          keySource: 'unavailable',
+          keyNote: 'the monitor does not connect to the cluster nodes directly',
+          keysSampled: 0,
+          keysSampledAt: BASE + 6 * STEP_MS,
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
@@ -2182,6 +2187,332 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
     });
 
+    describe('hot keys', () => {
+      type KeysBySlot = Record<number, Array<[string, number | Error]>>;
+      const NO_LFU = new Error(
+        'ERR An LFU maxmemory policy is not selected, access frequency not tracked.',
+      );
+      const RAISED =
+        "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+        'Top slots by CPU: 0 (75% of the shard), 1 (25%).';
+      let keys: KeysBySlot;
+
+      function hotNode() {
+        const freqOf = (name: Buffer): [Error | null, unknown] => {
+          const found = Object.values(keys)
+            .flat()
+            .find(([key]) => key === name.toString());
+          const freq = found?.[1];
+          return freq instanceof Error ? [freq, null] : [null, freq ?? null];
+        };
+        return {
+          callBuffer: jest.fn(async (_cluster: string, _sub: string, slot: number, count: number) =>
+            (keys[slot] ?? []).slice(0, count).map(([name]) => Buffer.from(name)),
+          ),
+          pipeline: jest.fn(() => {
+            const queued: Buffer[] = [];
+            return {
+              call(_object: string, _freq: string, name: Buffer) {
+                queued.push(name);
+                return this;
+              },
+              exec: async () => queued.map(freqOf),
+            };
+          }),
+        };
+      }
+
+      function dial(client: unknown) {
+        const discovery = {
+          getNodeConnection: jest.fn().mockResolvedValue(client),
+          evictNodeClient: jest.fn(),
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+        };
+        (service as any).clusterDiscovery = discovery;
+        return discovery;
+      }
+
+      const unavailableWarnings = (warn: jest.SpyInstance) =>
+        warn.mock.calls.filter(([line]) => String(line).startsWith('Hot keys are not available'));
+
+      beforeEach(() => {
+        keys = {
+          0: [
+            ['user:1', 40],
+            ['user:42', 255],
+          ],
+          1: [['cart:{9}', 201]],
+        };
+      });
+
+      it('names the hot keys in the message, the webhook and the detail', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toBe(
+          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).`,
+        );
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            dedupeKey: 'hot_shard:a0000000',
+            message: expect.stringContaining('Hot keys: "user:42" (freq 255)'),
+          }),
+        );
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+        expect(discovery.getNodeConnection).toHaveBeenCalledWith('a0000000', 'conn-a');
+        expect(client.callBuffer.mock.calls).toEqual([
+          ['CLUSTER', 'GETKEYSINSLOT', 0, 500],
+          ['CLUSTER', 'GETKEYSINSLOT', 1, 500],
+        ]);
+      });
+
+      it('writes a hostile key name into the message as one harmless line', async () => {
+        keys = { 0: [['<!channel>\n"x"', 255]] };
+        dial(hotNode());
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).`,
+        );
+        expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('<!channel>\n"x"');
+      });
+
+      it('reads the keys once, right before the raise, and on no other poll', async () => {
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 5);
+
+        expect(client.callBuffer).not.toHaveBeenCalled();
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+
+        await step(HOT, 10);
+        await idle(1_000);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+      });
+
+      it('reads no keys for an evenly loaded cluster', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(EVEN, 30);
+
+        expect(discovery.getNodeConnection).not.toHaveBeenCalledWith('a0000000', 'conn-a');
+        expect(client.callBuffer).not.toHaveBeenCalled();
+      });
+
+      it('refreshes the keys of an open event at most every five minutes', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        keys = { 0: [['later', 99]] };
+
+        await step(HOT, 19);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+        expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('user:42');
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keysSampledAt: BASE + 26 * STEP_MS,
+          keysSampled: 1,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toContain('"user:42"');
+      });
+
+      it('raises without key names when the node has no LFU policy, and says so once', async () => {
+        const warn = jest.spyOn((service as any).logger, 'warn');
+        keys = { 0: [['user:42', NO_LFU]], 1: [['cart:{9}', NO_LFU]] };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 46);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'maxmemory-policy is not an LFU policy, so the node keeps no access frequency',
+          keysSampled: 0,
+          topKeys: [],
+        });
+        expect(client.callBuffer).toHaveBeenCalledTimes(3);
+        expect(unavailableWarnings(warn)).toEqual([
+          [
+            'Hot keys are not available for cluster: maxmemory-policy is not an LFU policy, ' +
+              'so the node keeps no access frequency',
+          ],
+        ]);
+      });
+
+      it('raises without key names when the monitoring user may not list them', async () => {
+        const client = hotNode();
+        client.callBuffer.mockRejectedValue(
+          new Error("NOPERM User monitor has no permissions to run the 'cluster|getkeysinslot' command"),
+        );
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'the monitoring user may not run CLUSTER GETKEYSINSLOT',
+        });
+      });
+
+      it('gives up on a hot primary that does not answer and drops its client', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const client = hotNode();
+          client.callBuffer.mockReturnValue(new Promise(() => undefined));
+          const discovery = dial(client);
+
+          await step(HOT, 6);
+
+          expect(hotEvents()[0].message).toBe(RAISED);
+          expect(service.getHotShards('conn-a')[0]).toMatchObject({
+            keySource: 'unavailable',
+            keyNote: 'reading the keys from the hot primary timed out',
+          });
+          expect(discovery.evictNodeClient).toHaveBeenCalledWith(client);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
+      it('does not start reading on a connection that arrives after it gave up', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const client = hotNode();
+          const discovery = dial(client);
+          let connect!: (connected: unknown) => void;
+          discovery.getNodeConnection.mockReturnValue(
+            new Promise((resolve) => {
+              connect = resolve;
+            }),
+          );
+
+          await step(HOT, 6);
+          connect(client);
+          await new Promise((resolve) => setImmediate(resolve));
+
+          expect(hotEvents()[0].message).toBe(RAISED);
+          expect(service.getHotShards('conn-a')[0].keyNote).toBe(
+            'reading the keys from the hot primary timed out',
+          );
+          expect(client.callBuffer).not.toHaveBeenCalled();
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
+      it('raises without key names when the hot primary cannot be reached', async () => {
+        const discovery = dial(hotNode());
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: ECONNREFUSED',
+        });
+        expect(discovery.evictNodeClient).not.toHaveBeenCalled();
+      });
+
+      it('reads no keys while a slot migration delays the raise', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest
+            .fn()
+            .mockResolvedValue({ migrations: [{ slot: 5 }], complete: true }),
+        };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 8);
+
+        expect(hotEvents()).toEqual([]);
+        expect(client.callBuffer).not.toHaveBeenCalled();
+      });
+
+      it('reads the keys of the top slots of the sample it judged', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest.fn().mockImplementation(async () => {
+            counters.set(1, (counters.get(1) ?? 0) + 90_000_000);
+            shardLoad.record('conn-a', reading(), clock + 5_000);
+            return { migrations: [], complete: true };
+          }),
+        };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1, 'cpu')[0].slot).toBe(1);
+        expect(client.callBuffer.mock.calls.map(([, , slot]) => slot)).toEqual([0, 1]);
+      });
+
+      it('does not dial the nodes of a connection it reaches through an agent', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(discovery.getNodeConnection).not.toHaveBeenCalled();
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'unavailable',
+          keyNote: 'the monitor does not connect to the cluster nodes directly',
+        });
+      });
+
+      it('drops the keys when the event resolves and reads them again on the next raise', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        await step(FLAT, 25);
+
+        expect(hotEvents()[0].resolved).toBe(true);
+        expect((service as any).hotShardKeys.has('conn-a')).toBe(false);
+
+        keys = { 0: [['second', 7]] };
+        await step(HOT, 12);
+
+        expect(hotEvents()).toHaveLength(2);
+        expect(hotEvents().find((e) => !e.resolved)!.message).toContain(
+          'Hot keys: "second" (freq 7).',
+        );
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+    });
+
     it('forgets a removed connection', async () => {
       await step(HOT, 6);
 
@@ -2196,6 +2527,8 @@ describe('AnomalyService', () => {
         'hotShardJudgedAt',
         'hotShardDetails',
         'hotShardSince',
+        'hotShardKeys',
+        'hotKeyNoteLogged',
       ]) {
         expect((service as any)[state].has('conn-a')).toBe(false);
       }

@@ -163,3 +163,31 @@ describe('AnomalyController incident by event', () => {
     expect(service.findIncidentIdByEvent).not.toHaveBeenCalled();
   });
 });
+
+describe('AnomalyController hot shards', () => {
+  const detail = {
+    shardId: 'a0000000',
+    nodeAddr: '10.0.0.1:6379',
+    topSlots: [{ slot: 12 }],
+    topKeys: [{ key: 'user:42', slot: 12, freq: 255 }],
+    keySource: 'lfu',
+  };
+  const service = { getHotShards: jest.fn().mockReturnValue([detail]) };
+  const controller = new AnomalyController(service as unknown as AnomalyService);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns the open hot shards of the connection in the header', () => {
+    expect(controller.getHotShards('c1')).toEqual([detail]);
+    expect(service.getHotShards).toHaveBeenCalledWith('c1');
+  });
+
+  it('is served at hot-shards and requires the connection header', () => {
+    const args = Reflect.getMetadata('__routeArguments__', AnomalyController, 'getHotShards');
+
+    expect(Reflect.getMetadata('path', AnomalyController.prototype.getHotShards)).toBe(
+      'hot-shards',
+    );
+    expect(Object.values(args)).toEqual([expect.objectContaining({ data: { required: true } })]);
+  });
+});

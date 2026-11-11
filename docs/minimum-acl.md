@@ -52,6 +52,14 @@ Key analytics, KV cache monitoring and the cache simulator. `%R~*` grants read-o
 %R~* +scan +type +ttl +pttl +exists +memory|usage +object|freq +object|idletime +strlen +llen +hlen +scard +zcard +xlen
 ```
 
+### Hot shard keys
+
+Names the hottest keys of a hot shard in [`hot_shard`](anomaly-detection.md#hot_shard) anomalies. It reads key names and their access frequency, never values. Without it the anomaly is still raised, without key names.
+
+```
+%R~* +cluster|getkeysinslot +object|freq
+```
+
 ### AI observability
 
 The AI cache and agent memory panels, and cache proposals. BetterDB reads the `__betterdb:caches` registry, each cache's heartbeat, and its `<name>:__*` keys (stats, config, similarity window, tool policies and tuning history) on every connection. `%R~*:__*` also lets this user read any other key with `:__` in its name; if that is a concern, use one pattern per cache instead, such as `%R~faq:__*`. Trace correlation also checks the cache entry keys named in spans, so it needs the [key sampling](#key-sampling) rules too.

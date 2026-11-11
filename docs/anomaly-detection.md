@@ -679,6 +679,24 @@ The check needs three or more primaries that own slots, and Valkey 8.0+ with `cl
 
 Nothing is raised, and open events are kept as they are, while slots are moving: during a reshard, for two samples after a slot changes owner, and after a counter reset. `reshard_shard_skew` covers the reshard itself. A slot migration in flight, atomic or legacy, only delays a new event: the 60 seconds start over, and an open event can still resolve. The same holds when the monitor cannot ask every primary whether a slot is migrating. On Valkey 9.0+ that includes a monitoring user that may not run `CLUSTER GETSLOTMIGRATIONS`: no new event is raised until it is allowed (see [Minimum ACL](minimum-acl.md)). When no complete shard load sample arrives for 5 minutes, or `CLUSTER NODES` cannot be read for that long, open events are closed. That happens for example when one primary keeps failing.
 
+**Hot keys**: when the hot primary runs an LFU `maxmemory-policy` (`allkeys-lfu` or `volatile-lfu`), the event also names the hottest keys of the shard. Right before a new event is raised, and at most every 5 minutes while it stays open, BetterDB asks the hot primary for the first 500 key names of each of the shard's top 3 slots (`CLUSTER GETKEYSINSLOT`) and reads the access frequency of each name (`OBJECT FREQ`). That is at most 3 commands plus 1,500 `OBJECT FREQ` calls in 7 round trips, with a 2 second limit for the whole read. It runs no `KEYS` and no `SCAN`, and reads no value. The 10 keys with the highest frequency are kept, and the first 3 go into the message:
+
+```
+Hot shard 3f2a9c1e at 10.0.0.1:6379: CPU 3.1x the cluster median (61% of the cluster's slot CPU) for 60s. Top slots by CPU: 1234 (62% of the shard), 88 (9%). Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).
+```
+
+`freq` is the server's LFU counter, not a request count. It runs from 0 to 255, grows logarithmically with access and decays over time, so several keys tied at 255 are normal. It ranks keys against each other; it does not measure their load.
+
+What the read can miss, and when it is skipped:
+
+- `CLUSTER GETKEYSINSLOT` returns the first 500 names of a slot, not the hottest. In a slot with more keys the hottest one can be missed. Compare `keysSampled` with the `keyCount` of the top slots to see how much was covered.
+- Without an LFU policy the node keeps no access frequency. The read stops at the first refusal, normally after one `OBJECT FREQ`.
+- The monitoring user may lack the two commands (see the [minimum ACL](minimum-acl.md#hot-shard-keys)), the read may time out, or the connection may reach the cluster through an agent, which does not dial the nodes.
+
+In each of these cases the event is raised without key names, the detail has `keySource: "unavailable"` and a `keyNote` with the reason, and the reason is logged once per connection. A name that is not valid UTF-8 is still read, and is shown with replacement characters.
+
+**Key names leave the database with the message.** The message is stored with the event, written to the API log and sent to every webhook subscribed to `anomaly.detected`. It carries at most 3 names, each cut to 64 characters, with control and invisible characters written as `\xNN` or `\u{NNNN}` and quotes escaped. It is written once, when the event is raised; later reads only update the detail. The full list of up to 10 names is returned by [`GET /api/anomaly/hot-shards`](#get-hot-shards) only.
+
 ## Configuration
 
 ### Environment Variables
@@ -990,6 +1008,49 @@ One entry per polled connection (all connections without the header), with the o
     "timestamp": 1704067200000,
     "ageMs": 4200,
     "stale": false
+  }
+]
+```
+
+### Get Hot Shards
+
+```http
+GET /api/anomaly/hot-shards
+X-Connection-ID: <connection-id>
+```
+
+The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
+
+`cpu` and `network` give the shard's rate per second, its share of the cluster, the cluster median and the ratio the rule used. `rankedBy` is the metric that flagged the shard, and `topSlots` (up to 5) are ranked by it. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the last read and `keysSampled` the number of keys whose frequency it got.
+
+**Response**:
+```json
+[
+  {
+    "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+    "nodeAddr": "10.0.0.1:6379",
+    "slotCount": 5461,
+    "since": 1704067140000,
+    "sampledAt": 1704067200000,
+    "cpu": { "perSecond": 930000, "share": 0.61, "median": 300000, "ratio": 3.1 },
+    "network": { "perSecond": 2097152, "share": 0.35, "median": 1887436, "ratio": 1.11 },
+    "rankedBy": "cpu",
+    "topSlots": [
+      {
+        "slot": 1234,
+        "cpuUsecPerSecond": 576600,
+        "networkBytesPerSecond": 912000,
+        "keyCount": 1820,
+        "shareOfShard": 0.62
+      }
+    ],
+    "topKeys": [
+      { "key": "user:42", "slot": 1234, "freq": 255 },
+      { "key": "cart:{9}", "slot": 88, "freq": 201 }
+    ],
+    "keySource": "lfu",
+    "keysSampled": 1012,
+    "keysSampledAt": 1704067200000
   }
 ]
 ```

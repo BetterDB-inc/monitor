@@ -456,6 +456,8 @@ If the replica alerts again, the old event closes with no `replication.recovered
 
 A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
 
+**Key names in `hot_shard` messages.** On a cluster with an LFU `maxmemory-policy`, the `message` of a `hot_shard` event names up to 3 of the shard's hottest keys, for example `Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).` (see [hot keys](anomaly-detection.md#hot_shard)). If your key names hold personal or otherwise sensitive data, such as an email address or a session token, check where the webhook delivers before you subscribe a chat channel or a third-party tool to `anomaly.detected`. Each name is cut to 64 characters, and control and invisible characters are written as `\xNN` or `\u{NNNN}`, so a name cannot add a line. The Slack and Discord formats also escape mentions, links and markdown. The generic format carries the text as it is in a JSON string, so escape it yourself if you forward it to a chat tool.
+
 #### anomaly.sequence.detected (Pro)
 
 ```json
