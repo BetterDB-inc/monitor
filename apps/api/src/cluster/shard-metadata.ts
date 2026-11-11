@@ -1,4 +1,7 @@
 import type { ClusterShard } from '../common/types/metrics.types';
+import { withTimeout } from '../common/utils/with-timeout';
+
+export const CLUSTER_SHARDS_TIMEOUT_MS = 5_000;
 
 export interface ShardMetadata {
   availabilityZone?: string;
@@ -11,7 +14,7 @@ export interface ClusterShardsReader {
 
 export async function readClusterShards(client: ClusterShardsReader): Promise<ClusterShard[] | undefined> {
   try {
-    return await client.getClusterShards();
+    return await withTimeout(client.getClusterShards(), CLUSTER_SHARDS_TIMEOUT_MS);
   } catch {
     return undefined;
   }

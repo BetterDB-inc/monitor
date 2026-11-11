@@ -1,5 +1,5 @@
 import type { ClusterShard } from '../common/types/metrics.types';
-import { readClusterShards, withShardMetadata } from './shard-metadata';
+import { CLUSTER_SHARDS_TIMEOUT_MS, readClusterShards, withShardMetadata } from './shard-metadata';
 
 describe('withShardMetadata', () => {
   const shards: ClusterShard[] = [
@@ -77,6 +77,20 @@ describe('readClusterShards', () => {
     const client = { getClusterShards: jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')) };
 
     await expect(readClusterShards(client)).resolves.toBeUndefined();
+  });
+
+  it('gives up on a read that never answers, so the nodes are not held back', async () => {
+    jest.useFakeTimers();
+    try {
+      const client = { getClusterShards: jest.fn(() => new Promise<ClusterShard[]>(() => undefined)) };
+
+      const reading = readClusterShards(client);
+      await jest.advanceTimersByTimeAsync(CLUSTER_SHARDS_TIMEOUT_MS);
+
+      await expect(reading).resolves.toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('returns undefined when the client cannot read shards at all', async () => {
