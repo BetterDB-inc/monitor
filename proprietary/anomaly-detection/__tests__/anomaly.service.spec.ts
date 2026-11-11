@@ -2011,19 +2011,21 @@ describe('AnomalyService', () => {
     });
 
     it('waits out an atomic slot migration, asking only when it is about to raise', async () => {
-      const getSlotMigrations = jest.fn().mockResolvedValue([{ slot: 5 }]);
-      (service as any).clusterMetrics = { getSlotMigrations };
+      const checkSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
       await step(HOT, 5);
 
-      expect(getSlotMigrations).not.toHaveBeenCalled();
+      expect(checkSlotMigrations).not.toHaveBeenCalled();
 
       await step(HOT);
 
-      expect(getSlotMigrations).toHaveBeenCalledTimes(1);
-      expect(getSlotMigrations).toHaveBeenCalledWith('conn-a');
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(checkSlotMigrations).toHaveBeenCalledWith('conn-a');
       expect(hotEvents()).toEqual([]);
 
-      getSlotMigrations.mockResolvedValue([]);
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
       await step(HOT, 4);
 
       expect(hotEvents()).toEqual([]);
@@ -2031,7 +2033,86 @@ describe('AnomalyService', () => {
       await step(HOT);
 
       expect(hotEvents()).toHaveLength(1);
-      expect(getSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+    });
+
+    it('holds a new event back while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: false });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 12);
+
+      expect(hotEvents()).toEqual([]);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 5);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+
+      await step(HOT, 8);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await step(FLAT, 25);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('reports the top slots of the sample it judged, not of one that arrived while it waited', async () => {
+      const checkSlotMigrations = jest.fn().mockImplementation(async () => {
+        counters.set(1, (counters.get(1) ?? 0) + 90_000_000);
+        shardLoad.record('conn-a', reading(), clock + 5_000);
+        return { migrations: [], complete: true };
+      });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 6);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(shardLoad.getTopSlots('conn-a', IDS[0], 1, 'cpu')[0].slot).toBe(1);
+      expect(hotEvents()[0].message).toContain('Top slots by CPU: 0 (75% of the shard), 1 (25%).');
+      expect(service.getHotShards('conn-a')[0]).toMatchObject({
+        sampledAt: BASE + 6 * STEP_MS,
+        topSlots: [
+          { slot: 0, shareOfShard: 0.75 },
+          { slot: 1, shareOfShard: 0.25 },
+        ],
+      });
+    });
+
+    it('closes an open event after five minutes without a topology read', async () => {
+      await step(HOT, 6);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await idle(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await idle(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('judges the latest sample again once the topology can be read', async () => {
+      await step(HOT, 4);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      (ctx.client.getClusterNodes as jest.Mock).mockImplementation(async () => clusterNodes());
+      await idle(1_000);
+
+      expect(hotEvents()).toHaveLength(1);
     });
 
     it('closes an open event after five minutes without a shard load sample', async () => {

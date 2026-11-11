@@ -189,6 +189,11 @@ export interface SlotMigration {
   phase?: string;
 }
 
+export interface SlotMigrationCheck {
+  migrations: SlotMigration[];
+  complete: boolean;
+}
+
 const FINISHED_MIGRATION_STATES = new Set(['success', 'failed', 'cancelled']);
 
 /** One CLUSTER GETSLOTMIGRATIONS job; RESP2 delivers each map as a flat name/value array. */
@@ -841,6 +846,10 @@ export class ClusterMetricsService {
    * CLUSTER GETSLOTMIGRATIONS on the source and target nodes.
    */
   async getSlotMigrations(connectionId?: string): Promise<SlotMigration[]> {
+    return (await this.checkSlotMigrations(connectionId)).migrations;
+  }
+
+  async checkSlotMigrations(connectionId?: string): Promise<SlotMigrationCheck> {
     let nodes: DiscoveredNode[];
     try {
       nodes = await this.discoveryService.discoverNodes(connectionId);
@@ -848,7 +857,7 @@ export class ClusterMetricsService {
       this.logger.error(
         `Failed to check slot migrations: ${error instanceof Error ? error.message : error}`,
       );
-      return [];
+      return { migrations: [], complete: false };
     }
 
     const findNode = (idOrPrefix: string) =>
@@ -900,12 +909,14 @@ export class ClusterMetricsService {
       }
     };
     let nodesRead = 0;
+    let complete = true;
 
     const readNode = async (primary: DiscoveredNode, client: Valkey): Promise<void> => {
       try {
         addLegacyMarkers((await client.call('CLUSTER', 'NODES')) as string);
         nodesRead++;
       } catch (error) {
+        complete = false;
         this.logger.debug(`CLUSTER NODES failed on ${primary.address}: ${error}`);
       }
 
@@ -916,7 +927,9 @@ export class ClusterMetricsService {
         const message = error instanceof Error ? error.message : String(error);
         // Before Valkey 9 the subcommand does not exist; anything else is worth a line.
         const errorKey = `getslotmigrations-${primary.id}-${message}`;
-        if (!/unknown (sub)?command/i.test(message) && !this.loggedErrors.has(errorKey)) {
+        const unsupported = /unknown (sub)?command/i.test(message);
+        if (!unsupported) complete = false;
+        if (!unsupported && !this.loggedErrors.has(errorKey)) {
           this.addLoggedError(errorKey);
           this.logger.warn(`CLUSTER GETSLOTMIGRATIONS failed on ${primary.address}: ${message}`);
         }
@@ -947,6 +960,7 @@ export class ClusterMetricsService {
     await Promise.all(
       primaries.map((primary) =>
         this.onNode(primary, connectionId, NODE_COMMAND_TIMEOUT_MS, (client) => readNode(primary, client)).catch((error) => {
+          complete = false;
           this.logger.debug(`Slot migration check skipped ${primary.address}: ${error}`);
         }),
       ),
@@ -982,7 +996,7 @@ export class ClusterMetricsService {
       this.loggedErrors.delete(`slotmigrations-${connectionId ?? ''}`);
     }
 
-    return [...legacy.values(), ...atomicJobs.values()];
+    return { migrations: [...legacy.values(), ...atomicJobs.values()], complete };
   }
 
   private async getKeysInSlot(client: Valkey, slot: number): Promise<number | undefined> {

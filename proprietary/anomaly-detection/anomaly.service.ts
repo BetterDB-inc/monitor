@@ -2054,8 +2054,8 @@ export class AnomalyService
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
-          await this.detectHotShards(ctx, timestamp, nodes);
         }
+        await this.detectHotShards(ctx, timestamp, nodes);
         aclClusterNodes = nodes;
         if (nodes && !this.dialsDataNodes(ctx.connectionId)) {
           // The agent reaches only this node; cluster discovery would fail on
@@ -6225,13 +6225,13 @@ export class AnomalyService
   private async detectHotShards(
     ctx: ConnectionContext,
     timestamp: number,
-    nodes: ClusterNode[],
+    nodes: ClusterNode[] | undefined,
   ): Promise<void> {
     if (!this.shardLoad) return;
     const connectionId = ctx.connectionId;
-    const selfId = nodes.find((node) => node.flags.includes('myself'))?.id;
+    const selfId = nodes?.find((node) => node.flags.includes('myself'))?.id;
     try {
-      const sample = this.shardLoad.getLatest(connectionId);
+      const sample = nodes ? this.shardLoad.getLatest(connectionId) : null;
       const isNew =
         sample !== null &&
         sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
@@ -6240,8 +6240,8 @@ export class AnomalyService
         const judgedAt = this.hotShardJudgedAt.get(connectionId);
         if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);
         else if (timestamp - judgedAt > HOT_SHARD_BLIND_MS && this.tracksHotShards(connectionId)) {
-          await this.applyHotShardGate(ctx, timestamp, timestamp, [], selfId);
-          this.rememberHotShards(connectionId, timestamp, []);
+          await this.applyHotShardGate(ctx, timestamp, timestamp, [], new Map(), selfId);
+          this.rememberHotShards(connectionId, timestamp, [], new Map());
         }
         return;
       }
@@ -6257,6 +6257,12 @@ export class AnomalyService
       const findings = this.isReshardWindowOpen(connectionId, timestamp)
         ? null
         : judgeHotShards(sample, open);
+      const topSlots = new Map(
+        (findings ?? []).map((finding) => [
+          finding.shardId,
+          this.hotShardTopSlots(connectionId, finding),
+        ]),
+      );
       const held =
         findings === null ||
         (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
@@ -6264,8 +6270,8 @@ export class AnomalyService
         this.restartHotShardHold(connectionId);
         return;
       }
-      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, findings, selfId);
-      this.rememberHotShards(connectionId, sample.timestamp, findings);
+      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, findings, topSlots, selfId);
+      this.rememberHotShards(connectionId, sample.timestamp, findings, topSlots);
     } catch (err) {
       this.logger.warn(
         `Hot shard check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6307,7 +6313,8 @@ export class AnomalyService
       );
     });
     if (!aboutToRaise) return false;
-    return (await this.clusterMetrics.getSlotMigrations(connectionId)).length > 0;
+    const check = await this.clusterMetrics.checkSlotMigrations(connectionId);
+    return !check.complete || check.migrations.length > 0;
   }
 
   private restartHotShardHold(connectionId: string): void {
@@ -6324,6 +6331,7 @@ export class AnomalyService
     timestamp: number,
     sampledAt: number,
     findings: HotShardFinding[],
+    topSlots: ReadonlyMap<string, HotShardSlot[]>,
     selfId: string | undefined,
   ): Promise<void> {
     const nodeAddrOf = (finding: HotShardFinding) =>
@@ -6340,7 +6348,15 @@ export class AnomalyService
       metricType: MetricType.HOT_SHARD,
       contextOf: (finding) => this.nodeContext(ctx, nodeAddrOf(finding)),
       buildEvent: (finding, signature) =>
-        this.buildHotShardEvent(ctx, timestamp, sampledAt, finding, signature, nodeAddrOf(finding)),
+        this.buildHotShardEvent(
+          ctx,
+          timestamp,
+          sampledAt,
+          finding,
+          signature,
+          topSlots.get(finding.shardId) ?? [],
+          nodeAddrOf(finding),
+        ),
     });
   }
 
@@ -6360,6 +6376,7 @@ export class AnomalyService
     sampledAt: number,
     finding: HotShardFinding,
     signature: string,
+    topSlots: HotShardSlot[],
     nodeAddr: string | undefined,
   ): AnomalyEvent {
     const since = this.hotShardFirstSeen.get(ctx.connectionId)?.get(signature) ?? sampledAt;
@@ -6380,11 +6397,7 @@ export class AnomalyService
       zScore: 0,
       stdDev: 0,
       threshold: HOT_SHARD_RAISE_FACTOR,
-      message: describeHotShard(
-        finding,
-        this.hotShardTopSlots(ctx.connectionId, finding),
-        sampledAt - since,
-      ),
+      message: describeHotShard(finding, topSlots, sampledAt - since),
       resolved: false,
       connectionId: ctx.connectionId,
       ...(nodeAddr ? { nodeAddr } : {}),
@@ -6396,6 +6409,7 @@ export class AnomalyService
     connectionId: string,
     sampledAt: number,
     findings: HotShardFinding[],
+    topSlots: ReadonlyMap<string, HotShardSlot[]>,
   ): void {
     const eventIds = this.hotShardEventIds.get(connectionId);
     const since = this.hotShardSince.get(connectionId);
@@ -6412,7 +6426,7 @@ export class AnomalyService
         cpu: finding.cpu,
         network: finding.network,
         rankedBy: finding.over[0],
-        topSlots: this.hotShardTopSlots(connectionId, finding),
+        topSlots: topSlots.get(finding.shardId) ?? [],
       });
     }
     if (details.size > 0) this.hotShardDetails.set(connectionId, details);

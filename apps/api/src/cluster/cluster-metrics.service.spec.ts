@@ -465,12 +465,17 @@ used_cpu_user:20.3\r
       { id: 'fff789node3', address: '192.168.1.12:6379', flags: ['master'], role: 'master' as const, healthy: true, slots: [] },
     ];
 
-    function nodeClients(byNode: Record<string, { nodes?: string; jobs?: unknown; jobsError?: Error }>) {
+    function nodeClients(
+      byNode: Record<string, { nodes?: string; nodesError?: Error; jobs?: unknown; jobsError?: Error }>,
+    ) {
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
         status: 'ready',
         call: jest.fn(async (cmd: string, sub: string) => {
           const reply = byNode[nodeId] ?? {};
-          if (cmd === 'CLUSTER' && sub === 'NODES') return reply.nodes ?? '';
+          if (cmd === 'CLUSTER' && sub === 'NODES') {
+            if (reply.nodesError) throw reply.nodesError;
+            return reply.nodes ?? '';
+          }
           if (cmd === 'CLUSTER' && sub === 'GETSLOTMIGRATIONS') {
             if (reply.jobsError) throw reply.jobsError;
             return reply.jobs ?? [];
@@ -555,6 +560,71 @@ used_cpu_user:20.3\r
       });
 
       await expect(service.getSlotMigrations()).resolves.toEqual([]);
+    });
+
+    describe('checkSlotMigrations', () => {
+      it('is complete when every primary answered both questions', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations('conn-1')).resolves.toEqual({
+          migrations: [],
+          complete: true,
+        });
+      });
+
+      it('returns the migrations it found along with the verdict', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({
+          abc123node1: {
+            nodes: 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n',
+          },
+        });
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.complete).toBe(true);
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
+      });
+
+      it('counts a server without GETSLOTMIGRATIONS as answered', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'") } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+      });
+
+      it('is incomplete when a primary cannot list its migration jobs', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ def456node2: { jobsError: new Error('LOADING Valkey is loading the dataset in memory') } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when a primary does not answer CLUSTER NODES', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ fff789node3: { nodesError: new Error('ECONNRESET') } });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when a primary cannot be dialed', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({});
+        const dial = mockDiscoveryService.getNodeConnection.getMockImplementation()!;
+        mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => {
+          if (nodeId === 'def456node2') throw new Error('ECONNREFUSED');
+          return dial(nodeId);
+        });
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when the topology cannot be discovered', async () => {
+        mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Discovery failed'));
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
     });
 
     it('keeps the MIGRATING view of a legacy move whichever node answers first', async () => {
