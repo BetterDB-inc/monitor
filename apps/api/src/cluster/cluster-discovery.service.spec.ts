@@ -861,6 +861,73 @@ describe('ClusterDiscoveryService', () => {
     });
   });
 
+  describe('onIsolatedClient', () => {
+    function dedicatedClient() {
+      const client = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        call: jest.fn().mockResolvedValue('OK'),
+        disconnect: jest.fn(),
+        on: jest.fn(),
+      };
+      jest.mocked(Valkey).mockImplementationOnce(() => client as never);
+      return client;
+    }
+
+    beforeEach(() => {
+      mockDbClient.getClient.mockReturnValue({
+        options: { host: 'seed.example', port: 7001, username: 'u', password: 'p' },
+        call: jest.fn(),
+      });
+    });
+
+    it('runs the work on a socket of its own, with bounded dial and commands, and closes it', async () => {
+      const client = dedicatedClient();
+
+      const reply = await service.onIsolatedClient('test-connection', 5_000, (own) =>
+        own.call('CLUSTER', 'GETSLOTMIGRATIONS'),
+      );
+
+      expect(reply).toBe('OK');
+      expect(jest.mocked(Valkey)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          host: 'seed.example',
+          port: 7001,
+          username: 'u',
+          password: 'p',
+          connectTimeout: 5_000,
+          commandTimeout: 5_000,
+          enableOfflineQueue: false,
+        }),
+      );
+      expect(client.call).toHaveBeenCalledWith('CLUSTER', 'GETSLOTMIGRATIONS');
+      expect(mockDbClient.getClient().call).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when the work gives up', async () => {
+      const client = dedicatedClient();
+
+      await expect(
+        service.onIsolatedClient('test-connection', 5_000, () =>
+          Promise.reject(new Error('deadline')),
+        ),
+      ).rejects.toThrow('deadline');
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the socket when it cannot be dialed, without running the work', async () => {
+      const client = dedicatedClient();
+      client.connect.mockRejectedValue(new Error('connect ETIMEDOUT'));
+      const work = jest.fn();
+
+      await expect(service.onIsolatedClient('test-connection', 5_000, work)).rejects.toThrow(
+        'connect ETIMEDOUT',
+      );
+      expect(work).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('healthCheckAll', () => {
     it("records the result on the checked client, not another connection's", async () => {
       const nodes = await service.discoverNodes();
