@@ -971,6 +971,7 @@ export class ClusterMetricsService {
     // No primary could be read directly, as behind an SSH tunnel or NAT: the
     // connection's own node still shows its own markers and migration jobs.
     if (primaries.length > 0 && nodesRead === 0) {
+      complete = false;
       const errorKey = `slotmigrations-${connectionId ?? ''}`;
       if (!this.loggedErrors.has(errorKey)) {
         this.logger.warn(
@@ -982,12 +983,15 @@ export class ClusterMetricsService {
       // (GETSLOTMIGRATIONS) show up as well as legacy markers.
       const self = nodes.find((node) => node.flags.includes('myself')) ?? primaries[0];
       try {
-        // The connection's own client is shared, so a reply that never comes
-        // is left queued on it rather than disconnecting it; only the wait ends.
-        await withTimeout(
-          readNode(self, this.connectionRegistry.get(connectionId).getClient()),
+        await this.discoveryService.onIsolatedClient(
+          connectionId,
           NODE_COMMAND_TIMEOUT_MS,
-          `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+          (client) =>
+            withTimeout(
+              readNode(self, client),
+              NODE_COMMAND_TIMEOUT_MS,
+              `The connection did not answer the slot migration check within ${NODE_COMMAND_TIMEOUT_MS}ms`,
+            ),
         );
       } catch (error) {
         this.logger.error(
