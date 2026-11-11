@@ -25,7 +25,6 @@ const EVENT = { id: 'evt-1', metricType: 'hot_shard', resolved: false };
 const ACTION = 'Capture on hot primary';
 
 function hotShard(overrides: Partial<HotShardDetail> = {}): HotShardDetail {
-  const idle = { perSecond: 0, share: 0, median: 0, ratio: 0 };
   return {
     eventId: 'evt-1',
     captureAvailable: true,
@@ -35,8 +34,7 @@ function hotShard(overrides: Partial<HotShardDetail> = {}): HotShardDetail {
     since: 1_000,
     sampledAt: 61_000,
     cpu: { perSecond: 900_000, share: 0.82, median: 100_000, ratio: 9 },
-    network: idle,
-    rankedBy: 'cpu',
+    network: { perSecond: 0, share: 0, median: 0 },
     topSlots: [],
     topKeys: [],
     keySource: 'unavailable',

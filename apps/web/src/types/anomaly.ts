@@ -121,8 +121,7 @@ export interface HotShardDetail {
   since: number;
   sampledAt: number;
   cpu: HotShardLoad;
-  network: HotShardLoad;
-  rankedBy: 'cpu' | 'network';
+  network: Omit<HotShardLoad, 'ratio'>;
   topSlots: HotShardSlot[];
   topKeys: HotShardKey[];
   keySource: 'lfu' | 'unavailable';
