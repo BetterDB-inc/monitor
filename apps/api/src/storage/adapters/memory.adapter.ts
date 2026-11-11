@@ -321,14 +321,14 @@ export class MemoryAdapter implements StoragePort, RawDatabaseHandleProvider {
     };
   }
 
-  async pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number> {
+  async pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number> {
     const before = this.aclEntries.length;
     if (connectionId) {
       this.aclEntries = this.aclEntries.filter(
-        (e) => e.capturedAt >= olderThanTimestamp || e.connectionId !== connectionId,
+        (e) => e.capturedAt >= olderThanSeconds || e.connectionId !== connectionId,
       );
     } else {
-      this.aclEntries = this.aclEntries.filter((e) => e.capturedAt >= olderThanTimestamp);
+      this.aclEntries = this.aclEntries.filter((e) => e.capturedAt >= olderThanSeconds);
     }
     return before - this.aclEntries.length;
   }
