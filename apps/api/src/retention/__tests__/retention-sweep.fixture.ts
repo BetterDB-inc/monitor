@@ -6,6 +6,7 @@ import {
   WebhookEventType,
 } from '@betterdb/shared';
 import type { StoragePort } from '../../common/interfaces/storage-port.interface';
+import { hasRawDatabaseHandle } from '../../storage/raw-database-handle';
 
 export interface SweepFixtureTimes {
   expiredAtMs: number;
@@ -14,12 +15,12 @@ export interface SweepFixtureTimes {
 
 /**
  * Two rows of one swept store, written through the store's own save method: one whose
- * prune-relevant time is `expiredAtMs` and one at `recentAtMs`. `remaining` counts how many of
- * them the store still returns.
+ * prune-relevant time is `expiredAtMs` and one at `recentAtMs`. `remainingAtMs` returns that
+ * time, in milliseconds, for each of them the store still returns.
  */
 export interface SweepFixture {
   seed(storage: StoragePort, times: SweepFixtureTimes): Promise<void>;
-  remaining(storage: StoragePort): Promise<number>;
+  remainingAtMs(storage: StoragePort): Promise<number[]>;
 }
 
 const CONNECTION_ID = 'sweep-fixture-conn';
@@ -35,6 +36,7 @@ const ages = ({ expiredAtMs, recentAtMs }: SweepFixtureTimes): number[] => [
 ];
 
 const toSeconds = (ms: number): number => Math.floor(ms / 1000);
+const toMs = (seconds: number): number => seconds * 1000;
 
 async function withClockAt<T>(ms: number, run: () => Promise<T>): Promise<T> {
   const clock = jest.spyOn(Date, 'now').mockReturnValue(ms);
@@ -43,6 +45,21 @@ async function withClockAt<T>(ms: number, run: () => Promise<T>): Promise<T> {
   } finally {
     clock.mockRestore();
   }
+}
+
+// PostgreSQL stamps created_at from its own clock, which the Date.now spy cannot reach.
+async function backdatePostgresDelivery(
+  storage: StoragePort,
+  deliveryId: string,
+  createdAtMs: number,
+): Promise<void> {
+  if (!hasRawDatabaseHandle(storage)) return;
+  const handle = storage.getRawDatabaseHandle();
+  if (handle.kind !== 'postgres') return;
+  await handle.pool.query(
+    'UPDATE webhook_deliveries SET created_at = to_timestamp($1 / 1000.0) WHERE id = $2',
+    [createdAtMs, deliveryId],
+  );
 }
 
 export const sweepFixtures: Record<string, SweepFixture> = {
@@ -63,8 +80,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getSlowLogEntries({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getSlowLogEntries({ connectionId: CONNECTION_ID })).map(
+        (row) => row.capturedAt,
+      ),
   },
 
   commandlog: {
@@ -85,8 +104,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getCommandLogEntries({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getCommandLogEntries({ connectionId: CONNECTION_ID })).map(
+        (row) => row.capturedAt,
+      ),
   },
 
   client_snapshots: {
@@ -117,8 +138,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getClientSnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getClientSnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.capturedAt,
+      ),
   },
 
   client_analytics_rollups: {
@@ -142,8 +165,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         })),
       );
     },
-    remaining: async (storage) =>
-      (await storage.getClientAnalyticsRollups(0, Number.MAX_SAFE_INTEGER, CONNECTION_ID)).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getClientAnalyticsRollups(0, Number.MAX_SAFE_INTEGER, CONNECTION_ID)).map(
+        (row) => row.bucketStart,
+      ),
   },
 
   anomaly_events: {
@@ -166,8 +191,8 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getAnomalyEvents({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getAnomalyEvents({ connectionId: CONNECTION_ID })).map((row) => row.timestamp),
   },
 
   correlated_groups: {
@@ -188,8 +213,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         );
       }
     },
-    remaining: async (storage) =>
-      (await storage.getCorrelatedGroups({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getCorrelatedGroups({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   incident_boundaries: {
@@ -202,8 +229,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         })),
       );
     },
-    remaining: async (storage) =>
-      (await storage.getIncidentBoundaries({ scopeIds: [CONNECTION_ID], startTime: 0 })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getIncidentBoundaries({ scopeIds: [CONNECTION_ID], startTime: 0 })).map(
+        (row) => row.startedAt,
+      ),
   },
 
   key_patterns: {
@@ -224,8 +253,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getKeyPatternSnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getKeyPatternSnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   hot_keys: {
@@ -243,8 +274,8 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getHotKeys({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getHotKeys({ connectionId: CONNECTION_ID })).map((row) => row.capturedAt),
   },
 
   acl_entries: {
@@ -270,8 +301,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getAclEntries({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getAclEntries({ connectionId: CONNECTION_ID })).map((row) =>
+        toMs(row.capturedAt),
+      ),
   },
 
   webhook_deliveries: {
@@ -287,7 +320,7 @@ export const sweepFixtures: Record<string, SweepFixture> = {
       });
       for (const createdAt of ages(times)) {
         // createDelivery takes no createdAt and stamps it from the clock.
-        await withClockAt(createdAt, () =>
+        const delivery = await withClockAt(createdAt, () =>
           storage.createDelivery({
             webhookId: webhook.id,
             eventType: WebhookEventType.INSTANCE_DOWN,
@@ -301,14 +334,15 @@ export const sweepFixtures: Record<string, SweepFixture> = {
             connectionId: CONNECTION_ID,
           }),
         );
+        await backdatePostgresDelivery(storage, delivery.id, createdAt);
       }
     },
-    remaining: async (storage) => {
+    remainingAtMs: async (storage) => {
       const webhooks = await storage.getWebhooksByInstance(CONNECTION_ID);
       const deliveries = await Promise.all(
         webhooks.map((webhook) => storage.getDeliveriesByWebhook(webhook.id)),
       );
-      return deliveries.flat().length;
+      return deliveries.flat().map((row) => row.createdAt);
     },
   },
 
@@ -325,8 +359,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getLatencySnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getLatencySnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   latency_histograms: {
@@ -342,8 +378,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         );
       }
     },
-    remaining: async (storage) =>
-      (await storage.getLatencyHistograms({ connectionId: CONNECTION_ID, limit: 10 })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getLatencyHistograms({ connectionId: CONNECTION_ID, limit: 10 })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   memory_snapshots: {
@@ -367,8 +405,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getMemorySnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getMemorySnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   scaling_readiness_scores: {
@@ -394,8 +434,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         });
       }
     },
-    remaining: async (storage) =>
-      (await storage.getScalingReadinessScores({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getScalingReadinessScores({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   kv_cache_footprint_snapshots: {
@@ -427,8 +469,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         });
       }
     },
-    remaining: async (storage) =>
-      (await storage.getKvCacheFootprintSnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getKvCacheFootprintSnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   kv_cache_engine_samples: {
@@ -451,8 +495,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         })),
       );
     },
-    remaining: async (storage) =>
-      (await storage.getKvCacheEngineSamples({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getKvCacheEngineSamples({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   capture_chunks: {
@@ -484,7 +530,8 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         });
       }
     },
-    remaining: async (storage) => (await storage.getCaptureChunks(CHUNK_SESSION_ID)).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getCaptureChunks(CHUNK_SESSION_ID)).map((row) => row.lastTs),
   },
 
   capture_sessions: {
@@ -508,8 +555,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         );
       }
     },
-    remaining: async (storage) =>
-      (await storage.getCaptureSessions({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getCaptureSessions({ connectionId: CONNECTION_ID })).map(
+        (row) => row.endedAt ?? row.startedAt,
+      ),
   },
 
   capture_triggers: {
@@ -526,8 +575,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         });
       }
     },
-    remaining: async (storage) =>
-      (await storage.getCaptureTriggers({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getCaptureTriggers({ connectionId: CONNECTION_ID })).map(
+        (row) => row.createdAt,
+      ),
   },
 
   scheduled_captures: {
@@ -543,8 +594,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         });
       }
     },
-    remaining: async (storage) =>
-      (await storage.getScheduledCaptures({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getScheduledCaptures({ connectionId: CONNECTION_ID })).map(
+        (row) => row.createdAt,
+      ),
   },
 
   ai_cache_samples: {
@@ -568,8 +621,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getAiCacheHistory({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getAiCacheHistory({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 
   otel_spans: {
@@ -596,11 +651,11 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         })),
       );
     },
-    remaining: async (storage) => {
+    remainingAtMs: async (storage) => {
       const traces = await Promise.all(
         OTEL_TRACE_IDS.map((traceId) => storage.getOtelTraceSpans(traceId)),
       );
-      return traces.flat().length;
+      return traces.flat().map((row) => row.ingestedAt);
     },
   },
 
@@ -622,14 +677,14 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
+    remainingAtMs: async (storage) =>
       (
         await storage.getCommandStatsHistory({
           connectionId: CONNECTION_ID,
           command: COMMAND,
           ...ALL_TIME,
         })
-      ).length,
+      ).map((row) => row.capturedAt),
   },
 
   latency_stats_samples: {
@@ -646,8 +701,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getLatencyStatsHistory({ connectionId: CONNECTION_ID, ...ALL_TIME })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getLatencyStatsHistory({ connectionId: CONNECTION_ID, ...ALL_TIME })).map(
+        (row) => row.capturedAt,
+      ),
   },
 
   replication_divergence_windows: {
@@ -666,9 +723,10 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getReplicationDivergenceWindows({ connectionId: CONNECTION_ID, ...ALL_TIME }))
-        .length,
+    remainingAtMs: async (storage) =>
+      (
+        await storage.getReplicationDivergenceWindows({ connectionId: CONNECTION_ID, ...ALL_TIME })
+      ).map((row) => row.windowEnd),
   },
 
   vector_index_snapshots: {
@@ -692,7 +750,9 @@ export const sweepFixtures: Record<string, SweepFixture> = {
         CONNECTION_ID,
       );
     },
-    remaining: async (storage) =>
-      (await storage.getVectorIndexSnapshots({ connectionId: CONNECTION_ID })).length,
+    remainingAtMs: async (storage) =>
+      (await storage.getVectorIndexSnapshots({ connectionId: CONNECTION_ID })).map(
+        (row) => row.timestamp,
+      ),
   },
 };

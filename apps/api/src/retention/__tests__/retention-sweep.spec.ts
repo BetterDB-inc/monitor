@@ -7,7 +7,7 @@ import {
 } from '../../storage/adapters/__tests__/anomaly-storage-adapters';
 import { MS_PER_DAY } from '../retention-policy.service';
 import { runRetentionSweep } from '../retention-sweep';
-import { sweepFixtures } from './retention-sweep.fixture';
+import { sweepFixtures, type SweepFixture } from './retention-sweep.fixture';
 
 const NOW_MS = 1_700_000_000_500;
 const NOW_SECONDS = Math.floor(NOW_MS / 1000);
@@ -18,6 +18,8 @@ const CONNECTION_ID = 'conn-1';
 const SEED_TIMES = { expiredAtMs: NOW_MS - 40 * MS_PER_DAY, recentAtMs: NOW_MS - MS_PER_DAY };
 // MemoryAdapter keeps no key analytics: saving and reading them throws, and their prunes report 0.
 const STORES_MEMORY_ADAPTER_DOES_NOT_KEEP = ['key_patterns', 'hot_keys'];
+
+const ageOf = (atMs: number): 'expired' | 'recent' => (atMs < CUTOFF_MS ? 'expired' : 'recent');
 
 const aclEntry = (capturedAt: number): StoredAclEntry => ({
   id: 0,
@@ -77,14 +79,17 @@ describe.each<[string, AdapterFactory]>(adapters)('retention sweep (%s)', (name,
   const storesNotKept = name === 'MemoryAdapter' ? STORES_MEMORY_ADAPTER_DOES_NOT_KEEP : [];
   const storesKept = Object.keys(sweepFixtures).filter((store) => !storesNotKept.includes(store));
 
+  const agesOfRemainingRows = async (fixture: SweepFixture) =>
+    (await fixture.remainingAtMs(storage)).map(ageOf).sort();
+
   it.each(storesKept)('prunes only expired rows from %s', async (store) => {
     const fixture = sweepFixtures[store];
     await fixture.seed(storage, SEED_TIMES);
-    expect(await fixture.remaining(storage)).toBe(2);
+    expect(await agesOfRemainingRows(fixture)).toEqual(['expired', 'recent']);
 
     const results = await runRetentionSweep(storage, CUTOFF_MS, logger);
 
-    expect(await fixture.remaining(storage)).toBe(1);
+    expect(await agesOfRemainingRows(fixture)).toEqual(['recent']);
     expect(results[store]).toBe(1);
   });
 
