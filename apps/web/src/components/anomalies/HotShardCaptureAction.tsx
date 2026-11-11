@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { StartSessionModal } from '../../pages/monitor/start-session-modal';
 import type { HotShardDetail } from '../../types/anomaly';
@@ -10,35 +10,52 @@ interface Props {
   connectionId: string | undefined;
 }
 
+interface Capture {
+  connectionId: string;
+  hotPrimary: { nodeId: string; address: string };
+}
+
 export function HotShardCaptureAction({ event, hotShards, connectionId }: Props) {
   const navigate = useNavigate();
+  const action = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  const [capture, setCapture] = useState<Capture | null>(null);
   const [open, setOpen] = useState(false);
-  if (!connectionId || event.metricType !== 'hot_shard' || event.resolved) {
-    return null;
-  }
-  const shard = hotShards?.find((detail) => detail.eventId === event.id);
-  if (!shard?.captureAvailable) {
-    return null;
-  }
+  useEffect(() => {
+    if (wasOpen.current && !open) action.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
+  const hot = event.metricType === 'hot_shard' && !event.resolved;
+  const shard = hot ? hotShards?.find((detail) => detail.eventId === event.id) : undefined;
+  const offered = connectionId && shard?.captureAvailable ? { connectionId, shard } : undefined;
   return (
     <>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-        }}
-      >
-        Capture on hot primary
-      </Button>
-      <StartSessionModal
-        connectionId={connectionId}
-        open={open}
-        onOpenChange={setOpen}
-        onStarted={(session) => navigate(`/monitor/sessions/${session.id}`)}
-        hotPrimary={{ nodeId: shard.shardId, address: shard.nodeAddr }}
-      />
+      {offered && (
+        <Button
+          ref={action}
+          size="sm"
+          variant="ghost"
+          onClick={(e) => {
+            e.stopPropagation();
+            setCapture({
+              connectionId: offered.connectionId,
+              hotPrimary: { nodeId: offered.shard.shardId, address: offered.shard.nodeAddr },
+            });
+            setOpen(true);
+          }}
+        >
+          Capture on hot primary
+        </Button>
+      )}
+      {capture && (
+        <StartSessionModal
+          connectionId={capture.connectionId}
+          open={open}
+          onOpenChange={setOpen}
+          onStarted={(session) => navigate(`/monitor/sessions/${session.id}`)}
+          hotPrimary={capture.hotPrimary}
+        />
+      )}
     </>
   );
 }

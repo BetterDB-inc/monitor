@@ -50,11 +50,11 @@ function SessionPage() {
   return <div>session {useParams().id}</div>;
 }
 
-function renderAction(
-  props: Partial<Parameters<typeof HotShardCaptureAction>[0]> = {},
-): ReturnType<typeof render> {
+type ActionProps = Partial<Parameters<typeof HotShardCaptureAction>[0]>;
+
+function renderAction(props: ActionProps = {}): (next: ActionProps) => void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const tree = (current: ActionProps) => (
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/anomalies']}>
         <Routes>
@@ -65,15 +65,17 @@ function renderAction(
                 event={EVENT}
                 hotShards={[hotShard()]}
                 connectionId="conn-1"
-                {...props}
+                {...current}
               />
             }
           />
           <Route path="/monitor/sessions/:id" element={<SessionPage />} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const { rerender } = render(tree(props));
+  return (next) => rerender(tree(next));
 }
 
 async function openDialog(): Promise<HTMLElement> {
@@ -104,7 +106,7 @@ describe('HotShardCaptureAction', () => {
     expect(listConnectionNodes).not.toHaveBeenCalled();
   });
 
-  it.each<[string, Partial<Parameters<typeof HotShardCaptureAction>[0]>]>([
+  it.each<[string, ActionProps]>([
     ['the hot shard list is still loading', { hotShards: undefined }],
     ['the hot shard list could not be read', { hotShards: null }],
     ['the hot shard list is empty', { hotShards: [] }],
@@ -172,5 +174,51 @@ describe('HotShardCaptureAction', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Start MONITOR capture session')).toBeInTheDocument();
     expect(screen.queryByText(/^session /)).not.toBeInTheDocument();
+  });
+
+  it.each<[string, ActionProps]>([
+    ['a later read finds the keys', { hotShards: [hotShard({ captureAvailable: false })] }],
+    ['the hot shard resolves', { event: { ...EVENT, resolved: true }, hotShards: [] }],
+    ['the hot shard list cannot be read', { hotShards: null }],
+  ])('keeps an open dialog and what was typed in it when %s', async (_case, props) => {
+    const update = renderAction();
+    const start = await openDialog();
+    fireEvent.change(screen.getByLabelText('Duration'), { target: { value: '20' } });
+
+    update(props);
+
+    expect(screen.queryByRole('button', { name: ACTION })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Duration')).toHaveValue(20);
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(start);
+    await waitFor(() => expect(startSession).toHaveBeenCalled());
+    expect(startSession.mock.calls[0][0]).toMatchObject({
+      durationMs: 20_000,
+      targetNodeId: 'a0000000',
+    });
+  });
+
+  it('does not reopen a cancelled dialog when the capture is offered again', async () => {
+    const update = renderAction();
+    await openDialog();
+    update({ hotShards: null });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(screen.queryByText('Start MONITOR capture session')).not.toBeInTheDocument(),
+    );
+    update({});
+
+    expect(screen.getByRole('button', { name: ACTION })).toBeInTheDocument();
+    expect(screen.queryByText('Start MONITOR capture session')).not.toBeInTheDocument();
+  });
+
+  it('returns the focus to the action when the dialog is cancelled', async () => {
+    renderAction();
+    await openDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(screen.getByRole('button', { name: ACTION })).toHaveFocus());
   });
 });
