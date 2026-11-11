@@ -1124,17 +1124,17 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     );
     this.clusterShardNetworkBytesOutPerSecond = this.createGauge(
       'cluster_shard_network_bytes_out_per_second',
-      'Smoothed bytes per second sent for the slots of the shard (requires cluster-slot-stats-enabled)',
+      'Smoothed bytes per second sent for the slots of the shard, to clients and once per replica for replication (requires cluster-slot-stats-enabled)',
       shardLabels,
     );
     this.clusterShardCpuShare = this.createGauge(
       'cluster_shard_cpu_share',
-      'Share of the cluster-wide per-slot CPU rate that the shard takes, from 0 to 1',
+      'Share of the cluster-wide per-slot CPU rate that the shard takes, from 0 to 1, held at its last value while slot counters settle',
       shardLabels,
     );
     this.clusterShardNetworkShare = this.createGauge(
       'cluster_shard_network_share',
-      'Share of the cluster-wide per-slot network rate, in plus out, that the shard takes, from 0 to 1',
+      'Share of the cluster-wide per-slot network rate, in plus out, that the shard takes, from 0 to 1. Bytes out count replication once per replica, so this is not client load alone',
       shardLabels,
     );
     this.clusterShardSlots = this.createGauge(
@@ -3072,8 +3072,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.clusterShardCpuUsecPerSecond.labels(...series).set(shard.cpuUsecPerSecond);
       this.clusterShardNetworkBytesInPerSecond.labels(...series).set(shard.networkBytesInPerSecond);
       this.clusterShardNetworkBytesOutPerSecond.labels(...series).set(shard.networkBytesOutPerSecond);
-      this.clusterShardCpuShare.labels(...series).set(shard.cpuShare);
-      this.clusterShardNetworkShare.labels(...series).set(shard.networkShare);
+      if (shard.cpuShare !== null) this.clusterShardCpuShare.labels(...series).set(shard.cpuShare);
+      if (shard.networkShare !== null) {
+        this.clusterShardNetworkShare.labels(...series).set(shard.networkShare);
+      }
       this.clusterShardSlots.labels(...series).set(shard.slotCount);
     }
     for (const [nodeId, address] of state.currentShardLabels) {

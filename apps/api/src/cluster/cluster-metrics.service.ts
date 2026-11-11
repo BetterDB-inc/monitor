@@ -779,7 +779,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
-      nodeStats,
+      nodeStats: ownershipDrifted ? undefined : nodeStats,
     };
   }
 
