@@ -26,8 +26,8 @@ export interface ShardLoad {
   cpuUsecPerSecond: number;
   networkBytesInPerSecond: number;
   networkBytesOutPerSecond: number;
-  cpuShare: number;
-  networkShare: number;
+  cpuShare: number | null;
+  networkShare: number | null;
 }
 
 export interface ShardLoadSample {
@@ -60,6 +60,7 @@ export class ShardLoadTracker {
   private readonly present = new Uint8Array(CLUSTER_TOTAL_SLOTS);
   private readonly owner: (string | undefined)[] = new Array(CLUSTER_TOTAL_SLOTS);
   private slotsByNode = new Map<string, number[]>();
+  private settledShares = new Map<string, Pick<ShardLoad, 'cpuShare' | 'networkShare'>>();
   private lastTimestamp: number | null = null;
   private settleRemaining = 0;
 
@@ -154,7 +155,7 @@ export class ShardLoadTracker {
       this.settleRemaining -= 1;
       settling = true;
     }
-    return { timestamp, shards: this.summarize(nodes), settling };
+    return { timestamp, shards: this.summarize(nodes, settling), settling };
   }
 
   topSlots(nodeId: string, limit: number): SlotLoadRate[] {
@@ -192,11 +193,12 @@ export class ShardLoadTracker {
     this.measured.fill(0);
     this.owner.fill(undefined);
     this.slotsByNode = new Map();
+    this.settledShares = new Map();
     this.lastTimestamp = null;
     this.settleRemaining = 0;
   }
 
-  private summarize(nodes: readonly NodeSlotStats[]): ShardLoad[] {
+  private summarize(nodes: readonly NodeSlotStats[], settling: boolean): ShardLoad[] {
     const shards: ShardLoad[] = [];
     for (const node of nodes) {
       const slots = this.slotsByNode.get(node.nodeId) ?? [];
@@ -208,8 +210,8 @@ export class ShardLoadTracker {
         cpuUsecPerSecond: 0,
         networkBytesInPerSecond: 0,
         networkBytesOutPerSecond: 0,
-        cpuShare: 0,
-        networkShare: 0,
+        cpuShare: null,
+        networkShare: null,
       };
       for (const slot of slots) {
         if (!this.measured[slot]) continue;
@@ -218,7 +220,15 @@ export class ShardLoadTracker {
         shard.networkBytesInPerSecond += this.bytesInRate[slot];
         shard.networkBytesOutPerSecond += this.bytesOutRate[slot];
       }
-      if (shard.measuredSlots > 0) shards.push(shard);
+      if (shard.slotCount > 0) shards.push(shard);
+    }
+    if (settling) {
+      for (const shard of shards) {
+        const held = this.settledShares.get(shard.nodeId);
+        shard.cpuShare = held?.cpuShare ?? null;
+        shard.networkShare = held?.networkShare ?? null;
+      }
+      return shards;
     }
     const network = (shard: ShardLoad) =>
       shard.networkBytesInPerSecond + shard.networkBytesOutPerSecond;
@@ -228,6 +238,9 @@ export class ShardLoadTracker {
       shard.cpuShare = totalCpu > 0 ? shard.cpuUsecPerSecond / totalCpu : 0;
       shard.networkShare = totalNetwork > 0 ? network(shard) / totalNetwork : 0;
     }
+    this.settledShares = new Map(
+      shards.map(({ nodeId, cpuShare, networkShare }) => [nodeId, { cpuShare, networkShare }]),
+    );
     return shards;
   }
 }

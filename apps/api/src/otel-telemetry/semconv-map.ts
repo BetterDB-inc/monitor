@@ -125,7 +125,8 @@ const CPU_TIME = 'CPU time consumed by the server, by state';
 const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
 
 const SLOT_NETWORK_IO = 'Bytes received and sent for the cluster slot, by direction';
-const SHARD_NETWORK_IO = 'Smoothed bytes per second received and sent for the slots of the shard, by direction';
+const SHARD_NETWORK_IO =
+  'Smoothed bytes per second received and sent for the slots of the shard, by direction; sent bytes count replication once per replica';
 
 const PROCESS_CPU_TIME = 'CPU time consumed by the monitor process, by mode';
 

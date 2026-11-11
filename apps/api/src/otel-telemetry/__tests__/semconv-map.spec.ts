@@ -30,7 +30,8 @@ function one(name: string, value: number, labels: Record<string, string | number
 describe('planSemconvInstruments', () => {
   const CPU = 'CPU time consumed by the server, by state';
   const SLOT_IO = 'Bytes received and sent for the cluster slot, by direction';
-  const SHARD_IO = 'Smoothed bytes per second received and sent for the slots of the shard, by direction';
+  const SHARD_IO =
+    'Smoothed bytes per second received and sent for the slots of the shard, by direction; sent bytes count replication once per replica';
   const ROLE = 'Replication role of the node (1 for the current role)';
   const LATENCY = 'Inference bucket latency by percentile';
 
