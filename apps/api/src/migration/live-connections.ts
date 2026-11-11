@@ -15,6 +15,9 @@ export const SSH_TUNNEL_CLUSTER_MIGRATION_MESSAGE =
 export const SSH_TUNNEL_PREFER_REPLICA_MESSAGE =
   'Reading from a replica is not available when the source is reached through an SSH tunnel: RedisShake would connect to the replica directly and bypass the tunnel. Turn off the replica option.';
 
+export const SSH_TUNNEL_TLS_SHAKE_MIGRATION_MESSAGE =
+  'One or more selected instances uses TLS through an SSH tunnel. RedisShake does not verify the server certificate, so it cannot confirm which server answered through the tunnel. Use command mode.';
+
 export const AGENT_MIGRATION_MESSAGE =
   'One or more selected instances is connected through the BetterDB Agent. Execution and validation need a direct or SSH-tunnelled connection; an agent connection supports analysis only.';
 
@@ -24,6 +27,10 @@ export const CLIENT_CERT_SHAKE_MIGRATION_MESSAGE =
 /** True when a connection relies on a client certificate (mutual TLS) to connect or authenticate. */
 function usesClientCertificate(config: DatabaseConnectionConfig | null): boolean {
   return config?.authMode === 'certificate' || hasClientCertificate(config?.tlsConfig);
+}
+
+function usesTlsThroughTunnel(config: DatabaseConnectionConfig | null): boolean {
+  return config?.tls === true && usesSshTunnel(config);
 }
 
 function isAgentConnection(config: DatabaseConnectionConfig | null): boolean {
@@ -82,5 +89,8 @@ export function assertLiveMigrationPair(
   // runs through BetterDB's own mTLS-capable client) and then fail the handshake.
   if (mode !== undefined && mode !== 'command' && (usesClientCertificate(source) || usesClientCertificate(target))) {
     throw new BadRequestException(CLIENT_CERT_SHAKE_MIGRATION_MESSAGE);
+  }
+  if (mode !== undefined && mode !== 'command' && (usesTlsThroughTunnel(source) || usesTlsThroughTunnel(target))) {
+    throw new BadRequestException(SSH_TUNNEL_TLS_SHAKE_MIGRATION_MESSAGE);
   }
 }

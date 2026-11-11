@@ -1213,6 +1213,25 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it.each(['redis_shake', 'redis_shake_sync'] as const)('rejects %s for a tunnelled TLS side before opening a tunnel', async (mode) => {
+    const { service, tunnels, registry } = setup(['conn-2']);
+    const plainConfig = registry.getConfig.getMockImplementation()!;
+    registry.getConfig.mockImplementation((id: string) => ({ ...plainConfig(id), tls: true }));
+
+    const error = await service
+      .startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode, redisShakeOptions: { emptyDbBeforeSync: true } })
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(BadRequestException);
+    expect((error as Error).message).toBe(
+      'One or more selected instances uses TLS through an SSH tunnel. RedisShake does not verify the server certificate, so it cannot confirm which server answered through the tunnel. Use command mode.',
+    );
+    expect(tunnels.opened.size).toBe(0);
+    expect(registry.mockTargetAdapter.getClient).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
   it('allows prefer_replica when only the target is tunnelled', async () => {
     const { service } = setup(['conn-2']);
 

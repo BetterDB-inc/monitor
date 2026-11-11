@@ -436,7 +436,8 @@ the `RESTORE` compatibility constraint entirely.
 ### SSH tunnels
 
 A standalone source or target that is registered with an SSH tunnel can be
-analysed, migrated and validated in every execution mode. Each execution or
+analysed, migrated and validated. Without TLS every execution mode works; with
+TLS only `command` mode does (see the limits below). Each execution or
 validation job opens its own tunnel per tunnelled side, using the SSH settings
 stored on the connection, and closes it when the job ends. BetterDB's own
 clients and RedisShake then connect to the tunnel's local end on `127.0.0.1`;
@@ -468,9 +469,11 @@ Limits:
 - **TLS in command mode and validation** is verified against the stored host,
   not `127.0.0.1`. A hostname is sent as SNI; when the stored host is a bare IP
   the certificate must list that IP.
-- **TLS endpoints that route by SNI cannot be reached through a tunnel in the
-  RedisShake modes.** RedisShake dials `127.0.0.1` and has no option to send
-  the real hostname as SNI. Use `command` mode for those endpoints.
+- **TLS through a tunnel is rejected in the RedisShake modes.** RedisShake does
+  not verify the server certificate, so it cannot tell the real server from
+  another host answering on the tunnel's path. `redis_shake` and
+  `redis_shake_sync` return a 400 when a tunnelled source or target uses TLS.
+  Use `command` mode, which verifies the certificate against the stored host.
 
 ## Batching and concurrency
 

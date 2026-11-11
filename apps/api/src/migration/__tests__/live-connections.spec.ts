@@ -7,6 +7,7 @@ import {
   AGENT_MIGRATION_MESSAGE,
   SSH_TUNNEL_CLUSTER_MIGRATION_MESSAGE,
   SSH_TUNNEL_PREFER_REPLICA_MESSAGE,
+  SSH_TUNNEL_TLS_SHAKE_MIGRATION_MESSAGE,
   assertAddressableEndpoints,
   assertLiveMigrationPair,
   assertTunnelSupport,
@@ -25,6 +26,18 @@ const configs: Record<string, Partial<DatabaseConnectionConfig>> = {
   tunnelOff: {
     id: 'tunnelOff',
     connectionType: 'direct',
+    sshTunnel: { enabled: false, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+  },
+  tunneledTls: {
+    id: 'tunneledTls',
+    connectionType: 'direct',
+    tls: true,
+    sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
+  },
+  tunnelOffTls: {
+    id: 'tunnelOffTls',
+    connectionType: 'direct',
+    tls: true,
     sshTunnel: { enabled: false, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
   },
   certAuth: { id: 'certAuth', connectionType: 'direct', tls: true, authMode: 'certificate', tlsConfig: { cert: 'C', key: 'K' } },
@@ -90,6 +103,25 @@ describe('assertLiveMigrationPair', () => {
     it.each(['command', 'redis_shake', 'redis_shake_sync'] as const)('allows a tunnelled endpoint for %s execution', (mode) => {
       expect(() => assertLiveMigrationPair(registry, 'tunneled', 'other', mode)).not.toThrow();
       expect(() => assertLiveMigrationPair(registry, 'seed', 'tunneled', mode)).not.toThrow();
+    });
+
+    it.each(['redis_shake', 'redis_shake_sync'] as const)('rejects %s when a tunnelled side uses TLS', (mode) => {
+      expect(() => assertLiveMigrationPair(registry, 'tunneledTls', 'other', mode)).toThrow(BadRequestException);
+      expect(() => assertLiveMigrationPair(registry, 'tunneledTls', 'other', mode)).toThrow(SSH_TUNNEL_TLS_SHAKE_MIGRATION_MESSAGE);
+      expect(() => assertLiveMigrationPair(registry, 'seed', 'tunneledTls', mode)).toThrow(SSH_TUNNEL_TLS_SHAKE_MIGRATION_MESSAGE);
+    });
+
+    it('allows command mode for a tunnelled TLS side, which verifies the certificate itself', () => {
+      expect(() => assertLiveMigrationPair(registry, 'tunneledTls', 'tunneledTls', 'command')).not.toThrow();
+    });
+
+    it('allows analysis and validation of a tunnelled TLS side', () => {
+      expect(() => assertLiveMigrationPair(registry, 'tunneledTls', 'other')).not.toThrow();
+    });
+
+    it.each(['redis_shake', 'redis_shake_sync'] as const)('allows %s for a TLS side that is not tunnelled', (mode) => {
+      expect(() => assertLiveMigrationPair(registry, 'caOnly', 'other', mode)).not.toThrow();
+      expect(() => assertLiveMigrationPair(registry, 'seed', 'tunnelOffTls', mode)).not.toThrow();
     });
   });
 
