@@ -114,6 +114,22 @@ describe('ClusterDiscoveryService', () => {
       expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(1);
     });
 
+    it('reads CLUSTER NODES again once the topology is forgotten', async () => {
+      await service.discoverNodes('test-connection');
+      service.forgetTopology('test-connection');
+      await service.discoverNodes('test-connection');
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
+    it('forgets the topology of the default connection when none is named', async () => {
+      await service.discoverNodes();
+      service.forgetTopology();
+      await service.discoverNodes();
+
+      expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
+    });
+
     it('should mark nodes as healthy based on flags', async () => {
       const nodes = await service.discoverNodes();
 

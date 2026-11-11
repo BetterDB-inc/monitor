@@ -2853,8 +2853,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         'canClusterInfo',
         error instanceof Error ? error : String(error),
       );
-      if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connectionId, connLabel, state);
+      if (!this.isSuperseded(connectionId, epoch)) {
+        if (disabled) this.clearSlotSeries(connectionId, connLabel, state);
+        else this.exportShardLoad(connectionId, connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
@@ -2910,7 +2911,6 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       let result: ClusterSlotStatsResult;
-      const readAt = Date.now();
       if (
         client.getCapabilities().clusterEnabled &&
         this.clusterMetricsService &&
@@ -2955,7 +2955,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       const newSlotLabels = new Set<string>();
       const now = Date.now();
       if (result.nodeStats !== undefined && result.failedNodes.length === 0) {
-        this.shardLoadService?.record(connectionId, result.nodeStats, readAt);
+        this.shardLoadService?.record(connectionId, result.nodeStats, now);
       }
       for (const [slot, stats] of Object.entries(slotStats)) {
         newSlotLabels.add(slot);

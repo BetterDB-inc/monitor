@@ -995,6 +995,57 @@ describe('PrometheusService slot stats', () => {
       }
     });
 
+    it('ages the shard load out while CLUSTER INFO keeps failing', async () => {
+      const { harness, clusterMetrics, stalenessMs } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+        harness.client.getClusterInfo.mockRejectedValue(new Error('timeout'));
+
+        now += stalenessMs;
+        await runClusterInfo(harness);
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        now += 1;
+        await runClusterInfo(harness);
+        expect(await harness.service.getMetrics()).not.toContain('betterdb_cluster_shard_cpu_usec_per_second{');
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('stamps a shard load sample with the time its read finished', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockImplementationOnce(async () => {
+          now += 400;
+          return fanOut(0, 0);
+        });
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockImplementationOnce(async () => {
+          now += 900;
+          return fanOut(15_000, 5_000);
+        });
+        await runSlotStats(harness);
+
+        const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService })
+          .shardLoadService;
+        expect(shardLoad.getLatest('conn-1')?.timestamp).toBe(1_000_000 + 400 + 5_000 + 900);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('removes the series of a shard that left the cluster', async () => {
       const { harness, clusterMetrics } = clusterHarness();
       let now = 1_000_000;
