@@ -595,7 +595,7 @@ export interface StoragePort {
   saveAclEntries(entries: StoredAclEntry[], connectionId: string): Promise<number>;
   getAclEntries(options?: AuditQueryOptions): Promise<StoredAclEntry[]>;
   getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats>;
-  pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number>;
+  pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number>;
 
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
