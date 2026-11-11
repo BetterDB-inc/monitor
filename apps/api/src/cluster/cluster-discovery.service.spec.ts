@@ -17,6 +17,7 @@ jest.mock('iovalkey', () => {
 describe('ClusterDiscoveryService', () => {
   let service: ClusterDiscoveryService;
   let mockDbClient: any;
+  let shardsSocket: any;
   let mockConnectionRegistry: any;
 
   const mockClusterNodes = [
@@ -45,18 +46,23 @@ describe('ClusterDiscoveryService', () => {
   ];
 
   beforeEach(async () => {
+    shardsSocket = {
+      connect: jest.fn().mockResolvedValue(undefined),
+      quit: jest.fn().mockResolvedValue(undefined),
+      ping: jest.fn().mockResolvedValue('PONG'),
+      on: jest.fn(),
+      call: jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')),
+      disconnect: jest.fn(),
+    };
     mockDbClient = {
       getClusterNodes: jest.fn().mockResolvedValue(mockClusterNodes),
+      getClusterShards: jest.fn().mockResolvedValue([]),
       getClient: jest.fn().mockReturnValue({
         options: {
           username: 'testuser',
           password: 'testpass',
         },
-        duplicate: jest.fn().mockReturnValue({
-          connect: jest.fn().mockResolvedValue(undefined),
-          quit: jest.fn().mockResolvedValue(undefined),
-          ping: jest.fn().mockResolvedValue('PONG'),
-        }),
+        duplicate: jest.fn().mockReturnValue(shardsSocket),
       }),
     };
 
@@ -108,15 +114,18 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('attaches the availability zone and shard id from CLUSTER SHARDS', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
-        {
-          shardId: 'shard-1',
-          slots: [[0, 5460]],
-          nodes: [
-            { id: 'node1-id-abc123', role: 'master', availabilityZone: 'us-east-1a' },
-            { id: 'node2-id-def456', role: 'replica' },
+      shardsSocket.call.mockResolvedValue([
+        [
+          'slots',
+          [0, 5460],
+          'nodes',
+          [
+            ['id', 'node1-id-abc123', 'role', 'master', 'availability-zone', 'us-east-1a'],
+            ['id', 'node2-id-def456', 'role', 'replica'],
           ],
-        },
+          'id',
+          'shard-1',
+        ],
       ]);
 
       const nodes = await service.discoverNodes();
@@ -126,12 +135,23 @@ describe('ClusterDiscoveryService', () => {
       expect(nodes[1]).not.toHaveProperty('availabilityZone');
     });
 
+    it('reads CLUSTER SHARDS on a socket of its own, not the shared one, and closes it', async () => {
+      shardsSocket.call.mockResolvedValue([]);
+
+      await service.discoverNodes();
+
+      expect(shardsSocket.call).toHaveBeenCalledWith('CLUSTER', 'SHARDS');
+      expect(shardsSocket.disconnect).toHaveBeenCalledTimes(1);
+      expect(mockDbClient.getClusterShards).not.toHaveBeenCalled();
+    });
+
     it('returns the same nodes as before when CLUSTER SHARDS fails', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+      shardsSocket.call.mockRejectedValue(new Error('ERR unknown subcommand'));
 
       const nodes = await service.discoverNodes();
 
-      expect(mockDbClient.getClusterShards).toHaveBeenCalledTimes(1);
+      expect(shardsSocket.call).toHaveBeenCalledTimes(1);
+      expect(shardsSocket.disconnect).toHaveBeenCalledTimes(1);
       expect(nodes).toEqual([
         {
           id: 'node1-id-abc123',
@@ -159,14 +179,16 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('fills the zone from the connection map when the server reports none', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
-        {
-          slots: [[0, 5460]],
-          nodes: [
-            { id: 'node1-id-abc123', role: 'master', availabilityZone: 'us-east-1a' },
-            { id: 'node2-id-def456', role: 'replica' },
+      shardsSocket.call.mockResolvedValue([
+        [
+          'slots',
+          [0, 5460],
+          'nodes',
+          [
+            ['id', 'node1-id-abc123', 'role', 'master', 'availability-zone', 'us-east-1a'],
+            ['id', 'node2-id-def456', 'role', 'replica'],
           ],
-        },
+        ],
       ]);
       mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({
         '192.168.1.10:6379': 'rack-a',
@@ -181,14 +203,16 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('fills the zone from the connection map on a reply without zones, as before 9.1', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
-        {
-          slots: [[0, 5460]],
-          nodes: [
-            { id: 'node1-id-abc123', role: 'master' },
-            { id: 'node2-id-def456', role: 'replica' },
+      shardsSocket.call.mockResolvedValue([
+        [
+          'slots',
+          [0, 5460],
+          'nodes',
+          [
+            ['id', 'node1-id-abc123', 'role', 'master'],
+            ['id', 'node2-id-def456', 'role', 'replica'],
           ],
-        },
+        ],
       ]);
       mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '192.168.1.10:6379': 'rack-a' });
 
@@ -199,7 +223,7 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('fills the zone from the connection map when CLUSTER SHARDS fails', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+      shardsSocket.call.mockRejectedValue(new Error('ERR unknown subcommand'));
       mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '192.168.1.11:6379': 'rack-b' });
 
       const nodes = await service.discoverNodes('conn-1');
@@ -209,12 +233,12 @@ describe('ClusterDiscoveryService', () => {
     });
 
     it('reads CLUSTER SHARDS once per cached discovery', async () => {
-      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([]);
+      shardsSocket.call.mockResolvedValue([]);
 
       await service.discoverNodes();
       await service.discoverNodes();
 
-      expect(mockDbClient.getClusterShards).toHaveBeenCalledTimes(1);
+      expect(shardsSocket.call).toHaveBeenCalledTimes(1);
     });
 
     it('should cache discovery results', async () => {
