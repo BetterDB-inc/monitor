@@ -13,6 +13,7 @@ import {
   computeHotKeyDelta,
   computeNewShapes,
   computeSlowlogRegressions,
+  computeTopKeys,
   percentile,
   shapeOf,
   shapeOfStringArray,
@@ -213,6 +214,54 @@ describe('computeHotKeyDelta', () => {
   });
 });
 
+describe('computeTopKeys', () => {
+  it('ranks the keys of the capture by command count with their share of the keyed commands', () => {
+    const captured = parseAll([
+      '1700000000.0 [0 x:1] "GET" "user:42"',
+      '1700000000.1 [0 x:1] "SET" "cart:9" "v"',
+      '1700000000.2 [0 x:1] "HGET" "user:42" "name"',
+      '1700000000.3 [0 x:1] "GET" "user:42"',
+      '1700000000.4 [0 x:1] "PING"',
+    ]);
+
+    expect(computeTopKeys(captured)).toEqual([
+      { key: 'user:42', count: 3, share: 0.75 },
+      { key: 'cart:9', count: 1, share: 0.25 },
+    ]);
+  });
+
+  it('keeps the ten busiest keys, breaks ties by name, and counts every key in the share', () => {
+    const lines: string[] = [];
+    for (let n = 12; n >= 1; n -= 1) {
+      const name = `k${String(n).padStart(2, '0')}`;
+      const times = n === 12 ? 9 : 1;
+      for (let i = 0; i < times; i += 1) lines.push(`1700000000.0 [0 x:1] "GET" "${name}"`);
+    }
+
+    const top = computeTopKeys(parseAll(lines));
+
+    expect(top.map((row) => row.key)).toEqual([
+      'k12',
+      'k01',
+      'k02',
+      'k03',
+      'k04',
+      'k05',
+      'k06',
+      'k07',
+      'k08',
+      'k09',
+    ]);
+    expect(top[0]).toEqual({ key: 'k12', count: 9, share: 0.45 });
+    expect(top[1]).toEqual({ key: 'k01', count: 1, share: 0.05 });
+  });
+
+  it('returns no keys for a capture without keyed commands', () => {
+    expect(computeTopKeys(parseAll(['1700000000.0 [0 x:1] "PING"']))).toEqual([]);
+    expect(computeTopKeys([])).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // computeSlowlogRegressions
 // ---------------------------------------------------------------------------
@@ -386,6 +435,26 @@ describe('CrossReferenceEngine.compute', () => {
     expect(result.session.startTs).toBe(SESSION_START_MS);
   });
 
+  it('lists the top keys of the capture, whatever the baseline holds', async () => {
+    const baselineStart = SESSION_START_MS - 24 * 60 * 60 * 1000;
+    const slowlog: StoredSlowLogEntry[] = [slowlogEntry(['GET', 'foo'], baselineStart + 1000, 1)];
+    const chunks = [
+      chunkOf([
+        '1700000000.0 [0 1.2.3.4:5] "GET" "foo"',
+        '1700000000.1 [0 1.2.3.4:5] "GET" "foo"',
+        '1700000000.5 [0 1.2.3.4:5] "LPUSH" "x" "v"',
+      ]),
+    ];
+    const engine = new CrossReferenceEngine(makeStorage({ chunks, slowlog }));
+
+    const result = await engine.compute({ sessionId: SESSION_ID, baseline: '24h' });
+
+    expect(result.topKeys).toEqual([
+      { key: 'foo', count: 2, share: expect.closeTo(2 / 3) },
+      { key: 'x', count: 1, share: expect.closeTo(1 / 3) },
+    ]);
+  });
+
   it('honors each of the four baseline windows', async () => {
     const engine = new CrossReferenceEngine(makeStorage());
     for (const window of ['6h', '24h', '7d', 'same-hour-last-week'] as const) {
@@ -537,6 +606,24 @@ describe('CrossReferenceEngine.compute', () => {
       expect(result.baseline.endTs).toBe(SESSION_B_END_MS);
       expect(result.slowlogRegressions).toEqual([]);
       expect(result.aclDeltas.auditEntriesInWindow).toBe(0);
+    });
+
+    it('lists the top keys of the first capture only', async () => {
+      const a = [
+        '1700000000.0 [0 1.2.3.4:5] "GET" "k1"',
+        '1700000000.1 [0 1.2.3.4:5] "GET" "k1"',
+        '1700000000.2 [0 1.2.3.4:5] "GET" "k2"',
+        '1700000000.3 [0 1.2.3.4:5] "GET" "k1"',
+      ];
+      const b = ['1700000000.0 [0 1.2.3.4:5] "GET" "other"'];
+      const engine = new CrossReferenceEngine(buildStorage(a, b));
+
+      const result = await engine.computeCaptureDiff(SESSION_ID, SESSION_B_ID);
+
+      expect(result.topKeys).toEqual([
+        { key: 'k1', count: 3, share: 0.75 },
+        { key: 'k2', count: 1, share: 0.25 },
+      ]);
     });
 
     it('computes hot-key delta against the baseline capture key counts', async () => {

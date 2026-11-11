@@ -16,6 +16,7 @@ export type CaptureBaselineMarker = typeof CAPTURE_BASELINE_WINDOW;
 const SCRIPTED_VERBS = new Set(['EVAL', 'EVALSHA', 'FCALL', 'FCALL_RO']);
 
 const HOT_KEY_TOP_K = 50;
+const TOP_KEYS = 10;
 
 export interface CrossReferenceInput {
   sessionId: string;
@@ -41,6 +42,12 @@ export interface HotKey {
 export interface HotKeyDelta {
   newInTopK: HotKey[];
   rankChanges: HotKey[];
+}
+
+export interface TopKey {
+  key: string;
+  count: number;
+  share: number;
 }
 
 export interface SlowlogRegression {
@@ -81,6 +88,7 @@ export interface CrossReferenceResult {
     capturedLineCount: number;
   };
   newShapes: NewShape[];
+  topKeys: TopKey[];
   hotKeyDelta: HotKeyDelta;
   slowlogRegressions: SlowlogRegression[];
   aclDeltas: AclDeltas;
@@ -170,6 +178,7 @@ export class CrossReferenceEngine {
         capturedLineCount: capturedLines.length,
       },
       newShapes,
+      topKeys: computeTopKeys(capturedLines),
       hotKeyDelta,
       slowlogRegressions,
       aclDeltas: {
@@ -231,6 +240,7 @@ export class CrossReferenceEngine {
         capturedLineCount: capturedLines.length,
       },
       newShapes,
+      topKeys: computeTopKeys(capturedLines),
       hotKeyDelta,
       slowlogRegressions: [],
       aclDeltas: {
@@ -430,6 +440,16 @@ export function computeNewShapes(
   }
   newShapes.sort((a, b) => b.countInCapture - a.countInCapture);
   return newShapes;
+}
+
+export function computeTopKeys(capturedLines: ParsedMonitorLine[]): TopKey[] {
+  const counts = collectKeyCountsFromLines(capturedLines);
+  let keyed = 0;
+  for (const count of counts.values()) keyed += count;
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, TOP_KEYS)
+    .map(([key, count]) => ({ key, count, share: count / keyed }));
 }
 
 export function computeHotKeyDelta(

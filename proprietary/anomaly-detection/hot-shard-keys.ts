@@ -7,6 +7,13 @@ export const HOT_KEY_NAME_LIMIT = 64;
 const MESSAGE_KEYS = 3;
 const UNSAFE_IN_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}"\\]/gu;
 const SLOT_MOVED = /^(MOVED|ASK) /;
+const SHORT_NOTES: ReadonlyArray<[RegExp, string]> = [
+  [/LFU/, 'no LFU policy'],
+  [/may not run/, 'no permission'],
+  [/does not support/, 'not supported by the server'],
+  [/timed out/, 'the hot primary did not answer'],
+  [/hot primary failed/, 'the read from the hot primary failed'],
+];
 
 export type HotKeySource = 'lfu' | 'unavailable';
 
@@ -148,4 +155,12 @@ export function describeHotKeys(keys: readonly HotShardKey[]): string {
   if (listed.length === 0) return '';
   const names = listed.map(({ key, freq }) => `"${displayKeyName(key)}" (freq ${freq})`);
   return ` Hot keys: ${names.join(', ')}.`;
+}
+
+export function describeMissingKeys(keyNote: string | undefined): string {
+  const reason = SHORT_NOTES.find(([pattern]) => pattern.test(keyNote ?? ''))?.[1];
+  return (
+    ` Key names are not available${reason ? ` (${reason})` : ''}; ` +
+    'a capture on this primary can show them.'
+  );
 }

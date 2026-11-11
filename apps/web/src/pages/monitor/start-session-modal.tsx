@@ -22,6 +22,7 @@ import { PreflightPanel } from './preflight-panel';
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const DEFAULT_DURATION_SECONDS = 30;
+const HOT_PRIMARY_DURATION_SECONDS = 10;
 
 function ClusterNodeField({
   nodes,
@@ -63,12 +64,21 @@ interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onStarted: (session: StoredCaptureSession) => void;
+  hotPrimary?: { nodeId: string; address: string };
 }
 
 type Unit = 's' | 'm';
 
-export function StartSessionModal({ connectionId, open, onOpenChange, onStarted }: Props) {
-  const [duration, setDuration] = useState<number>(DEFAULT_DURATION_SECONDS);
+export function StartSessionModal({
+  connectionId,
+  open,
+  onOpenChange,
+  onStarted,
+  hotPrimary,
+}: Props) {
+  const defaultDuration = hotPrimary ? HOT_PRIMARY_DURATION_SECONDS : DEFAULT_DURATION_SECONDS;
+  const hotNodeId = hotPrimary?.nodeId;
+  const [duration, setDuration] = useState<number>(defaultDuration);
   const [unit, setUnit] = useState<Unit>('s');
   const [requestedBy, setRequestedBy] = useState('');
   const [targetNodeId, setTargetNodeId] = useState<string>('');
@@ -90,12 +100,16 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
   const isCluster = clusterNodes.length > 0;
 
   useEffect(() => {
-    if (!open) return;
-    if (isCluster && !targetNodeId) {
+    if (!open || targetNodeId) return;
+    if (hotNodeId) {
+      setTargetNodeId(hotNodeId);
+      return;
+    }
+    if (isCluster) {
       const firstMaster = clusterNodes.find((n) => n.role === 'master') ?? clusterNodes[0];
       if (firstMaster) setTargetNodeId(firstMaster.id);
     }
-  }, [open, isCluster, clusterNodes, targetNodeId]);
+  }, [open, isCluster, clusterNodes, targetNodeId, hotNodeId]);
 
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
@@ -112,7 +126,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
   // Reset all form + transient state on close so reopening always shows fresh defaults.
   useEffect(() => {
     if (!open) {
-      setDuration(DEFAULT_DURATION_SECONDS);
+      setDuration(defaultDuration);
       setUnit('s');
       setRequestedBy('');
       setTargetNodeId('');
@@ -122,7 +136,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
       setConfirming(false);
       setError(null);
     }
-  }, [open]);
+  }, [open, defaultDuration]);
 
   // Refresh pre-flight whenever the modal opens or duration changes (debounced via effect deps).
   useEffect(() => {
@@ -158,7 +172,7 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
         connectionId,
         durationMs,
         requestedBy: requestedBy.trim() || undefined,
-        targetNodeId: isCluster && !fanOut ? targetNodeId || undefined : undefined,
+        targetNodeId: (isCluster || hotNodeId) && !fanOut ? targetNodeId || undefined : undefined,
         fanOut: isCluster && fanOut ? true : undefined,
       });
       onStarted(session);
@@ -219,6 +233,19 @@ export function StartSessionModal({ connectionId, open, onOpenChange, onStarted 
               />
             </div>
           </div>
+
+          {hotPrimary && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+              <p className="font-medium text-amber-800 dark:text-amber-200">
+                MONITOR adds load to a primary that is already hot ({hotPrimary.address}). Keep the
+                capture short.
+              </p>
+              <p className="mt-1 text-xs text-amber-700/90 dark:text-amber-200/80">
+                The pre-flight estimate below is read from the node this connection points at. When
+                that is not the hot primary, expect more lines and bytes than it shows.
+              </p>
+            </div>
+          )}
 
           {isCluster && (
             <div className="space-y-2">

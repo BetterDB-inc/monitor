@@ -697,6 +697,27 @@ In each of these cases the event is raised without key names, the detail has `ke
 
 **Key names leave the database with the message.** The message is stored with the event, written to the API log and sent to every webhook subscribed to `anomaly.detected`. It carries at most 3 names, each cut to 64 characters, with control and invisible characters written as `\xNN` or `\u{NNNN}` and quotes escaped. It is written once, when the event is raised; later reads only update the detail. The full list of up to 10 names is returned by [`GET /api/anomaly/hot-shards`](#get-hot-shards) only.
 
+**A capture can show the keys when the read cannot.** When the event has no key names and the monitor connects to the cluster nodes directly, the message ends with one more sentence, for example `Key names are not available (no LFU policy); a capture on this primary can show them.`, and the detail has `captureAvailable: true`. Nothing is started for you: a person starts a [MONITOR capture](monitor.md) on the hot primary.
+
+- In the UI, the open event on the Anomalies page gets a **Capture on hot primary** action. It opens the usual start dialog with the hot primary selected and a duration of 10 seconds instead of 30. Both can be changed. The session page then lists the **Top keys in this capture**.
+- By API, take `shardId` from [`GET /api/anomaly/hot-shards`](#get-hot-shards) and send it as `targetNodeId`:
+
+  ```http
+  POST /api/monitor/sessions
+  Content-Type: application/json
+
+  { "connectionId": "<connection-id>", "targetNodeId": "<shardId>", "durationMs": 10000 }
+  ```
+
+  Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
+
+Before you start one:
+
+- `MONITOR` makes the node send every command it runs to the capture connection. On a primary that is already hot this adds load, so keep the capture short. The usual limits of a capture apply: its duration, its byte and line caps, and one capture per connection at a time.
+- The pre-flight health check is advice for a capture a person starts; it does not block it. The check and the throughput estimate are read from the node the connection points at, not from the hot primary. A hot primary runs more commands, so expect more lines and bytes than the estimate shows. The check looks at memory, recent OOM events, failover and replication, not at CPU.
+- A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
+- The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
+
 ## Configuration
 
 ### Environment Variables
@@ -1021,12 +1042,14 @@ X-Connection-ID: <connection-id>
 
 The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
 
-`cpu` and `network` give the shard's rate per second, its share of the cluster, the cluster median and the ratio the rule used. `rankedBy` is the metric that flagged the shard, and `topSlots` (up to 5) are ranked by it. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the last read and `keysSampled` the number of keys whose frequency it got.
+`cpu` and `network` give the shard's rate per second, its share of the cluster, the cluster median and the ratio the rule used. `rankedBy` is the metric that flagged the shard, and `topSlots` (up to 5) are ranked by it. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the last read and `keysSampled` the number of keys whose frequency it got. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
 
 **Response**:
 ```json
 [
   {
+    "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+    "captureAvailable": false,
     "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
     "nodeAddr": "10.0.0.1:6379",
     "slotCount": 5461,

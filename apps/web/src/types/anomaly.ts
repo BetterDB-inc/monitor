@@ -91,6 +91,46 @@ export interface FanoutCoverage {
   stale: boolean;
 }
 
+export interface HotShardLoad {
+  perSecond: number;
+  share: number;
+  median: number;
+  ratio: number;
+}
+
+export interface HotShardSlot {
+  slot: number;
+  cpuUsecPerSecond: number;
+  networkBytesPerSecond: number;
+  keyCount: number;
+  shareOfShard: number;
+}
+
+export interface HotShardKey {
+  key: string;
+  slot: number;
+  freq: number;
+}
+
+export interface HotShardDetail {
+  eventId: string;
+  captureAvailable: boolean;
+  shardId: string;
+  nodeAddr: string;
+  slotCount: number;
+  since: number;
+  sampledAt: number;
+  cpu: HotShardLoad;
+  network: HotShardLoad;
+  rankedBy: 'cpu' | 'network';
+  topSlots: HotShardSlot[];
+  topKeys: HotShardKey[];
+  keySource: 'lfu' | 'unavailable';
+  keyNote?: string;
+  keysSampled: number;
+  keysSampledAt?: number;
+}
+
 export type ReplicationDivergenceLevel = 'none' | 'behind' | 'warning' | 'critical' | 'unobserved';
 
 export interface ReplicationDivergenceWindow {

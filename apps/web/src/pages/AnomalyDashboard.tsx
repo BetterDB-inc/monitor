@@ -18,6 +18,7 @@ import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressi
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
+import { HotShardCaptureAction } from '../components/anomalies/HotShardCaptureAction';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
 import {
@@ -31,7 +32,12 @@ import { GroupIncidentLink } from '../components/anomalies/incidents/GroupIncide
 import { IncidentList } from '../components/anomalies/incidents/IncidentList';
 import { dateRangeQuery } from '../components/anomalies/incidents/incident-summary';
 import { IncidentNotice } from '../components/anomalies/incidents/IncidentNotice';
-import type { FanoutCoverage, IncidentTimeline, ReplicaDivergenceHistory } from '../types/anomaly';
+import type {
+  FanoutCoverage,
+  HotShardDetail,
+  IncidentTimeline,
+  ReplicaDivergenceHistory,
+} from '../types/anomaly';
 import {
   AlertTriangle,
   AlertCircle,
@@ -229,6 +235,16 @@ export function AnomalyDashboard() {
   const { data: fanoutCoverage, error: fanoutCoverageError } = usePolling<FanoutCoverage[]>({
     fetcher: () => (currentConnection?.id ? metricsApi.getAnomalyCoverage() : Promise.resolve([])),
     interval: 10000,
+    refetchKey: currentConnection?.id,
+  });
+
+  const hotShardOpen = !!events?.some(
+    (event) => event.metricType === 'hot_shard' && !event.resolved,
+  );
+  const { data: hotShards } = usePolling<HotShardDetail[]>({
+    fetcher: () => metricsApi.getHotShards(),
+    interval: 10000,
+    enabled: overviewOpen && hotShardOpen && !!currentConnection?.id,
     refetchKey: currentConnection?.id,
   });
 
@@ -714,6 +730,11 @@ export function AnomalyDashboard() {
                               Capture next
                             </Button>
                           )}
+                          <HotShardCaptureAction
+                            event={event}
+                            hotShards={hotShards}
+                            connectionId={currentConnection?.id}
+                          />
                           <ThresholdsLink metricType={event.metricType} />
                         </div>
                       </div>

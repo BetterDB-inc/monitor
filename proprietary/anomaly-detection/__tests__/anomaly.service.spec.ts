@@ -1942,6 +1942,8 @@ describe('AnomalyService', () => {
           keyNote: 'the monitor does not connect to the cluster nodes directly',
           keysSampled: 0,
           keysSampledAt: BASE + 6 * STEP_MS,
+          eventId: hotEvents()[0].id,
+          captureAvailable: false,
         },
       ]);
       expect(service.getHotShards('conn-other')).toEqual([]);
@@ -2195,6 +2197,8 @@ describe('AnomalyService', () => {
       const RAISED =
         "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
         'Top slots by CPU: 0 (75% of the shard), 1 (25%).';
+      const capture = (reason: string) =>
+        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.`;
       let keys: KeysBySlot;
 
       function hotNode() {
@@ -2273,6 +2277,11 @@ describe('AnomalyService', () => {
           ],
         });
         expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          eventId: hotEvents()[0].id,
+          captureAvailable: false,
+        });
+        expect(hotEvents()[0].message).not.toContain('capture');
         expect(discovery.getNodeConnection).toHaveBeenCalledWith('a0000000', 'conn-a');
         expect(client.callBuffer.mock.calls).toEqual([
           ['CLUSTER', 'GETKEYSINSLOT', 0, 500],
@@ -2352,8 +2361,13 @@ describe('AnomalyService', () => {
         await step(HOT, 46);
 
         expect(hotEvents()).toHaveLength(1);
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(capture('no LFU policy'));
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({ message: capture('no LFU policy') }),
+        );
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          eventId: hotEvents()[0].id,
+          captureAvailable: true,
           keySource: 'unavailable',
           keyNote: 'maxmemory-policy is not an LFU policy, so the node keeps no access frequency',
           keysSampled: 0,
@@ -2377,8 +2391,9 @@ describe('AnomalyService', () => {
 
         await step(HOT, 6);
 
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(capture('no permission'));
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
           keySource: 'unavailable',
           keyNote: 'the monitoring user may not run CLUSTER GETKEYSINSLOT',
         });
@@ -2394,8 +2409,9 @@ describe('AnomalyService', () => {
 
           await step(HOT, 6);
 
-          expect(hotEvents()[0].message).toBe(RAISED);
+          expect(hotEvents()[0].message).toBe(capture('the hot primary did not answer'));
           expect(service.getHotShards('conn-a')[0]).toMatchObject({
+            captureAvailable: true,
             keySource: 'unavailable',
             keyNote: 'reading the keys from the hot primary timed out',
           });
@@ -2422,7 +2438,7 @@ describe('AnomalyService', () => {
           connect(client);
           await new Promise((resolve) => setImmediate(resolve));
 
-          expect(hotEvents()[0].message).toBe(RAISED);
+          expect(hotEvents()[0].message).toBe(capture('the hot primary did not answer'));
           expect(service.getHotShards('conn-a')[0].keyNote).toBe(
             'reading the keys from the hot primary timed out',
           );
@@ -2438,8 +2454,9 @@ describe('AnomalyService', () => {
 
         await step(HOT, 6);
 
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(capture('the read from the hot primary failed'));
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
           keySource: 'unavailable',
           keyNote: 'reading the keys from the hot primary failed: ECONNREFUSED',
         });
@@ -2453,8 +2470,9 @@ describe('AnomalyService', () => {
 
         await step(HOT, 6);
 
-        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(hotEvents()[0].message).toBe(capture('the read from the hot primary failed'));
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
           keySource: 'unavailable',
           keyNote: 'reading the keys from the hot primary failed: CLUSTERDOWN Hash slot not served',
           keysSampled: 0,
@@ -2559,9 +2577,38 @@ describe('AnomalyService', () => {
         expect(hotEvents()[0].message).toBe(RAISED);
         expect(discovery.getNodeConnection).not.toHaveBeenCalled();
         expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: false,
           keySource: 'unavailable',
           keyNote: 'the monitor does not connect to the cluster nodes directly',
         });
+      });
+
+      it('stops offering a capture once a later read finds the keys', async () => {
+        keys = { 0: [['user:42', NO_LFU]] };
+        dial(hotNode());
+        await step(HOT, 6);
+
+        expect(service.getHotShards('conn-a')[0].captureAvailable).toBe(true);
+
+        keys = { 0: [['user:42', 255]] };
+        await step(HOT, 20);
+
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: false,
+          keySource: 'lfu',
+        });
+      });
+
+      it('reports the id of the open event while the shard stays hot', async () => {
+        keys = { 0: [['user:42', NO_LFU]] };
+        dial(hotNode());
+        await step(HOT, 6);
+        const raised = hotEvents()[0].id;
+
+        await step(HOT, 4);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(service.getHotShards('conn-a').map((shard) => shard.eventId)).toEqual([raised]);
       });
 
       it('drops the keys when the event resolves and reads them again on the next raise', async () => {

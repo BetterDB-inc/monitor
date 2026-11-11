@@ -51,6 +51,7 @@ import type {
   AnomalySummary,
   AnomalyBufferStats,
   FanoutCoverage,
+  HotShardDetail,
   ReplicaDivergenceHistory,
   IncidentTimeline,
 } from '../types/anomaly';
@@ -457,6 +458,8 @@ export const metricsApi = {
 
   // Scoped to the current connection by the connection header.
   getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
+
+  getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
 
   getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
     const query = new URLSearchParams();

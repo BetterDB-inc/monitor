@@ -6,6 +6,7 @@ import {
   CrossReferenceNewShape,
   CrossReferenceResult,
   CrossReferenceSlowlogRegression,
+  CrossReferenceTopKey,
   monitorApi,
 } from '../../api/monitor';
 
@@ -78,6 +79,15 @@ export function CrossReferenceSections({ result }: { result: CrossReferenceResul
         <NewShapesList shapes={result.newShapes} />
       </Section>
 
+      {result.topKeys && (
+        <Section
+          title="Top keys in this capture"
+          subtitle="By command count; the first argument of a command counts as its key"
+        >
+          <TopKeysList keys={result.topKeys} />
+        </Section>
+      )}
+
       <Section
         title="Hot-key delta"
         subtitle={`${result.hotKeyDelta.newInTopK.length} new keys, ${result.hotKeyDelta.rankChanges.length} rank changes`}
@@ -139,6 +149,24 @@ function NewShapesList({ shapes }: { shapes: CrossReferenceNewShape[] }) {
             )}
           </span>
           <span className="text-muted-foreground">×{s.countInCapture.toLocaleString()}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function TopKeysList({ keys }: { keys: CrossReferenceTopKey[] }) {
+  if (keys.length === 0) {
+    return <Empty text="No keyed commands in this capture." />;
+  }
+  return (
+    <ul className="max-h-48 space-y-1 overflow-y-auto text-xs">
+      {keys.map((k) => (
+        <li key={k.key} className="flex items-center justify-between gap-2 font-mono">
+          <span className="break-all">{k.key}</span>
+          <span className="shrink-0 text-muted-foreground">
+            ×{k.count.toLocaleString()} ({Math.round(k.share * 100)}%)
+          </span>
         </li>
       ))}
     </ul>

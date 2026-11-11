@@ -6,6 +6,7 @@ import {
   HOT_KEY_TOP,
   type HotKeyReader,
   describeHotKeys,
+  describeMissingKeys,
   displayKeyName,
   sampleHotKeys,
 } from '../hot-shard-keys';
@@ -360,5 +361,65 @@ describe('describeHotKeys', () => {
       expect(description).toContain('\\*b\\*');
       expect(description).not.toMatch(/[\r\n]/);
     });
+  });
+});
+
+describe('describeMissingKeys', () => {
+  it.each([
+    [
+      'maxmemory-policy is not an LFU policy, so the node keeps no access frequency',
+      'no LFU policy',
+    ],
+    ['the monitoring user may not run CLUSTER GETKEYSINSLOT', 'no permission'],
+    ['the monitoring user may not run OBJECT FREQ on these keys', 'no permission'],
+    ['the server does not support OBJECT FREQ', 'not supported by the server'],
+    ['reading the keys from the hot primary timed out', 'the hot primary did not answer'],
+    [
+      'reading the keys from the hot primary failed: ECONNREFUSED',
+      'the read from the hot primary failed',
+    ],
+    [
+      'reading the keys from the hot primary failed: CLUSTERDOWN Hash slot not served',
+      'the read from the hot primary failed',
+    ],
+  ])('shortens "%s" to "%s" and points at a capture', (keyNote, reason) => {
+    expect(describeMissingKeys(keyNote)).toBe(
+      ` Key names are not available (${reason}); a capture on this primary can show them.`,
+    );
+  });
+
+  it('gives no reason for a note it does not know', () => {
+    expect(describeMissingKeys(undefined)).toBe(
+      ' Key names are not available; a capture on this primary can show them.',
+    );
+    expect(describeMissingKeys('the keys have not been read yet')).toBe(
+      ' Key names are not available; a capture on this primary can show them.',
+    );
+  });
+
+  it('shortens the notes the key read itself gives', async () => {
+    const refused = async (error: Error) => {
+      const pipeline = { call: () => pipeline, exec: async () => [[error, null]] };
+      const read = await sampleHotKeys(
+        {
+          callBuffer: async () => [Buffer.from('k')],
+          pipeline: () => pipeline,
+        } as never,
+        [0],
+      );
+      return describeMissingKeys(read.keyNote);
+    };
+
+    expect(
+      await refused(
+        new Error('ERR An LFU maxmemory policy is not selected, access frequency not tracked.'),
+      ),
+    ).toContain('(no LFU policy)');
+    expect(
+      await refused(new Error("NOPERM User monitor has no permissions to run 'object|freq'")),
+    ).toContain('(no permission)');
+    expect(await refused(new Error("ERR unknown subcommand 'FREQ'"))).toContain(
+      '(not supported by the server)',
+    );
   });
 });

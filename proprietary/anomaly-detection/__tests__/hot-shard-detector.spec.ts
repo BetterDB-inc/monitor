@@ -290,6 +290,27 @@ describe('describeHotShard', () => {
     );
   });
 
+  it('ends with the note about missing key names when it is given one', () => {
+    const [finding] = judgeHotShards(
+      sample([shard('3f2a9c1e77aa', 930_000), shard('n2', 300_000), shard('n3', 300_000)]),
+      NONE,
+    )!;
+
+    expect(
+      describeHotShard(
+        finding,
+        topSlots.slice(0, 1),
+        60_000,
+        [],
+        ' Key names are not available (no LFU policy); a capture on this primary can show them.',
+      ),
+    ).toBe(
+      "Hot shard 3f2a9c1e at 10.0.0.a:6379: CPU 3.1x the cluster median (61% of the cluster's slot CPU) for 60s. " +
+        'Top slots by CPU: 1234 (62% of the shard). ' +
+        'Key names are not available (no LFU policy); a capture on this primary can show them.',
+    );
+  });
+
   it('describes network load in bytes and both metrics when both are over', () => {
     const [finding] = judgeHotShards(
       sample([
