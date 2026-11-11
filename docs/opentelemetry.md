@@ -296,6 +296,12 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_cluster_slot_cpu_usec_total` | `betterdb.cluster.slot.cpu.time` | `us` |
 | `betterdb_cluster_slot_network_bytes_in_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=receive`) | `By` |
 | `betterdb_cluster_slot_network_bytes_out_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=transmit`) | `By` |
+| `betterdb_cluster_shard_cpu_usec_per_second` | `betterdb.cluster.shard.cpu.rate` | `us/s` |
+| `betterdb_cluster_shard_network_bytes_in_per_second` | `betterdb.cluster.shard.network.io.rate` (`network.io.direction=receive`) | `By/s` |
+| `betterdb_cluster_shard_network_bytes_out_per_second` | `betterdb.cluster.shard.network.io.rate` (`network.io.direction=transmit`) | `By/s` |
+| `betterdb_cluster_shard_cpu_share` | `betterdb.cluster.shard.cpu.share` | `1` |
+| `betterdb_cluster_shard_network_share` | `betterdb.cluster.shard.network.share` | `1` |
+| `betterdb_cluster_shard_slots` | `betterdb.cluster.shard.slots` | `{slot}` |
 | `betterdb_commandstats_latency_us` | `betterdb.cmd.latency_avg` | `us` |
 | `betterdb_slowlog_length` | `betterdb.slowlog.length` | `{entry}` |
 | `betterdb_slowlog_last_id` | `betterdb.slowlog.last_id` | `{id}` |

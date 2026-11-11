@@ -163,6 +163,7 @@ A family marked **removed** tracks only its current label values: a value that d
 | -------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | `betterdb_db_keys`, `betterdb_db_keys_expiring`, `betterdb_db_avg_ttl_seconds`               | 3 × D        | D is the number of databases that have held keys. It cannot exceed the server's `databases` setting (default 16). In cluster mode this is normally just `db0`.                | zeroed       |
 | `betterdb_cluster_slot_keys`, `_expires`, `_reads_total`, `_writes_total`                    | 4 × N        | N is `METRICS_SLOT_STATS_TOP_N` (default 100, maximum 16384). Only cluster connections on Valkey 8.0+ emit these.                                                             | removed      |
+| `betterdb_cluster_shard_cpu_usec_per_second`, `_network_bytes_in_per_second`, `_network_bytes_out_per_second`, `_cpu_share`, `_network_share`, `_slots` | 6 × P | P is the number of slot-owning primaries. Only cluster connections with `cluster-slot-stats-enabled yes` on every node emit these. | removed      |
 | `betterdb_commandstats_calls_total`, `betterdb_commandstats_latency_us`                      | 2 × C        | C is the number of commands with at least one call. The command table (with any module commands) caps it; typically a few dozen.                                              | removed      |
 | `betterdb_repl_output_buffer_ratio`                                                          | R            | R is the number of connected replicas.                                                                                                                                        | removed      |
 | `betterdb_vector_index_docs`, `_memory_bytes`, `_indexing_failures`, `_percent_indexed`      | 4 × I        | I is the number of search indexes.                                                                                                                                            | removed      |
@@ -506,6 +507,23 @@ Cluster mode health and slot distribution.
 | `betterdb_cluster_slot_network_bytes_out_total` | gauge | `slot` | Bytes sent for the slot, cumulative                          | `12345`   |
 
 **Availability**: Only populated when connected to a Valkey 8.0+ cluster. Read from every primary, since a node only reports the slots it owns; with cluster auto-registration only the seed connection exports them, so each slot appears once. Coverage can be partial: a primary that fails or times out keeps its last series until they are older than the staleness bound, and when no primary can be reached directly only the connection's own node is read. The `_total` series need `cluster-slot-stats-enabled yes` on every node and are left out otherwise. They are cumulative, so use `rate()`; they reset when a slot moves or its node restarts. Limited to the top `METRICS_SLOT_STATS_TOP_N` slots by key count plus the top N by cumulative CPU (default 100; `0` disables), so a slot that only just became hot can be missing. A slot that leaves both lists is removed rather than reported as 0. Not exported under `vitals`.
+
+#### Cluster Shard Load Metrics (Valkey 8.0+)
+
+| Metric                                               | Type  | Labels            | Description                                                                 | Example  |
+| ---------------------------------------------------- | ----- | ----------------- | --------------------------------------------------------------------------- | -------- |
+| `betterdb_cluster_shard_cpu_usec_per_second`         | gauge | `node`, `node_id` | CPU microseconds per second spent on the slots of the shard                 | `412000` |
+| `betterdb_cluster_shard_network_bytes_in_per_second` | gauge | `node`, `node_id` | Bytes per second received for the slots of the shard                        | `98000`  |
+| `betterdb_cluster_shard_network_bytes_out_per_second`| gauge | `node`, `node_id` | Bytes per second sent for the slots of the shard                            | `120000` |
+| `betterdb_cluster_shard_cpu_share`                   | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot CPU rate, from 0 to 1         | `0.62`   |
+| `betterdb_cluster_shard_network_share`               | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot network rate, in plus out     | `0.55`   |
+| `betterdb_cluster_shard_slots`                       | gauge | `node`, `node_id` | Slots the shard owns, as counted for its load                               | `5461`   |
+
+A shard is one slot-owning primary: `node` is its address and `node_id` its cluster node id. A share far above `1 / number of shards` means the load is skewed onto that shard.
+
+**How the rates are made**: every poll already reads the usage counters of every slot from every primary for the slot metrics above. The rate of each slot is the change since the previous poll divided by the time between them, smoothed over about 30 seconds, and a shard's rate is the sum over the slots it owns. This covers all slots, not only the top `METRICS_SLOT_STATS_TOP_N`, and costs no extra command.
+
+**Availability**: needs a Valkey 8.0+ cluster with `cluster-slot-stats-enabled yes` on every node, and the cluster-wide slot read, so nothing is exported under `vitals`, with `METRICS_SLOT_STATS_TOP_N=0`, or for a cluster whose nodes are registered one by one as separate connections. The first series appear after two complete polls. A poll in which any primary did not answer adds no new value: the last one stays until it is older than the staleness bound, then the series are removed. A slot whose counter went down (its node restarted, or `CONFIG RESETSTAT` ran) or that moved to another shard is left out for one poll, so a shard that just received slots reads low for a moment.
 
 ### Anomaly Detection Metrics
 

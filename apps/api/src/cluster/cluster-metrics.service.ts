@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ClusterDiscoveryService, DiscoveredNode } from './cluster-discovery.service';
+import { NodeSlotStats } from './shard-load';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { InfoParser } from '../database/parsers/info.parser';
@@ -56,6 +57,7 @@ export interface ClusterSlotStatsResult {
   failedNodes: string[];
   /** The slot ranges that could not be read, as discovery sees them. */
   failedSlotRanges: number[][];
+  nodeStats?: NodeSlotStats[];
 }
 
 export function inSlotRanges(slot: number, ranges: number[][]): boolean {
@@ -686,6 +688,7 @@ export class ClusterMetricsService {
     );
 
     const perNode: SlotStats[] = [];
+    const nodeStats: NodeSlotStats[] = [];
     const unhealthy = owners.filter((node) => !node.healthy);
     const failedNodes = unhealthy.map((node) => node.address);
     const failedSlotRanges = unhealthy.flatMap((node) => node.slots);
@@ -714,6 +717,7 @@ export class ClusterMetricsService {
             `slot ranges from ${node.address}: ${result.value.reason}`,
         );
       } else {
+        nodeStats.push({ nodeId: node.id, address: node.address, stats: result.value.stats });
         this.loggedErrors.delete(errorKey);
       }
     }
@@ -755,6 +759,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
+      nodeStats,
     };
   }
 

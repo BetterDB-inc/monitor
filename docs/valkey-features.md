@@ -232,6 +232,17 @@ The `_total` series are only exported when `cluster-slot-stats-enabled` is on. T
 
 The CPU list ranks by cumulative `cpu-usec`, not by recent CPU, and nothing ranks by traffic. A slot that only just became hot can stay below slots that were busy earlier and be missing from both lists, and from the queries below. Raise `METRICS_SLOT_STATS_TOP_N` to widen the net, at the cost of more series (up to 16,384 slots × 4 at the maximum).
 
+**Load per shard**: with `cluster-slot-stats-enabled` on, the same poll also adds up the recent CPU and traffic of every slot per owning primary and exports them as `betterdb_cluster_shard_*` gauges. These cover all slots, not only the exported top N, so they show a shard that carries far more than its part even when no single slot stands out:
+
+```promql
+# Shards taking more than twice their even part of the cluster's CPU
+betterdb_cluster_shard_cpu_share
+  > on(connection) group_left()
+(2 / count by (connection) (betterdb_cluster_shard_cpu_share))
+```
+
+See [Cluster Shard Load Metrics](prometheus-metrics.md#cluster-shard-load-metrics-valkey-80) for the full list and its limits.
+
 ### Example Use Cases
 
 #### Find the Hottest Slots

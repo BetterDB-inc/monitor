@@ -49,6 +49,7 @@ import {
   NODE_COMMAND_TIMEOUT_MS,
   inSlotRanges,
 } from '../cluster/cluster-metrics.service';
+import { ShardLoadService } from '../cluster/shard-load.service';
 import {
   demotedWritesMessage,
   evaluateDemotedWrites,
@@ -164,6 +165,7 @@ interface ConnectionMetricState {
   currentClusterSlotLabels: Set<string>;
   /** When each exported slot was last answered for, so a failing owner's series age out. */
   clusterSlotSeenAt: Map<string, number>;
+  currentShardLabels: Map<string, string>;
   // Key-size metric labels (per-connection). Per-key and keysize-bucket label
   // tuples are stored JSON-encoded so a single set tracks the full tuple
   // (key names may contain any delimiter character).
@@ -405,6 +407,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private clusterSlotCpuUsecTotal: Gauge;
   private clusterSlotNetworkBytesInTotal: Gauge;
   private clusterSlotNetworkBytesOutTotal: Gauge;
+  private clusterShardCpuUsecPerSecond: Gauge;
+  private clusterShardNetworkBytesInPerSecond: Gauge;
+  private clusterShardNetworkBytesOutPerSecond: Gauge;
+  private clusterShardCpuShare: Gauge;
+  private clusterShardNetworkShare: Gauge;
+  private clusterShardSlots: Gauge;
 
   // Key Size Metrics (from key analytics runs and INFO keysizes)
   private keyPatternMemoryBytes: Gauge;
@@ -514,6 +522,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly clientAnalyticsRollup?: ClientAnalyticsRollupService,
     @Optional()
     private readonly auditStatsCache?: AuditStatsCacheService,
+    @Optional()
+    private readonly shardLoadService?: ShardLoadService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = Number(
@@ -768,6 +778,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
         clusterSlotSeenAt: new Map(),
+        currentShardLabels: new Map(),
         // Key-size metric labels
         currentKeyPatternLabels: new Set(),
         currentKeyDetailLabels: new Set(),
@@ -1098,6 +1109,38 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'cluster_slot_network_bytes_out_total',
       'Bytes sent for the cluster slot (requires cluster-slot-stats-enabled)',
       ['slot'],
+    );
+
+    const shardLabels = ['node', 'node_id'];
+    this.clusterShardCpuUsecPerSecond = this.createGauge(
+      'cluster_shard_cpu_usec_per_second',
+      'Smoothed CPU microseconds per second spent on the slots of the shard (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardNetworkBytesInPerSecond = this.createGauge(
+      'cluster_shard_network_bytes_in_per_second',
+      'Smoothed bytes per second received for the slots of the shard (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardNetworkBytesOutPerSecond = this.createGauge(
+      'cluster_shard_network_bytes_out_per_second',
+      'Smoothed bytes per second sent for the slots of the shard (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardCpuShare = this.createGauge(
+      'cluster_shard_cpu_share',
+      'Share of the cluster-wide per-slot CPU rate that the shard takes, from 0 to 1',
+      shardLabels,
+    );
+    this.clusterShardNetworkShare = this.createGauge(
+      'cluster_shard_network_share',
+      'Share of the cluster-wide per-slot network rate, in plus out, that the shard takes, from 0 to 1',
+      shardLabels,
+    );
+    this.clusterShardSlots = this.createGauge(
+      'cluster_shard_slots',
+      'Slots the shard owns, as counted for its load',
+      shardLabels,
     );
 
     // Key Size Metrics (per connection). Pattern/per-key series come from the
@@ -2590,12 +2633,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
 
     if (!clusterEnabled) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
     if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterInfo')) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
@@ -2811,13 +2854,26 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         error instanceof Error ? error : String(error),
       );
       if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connLabel, state);
+        this.clearSlotSeries(connectionId, connLabel, state);
       }
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }
 
   private async updateSlotStatsMetrics(
+    client: DatabasePort,
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    await this.readSlotStats(client, connectionId, connLabel, state, epoch);
+    if (!this.isSuperseded(connectionId, epoch)) {
+      this.exportShardLoad(connectionId, connLabel, state, Date.now());
+    }
+  }
+
+  private async readSlotStats(
     client: DatabasePort,
     connectionId: string,
     connLabel: string,
@@ -2834,7 +2890,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       !client.getCapabilities().hasClusterSlotStats ||
       !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
     ) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
     // Its seed exports the whole cluster, this node's slots included; a second
@@ -2848,12 +2904,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       this.clusterMetricsService?.coveredBySeed(connectionId) &&
       this.seedHoldsSlotStats(connectionId)
     ) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
     try {
       let result: ClusterSlotStatsResult;
+      const readAt = Date.now();
       if (
         client.getCapabilities().clusterEnabled &&
         this.clusterMetricsService &&
@@ -2883,6 +2940,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.slotStatsFanOuts.delete(connectionId);
         }
       } else {
+        this.shardLoadService?.forget(connectionId);
         result = {
           stats: await this.readOwnTopSlots(client),
           failedNodes: [],
@@ -2896,6 +2954,9 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
       const newSlotLabels = new Set<string>();
       const now = Date.now();
+      if (result.nodeStats !== undefined && result.failedNodes.length === 0) {
+        this.shardLoadService?.record(connectionId, result.nodeStats, readAt);
+      }
       for (const [slot, stats] of Object.entries(slotStats)) {
         newSlotLabels.add(slot);
         state.clusterSlotSeenAt.set(slot, now);
@@ -2932,7 +2993,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         // old values. Age them out the same way a pass that never starts does,
         // or once they pass the staleness bound the members export too and
         // every sum counts the slots twice.
-        if (disabled) this.clearSlotSeries(connLabel, state);
+        if (disabled) this.clearSlotSeries(connectionId, connLabel, state);
         else this.dropExpiredSlotSeries(connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
@@ -2986,12 +3047,45 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     return false;
   }
 
-  private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
+  private clearSlotSeries(connectionId: string, connLabel: string, state: ConnectionMetricState): void {
     for (const slot of state.currentClusterSlotLabels) {
       this.removeSlotSeries(connLabel, slot);
     }
     state.currentClusterSlotLabels = new Set();
     state.clusterSlotSeenAt.clear();
+    this.shardLoadService?.forget(connectionId);
+    this.exportShardLoad(connectionId, connLabel, state, Date.now());
+  }
+
+  private exportShardLoad(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    now: number,
+  ): void {
+    const sample = this.shardLoadService?.getLatest(connectionId) ?? null;
+    const shards = sample !== null && now - sample.timestamp <= this.stalenessMs ? sample.shards : [];
+    const labels = new Map<string, string>();
+    for (const shard of shards) {
+      const series = [connLabel, shard.address, shard.nodeId] as const;
+      labels.set(shard.nodeId, shard.address);
+      this.clusterShardCpuUsecPerSecond.labels(...series).set(shard.cpuUsecPerSecond);
+      this.clusterShardNetworkBytesInPerSecond.labels(...series).set(shard.networkBytesInPerSecond);
+      this.clusterShardNetworkBytesOutPerSecond.labels(...series).set(shard.networkBytesOutPerSecond);
+      this.clusterShardCpuShare.labels(...series).set(shard.cpuShare);
+      this.clusterShardNetworkShare.labels(...series).set(shard.networkShare);
+      this.clusterShardSlots.labels(...series).set(shard.slotCount);
+    }
+    for (const [nodeId, address] of state.currentShardLabels) {
+      if (labels.get(nodeId) === address) continue;
+      this.clusterShardCpuUsecPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkBytesInPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkBytesOutPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardCpuShare.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkShare.remove(connLabel, address, nodeId);
+      this.clusterShardSlots.remove(connLabel, address, nodeId);
+    }
+    state.currentShardLabels = labels;
   }
 
   private removeSlotSeries(connLabel: string, slot: string): void {
@@ -4497,6 +4591,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
     this.passDeadlines.delete(connectionId);
+    this.shardLoadService?.forget(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
     this.webhookEventsProService?.forgetReplication(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join

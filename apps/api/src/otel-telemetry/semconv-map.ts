@@ -125,6 +125,7 @@ const CPU_TIME = 'CPU time consumed by the server, by state';
 const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
 
 const SLOT_NETWORK_IO = 'Bytes received and sent for the cluster slot, by direction';
+const SHARD_NETWORK_IO = 'Smoothed bytes per second received and sent for the slots of the shard, by direction';
 
 const PROCESS_CPU_TIME = 'CPU time consumed by the monitor process, by mode';
 
@@ -227,6 +228,18 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
     SLOT_NETWORK_IO,
     counter('betterdb.cluster.slot.network.io', 'By', withAttributes({ 'network.io.direction': 'transmit' })),
   ),
+  betterdb_cluster_shard_cpu_usec_per_second: gauge('betterdb.cluster.shard.cpu.rate', 'us/s'),
+  betterdb_cluster_shard_network_bytes_in_per_second: described(
+    SHARD_NETWORK_IO,
+    gauge('betterdb.cluster.shard.network.io.rate', 'By/s', withAttributes({ 'network.io.direction': 'receive' })),
+  ),
+  betterdb_cluster_shard_network_bytes_out_per_second: described(
+    SHARD_NETWORK_IO,
+    gauge('betterdb.cluster.shard.network.io.rate', 'By/s', withAttributes({ 'network.io.direction': 'transmit' })),
+  ),
+  betterdb_cluster_shard_cpu_share: gauge('betterdb.cluster.shard.cpu.share', '1'),
+  betterdb_cluster_shard_network_share: gauge('betterdb.cluster.shard.network.share', '1'),
+  betterdb_cluster_shard_slots: gauge('betterdb.cluster.shard.slots', '{slot}'),
   betterdb_commandstats_latency_us: gauge('betterdb.cmd.latency_avg', 'us'),
   betterdb_slowlog_length: gauge('betterdb.slowlog.length', '{entry}'),
   betterdb_slowlog_last_id: gauge('betterdb.slowlog.last_id', '{id}'),

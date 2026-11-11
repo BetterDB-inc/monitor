@@ -30,6 +30,7 @@ function one(name: string, value: number, labels: Record<string, string | number
 describe('planSemconvInstruments', () => {
   const CPU = 'CPU time consumed by the server, by state';
   const SLOT_IO = 'Bytes received and sent for the cluster slot, by direction';
+  const SHARD_IO = 'Smoothed bytes per second received and sent for the slots of the shard, by direction';
   const ROLE = 'Replication role of the node (1 for the current role)';
   const LATENCY = 'Inference bucket latency by percentile';
 
@@ -79,6 +80,10 @@ describe('planSemconvInstruments', () => {
     ['betterdb_cluster_stats_messages_crc_mismatch', 'betterdb.cluster.messages_crc_mismatch', 'gauge', '{message}'],
     ['betterdb_cluster_slot_keys', 'betterdb.cluster.slot.keys', 'gauge', '{key}'],
     ['betterdb_cluster_slot_cpu_usec_total', 'betterdb.cluster.slot.cpu.time', 'counter', 'us'],
+    ['betterdb_cluster_shard_cpu_usec_per_second', 'betterdb.cluster.shard.cpu.rate', 'gauge', 'us/s'],
+    ['betterdb_cluster_shard_cpu_share', 'betterdb.cluster.shard.cpu.share', 'gauge', '1'],
+    ['betterdb_cluster_shard_network_share', 'betterdb.cluster.shard.network.share', 'gauge', '1'],
+    ['betterdb_cluster_shard_slots', 'betterdb.cluster.shard.slots', 'gauge', '{slot}'],
     ['betterdb_commandstats_latency_us', 'betterdb.cmd.latency_avg', 'gauge', 'us'],
     ['betterdb_slowlog_length', 'betterdb.slowlog.length', 'gauge', '{entry}'],
     ['betterdb_slowlog_last_id', 'betterdb.slowlog.last_id', 'gauge', '{id}'],
@@ -137,6 +142,8 @@ describe('planSemconvInstruments', () => {
     ['betterdb_inference_bucket_p99_us', 'betterdb.inference.bucket.latency', 'gauge', 'us', LATENCY],
     ['betterdb_cluster_slot_network_bytes_in_total', 'betterdb.cluster.slot.network.io', 'counter', 'By', SLOT_IO],
     ['betterdb_cluster_slot_network_bytes_out_total', 'betterdb.cluster.slot.network.io', 'counter', 'By', SLOT_IO],
+    ['betterdb_cluster_shard_network_bytes_in_per_second', 'betterdb.cluster.shard.network.io.rate', 'gauge', 'By/s', SHARD_IO],
+    ['betterdb_cluster_shard_network_bytes_out_per_second', 'betterdb.cluster.shard.network.io.rate', 'gauge', 'By/s', SHARD_IO],
   ])('%s → %s uses its own description', (prom, name, kind, unit, description) => {
     expect(planSemconvInstruments([family(prom, [])])).toEqual([
       { name, kind, unit, description },
