@@ -1,11 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import {
-  NodeSlotStats,
-  ShardLoadSample,
-  ShardLoadTracker,
-  SlotLoadOrder,
-  SlotLoadRate,
-} from './shard-load';
+import { NodeSlotStats, ShardLoadSample, ShardLoadTracker, SlotLoadRate } from './shard-load';
 
 @Injectable()
 export class ShardLoadService {
@@ -32,13 +26,8 @@ export class ShardLoadService {
     return this.latest.get(connectionId) ?? null;
   }
 
-  getTopSlots(
-    connectionId: string,
-    nodeId: string,
-    limit: number,
-    by: SlotLoadOrder = 'cpu',
-  ): SlotLoadRate[] {
-    return this.trackers.get(connectionId)?.topSlots(nodeId, limit, by) ?? [];
+  getTopSlots(connectionId: string, nodeId: string, limit: number): SlotLoadRate[] {
+    return this.trackers.get(connectionId)?.topSlots(nodeId, limit) ?? [];
   }
 
   forget(connectionId: string): void {

@@ -241,6 +241,8 @@ betterdb_cluster_shard_cpu_share
 (2 / count by (connection) (betterdb_cluster_shard_cpu_share))
 ```
 
+The network gauges also count replication: bytes out include the replication stream once per replica, so compare shards on the CPU share when the question is client load.
+
 See [Cluster Shard Load Metrics](prometheus-metrics.md#cluster-shard-load-metrics-valkey-80) for the full list and its limits.
 
 ### Example Use Cases
