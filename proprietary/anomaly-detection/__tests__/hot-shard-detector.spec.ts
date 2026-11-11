@@ -52,7 +52,6 @@ describe('judgeHotShards', () => {
       shardId: 'n1',
       nodeAddr: '10.0.0.1:6379',
       slotCount: 5461,
-      over: ['cpu'],
     });
     expect(findings![0].cpu).toMatchObject({ perSecond: 900_000, median: 300_000, ratio: 3 });
     expect(findings![0].cpu.share).toBeCloseTo(900 / 1480);
@@ -67,22 +66,32 @@ describe('judgeHotShards', () => {
     ).toEqual([]);
   });
 
-  it('flags a shard on network alone, counting bytes in and out together', () => {
-    const findings = judgeHotShards(
-      sample([
-        shard('n1', 50_000, 8 * MIB),
-        shard('n2', 50_000, 2 * MIB),
-        shard('n3', 50_000, 2 * MIB),
-      ]),
-      NONE,
-    );
-
-    expect(findings).toHaveLength(1);
-    expect(findings![0].over).toEqual(['network']);
-    expect(findings![0].network).toMatchObject({ perSecond: 8 * MIB, median: 2 * MIB, ratio: 4 });
+  it.each([
+    ['under the CPU floor', 50_000],
+    ['over the CPU floor', 300_000],
+  ])('does not flag a shard on network alone, with every shard %s', (_case, cpu) => {
+    expect(
+      judgeHotShards(
+        sample([shard('n1', cpu, 64 * MIB), shard('n2', cpu, 2 * MIB), shard('n3', cpu, 2 * MIB)]),
+        NONE,
+      ),
+    ).toEqual([]);
   });
 
-  it('lists both metrics, worst first, when both are over', () => {
+  it('does not keep an open shard for its network rate', () => {
+    expect(
+      judgeHotShards(
+        sample([
+          shard('n1', 300_000, 64 * MIB),
+          shard('n2', 300_000, 2 * MIB),
+          shard('n3', 300_000, 2 * MIB),
+        ]),
+        new Set(['n1']),
+      ),
+    ).toEqual([]);
+  });
+
+  it('gives the network rate of a hot shard as detail, bytes in and out together', () => {
     const findings = judgeHotShards(
       sample([
         shard('n1', 600_000, 16 * MIB),
@@ -92,7 +101,9 @@ describe('judgeHotShards', () => {
       NONE,
     );
 
-    expect(findings![0].over).toEqual(['network', 'cpu']);
+    expect(findings).toHaveLength(1);
+    expect(findings![0].network).toEqual({ perSecond: 16 * MIB, share: 0.8, median: 2 * MIB });
+    expect(findings![0].cpu.ratio).toBe(3);
   });
 
   it('ignores a ratio over the factor while the rate is under the floor', () => {
@@ -112,7 +123,7 @@ describe('judgeHotShards', () => {
 
     expect(findings).toHaveLength(1);
     expect(findings![0].cpu).toMatchObject({ median: 0, ratio: 18 });
-    expect(Number.isFinite(findings![0].network.ratio)).toBe(true);
+    expect(findings![0].network).toEqual({ perSecond: 0, share: 0, median: 0 });
     expect(JSON.stringify(findings)).not.toMatch(/null|NaN|Infinity/);
   });
 
@@ -219,7 +230,7 @@ describe('hotShardSlots', () => {
     },
   ];
 
-  it('gives each slot its part of the shard on the metric that flagged it', () => {
+  it("gives each slot its part of the shard's CPU", () => {
     const [finding] = judgeHotShards(
       sample([shard('n1', 900_000), shard('n2', 300_000), shard('n3', 300_000)]),
       NONE,
@@ -243,13 +254,17 @@ describe('hotShardSlots', () => {
     ]);
   });
 
-  it('uses the network rate for a shard flagged on network', () => {
+  it('uses the CPU rate when the network rate of the shard is further over', () => {
     const [finding] = judgeHotShards(
-      sample([shard('n1', 0, 4 * MIB), shard('n2', 0, MIB), shard('n3', 0, MIB)]),
+      sample([
+        shard('n1', 900_000, 64 * MIB),
+        shard('n2', 300_000, MIB),
+        shard('n3', 300_000, MIB),
+      ]),
       NONE,
     )!;
 
-    expect(hotShardSlots(finding, slots)[0].shareOfShard).toBeCloseTo(400 / (4 * MIB));
+    expect(hotShardSlots(finding, slots)[0].shareOfShard).toBe(0.5);
   });
 });
 
@@ -311,7 +326,7 @@ describe('describeHotShard', () => {
     );
   });
 
-  it('describes network load in bytes and both metrics when both are over', () => {
+  it('gives the network share as detail that includes replication, not as a reason', () => {
     const [finding] = judgeHotShards(
       sample([
         shard('n1', 600_000, 16 * MIB),
@@ -322,27 +337,23 @@ describe('describeHotShard', () => {
     )!;
 
     expect(describeHotShard(finding, [], 75_400)).toBe(
-      "Hot shard n1 at 10.0.0.1:6379: network 8.0x the cluster median (80% of the cluster's network bytes), " +
-        "CPU 3.0x the cluster median (60% of the cluster's slot CPU) for 75s.",
+      "Hot shard n1 at 10.0.0.1:6379: CPU 3.0x the cluster median (60% of the cluster's slot CPU) for 75s. " +
+        "Network: 80% of the cluster's bytes, replication included.",
+    );
+    expect(describeHotShard(finding, topSlots.slice(0, 1), 75_400)).toMatch(
+      /replication included\. Top slots by CPU: 1234 \(62% of the shard\)\.$/,
     );
   });
 
   it('gives the rate itself when the rest of the cluster is near idle', () => {
-    const [cpu] = judgeHotShards(
+    const [finding] = judgeHotShards(
       sample([shard('n1', 900_000), shard('n2', 0), shard('n3', 0)]),
       NONE,
     )!;
-    const [network] = judgeHotShards(
-      sample([shard('n1', 0, 12.5 * MIB), shard('n2', 0, 0), shard('n3', 0, 0)]),
-      NONE,
-    )!;
 
-    expect(describeHotShard(cpu, [], 60_000)).toBe(
-      "Hot shard n1 at 10.0.0.1:6379: CPU 0.90 cores against a near-idle cluster median (100% of the cluster's slot CPU) for 60s.",
-    );
-    expect(describeHotShard(network, topSlots.slice(0, 1), 60_000)).toBe(
-      "Hot shard n1 at 10.0.0.1:6379: network 12.5 MiB/s against a near-idle cluster median (100% of the cluster's network bytes) for 60s. " +
-        'Top slots by network: 1234 (62% of the shard).',
+    expect(describeHotShard(finding, topSlots.slice(0, 1), 60_000)).toBe(
+      "Hot shard n1 at 10.0.0.1:6379: CPU 0.90 cores against a near-idle cluster median (100% of the cluster's slot CPU) for 60s. " +
+        'Top slots by CPU: 1234 (62% of the shard).',
     );
   });
 });

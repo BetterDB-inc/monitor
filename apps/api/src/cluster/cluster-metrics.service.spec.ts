@@ -620,6 +620,32 @@ used_cpu_user:20.3\r
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
       });
 
+      it('is incomplete when a failed primary that still owns slots is not asked', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          { ...primaries[1], flags: ['master', 'fail'], healthy: false },
+          primaries[2],
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+        expect(mockDiscoveryService.getNodeConnection).not.toHaveBeenCalledWith(
+          'def456node2',
+          undefined,
+        );
+      });
+
+      it('stays complete when the failed primary it skips owns no slots', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+          primaries[0],
+          primaries[1],
+          { ...primaries[2], flags: ['master', 'fail'], healthy: false },
+        ]);
+        nodeClients({});
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
+      });
+
       it('is incomplete when the topology cannot be discovered', async () => {
         mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Discovery failed'));
 
@@ -818,8 +844,8 @@ used_cpu_user:20.3\r
 
     it('returns every owned slot of each primary that answered in full, whatever the limit', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
-        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 8191]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[8192, 16383]] },
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[1, 2]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9000, 9000]] },
       ]);
       const replies: Record<string, unknown> = {
         p1: [[1, ['key-count', 50]], [2, ['key-count', 5]]],
@@ -853,7 +879,7 @@ used_cpu_user:20.3\r
       ]);
     });
 
-    it('forgets the cached topology when a primary answers for fewer slots than it was asked for', async () => {
+    it('forgets the cached topology and gives no per-node stats when a primary answers for fewer slots than it was asked for', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 1], [5, 5]] },
         { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[9, 9]] },
@@ -871,6 +897,8 @@ used_cpu_user:20.3\r
       expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledTimes(1);
       expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledWith('conn-1');
       expect(result.failedNodes).toEqual([]);
+      expect(Object.keys(result.stats).sort()).toEqual(['0', '1', '9']);
+      expect(result.nodeStats).toBeUndefined();
     });
 
     it('keeps the cached topology while every primary answers for all its slots', async () => {
@@ -909,7 +937,7 @@ used_cpu_user:20.3\r
     it('leaves a primary with an unread range out of the per-node stats', async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
         { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [[0, 99], [200, 299]] },
-        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[300, 399]] },
+        { id: 'p2', address: '10.0.0.3:6379', role: 'master', healthy: true, slots: [[300, 300]] },
       ]);
       mockDiscoveryService.getNodeConnection.mockImplementation(async (nodeId: string) => ({
         call: jest.fn(async (_c: string, _s: string, _r: string, start: number) => {

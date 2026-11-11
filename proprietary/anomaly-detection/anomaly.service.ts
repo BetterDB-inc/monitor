@@ -6468,12 +6468,7 @@ export class AnomalyService
   }
 
   private hotShardTopSlots(connectionId: string, finding: HotShardFinding): HotShardSlot[] {
-    const slots = this.shardLoad?.getTopSlots(
-      connectionId,
-      finding.shardId,
-      HOT_SHARD_TOP_SLOTS,
-      finding.over[0],
-    );
+    const slots = this.shardLoad?.getTopSlots(connectionId, finding.shardId, HOT_SHARD_TOP_SLOTS);
     return hotShardSlots(finding, slots ?? []);
   }
 
@@ -6500,7 +6495,7 @@ export class AnomalyService
       metricType: MetricType.HOT_SHARD,
       anomalyType: AnomalyType.SPIKE,
       severity: AnomalySeverity.WARNING,
-      value: finding[finding.over[0]].ratio,
+      value: finding.cpu.ratio,
       baseline: 1,
       zScore: 0,
       stdDev: 0,
@@ -6547,7 +6542,6 @@ export class AnomalyService
         sampledAt,
         cpu: finding.cpu,
         network: finding.network,
-        rankedBy: finding.over[0],
         topSlots: topSlots.get(finding.shardId) ?? [],
         ...read,
       });
@@ -9128,7 +9122,7 @@ export class AnomalyService
 
   getHotShards(connectionId: string): HotShardDetail[] {
     return [...(this.hotShardDetails.get(connectionId)?.values() ?? [])].sort(
-      (a, b) => b[b.rankedBy].ratio - a[a.rankedBy].ratio,
+      (a, b) => b.cpu.ratio - a.cpu.ratio,
     );
   }
 

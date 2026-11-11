@@ -173,16 +173,113 @@ describe('ShardLoadTracker', () => {
     expect(tracker.topSlots('n1', 5).map((s) => s.slot)).toEqual([0]);
   });
 
-  it('leaves out a shard that has no measured slot yet', () => {
+  it('keeps a shard that has no measured slot yet, and gives no shard the whole load', () => {
     const tracker = new ShardLoadTracker();
     tracker.observe([node('n1', { 0: [0, 0, 0] })], 0);
 
     const sample = tracker.observe(
-      [node('n1', { 0: [100, 0, 0] }), node('n3', { 1: [900, 0, 0] })],
+      [node('n1', { 0: [100, 50, 50] }), node('n3', { 1: [900, 0, 0] })],
       1_000,
     );
 
-    expect(sample?.shards.map((s) => s.nodeId)).toEqual(['n1']);
+    expect(sample?.settling).toBe(true);
+    expect(sample?.shards.map((s) => s.nodeId)).toEqual(['n1', 'n3']);
+    expect(shardOf(sample, 'n3')).toMatchObject({
+      slotCount: 1,
+      measuredSlots: 0,
+      cpuUsecPerSecond: 0,
+      cpuShare: null,
+      networkShare: null,
+    });
+    expect(shardOf(sample, 'n1').cpuUsecPerSecond).toBe(100);
+    expect(shardOf(sample, 'n1').cpuShare).not.toBe(1);
+    expect(shardOf(sample, 'n1').cpuShare).toBeNull();
+    expect(shardOf(sample, 'n1').networkShare).toBeNull();
+  });
+
+  it('holds every share while a restarted primary has no measured slot', () => {
+    const tracker = new ShardLoadTracker();
+    const reading = (n1: number, n2: number, n3: number) => [
+      node('n1', { 0: [n1, n1, 0] }),
+      node('n2', { 1: [n2, n2, 0] }),
+      node('n3', { 2: [n3, n3, 0] }),
+    ];
+    tracker.observe(reading(0, 0, 0), 0);
+    const before = tracker.observe(reading(600, 300, 100), 1_000);
+
+    const restarted = tracker.observe(reading(1_500, 600, 5), 2_000);
+
+    expect(before?.settling).toBe(false);
+    expect(restarted?.settling).toBe(true);
+    expect(shardOf(restarted, 'n3')).toMatchObject({ measuredSlots: 0, cpuUsecPerSecond: 0 });
+    for (const sample of [before, restarted]) {
+      expect(shardOf(sample, 'n1').cpuShare).toBeCloseTo(0.6);
+      expect(shardOf(sample, 'n2').cpuShare).toBeCloseTo(0.3);
+      expect(shardOf(sample, 'n3').cpuShare).toBeCloseTo(0.1);
+      expect(shardOf(sample, 'n1').networkShare).toBeCloseTo(0.6);
+      expect(shardOf(sample, 'n3').networkShare).toBeCloseTo(0.1);
+    }
+
+    const resumed = tracker.observe(reading(1_500, 600, 1_005), 3_000);
+
+    expect(resumed?.settling).toBe(false);
+    expect(shardOf(resumed, 'n3').cpuUsecPerSecond).toBe(1_000);
+    const shares = resumed?.shards.map((s) => s.cpuShare ?? 0) ?? [];
+    expect(shares.reduce((total, share) => total + share, 0)).toBeCloseTo(1);
+    expect(shardOf(resumed, 'n3').cpuShare).toBeGreaterThan(0.1);
+  });
+
+  it('holds the shares until a slot move has settled, with none for a new shard', () => {
+    const tracker = new ShardLoadTracker();
+    const before = (step: number) => [
+      node('n1', { 0: [300 * step, 0, 0], 1: [300 * step, 0, 0] }),
+      node('n2', { 2: [400 * step, 0, 0] }),
+    ];
+    const after = (step: number) => [
+      node('n1', { 0: [300 * step, 0, 0] }),
+      node('n2', { 2: [400 * step, 0, 0] }),
+      node('n3', { 1: [300 * step, 0, 0] }),
+    ];
+    tracker.observe(before(0), 0);
+    tracker.observe(before(1), 1_000);
+
+    for (const step of [2, 3, 4]) {
+      const settling = tracker.observe(after(step), step * 1_000);
+
+      expect(settling?.settling).toBe(true);
+      expect(shardOf(settling, 'n1').cpuShare).toBeCloseTo(0.6);
+      expect(shardOf(settling, 'n2').cpuShare).toBeCloseTo(0.4);
+      expect(shardOf(settling, 'n3').cpuShare).toBeNull();
+      expect(shardOf(settling, 'n1').cpuUsecPerSecond).toBeCloseTo(300);
+    }
+
+    const settled = tracker.observe(after(5), 5_000);
+
+    expect(settled?.settling).toBe(false);
+    expect(shardOf(settled, 'n1').cpuShare).toBeCloseTo(0.3);
+    expect(shardOf(settled, 'n2').cpuShare).toBeCloseTo(0.4);
+    expect(shardOf(settled, 'n3').cpuShare).toBeCloseTo(0.3);
+  });
+
+  it('forgets the held shares when it starts over', () => {
+    const tracker = new ShardLoadTracker();
+    const untracked: NodeSlotStats = {
+      nodeId: 'n1',
+      address: '10.0.0.1:6379',
+      stats: { 0: { key_count: 4 } },
+    };
+    tracker.observe([node('n1', { 0: [0, 0, 0] })], 0);
+    tracker.observe([node('n1', { 0: [100, 0, 0] })], 1_000);
+    tracker.observe([untracked], 2_000);
+    tracker.observe([node('n1', { 0: [0, 0, 0] })], 3_000);
+
+    const sample = tracker.observe(
+      [node('n1', { 0: [100, 0, 0] }), node('n2', { 1: [0, 0, 0] })],
+      4_000,
+    );
+
+    expect(sample?.settling).toBe(true);
+    expect(shardOf(sample, 'n1').cpuShare).toBeNull();
   });
 
   it('measures across a skipped pass with the longer interval', () => {
@@ -246,15 +343,6 @@ describe('ShardLoadTracker', () => {
         keyCount: 10,
       },
     ]);
-  });
-
-  it('ranks the slots by network rate when asked', () => {
-    const tracker = new ShardLoadTracker();
-    tracker.observe([node('n1', { 0: [0, 0, 0], 1: [0, 0, 0], 2: [0, 0, 0] })], 0);
-    tracker.observe([node('n1', { 0: [100, 0, 0], 1: [900, 10, 10], 2: [100, 500, 500] })], 1_000);
-
-    expect(tracker.topSlots('n1', 3, 'network').map((s) => s.slot)).toEqual([2, 1, 0]);
-    expect(tracker.topSlots('n1', 3).map((s) => s.slot)).toEqual([1, 2, 0]);
   });
 
   it('separates a shard under skewed write load from an evenly loaded cluster', () => {

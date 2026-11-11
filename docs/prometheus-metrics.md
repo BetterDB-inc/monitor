@@ -514,16 +514,20 @@ Cluster mode health and slot distribution.
 | ---------------------------------------------------- | ----- | ----------------- | --------------------------------------------------------------------------- | -------- |
 | `betterdb_cluster_shard_cpu_usec_per_second`         | gauge | `node`, `node_id` | CPU microseconds per second spent on the slots of the shard                 | `412000` |
 | `betterdb_cluster_shard_network_bytes_in_per_second` | gauge | `node`, `node_id` | Bytes per second received for the slots of the shard                        | `98000`  |
-| `betterdb_cluster_shard_network_bytes_out_per_second`| gauge | `node`, `node_id` | Bytes per second sent for the slots of the shard                            | `120000` |
+| `betterdb_cluster_shard_network_bytes_out_per_second`| gauge | `node`, `node_id` | Bytes per second sent for the slots of the shard, replication included      | `120000` |
 | `betterdb_cluster_shard_cpu_share`                   | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot CPU rate, from 0 to 1         | `0.62`   |
-| `betterdb_cluster_shard_network_share`               | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot network rate, in plus out     | `0.55`   |
+| `betterdb_cluster_shard_network_share`               | gauge | `node`, `node_id` | The shard's part of the cluster-wide per-slot network rate, in plus out, replication included | `0.55`   |
 | `betterdb_cluster_shard_slots`                       | gauge | `node`, `node_id` | Slots the shard owns, as counted for its load                               | `5461`   |
 
-A shard is one slot-owning primary: `node` is its address and `node_id` its cluster node id. A share far above `1 / number of shards` means the load is skewed onto that shard.
+A shard is one slot-owning primary: `node` is its address and `node_id` its cluster node id. A CPU share far above `1 / number of shards` means the load is skewed onto that shard.
+
+**Network is not client traffic alone**: Valkey adds the bytes of the replication stream to a slot's bytes out once per replica. A shard with more writes, or a primary with more replicas, therefore sends more and takes a larger network share than a shard serving the same client traffic. Use the CPU share to find skewed client load.
 
 **How the rates are made**: every poll already reads the usage counters of every slot from every primary for the slot metrics above. The rate of each slot is the change since the previous poll divided by the time between them, smoothed over about 30 seconds, and a shard's rate is the sum over the slots it owns. This covers all slots, not only the top `METRICS_SLOT_STATS_TOP_N`, and costs no extra command.
 
-**Availability**: needs a Valkey 8.0+ cluster with `cluster-slot-stats-enabled yes` on every node, and the cluster-wide slot read, so nothing is exported under `vitals`, with `METRICS_SLOT_STATS_TOP_N=0`, or for a cluster whose nodes are registered one by one as separate connections. The first series appear after two complete polls. A poll in which any primary did not answer adds no new value: the last one stays until it is older than the staleness bound, then the series are removed. A slot whose counter went down (its node restarted, or `CONFIG RESETSTAT` ran) or that moved to another shard is left out for one poll, so a shard that just received slots reads low for a moment.
+**Availability**: needs a Valkey 8.0+ cluster with `cluster-slot-stats-enabled yes` on every node, and the cluster-wide slot read, so nothing is exported under `vitals`, with `METRICS_SLOT_STATS_TOP_N=0`, or for a cluster whose nodes are registered one by one as separate connections. The first series appear after two complete polls. A poll in which any primary did not answer, or answered for fewer slots than it was asked for because a slot just moved, adds no new value: the last one stays until it is older than the staleness bound, then the series are removed. A slot whose counter went down (its node restarted, or `CONFIG RESETSTAT` ran) or that moved to another shard is left out of the rates for one poll, so a shard that just received slots reads low for a moment and a primary that just restarted reads 0.
+
+**Shares while slots settle**: a share worked out while some slots are left out would be too high for every other shard. So while any slot is left out, and for two polls after a slot changed owner, both shares stay at their last values and only the rates move. A shard that had no share before, such as one that just joined, gets no share series until then. During a long resharding the shares stay where they were before it started.
 
 ### Anomaly Detection Metrics
 
