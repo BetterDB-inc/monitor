@@ -11,6 +11,7 @@ describe('ClusterMetricsService', () => {
     getNodeConnection: jest.Mock;
     evictNodeClient: jest.Mock;
     forgetTopology: jest.Mock;
+    onIsolatedClient: jest.Mock;
   };
   let mockConnectionRegistry: {
     get: jest.Mock;
@@ -121,6 +122,7 @@ used_cpu_user:20.3\r
       getNodeConnection: jest.fn().mockResolvedValue(mockClient),
       evictNodeClient: jest.fn(),
       forgetTopology: jest.fn(),
+      onIsolatedClient: jest.fn(),
     };
 
     mockConnectionRegistry = {
@@ -485,6 +487,20 @@ used_cpu_user:20.3\r
       }));
     }
 
+    function ownNodeClient(call: (...args: any[]) => Promise<unknown>) {
+      const client = { status: 'ready', call: jest.fn(call), disconnect: jest.fn() };
+      mockDiscoveryService.onIsolatedClient.mockImplementation(
+        async (_id: string, _timeoutMs: number, run: (own: typeof client) => Promise<unknown>) => {
+          try {
+            return await run(client);
+          } finally {
+            client.disconnect();
+          }
+        },
+      );
+      return client;
+    }
+
     it('should return empty array when no migrations', async () => {
       const migrations = await service.getSlotMigrations();
 
@@ -646,6 +662,62 @@ used_cpu_user:20.3\r
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: true });
       });
 
+      it("is incomplete when no primary can be dialed and only the connection's own node answers", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        const own = ownNodeClient(async (cmd: string, sub: string) =>
+          cmd === 'CLUSTER' && sub === 'NODES'
+            ? 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n'
+            : [],
+        );
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.complete).toBe(false);
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
+        expect(own.disconnect).toHaveBeenCalledTimes(1);
+      });
+
+      it("is incomplete when no primary can be dialed and the connection's own node does not answer", async () => {
+        jest.useFakeTimers();
+        try {
+          mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+          mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+          const own = ownNodeClient(() => new Promise(() => undefined));
+          jest
+            .spyOn((service as unknown as { logger: Logger }).logger, 'error')
+            .mockImplementation(() => undefined);
+
+          const pending = service.checkSlotMigrations('conn-1');
+          await jest.advanceTimersByTimeAsync(4_999);
+          expect(own.disconnect).not.toHaveBeenCalled();
+          await jest.advanceTimersByTimeAsync(1);
+
+          expect(own.disconnect).toHaveBeenCalledTimes(1);
+          await expect(pending).resolves.toEqual({ migrations: [], complete: false });
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it("asks the connection's own node on a socket of its own, not on the shared client", async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
+        mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
+        const own = ownNodeClient(async () => []);
+        mockClient.call.mockClear();
+
+        await service.checkSlotMigrations('conn-1');
+
+        expect(mockDiscoveryService.onIsolatedClient).toHaveBeenCalledWith(
+          'conn-1',
+          5_000,
+          expect.any(Function),
+        );
+        expect(own.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
+        expect(own.call).toHaveBeenCalledWith('CLUSTER', 'GETSLOTMIGRATIONS');
+        expect(mockClient.call).not.toHaveBeenCalled();
+      });
+
       it('is incomplete when the topology cannot be discovered', async () => {
         mockDiscoveryService.discoverNodes.mockRejectedValueOnce(new Error('Discovery failed'));
 
@@ -679,7 +751,7 @@ used_cpu_user:20.3\r
     it("reads the connection's own node when no primary can be reached directly, and warns once", async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-      mockClient.call.mockImplementation(async (cmd: string, sub: string) =>
+      ownNodeClient(async (cmd: string, sub: string) =>
         cmd === 'CLUSTER' && sub === 'NODES'
           ? 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460 [5461->-def456]\n'
           : null,
@@ -692,14 +764,18 @@ used_cpu_user:20.3\r
       expect(migrations).toEqual([
         expect.objectContaining({ slot: 5461, sourceNodeId: 'abc123node1', targetNodeId: 'def456node2', state: 'migrating' }),
       ]);
-      expect(mockConnectionRegistry.get).toHaveBeenCalledWith('conn-1');
+      expect(mockDiscoveryService.onIsolatedClient).toHaveBeenCalledWith(
+        'conn-1',
+        5_000,
+        expect.any(Function),
+      );
       expect(warn).toHaveBeenCalledTimes(1);
     });
 
     it("reads atomic migration jobs through the connection's own node when no primary can be reached directly", async () => {
       mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
       mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-      mockClient.call.mockImplementation(async (cmd: string, sub: string) => {
+      ownNodeClient(async (cmd: string, sub: string) => {
         if (cmd !== 'CLUSTER') return null;
         if (sub === 'NODES') return 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460\n';
         if (sub === 'GETSLOTMIGRATIONS') {
@@ -723,7 +799,7 @@ used_cpu_user:20.3\r
       try {
         mockDiscoveryService.discoverNodes.mockResolvedValue(primaries);
         mockDiscoveryService.getNodeConnection.mockRejectedValue(new Error('connect ETIMEDOUT'));
-        mockClient.call.mockImplementation(() => new Promise(() => undefined));
+        ownNodeClient(() => new Promise(() => undefined));
         jest.spyOn((service as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
 
         let settled = false;

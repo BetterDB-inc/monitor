@@ -100,7 +100,20 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
    * node, and topology sync relies on seeing which node that was.
    */
   async discoverNodesIsolated(connectionId: string, timeoutMs: number): Promise<DiscoveredNode[]> {
-    const { host, port, username, password, tls } = this.connectionRegistry.get(connectionId).getClient().options;
+    return this.onIsolatedClient(connectionId, timeoutMs, async (client) => {
+      const raw = await client.call('CLUSTER', 'NODES');
+      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
+    });
+  }
+
+  async onIsolatedClient<T>(
+    connectionId: string | undefined,
+    timeoutMs: number,
+    run: (client: Valkey) => Promise<T>,
+  ): Promise<T> {
+    const { host, port, username, password, tls } = this.connectionRegistry
+      .get(connectionId)
+      .getClient().options;
     const client = new Valkey({
       host,
       port,
@@ -119,8 +132,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
     client.on('error', () => undefined);
     try {
       await client.connect();
-      const raw = await client.call('CLUSTER', 'NODES');
-      return this.toDiscoveredNodes(MetricsParser.parseClusterNodes(raw as string));
+      return await run(client);
     } finally {
       client.disconnect();
     }
