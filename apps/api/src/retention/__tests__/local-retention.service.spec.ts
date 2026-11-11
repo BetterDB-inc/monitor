@@ -72,12 +72,15 @@ describe('LocalRetentionService', () => {
     await makeService(30).runSweep();
 
     const expectedCutoff = NOW - 30 * MS_PER_DAY;
+    // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
+    // ACL audit rows store captured_at in seconds.
+    const expectedCutoffByMethod: Record<string, number> = {
+      pruneOldClientAnalyticsRollups: clientRollupBucketStart(expectedCutoff),
+      pruneOldEntries: Math.floor(expectedCutoff / 1000),
+    };
     for (const method of Object.keys(storage)) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
-      // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
-      expect(storage[method]).toHaveBeenCalledWith(
-        method === 'pruneOldClientAnalyticsRollups' ? clientRollupBucketStart(expectedCutoff) : expectedCutoff,
-      );
+      expect(storage[method]).toHaveBeenCalledWith(expectedCutoffByMethod[method] ?? expectedCutoff);
     }
   });
 
