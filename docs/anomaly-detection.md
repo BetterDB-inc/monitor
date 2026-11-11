@@ -1023,7 +1023,7 @@ X-Connection-ID: <connection-id>
 
 The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
 
-`cpu` and `network` give the shard's rate per second, its share of the cluster, the cluster median and the ratio the rule used. `rankedBy` is the metric that flagged the shard, and `topSlots` (up to 5) are ranked by it. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the last read and `keysSampled` the number of keys whose frequency it got.
+`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the last read and `keysSampled` the number of keys whose frequency it got.
 
 **Response**:
 ```json
@@ -1035,8 +1035,7 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     "since": 1704067140000,
     "sampledAt": 1704067200000,
     "cpu": { "perSecond": 930000, "share": 0.61, "median": 300000, "ratio": 3.1 },
-    "network": { "perSecond": 2097152, "share": 0.35, "median": 1887436, "ratio": 1.11 },
-    "rankedBy": "cpu",
+    "network": { "perSecond": 2097152, "share": 0.35, "median": 1887436 },
     "topSlots": [
       {
         "slot": 1234,
