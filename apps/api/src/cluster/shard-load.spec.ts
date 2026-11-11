@@ -248,15 +248,6 @@ describe('ShardLoadTracker', () => {
     ]);
   });
 
-  it('ranks the slots by network rate when asked', () => {
-    const tracker = new ShardLoadTracker();
-    tracker.observe([node('n1', { 0: [0, 0, 0], 1: [0, 0, 0], 2: [0, 0, 0] })], 0);
-    tracker.observe([node('n1', { 0: [100, 0, 0], 1: [900, 10, 10], 2: [100, 500, 500] })], 1_000);
-
-    expect(tracker.topSlots('n1', 3, 'network').map((s) => s.slot)).toEqual([2, 1, 0]);
-    expect(tracker.topSlots('n1', 3).map((s) => s.slot)).toEqual([1, 2, 0]);
-  });
-
   it('separates a shard under skewed write load from an evenly loaded cluster', () => {
     const readings = (perShardCpu: number[], step: number) =>
       perShardCpu.map((cpu, i) => node(`n${i + 1}`, { [i]: [cpu * step, cpu * step, 0] }));

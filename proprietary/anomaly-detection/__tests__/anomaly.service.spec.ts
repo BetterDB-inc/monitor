@@ -1751,6 +1751,7 @@ describe('AnomalyService', () => {
     let clock: number;
     let shardLoad: ShardLoadService;
     let counters: Map<number, number>;
+    let bytesOut: Map<number, number>;
     let owners: number[][];
     let migrating: boolean;
     let ctx: ConnectionContext;
@@ -1781,7 +1782,7 @@ describe('AnomalyService', () => {
               key_count: 10,
               cpu_usec: counters.get(slot) ?? 0,
               network_bytes_in: 0,
-              network_bytes_out: 0,
+              network_bytes_out: bytesOut.get(slot) ?? 0,
             },
           ]),
         ),
@@ -1818,6 +1819,7 @@ describe('AnomalyService', () => {
       shardLoad = new ShardLoadService();
       (service as any).shardLoad = shardLoad;
       counters = new Map();
+      bytesOut = new Map();
       owners = [
         [0, 1],
         [10, 11],
@@ -1897,6 +1899,20 @@ describe('AnomalyService', () => {
       expect(service.getHotShards('conn-a')).toEqual([]);
     });
 
+    it('raises nothing for a shard that sends far more bytes than the others on even CPU', async () => {
+      for (let n = 0; n < 12; n += 1) {
+        bytesOut.set(0, (bytesOut.get(0) ?? 0) + (64 * 1024 * 1024 * STEP_MS) / 1000);
+        await step(EVEN);
+      }
+
+      expect(shardLoad.getLatest('conn-a')?.shards[0]).toMatchObject({
+        networkBytesOutPerSecond: 64 * 1024 * 1024,
+        networkShare: 1,
+      });
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
     it('flags one loaded shard in an otherwise idle cluster with a finite value', async () => {
       await step([900_000, 0, 0], 6);
 
@@ -1919,8 +1935,7 @@ describe('AnomalyService', () => {
           since: BASE + 2 * STEP_MS,
           sampledAt: BASE + 6 * STEP_MS,
           cpu: { perSecond: 900_000, share: expect.closeTo(9 / 11), median: 100_000, ratio: 9 },
-          network: { perSecond: 0, share: 0, median: 0, ratio: 0 },
-          rankedBy: 'cpu',
+          network: { perSecond: 0, share: 0, median: 0 },
           topSlots: [
             {
               slot: 0,
@@ -2078,7 +2093,7 @@ describe('AnomalyService', () => {
       await step(HOT, 6);
 
       expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
-      expect(shardLoad.getTopSlots('conn-a', IDS[0], 1, 'cpu')[0].slot).toBe(1);
+      expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(1);
       expect(hotEvents()[0].message).toContain('Top slots by CPU: 0 (75% of the shard), 1 (25%).');
       expect(service.getHotShards('conn-a')[0]).toMatchObject({
         sampledAt: BASE + 6 * STEP_MS,

@@ -669,11 +669,13 @@ Some metrics have custom thresholds beyond Z-score:
 **Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
 
 ### hot_shard
-**What it measures**: CPU time and network bytes per second on the slots of each shard, compared with the other shards of the cluster
+**What it measures**: CPU time per second on the slots of each shard, compared with the other shards of the cluster
 **Why anomalies matter**: One shard carrying far more than the others is the first to saturate, while the cluster as a whole still looks healthy
 **Typical baseline**: Shards within a small factor of each other
 **Source**: `CLUSTER SLOT-STATS` on every primary, read by the Prometheus poll (the [shard load metrics](prometheus-metrics.md#cluster-shard-load-metrics-valkey-80))
-**Detection method**: State-based detector (not z-score based). A shard is hot when its CPU rate or its network rate (bytes in plus bytes out) is at least 2 times the cluster median and at least 100,000 CPU microseconds per second (10% of a core) or 1 MiB/s. A WARNING is raised once that has held for 60 seconds. It stays open while the shard is at least 1.5 times the median and at least three quarters of the floor, and resolves below that. One event is open per shard. The message names the shard, its address and the top slots by the metric that flagged it.
+**Detection method**: State-based detector (not z-score based). A shard is hot when its CPU rate is at least 2 times the cluster median and at least 100,000 CPU microseconds per second (10% of a core). A WARNING is raised once that has held for 60 seconds. It stays open while the shard is at least 1.5 times the median and at least three quarters of the floor, and resolves below that. One event is open per shard. The message names the shard, its address and its top slots by CPU.
+
+The network rate of a hot shard (bytes in plus bytes out) is reported with it as detail, and its share of the cluster's bytes is in the message, but it never raises an event. Bytes out count the replication stream once per replica, so a shard with more replicas, or more writes to replicate, sends more without serving more clients.
 
 The check needs three or more primaries that own slots, and Valkey 8.0+ with `cluster-slot-stats-enabled yes` on every node. It runs on the connection that reads the whole cluster, so a cluster whose nodes are registered one by one as separate connections is not checked. It is also off under the `vitals` export profile and with `METRICS_SLOT_STATS_TOP_N=0`, because the shard load is not measured then.
 
