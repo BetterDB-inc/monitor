@@ -101,6 +101,7 @@ import {
   HOT_KEY_SLOTS,
   HotKeyRead,
   HotShardKeyDetail,
+  hotKeysAfterRead,
   hotKeysUnavailable,
   sampleHotKeys,
 } from './hot-shard-keys';
@@ -725,7 +726,10 @@ export class AnomalyService
   private hotShardJudgedAt = new Map<string, number>();
   private hotShardDetails = new Map<string, Map<string, HotShardDetail>>();
   private hotShardSince = new Map<string, Map<string, number>>();
-  private hotShardKeys = new Map<string, Map<string, HotShardKeyDetail>>();
+  private hotShardKeys = new Map<
+    string,
+    Map<string, { detail: HotShardKeyDetail; checkedAt: number }>
+  >();
   private hotKeyNoteLogged = new Map<string, string>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
@@ -6347,27 +6351,28 @@ export class AnomalyService
     const connectionId = ctx.connectionId;
     const eventIds = this.hotShardEventIds.get(connectionId);
     const known = this.hotShardKeys.get(connectionId);
-    const kept = new Map<string, HotShardKeyDetail>();
-    const due: Array<{ signature: string; shardId: string }> = [];
+    const kept = new Map<string, { detail: HotShardKeyDetail; checkedAt: number }>();
+    const due: Array<{ signature: string; shardId: string; last?: HotShardKeyDetail }> = [];
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
       const wanted =
         eventIds?.has(signature) || this.isHotShardAboutToRaise(connectionId, sampledAt, finding);
       if (!wanted) continue;
       const last = known?.get(signature);
-      const fresh =
-        last?.keysSampledAt !== undefined && timestamp - last.keysSampledAt < HOT_KEY_REFRESH_MS;
-      if (fresh) kept.set(signature, last);
-      else due.push({ signature, shardId: finding.shardId });
+      if (last && timestamp - last.checkedAt < HOT_KEY_REFRESH_MS) kept.set(signature, last);
+      else due.push({ signature, shardId: finding.shardId, last: last?.detail });
     }
     const reads = await Promise.all(
       due.map(({ shardId }) =>
         this.readHotShardKeys(connectionId, shardId, topSlots.get(shardId) ?? []),
       ),
     );
-    for (const [index, { signature }] of due.entries()) {
+    for (const [index, { signature, last }] of due.entries()) {
       this.logHotKeySource(ctx, reads[index]);
-      kept.set(signature, { ...reads[index], keysSampledAt: timestamp });
+      kept.set(signature, {
+        detail: hotKeysAfterRead(last, reads[index], timestamp),
+        checkedAt: timestamp,
+      });
     }
     if (kept.size > 0) this.hotShardKeys.set(connectionId, kept);
     else this.hotShardKeys.delete(connectionId);
@@ -6494,7 +6499,7 @@ export class AnomalyService
         finding,
         topSlots,
         sampledAt - since,
-        this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.topKeys,
+        this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail.topKeys,
       ),
       resolved: false,
       connectionId: ctx.connectionId,
@@ -6526,7 +6531,7 @@ export class AnomalyService
         cpu: finding.cpu,
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
-        ...(keys?.get(signature) ?? hotKeysUnavailable('the keys have not been read yet')),
+        ...(keys?.get(signature)?.detail ?? hotKeysUnavailable('the keys have not been read yet')),
       });
     }
     if (details.size > 0) this.hotShardDetails.set(connectionId, details);

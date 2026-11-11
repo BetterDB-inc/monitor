@@ -2358,6 +2358,93 @@ describe('AnomalyService', () => {
         expect(hotEvents()[0].message).toContain('"user:42"');
       });
 
+      it('keeps the last key names when a refresh fails, and reads again five minutes later', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+        const dials = () =>
+          discovery.getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === 'a0000000').length;
+        await step(HOT, 6);
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 20);
+
+        expect(dials()).toBe(2);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          keyNote:
+            'the last read gave no names (reading the keys from the hot primary failed: ' +
+            'ECONNREFUSED); these are from an earlier read',
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+
+        await step(HOT, 19);
+
+        expect(dials()).toBe(2);
+
+        discovery.getNodeConnection.mockResolvedValue(client);
+        keys = { 0: [['later', 99]] };
+        await step(HOT);
+
+        expect(dials()).toBe(3);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 1,
+          keysSampledAt: BASE + 46 * STEP_MS,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+      });
+
+      it('keeps the last key names when every name of a refresh was skipped', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        keys = {
+          0: [['user:42', new Error('MOVED 0 10.0.0.2:6379')]],
+          1: [['cart:{9}', new Error('ASK 1 10.0.0.2:6379')]],
+        };
+
+        await step(HOT, 20);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          keyNote: 'the last read gave no names; these are from an earlier read',
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+
+        await step(HOT, 19);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+
+      it('reads the keys of the top slots by CPU when another slot carries the bytes', async () => {
+        owners[0] = [0, 1, 2, 3, 4];
+        const client = hotNode();
+        dial(client);
+
+        for (let n = 0; n < 6; n += 1) {
+          bytesOut.set(4, (bytesOut.get(4) ?? 0) + (64 * 1024 * 1024 * STEP_MS) / 1000);
+          for (const slot of [1, 2]) counters.set(slot, (counters.get(slot) ?? 0) + 150_000);
+          await step(HOT);
+        }
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(client.callBuffer.mock.calls.map(([, , slot]) => slot)).toEqual([0, 1, 2]);
+      });
+
       it('raises without key names when the node has no LFU policy, and says so once', async () => {
         const warn = jest.spyOn((service as any).logger, 'warn');
         keys = { 0: [['user:42', NO_LFU]], 1: [['cart:{9}', NO_LFU]] };
