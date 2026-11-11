@@ -448,12 +448,13 @@ is written and a validation job fails with the SSH error. If a tunnel drops
 while a job runs, the job stops and fails with
 `The SSH tunnel to the source closed unexpectedly` (or `target`).
 
-With `emptyDbBeforeSync`, a drop before the flush is sent skips the flush. A
-flush that has already been sent cannot be recalled: if a tunnel drops while it
-runs, RedisShake is not started and the target may already be empty. When the
-flush was confirmed, the job carries the notice `The target was emptied before
-the SSH tunnel dropped, and nothing was copied to it.` Without the notice the
-flush may or may not have run, so check the target before you retry.
+With `emptyDbBeforeSync`, a drop or a cancel before the flush is sent skips the
+flush. A flush that has started cannot be recalled and runs on every target
+master: if a tunnel drops or the job is cancelled while it runs, RedisShake is
+not started and the target is already empty. The job then carries the notice
+`The target was emptied before the migration stopped, and nothing was copied to
+it.` If the flush itself fails, the job fails with `Target pre-flush failed`
+and the target may be partly emptied, so check it before you retry.
 
 A tunnelled connection normally has its bastion host key pinned from the first
 time BetterDB connected to it. If none is stored yet, the job's tunnel pins the

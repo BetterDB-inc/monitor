@@ -55,8 +55,8 @@ export const SHUTDOWN_CANCEL_MESSAGE = 'Stopped because BetterDB shut down';
 export const SHUTDOWN_START_MESSAGE =
   'BetterDB is shutting down; start the migration again after it restarts.';
 
-export const TARGET_EMPTIED_BEFORE_TUNNEL_DROP_NOTICE =
-  'The target was emptied before the SSH tunnel dropped, and nothing was copied to it.';
+export const TARGET_EMPTIED_NOTHING_COPIED_NOTICE =
+  'The target was emptied before the migration stopped, and nothing was copied to it.';
 
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
@@ -411,7 +411,6 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     targetIsCluster: boolean,
     shouldStop: () => boolean,
   ): Promise<boolean> {
-    let sent = false;
     if (targetIsCluster) {
       const nodes = await targetAdapter.getClusterNodes();
       if (shouldStop()) return false;
@@ -429,8 +428,6 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
             maxRetriesPerRequest: 1,
           });
           await client.connect();
-          if (shouldStop()) return;
-          sent = true;
           await client.flushall();
         } finally {
           try { client?.disconnect(); } catch { /* ignore */ }
@@ -438,13 +435,10 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       }));
     } else {
       if (shouldStop()) return false;
-      sent = true;
       await targetAdapter.getClient().flushall();
     }
-    if (sent) {
-      this.logger.log(`Execution pre-flush: flushed target before migration`);
-    }
-    return sent;
+    this.logger.log(`Execution pre-flush: flushed target before migration`);
+    return true;
   }
 
   /**
@@ -509,28 +503,27 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       // by the finally block (TOML unlinked, completedAt set) — the credential-bearing
       // TOML never lingers, and the job doesn't stay half-finished. Guarded on cancel
       // so we never wipe a target for a run the caller already stopped.
-      if (job.tunnelError !== undefined) return;
+      const stopped = () => (job.status as string) === 'cancelled' || job.tunnelError !== undefined;
+      if (stopped()) return;
       let targetFlushed = false;
-      if (preSpawn.emptyDbBeforeSync && (job.status as string) !== 'cancelled') {
+      if (preSpawn.emptyDbBeforeSync) {
         try {
           targetFlushed = await this.flushTargetBeforeSync(
             preSpawn.targetAdapter,
             preSpawn.targetConfig,
             preSpawn.targetIsCluster,
-            () => (job.status as string) === 'cancelled' || job.tunnelError !== undefined,
+            stopped,
           );
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           throw new Error(`Target pre-flush failed: ${message}`);
         }
-        if ((job.status as string) === 'cancelled') return;
       }
 
       await preSpawn.statusPortReservation?.release();
-      if ((job.status as string) === 'cancelled') return;
-      if (job.tunnelError !== undefined) {
+      if (stopped()) {
         if (targetFlushed) {
-          job.notices.push(TARGET_EMPTIED_BEFORE_TUNNEL_DROP_NOTICE);
+          job.notices.push(TARGET_EMPTIED_NOTHING_COPIED_NOTICE);
         }
         return;
       }

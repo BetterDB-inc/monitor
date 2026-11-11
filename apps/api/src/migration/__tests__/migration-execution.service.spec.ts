@@ -1360,7 +1360,34 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
 
     const job = await waitForTerminal(service, id);
     expect(flushall).toHaveBeenCalledTimes(1);
-    expect(job.notices).toEqual(['The target was emptied before the SSH tunnel dropped, and nothing was copied to it.']);
+    expect(job.notices).toEqual(['The target was emptied before the migration stopped, and nothing was copied to it.']);
+  });
+
+  it('says the target was already emptied when the job is cancelled during the flush', async () => {
+    const { service, registry } = setup(['conn-1']);
+    let finishFlush: () => void = () => undefined;
+    const flushall = jest.fn().mockImplementation(() => new Promise<string>((resolve) => { finishFlush = () => resolve('OK'); }));
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+    await flushProbe();
+    expect(flushall).toHaveBeenCalledTimes(1);
+    service.stopExecution(id);
+    finishFlush();
+
+    let job = await waitForTerminal(service, id);
+    for (let i = 0; i < 200 && job.completedAt === undefined; i++) {
+      await flushProbe();
+      job = service.getExecution(id)!;
+    }
+    expect(job.status).toBe('cancelled');
+    expect(job.notices).toEqual(['The target was emptied before the migration stopped, and nothing was copied to it.']);
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it('fails a command-mode job with the tunnel message when a tunnel drops mid-run', async () => {

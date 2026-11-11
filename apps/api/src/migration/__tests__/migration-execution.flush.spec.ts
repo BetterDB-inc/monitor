@@ -8,7 +8,8 @@ type MockClient = {
 };
 
 const clients: MockClient[] = [];
-let onConnect: () => void = () => undefined;
+let onConnect: (host: string) => void | Promise<void> = () => undefined;
+let onFlush: (host: string) => void = () => undefined;
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; tls?: { servername?: string } }) => {
@@ -17,9 +18,12 @@ jest.mock('iovalkey', () => {
       port: opts.port,
       options: opts,
       connect: jest.fn().mockImplementation(async () => {
-        onConnect();
+        await onConnect(opts.host);
       }),
-      flushall: jest.fn().mockResolvedValue('OK'),
+      flushall: jest.fn().mockImplementation(async () => {
+        onFlush(opts.host);
+        return 'OK';
+      }),
       disconnect: jest.fn(),
     };
     clients.push(client);
@@ -56,6 +60,7 @@ describe('MigrationExecutionService.flushTargetBeforeSync', () => {
   beforeEach(() => {
     clients.length = 0;
     onConnect = () => undefined;
+    onFlush = () => undefined;
   });
 
   it('flushes every target master, verifying each against the hostname it announces', async () => {
@@ -100,11 +105,17 @@ describe('MigrationExecutionService.flushTargetBeforeSync', () => {
     expect(clients).toEqual([]);
   });
 
-  it('sends no FLUSHALL when the job stops while the masters are being dialled', async () => {
+  it('still flushes every master when the job stops after the first master was flushed', async () => {
     const service = createService();
     let stopped = false;
-    onConnect = () => {
-      stopped = true;
+    let releaseSlowMaster: () => void = () => undefined;
+    onConnect = (host) =>
+      host === '10.0.0.2' ? new Promise<void>((resolve) => { releaseSlowMaster = resolve; }) : undefined;
+    onFlush = (host) => {
+      if (host === '10.0.0.1') {
+        stopped = true;
+        releaseSlowMaster();
+      }
     };
     const targetAdapter = {
       getClusterNodes: jest.fn().mockResolvedValue(TWO_MASTERS),
@@ -113,10 +124,10 @@ describe('MigrationExecutionService.flushTargetBeforeSync', () => {
 
     const flushed = await service.flushTargetBeforeSync(targetAdapter, TARGET_CONFIG, true, () => stopped);
 
-    expect(flushed).toBe(false);
+    expect(flushed).toBe(true);
     expect(clients).toHaveLength(2);
     for (const client of clients) {
-      expect(client.flushall).not.toHaveBeenCalled();
+      expect(client.flushall).toHaveBeenCalledTimes(1);
       expect(client.disconnect).toHaveBeenCalledTimes(1);
     }
   });
