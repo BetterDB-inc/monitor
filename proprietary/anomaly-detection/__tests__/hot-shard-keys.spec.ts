@@ -5,9 +5,12 @@ import {
   HOT_KEY_NAME_LIMIT,
   HOT_KEY_TOP,
   type HotKeyReader,
+  type HotShardKeyDetail,
   describeHotKeys,
   describeMissingKeys,
   displayKeyName,
+  hotKeysAfterRead,
+  hotKeysUnavailable,
   sampleHotKeys,
 } from '../hot-shard-keys';
 
@@ -262,6 +265,79 @@ describe('sampleHotKeys', () => {
       keySource: 'lfu',
       keysSampled: 0,
       topKeys: [],
+    });
+  });
+});
+
+describe('hotKeysAfterRead', () => {
+  const earlier: HotShardKeyDetail = {
+    keySource: 'lfu',
+    keysSampled: 2,
+    keysSampledAt: 1_000,
+    topKeys: [
+      { key: 'user:42', slot: 5, freq: 255 },
+      { key: 'user:1', slot: 5, freq: 40 },
+    ],
+  };
+
+  it('takes a read with names and stamps it with its time', () => {
+    const read = {
+      keySource: 'lfu' as const,
+      keysSampled: 1,
+      topKeys: [{ key: 'a', slot: 6, freq: 9 }],
+    };
+
+    expect(hotKeysAfterRead(earlier, read, 2_000)).toEqual({ ...read, keysSampledAt: 2_000 });
+  });
+
+  it('keeps the earlier names when the read failed, and says why', () => {
+    const failed = hotKeysUnavailable('reading the keys from the hot primary timed out');
+
+    expect(hotKeysAfterRead(earlier, failed, 2_000)).toEqual({
+      ...earlier,
+      keyNote:
+        'the last read gave no names (reading the keys from the hot primary timed out); ' +
+        'these are from an earlier read',
+    });
+  });
+
+  it('keeps the earlier names when the read skipped every name', () => {
+    const skipped = { keySource: 'lfu' as const, keysSampled: 0, topKeys: [] };
+
+    expect(hotKeysAfterRead(earlier, skipped, 2_000)).toEqual({
+      ...earlier,
+      keyNote: 'the last read gave no names; these are from an earlier read',
+    });
+  });
+
+  it('keeps the names of the last good read through several bad ones', () => {
+    const once = hotKeysAfterRead(earlier, hotKeysUnavailable('first reason'), 2_000);
+    const twice = hotKeysAfterRead(once, hotKeysUnavailable('second reason'), 3_000);
+
+    expect(twice).toEqual({
+      ...earlier,
+      keyNote: 'the last read gave no names (second reason); these are from an earlier read',
+    });
+  });
+
+  it('drops the note once a read gives names again', () => {
+    const kept = hotKeysAfterRead(earlier, hotKeysUnavailable('a reason'), 2_000);
+    const read = {
+      keySource: 'lfu' as const,
+      keysSampled: 1,
+      topKeys: [{ key: 'a', slot: 6, freq: 9 }],
+    };
+
+    expect(hotKeysAfterRead(kept, read, 3_000)).not.toHaveProperty('keyNote');
+  });
+
+  it('gives the failed read itself when there are no earlier names', () => {
+    const failed = hotKeysUnavailable('a reason');
+
+    expect(hotKeysAfterRead(undefined, failed, 2_000)).toEqual({ ...failed, keysSampledAt: 2_000 });
+    expect(hotKeysAfterRead({ ...failed, keysSampledAt: 1_000 }, failed, 2_000)).toEqual({
+      ...failed,
+      keysSampledAt: 2_000,
     });
   });
 });

@@ -50,6 +50,18 @@ export function hotKeysUnavailable(keyNote: string): HotKeyRead {
   return { keySource: 'unavailable', keyNote, keysSampled: 0, topKeys: [] };
 }
 
+export function hotKeysAfterRead(
+  last: HotShardKeyDetail | undefined,
+  read: HotKeyRead,
+  readAt: number,
+): HotShardKeyDetail {
+  if (read.topKeys.length > 0 || !last || last.topKeys.length === 0) {
+    return { ...read, keysSampledAt: readAt };
+  }
+  const why = read.keyNote === undefined ? '' : ` (${read.keyNote})`;
+  return { ...last, keyNote: `the last read gave no names${why}; these are from an earlier read` };
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
