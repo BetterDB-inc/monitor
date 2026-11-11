@@ -1,0 +1,4 @@
+{"scenario": {"baselineSec": 30, "gapSec": 15,
+  "phases": ["spike", "hotShard", "slowCommands", "memoryPressure", "replicaLag", "primaryKill"],
+  "spike": {"durationSec": 20}, "hotShard": {"durationSec": 20}, "slowCommands": {"durationSec": 20, "calls": 8, "members": 200000},
+  "memoryPressure": {"durationSec": 20}, "replicaLag": {"durationSec": 20}}}

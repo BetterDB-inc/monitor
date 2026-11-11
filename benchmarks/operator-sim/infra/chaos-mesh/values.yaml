@@ -1,0 +1,8 @@
+# Chaos Mesh 2.8.8 on kind: containerd runtime. Only NetworkChaos/PodChaos are used.
+chaosDaemon:
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+dashboard:
+  create: false
+controllerManager:
+  replicaCount: 1

@@ -1,0 +1,2 @@
+# Standalone harness: its own pnpm root, deliberately outside the monitor workspace.
+packages: []

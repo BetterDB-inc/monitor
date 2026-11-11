@@ -1,0 +1,31 @@
+2026-11-11T13:01:35Z start: context=kind-bz-sim cluster=valkey/bz operator=ghcr.io/valkey-io/valkey-operator:v0.8.0
+2026-11-11T13:01:51Z baseline check (no roll yet)
+2026-11-11T13:02:12Z round summary: 0 slotless-master observations
+2026-11-11T13:02:12Z round 1: patch spec.image=valkey/valkey:9.1.3
+2026-11-11T13:11:12Z round 1: Ready; observing 300s
+2026-11-11T13:16:22Z round summary: 0 slotless-master observations
+2026-11-11T13:16:22Z round 2: patch spec.image=valkey/valkey:9.1.2
+2026-11-11T13:24:28Z round 2: Ready; observing 300s
+2026-11-11T13:29:43Z round summary: 0 slotless-master observations
+2026-11-11T13:29:43Z round 3: patch spec.image=valkey/valkey:9.1.3
+2026-11-11T13:38:03Z round 3: Ready; observing 300s
+2026-11-11T13:38:10Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:38:27Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:38:43Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:39:00Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:39:16Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:39:32Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:39:49Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:40:05Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:40:21Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:40:38Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:40:54Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:41:11Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:41:28Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:41:45Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:42:02Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:42:19Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:42:35Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:42:51Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:43:09Z slotless-master id=6758063940d5e14c7ffb6f63d68185dd288c2f8b ip=10.244.5.24 pod=valkey-bz-2-1-0 self-role=slave listed-by=7/36
+2026-11-11T13:43:19Z round summary: 19 slotless-master observations

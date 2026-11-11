@@ -1,0 +1,27 @@
+# betterdb/betterdb-monitor chart. image.tag, db.host and env values that depend on
+# sim.yaml are set by src/infra/betterdb.ts via --set.
+image:
+  repository: betterdb/monitor
+  pullPolicy: IfNotPresent   # tag/pullPolicy set by src/infra/betterdb.ts (imageTag or buildRef)
+db:
+  username: betterdb
+  existingSecret: betterdb-sim
+  existingSecretKey: valkey-password
+storage:
+  type: postgres
+  existingSecret: betterdb-sim
+  existingSecretKey: storage-url
+license:
+  existingSecret: betterdb-sim
+  existingSecretKey: license-key
+telemetry: false
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { cpu: "2", memory: 2Gi }
+extraEnv:
+  - { name: CLUSTER_AUTO_REGISTER_NODES, value: "true" }
+  - { name: ANOMALY_POLL_INTERVAL_MS, value: "1000" }
+  # Single-user local sim: no login, so the collector and screenshots hit the API directly.
+  - { name: WORKSPACE_DISABLED, value: "true" }
+  - name: ENCRYPTION_KEY       # persists auto-registered child connections
+    valueFrom: { secretKeyRef: { name: betterdb-sim, key: encryption-key } }

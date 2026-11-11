@@ -1,0 +1,177 @@
+# All harness parameters. Validated by src/config.ts (zod). No magic numbers in code.
+seed: 42
+cluster:
+  name: bz
+  namespace: valkey
+  shards: 12
+  replicasPerShard: 2
+  valkeyImage: "valkey/valkey:9.1.2"
+  rollToImage: "valkey/valkey:9.1.3"
+  persistence: false
+  # limit > maxmemory leaves headroom for replication buffers + diskless-sync fork COW
+  # (an OOM-kill restarts the container in place → operator #533 data-loss path).
+  resources: { cpu: 100m, memoryRequest: 320Mi, memoryLimit: 512Mi }
+  exporterResources: { cpu: 10m, memory: 32Mi }
+  maxmemory: 256mb
+  maxmemoryPolicy: allkeys-lru
+  slowlogSlowerThanUs: 10000
+  latencyMonitorThresholdMs: 10
+  readyTimeoutSec: 900
+  usersSecret: bz-users
+  pollSec: 5
+  enableDebugCommand: local   # yes | no | local
+operator: { namespace: valkey-operator-system }
+chaos: { namespace: chaos-mesh }
+harness: { namespace: operator-sim, imageRepo: operator-sim, startTimeoutSec: 180, jobTimeoutSec: 1800 }
+clients: { requestTimeoutMs: 1000, injectRequestTimeoutMs: 30000, smokeConcurrency: 256 }
+kind:
+  clusterName: bz-sim
+  workers: 6
+  zones: 3
+  # kind v0.33.0 default; Chaos Mesh 2.8.8 needs K8s 1.35–1.37 (docs/VERSIONS.md)
+  nodeImage: "kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+# 2.5M × ~2.6 KB ≈ 6.5 GB > 12 × 256mb maxmemory → would evict at baseline and mask memoryPressure.
+# 1M keys (half profiles) ≈ 1.6 GB ≈ 50% of primary maxmemory. See docs/DECISIONS.md D7.
+dataset:
+  keys: 1000000
+  mix: { profiles: 0.5, counters: 0.2, dedupSets: 0.15, inboxes: 0.15 }
+  valueBytes: [1024, 4096]     # profile hash payload
+  setMembers: 10               # members per dedup set / inbox zset
+  memberBytes: 24
+  overheadBytes: { key: 80, field: 24 }   # rough per-key / per-field resident overhead
+  maxFillRatio: 0.75
+  skipTolerance: 0.02
+  warmBatch: 500
+  warmConcurrency: 16
+  warmProgressEvery: 100000
+  warmRequestTimeoutMs: 10000
+load:
+  memtier:
+    image: "redislabs/memtier_benchmark:2.5.2"
+    clients: 8
+    threads: 4
+    ratio: "1:4"            # set:get
+    keyPattern: "Z:Z"
+    zipfExp: 0.4           # 1.0 put ~3× memtier traffic on one shard (FINDINGS); 0.4 keeps skew without a planned hot shard
+    keyPrefix: "mt:"
+    keyMaximum: 100000
+    dataSizeRange: "512-1024"
+    # --rate-limiting is per *connection*, and --cluster-mode opens one per shard per client:
+    # total ≈ clients × threads × shards × rate = 8 × 4 × 12 × 4 ≈ 1536 req/s. (50 gave ~15–19k/s, FINDINGS.)
+    ratePerConn: 4
+    pipeline: 1
+    collectGraceSec: 120
+    cpu: 500m
+  app:
+    rps: 3000
+    replicas: 2
+    controlFile: /control/control.json
+    tickMs: 10
+    rateLimitTtlSec: 120
+    dedupMemberSpace: 1000
+    inboxKeep: 50
+    cpu: 500m
+    memory: 256Mi
+    mix: { profileHGET: 0.45, counterINCR: 0.20, rateLimitINCRBY_EXPIRE: 0.15, dedupSADD_SISMEMBER: 0.10, zsetZADD_ZRANGE: 0.10 }
+  # settle ≥ BetterDB window (300 samples @1 s) + margin, so the steady window is judged
+  # against a baseline learned under load, not the idle pre-load baseline.
+  steady: { durationSec: 300, settleSec: 360, balanceTolerance: 0.25, p99StabilityQuantile: 0.95, p99StabilityFactor: 3 }
+scenario:
+  baselineSec: 360       # >= 5 min: fills BetterDB's 300-sample window
+  gapSec: 120            # recovery between injections (> 60s cooldown + settle)
+  phases: [spike, hotShard, slowCommands, memoryPressure, replicaLag, primaryKill, rollingUpdate]
+  injectorGraceSec: 5    # injector Jobs outlive the hold slightly; revert() deletes them
+  pollMs: 2000           # condition polling in primaryKill/rollingUpdate holds
+  bannerEverySec: 15
+  countdownFinalSec: 5
+  loadOverrunSec: 1800   # memtier --test-time = planned total + this (rolls/kills run long)
+  spike: { multiplier: 3, durationSec: 90 }
+  hotShard: { shardIndex: 7, hashTag: "{campaign:7}", rps: 4000, keys: 16, durationSec: 120 }
+  slowCommands: { shardIndex: 3, hashTag: "{audience:3}", method: bigSet, members: 1000000, preloadBatch: 10000, calls: 40, debugSleepSec: 0.05, durationSec: 90 }
+  memoryPressure: { shardIndex: 5, hashTag: "{import:5}", maxmemory: 64mb, writeRps: 2000, valueBytes: 2048, durationSec: 120 }
+  replicaLag: { shardIndex: 9, hashTag: "{journey:9}", latencyMs: 200, bandwidth: "1mbps", bandwidthLimitBytes: 20971520, bandwidthBufferBytes: 10000,
+                writeBurstRps: 3000, valueBytes: 1024, keySpace: 20000, durationSec: 120 }
+  primaryKill: { shardIndex: 2, mode: graceful, expectedRecoverySec: 60, timeoutSec: 300 }   # graceful | hard (Chaos Mesh pod-kill, gracePeriod 0)
+  rollingUpdate: { enabled: true, expectedSec: 600, timeoutSec: 1800 }   # ~506 s observed for a config roll (FINDINGS)
+screenshots:
+  enabled: true
+  width: 1600
+  height: 1000
+  settleMs: 3000
+  timeoutMs: 30000
+  # Extra capture cropped to the panel that proves the phase's claim (v0.55.0 UI text).
+  panels:
+    hotShard: { view: cluster, tab: Nodes, anchor: "Operations/sec", container: "space-y-3" }
+    replicaLag: { view: node, anchor: "Replication divergence", container: "rounded-lg" }   # Card root
+    rollingUpdate: { view: cluster, anchor: "Cluster Health", clip: [272, 0, 1328, 960] }
+prospect:
+  windowPadSec: 30            # scoped screenshot range = phase window ± this
+  shots: [replicaLag, rollingUpdate]   # panels that prove a claim on their own (hotShard capture predates the capture-before-revert fix)
+  buildLabel: "v0.55.0 plus a fix that ships in the next release"
+  signature: "Kristiyan Ivanov · BetterDB · kristiyan@betterdb.com"
+  slowlogMetrics: [slowlog_last_id, "group:slow_queries"]
+  # Prose not derivable from a run. Fill only with verified statements (FINDINGS.md).
+  notes:
+    zeroReplica: "It happened in all 12 shards in each of the four rolls our scenario runs included. We can attach the per-second timeline to #552 or #562."
+    ghostMaster: "**A demoted primary can stay listed as a master after a roll.** In 3 of those same 4 rolls (the fourth, a roll-only run on a freshly reset cluster, stayed clean), and in 1 of 3 rolls on a clean cluster running nothing but the operator (no monitoring, no load), part of the cluster kept listing a node that had been demoted to replica as a slotless `master` for as long as we watched (5 to 10 minutes, until each run ended). In the clean repro, 7 of 36 nodes still listed that node as a master at config epoch 146 while the node itself reported replica at epoch 145. BetterDB's cluster page showed 13 primaries for 12 shards but raised no anomaly; we're adding one. The repro script and the captured CLUSTER NODES output are ready to attach."
+    plannedRolls: ""
+    slowCommands: "BetterDB reads each node's slowlog every 30 s, so a slow-query finding waits up to 30 s for the next read (verified: in this run the findings landed on a 30 s grid)."
+    repro: "**Reproduce it.** Happy to share the repo: `make all` brings up kind, the operator and BetterDB, runs the same timeline and regenerates this report from the raw data."
+  captions:
+    hotShard: ""
+    replicaLag: "BetterDB's replication-divergence panel for shard 9's primary, captured at the end of the phase: the replica behind the shaped link is 181 MB / 58 s behind and marked Diverging; the other replica stays in sync."
+    rollingUpdate: "BetterDB's cluster page right after the roll: 13 masters and 23 replicas for a 12 × 2 cluster. Seven of 36 nodes (ground truth) still listed a demoted node as a slotless master; BetterDB displayed it but raised no anomaly."
+report:
+  warmupSec: 30            # BetterDB z-score warmup (30 samples @1 s); detections before this aren't FPs
+  onsetBaselineSec: 60     # ground-truth baseline window before each injection
+  opsOnsetFactor: 1.5
+  replLagOnsetBytes: 1048576
+  maxMatchedPerPhase: 12
+  textChars: 240
+  chromiumPath: /usr/bin/chromium   # PDF export + screenshots (playwright-core, no browser download)
+truth:   # ground-truth collector (src/truth/collector.ts)
+  file: /data/groundtruth.jsonl
+  primaryIntervalSec: 1
+  replicaIntervalSec: 5
+  shardsIntervalSec: 5
+  viewIntervalSec: 5     # per-node CLUSTER NODES view summary (gossip divergence)
+  slotStatsIntervalSec: 10
+  slotStatsLimit: 20
+  podRefreshSec: 5
+  tickMs: 250
+  requestTimeoutMs: 2000
+  clientName: operator-sim-truth
+  logEntries: 10
+  logArgs: 4
+  cpu: 200m
+  memory: 256Mi
+  smokeSec: 40
+  infoFields: [instantaneous_ops_per_sec, total_commands_processed, keyspace_hits, keyspace_misses, evicted_keys, expired_keys,
+    used_memory, maxmemory, connected_clients, blocked_clients, instantaneous_input_kbps, instantaneous_output_kbps,
+    used_cpu_sys, used_cpu_user, master_link_status, master_sync_in_progress, master_repl_offset, slave_repl_offset,
+    master_last_io_seconds_ago, connected_slaves, rejected_connections]
+betterdb:
+  namespace: betterdb
+  url: "http://localhost:3001"   # kind maps hostPort (from url) → nodePort on the control plane
+  nodePort: 30301
+  release: betterdb
+  readyTimeoutSec: 300
+  requestTimeoutMs: 10000
+  eventLimit: 10000     # API default is 100
+  verify: { registerCycles: 2, syncIntervalSec: 30, churnWatchSec: 300, healthyCoverageReasons: [no_targets, not_applicable, covered_elsewhere] }   # auto-register syncs every 30 s
+  valkeyUser: betterdb
+  # docs/minimum-acl.md read-only monitoring line (Valkey 9.1 has COMMANDLOG + GETSLOTMIGRATIONS).
+  valkeyAcl: "-@all +ping +info +select +client|setname +client|getname +client|list +client|no-touch +config|get +slowlog|get +slowlog|len +commandlog|get +commandlog|len +latency|latest +latency|histogram +latency|history +latency|doctor +memory|stats +memory|doctor +acl|whoami +acl|log +role +cluster|info +cluster|nodes +cluster|shards +cluster|slot-stats +cluster|getslotmigrations +cluster|myid +command|info +dbsize +lastsave +time +module|list"
+  # v0.55.0 (2026-11-10) is the first release with #651 (headless seed), #654 (nodeAddr), #673 (coverage).
+  # Chart 0.51.1 lags the app, so the tag is overridden.
+  imageTag: 0.55.0-no-ai
+  # Set → build this git ref of the monitor repo instead (local, never pushed). Recording
+  # runs use the cumulative-counter fix (docs/DECISIONS.md D17); unset to run stock v0.55.0.
+  buildRef: fix/anomaly-cumulative-counter-deltas
+  pollSec: 5
+  matchWindowSec: 180
+charts:   # pinned; verified in docs/VERSIONS.md
+  metricsServer: { repo: "https://kubernetes-sigs.github.io/metrics-server/", chart: metrics-server, version: 3.14.0 }
+  valkeyOperator: { repo: "https://valkey.io/valkey-helm/", chart: valkey-operator, version: 0.8.0 }
+  betterdbMonitor: { repo: "https://docs.betterdb.com/charts", chart: betterdb-monitor, version: 0.51.1 }
+  chaosMesh: { repo: "https://charts.chaos-mesh.org", chart: chaos-mesh, version: 2.8.8 }

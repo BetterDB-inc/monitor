@@ -1,0 +1,39 @@
+# Rendered by src/infra/valkey.ts from config/sim.yaml (double-brace placeholders).
+# Operator v0.8.0 CRD: spec.replicas = replicas per shard (not replicasPerShard, PR #590 unmerged).
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: {{name}}
+  namespace: {{namespace}}
+spec:
+  shards: {{shards}}
+  replicas: {{replicas}}
+  image: {{image}}
+  workloadType: StatefulSet
+  resources:
+    requests: { cpu: {{cpu}}, memory: {{memoryRequest}} }
+    limits: { memory: {{memoryLimit}} }
+  exporter:
+    enabled: true
+    resources:
+      requests: { cpu: {{exporterCpu}}, memory: {{exporterMemory}} }
+  scheduling:
+    node:
+      spread:
+        shard: { mode: Required }      # primary + replicas of a shard on distinct workers
+        primaries: { mode: Preferred }
+    zone:
+      spread:
+        shard: { mode: Preferred }
+  users:
+    - name: {{monitorUser}}             # BetterDB, docs/minimum-acl.md
+      passwordSecret: { name: {{usersSecret}}, keys: [{{monitorUser}}] }
+      permissions: "{{monitorAcl}}"
+  config:
+    maxmemory: "{{maxmemory}}"
+    maxmemory-policy: "{{maxmemoryPolicy}}"
+    slowlog-log-slower-than: "{{slowlogSlowerThanUs}}"
+    commandlog-execution-slower-than: "{{slowlogSlowerThanUs}}"
+    latency-monitor-threshold: "{{latencyMonitorThresholdMs}}"
+    enable-debug-command: "{{enableDebugCommand}}"
+    cluster-slot-stats-enabled: "yes"   # cpu-usec / network-bytes-* in CLUSTER SLOT-STATS (not live-settable → rolls)

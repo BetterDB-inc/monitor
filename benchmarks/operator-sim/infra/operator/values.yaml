@@ -1,0 +1,2 @@
+# valkey-operator chart 0.8.0. CRDs are applied server-side by src/infra/operator.ts (helm --skip-crds).
+replicaCount: 1

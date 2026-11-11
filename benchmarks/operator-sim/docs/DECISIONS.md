@@ -1,0 +1,23 @@
+# DECISIONS
+
+- D1 (2026-11-10) Harness lives in `benchmarks/operator-sim/` of the monitor repo, branch `bench/operator-sim`, own pnpm root (`packages: []`) so it never touches the product workspace/lockfile.
+- D2 Node 22 is taken from `~/.nvm/versions/node/v22.12.0/bin` via PATH (user `.npmrc` prefix breaks `nvm use`).
+- D3 All kubectl/helm calls pass `--context/--kube-context kind-<kind.clusterName>`; the user's current context (EKS) is never read or switched.
+- D4 jq optional: download blocked by sandbox policy; all JSON handled in TS.
+- D5 Operator v0.8.0 → ValkeyCluster uses `spec.replicas` (per shard). `replicasPerShard` in sim.yaml maps onto it; never both.
+- D6 Chaos: `pod-kill` only (no `container-kill`/OOM/DEBUG SEGFAULT) because of operator #533 (no-persistence in-place restart empties shard).
+- D7 dataset.keys 2.5M → 1M (50% profiles hashes, 20% counters, 15% sets, 15% zsets) ≈ 50% of primary maxmemory. 2.5M × ~2.6 KB ≈ 6.5 GB exceeds 12 × 256mb primary maxmemory; LRU eviction at baseline would mask the memoryPressure phase. `make warm` refuses if projected fill > `dataset.maxFillRatio`.
+- D8 Valkey container: request 320Mi, limit 512Mi (spec had one value). Headroom over maxmemory for repl buffers/fork COW; an OOM-kill is an in-place restart → operator #533.
+- D9 Placement: `scheduling.node.spread.shard: Required`, `primaries: Preferred`, `zone.spread.shard: Preferred` (all default Disabled in v0.8.0).
+- D10 Operator CRDs applied with `kubectl apply --server-side` from the pinned chart; helm runs with `--skip-crds`.
+- D11 (superseded same day by D16) BetterDB image built locally: `origin/fix/cluster-seed-dns-monitoring` (PR #651) merged onto `origin/master` in a detached worktree (`.bin/betterdb-src`), tagged `<version>-pr651.<base8>.<head8>-no-ai`; never pushed. SUMMARY must label it "unreleased build".
+- D12 `WORKSPACE_DISABLED=true` on BetterDB (single-user local sim) so the collector/screenshot tooling needs no login.
+- D13 BetterDB user `betterdb` created via ValkeyCluster `spec.users` with the docs/minimum-acl.md read-only line; ACL is live-applied per node after the kubelet Secret sync (~1 min), so `cluster-up` waits for `ACLApplied` on all ValkeyNodes.
+- D14 app-gen RPS control: exec-written file in an emptyDir, re-read every 1 s (ConfigMap volume updates lag ~60 s → would smear phase timestamps).
+- D15 memtier `zipfExp` 1 → 0.4 (1.0 created an unplanned hot shard, +77%).
+- D16 v0.55.0 released 2026-11-10 with #651/#654/#673/#682 → use the released `betterdb/monitor:0.55.0-no-ai` (chart 0.51.1 + tag override). Local-build path removed.
+- D17 Recording builds BetterDB from `fix/anomaly-cumulative-counter-deltas` (173a4a3f, on master ee9d1735 = v0.55.0 + version bump + #685/#686): keyspace_misses / evicted_keys / acl_denied fed to z-score detectors as per-second rates instead of lifetime counters. Unreleased; SUMMARY labels it. `betterdb.buildRef` unset → stock v0.55.0 for comparison.
+- D18 No webhook receiver: v0.55.0 `assertSafeOutboundUrl` rejects private/in-cluster webhook URLs in production with no override for webhooks, so detection timing comes from REST polling (`betterdb.pollSec`). Poll granularity bounds latency precision (±pollSec); event `timestamp` (BetterDB's own) is used for latency, `firstSeenAt` only for audit.
+- D19 replicaLag shapes the primary's egress toward the chosen replica (`direction: to`, `target` = replica): replication data flows primary → replica, so shaping the replica's own egress would only delay ACKs.
+- D20 Phase match window is cut at the next phase's start so one detection is never credited to two injections.
+- D21 EC2 fallback dropped (host passes preflight; user: not needed). Preflight just stops on an undersized host.

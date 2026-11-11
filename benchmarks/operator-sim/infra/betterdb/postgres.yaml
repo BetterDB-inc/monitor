@@ -1,0 +1,34 @@
+# Minimal single-instance Postgres for BetterDB history. emptyDir: history lives as
+# long as the kind cluster (survives `make scenario` re-runs, not `make down`).
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: betterdb }
+spec:
+  clusterIP: None
+  selector: { app: postgres }
+  ports: [{ name: pg, port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: betterdb }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - { name: POSTGRES_DB, value: betterdb }
+            - { name: POSTGRES_USER, value: betterdb }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: betterdb-sim, key: pg-password } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ name: pg, containerPort: 5432 }]
+          readinessProbe: { exec: { command: [pg_isready, -U, betterdb] }, periodSeconds: 5 }
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes: [{ name: data, emptyDir: {} }]

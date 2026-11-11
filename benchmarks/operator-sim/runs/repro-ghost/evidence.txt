@@ -1,0 +1,51 @@
+# captured 2026-11-11T13:43:47Z
+valkey-bz-0-0-0 | cluster_current_epoch:183  cluster_my_epoch:137   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404625834 146 connected
+valkey-bz-0-1-0 | cluster_current_epoch:183  cluster_my_epoch:137   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404621000 146 connected
+valkey-bz-0-2-0 | cluster_current_epoch:183  cluster_my_epoch:137   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404625000 146 connected
+valkey-bz-1-0-0 | cluster_current_epoch:183  cluster_my_epoch:141   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404625000 146 connected
+valkey-bz-1-1-0 | cluster_current_epoch:183  cluster_my_epoch:141   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404627000 146 connected
+valkey-bz-1-2-0 | cluster_current_epoch:183  cluster_my_epoch:141   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404625000 146 connected
+valkey-bz-10-0-0 | cluster_current_epoch:183  cluster_my_epoch:178   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404625000 145 connected
+valkey-bz-10-1-0 | cluster_current_epoch:183  cluster_my_epoch:178   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628518 145 connected
+valkey-bz-10-2-0 | cluster_current_epoch:183  cluster_my_epoch:178   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404627560 145 connected
+valkey-bz-11-0-0 | cluster_current_epoch:183  cluster_my_epoch:182   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404627546 145 connected
+valkey-bz-11-1-0 | cluster_current_epoch:183  cluster_my_epoch:182   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628544 145 connected
+valkey-bz-11-2-0 | cluster_current_epoch:183  cluster_my_epoch:182   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628307 145 connected
+valkey-bz-2-0-0 | cluster_current_epoch:183  cluster_my_epoch:145   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404627000 145 connected
+valkey-bz-2-1-0 | cluster_current_epoch:183  cluster_my_epoch:145   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 myself,slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 0 145 connected
+valkey-bz-2-2-0 | cluster_current_epoch:183  cluster_my_epoch:145   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 master - 0 1794404628000 146 connected
+valkey-bz-3-0-0 | cluster_current_epoch:183  cluster_my_epoch:150   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628000 145 connected
+valkey-bz-3-1-0 | cluster_current_epoch:183  cluster_my_epoch:150   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404632630 145 connected
+valkey-bz-3-2-0 | cluster_current_epoch:183  cluster_my_epoch:150   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628000 145 connected
+valkey-bz-4-0-0 | cluster_current_epoch:183  cluster_my_epoch:154   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628000 145 connected
+valkey-bz-4-1-0 | cluster_current_epoch:183  cluster_my_epoch:154   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404632640 145 connected
+valkey-bz-4-2-0 | cluster_current_epoch:183  cluster_my_epoch:154   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628000 145 connected
+valkey-bz-5-0-0 | cluster_current_epoch:183  cluster_my_epoch:158   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404627000 145 connected
+valkey-bz-5-1-0 | cluster_current_epoch:183  cluster_my_epoch:158   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404632000 145 connected
+valkey-bz-5-2-0 | cluster_current_epoch:183  cluster_my_epoch:158   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404634590 145 connected
+valkey-bz-6-0-0 | cluster_current_epoch:183  cluster_my_epoch:162   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404628000 145 connected
+valkey-bz-6-1-0 | cluster_current_epoch:183  cluster_my_epoch:162   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635244 145 connected
+valkey-bz-6-2-0 | cluster_current_epoch:183  cluster_my_epoch:162   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404633000 145 connected
+valkey-bz-7-0-0 | cluster_current_epoch:183  cluster_my_epoch:166   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635651 145 connected
+valkey-bz-7-1-0 | cluster_current_epoch:183  cluster_my_epoch:166   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635547 145 connected
+valkey-bz-7-2-0 | cluster_current_epoch:183  cluster_my_epoch:166   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404636142 145 connected
+valkey-bz-8-0-0 | cluster_current_epoch:183  cluster_my_epoch:170   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635000 145 connected
+valkey-bz-8-1-0 | cluster_current_epoch:183  cluster_my_epoch:170   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635523 145 connected
+valkey-bz-8-2-0 | cluster_current_epoch:183  cluster_my_epoch:170   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404634515 145 connected
+valkey-bz-9-0-0 | cluster_current_epoch:183  cluster_my_epoch:174   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635514 145 connected
+valkey-bz-9-1-0 | cluster_current_epoch:183  cluster_my_epoch:174   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635000 145 connected
+valkey-bz-9-2-0 | cluster_current_epoch:183  cluster_my_epoch:174   | 6758063940d5e14c7ffb6f63d68185dd288c2f8b 10.244.5.24:6379@16379 slave 9d297c89871b6e26d89a701e7e984ee57edc531e 0 1794404635065 145 connected
+# valkey-bz-2-1-0 INFO replication / server
+# Replication
+role:slave
+master_host:10.244.4.23
+master_port:6379
+master_link_status:up
+master_last_io_seconds_ago:7
+master_sync_in_progress:0
+slave_read_repl_offset:125460927
+valkey_version:9.1.3
+run_id:574e2d4141015c6b16b89973cff17e194d8593c0
+uptime_in_seconds:799
+# pod
+2026-11-11T13:30:56Z restarts=0
