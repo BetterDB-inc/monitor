@@ -55,6 +55,9 @@ export const SHUTDOWN_CANCEL_MESSAGE = 'Stopped because BetterDB shut down';
 export const SHUTDOWN_START_MESSAGE =
   'BetterDB is shutting down; start the migration again after it restarts.';
 
+export const TARGET_EMPTIED_BEFORE_TUNNEL_DROP_NOTICE =
+  'The target was emptied before the SSH tunnel dropped, and nothing was copied to it.';
+
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
  * function-presence notice and the optional target pre-flush. Both run inside
@@ -363,6 +366,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
         job.tomlPath = tomlPath;
       } catch (err) {
+        this.jobs.delete(id);
         await statusPortReservation?.release();
         await endpoints.close();
         throw err;
@@ -405,9 +409,12 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     targetAdapter: ReturnType<ConnectionRegistry['get']>,
     targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>,
     targetIsCluster: boolean,
-  ): Promise<void> {
+    shouldStop: () => boolean,
+  ): Promise<boolean> {
+    let sent = false;
     if (targetIsCluster) {
       const nodes = await targetAdapter.getClusterNodes();
+      if (shouldStop()) return false;
       const masters = nodes.filter(n => n.flags.includes('master'));
       await Promise.all(masters.map(async (master) => {
         const { host, port } = parseNodeAddress(master.address);
@@ -422,15 +429,22 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
             maxRetriesPerRequest: 1,
           });
           await client.connect();
+          if (shouldStop()) return;
+          sent = true;
           await client.flushall();
         } finally {
           try { client?.disconnect(); } catch { /* ignore */ }
         }
       }));
     } else {
+      if (shouldStop()) return false;
+      sent = true;
       await targetAdapter.getClient().flushall();
     }
-    this.logger.log(`Execution pre-flush: flushed target before migration`);
+    if (sent) {
+      this.logger.log(`Execution pre-flush: flushed target before migration`);
+    }
+    return sent;
   }
 
   /**
@@ -496,9 +510,15 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       // TOML never lingers, and the job doesn't stay half-finished. Guarded on cancel
       // so we never wipe a target for a run the caller already stopped.
       if (job.tunnelError !== undefined) return;
+      let targetFlushed = false;
       if (preSpawn.emptyDbBeforeSync && (job.status as string) !== 'cancelled') {
         try {
-          await this.flushTargetBeforeSync(preSpawn.targetAdapter, preSpawn.targetConfig, preSpawn.targetIsCluster);
+          targetFlushed = await this.flushTargetBeforeSync(
+            preSpawn.targetAdapter,
+            preSpawn.targetConfig,
+            preSpawn.targetIsCluster,
+            () => (job.status as string) === 'cancelled' || job.tunnelError !== undefined,
+          );
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           throw new Error(`Target pre-flush failed: ${message}`);
@@ -508,7 +528,12 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
       await preSpawn.statusPortReservation?.release();
       if ((job.status as string) === 'cancelled') return;
-      if (job.tunnelError !== undefined) return;
+      if (job.tunnelError !== undefined) {
+        if (targetFlushed) {
+          job.notices.push(TARGET_EMPTIED_BEFORE_TUNNEL_DROP_NOTICE);
+        }
+        return;
+      }
 
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],

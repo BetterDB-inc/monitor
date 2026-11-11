@@ -1250,6 +1250,17 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
     expect(tunnels.closed).toHaveLength(1);
   });
 
+  it('frees the job slot when the RedisShake config cannot be written', async () => {
+    const { service } = setup(['conn-1']);
+    buildScanReaderToml.mockImplementationOnce(() => { throw new Error('Invalid host: empty or too long'); });
+
+    await expect(
+      service.startExecution({ sourceConnectionId: 'conn-1', targetConnectionId: 'conn-2', mode: 'redis_shake' }),
+    ).rejects.toThrow('Invalid host: empty or too long');
+
+    expect((service as unknown as { jobs: Map<string, unknown> }).jobs.size).toBe(0);
+  });
+
   it('stops RedisShake and fails the job with the tunnel message when a tunnel drops mid-run', async () => {
     const { service, tunnels } = setup(['conn-1']);
 
@@ -1287,6 +1298,7 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
     expect(job.status).toBe('failed');
     expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
     expect(flushall).not.toHaveBeenCalled();
+    expect(job.notices).toEqual([]);
     expect(spawn).not.toHaveBeenCalled();
     expect(tunnels.closed).toEqual([`migration:${id}:source`]);
   });
@@ -1310,6 +1322,26 @@ describe('MigrationExecutionService with SSH-tunneled connections', () => {
     expect(job.status).toBe('failed');
     expect(job.error).toBe('The SSH tunnel to the source closed unexpectedly');
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('says the target was already emptied when a tunnel drops during the flush', async () => {
+    const { service, tunnels, registry } = setup(['conn-1']);
+    const flushall = jest.fn().mockImplementation(async () => {
+      tunnels.drop('source');
+      return 'OK';
+    });
+    registry.mockTargetAdapter.getClient.mockReturnValue({ flushall, quit: jest.fn() });
+
+    const { id } = await service.startExecution({
+      sourceConnectionId: 'conn-1',
+      targetConnectionId: 'conn-2',
+      mode: 'redis_shake',
+      redisShakeOptions: { emptyDbBeforeSync: true },
+    });
+
+    const job = await waitForTerminal(service, id);
+    expect(flushall).toHaveBeenCalledTimes(1);
+    expect(job.notices).toEqual(['The target was emptied before the SSH tunnel dropped, and nothing was copied to it.']);
   });
 
   it('fails a command-mode job with the tunnel message when a tunnel drops mid-run', async () => {

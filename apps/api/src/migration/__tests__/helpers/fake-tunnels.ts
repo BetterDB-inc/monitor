@@ -17,9 +17,11 @@ export class FakeTunnels {
   readonly opened = new Map<string, SshTunnelParams>();
   readonly closed: string[] = [];
   failFor: string | undefined;
+  presentedHostKey = 'SHA256:presented';
   private nextPort = 40001;
 
   async createTunnel(key: string, params: SshTunnelParams): Promise<number> {
+    if (!params.hostKeyFingerprint) params.onHostKey?.(this.presentedHostKey);
     if (this.failFor !== undefined && key.endsWith(this.failFor)) {
       throw new Error('All configured authentication methods failed');
     }
@@ -38,6 +40,14 @@ export class FakeTunnels {
   }
 }
 
-export function fakeEndpointResolver(tunnels = new FakeTunnels()): MigrationEndpointResolver {
-  return new MigrationEndpointResolver(tunnels);
+export class FakeHostKeys {
+  readonly pinned: Array<{ id: string; fingerprint: string }> = [];
+
+  async pinLearnedSshHostKey(id: string, fingerprint: string): Promise<void> {
+    this.pinned.push({ id, fingerprint });
+  }
+}
+
+export function fakeEndpointResolver(tunnels = new FakeTunnels(), hostKeys = new FakeHostKeys()): MigrationEndpointResolver {
+  return new MigrationEndpointResolver(tunnels, hostKeys);
 }

@@ -445,8 +445,17 @@ credentials and TLS settings still come from the stored connection.
 If a tunnel cannot be opened, execution is refused with a 502 before anything
 is written and a validation job fails with the SSH error. If a tunnel drops
 while a job runs, the job stops and fails with
-`The SSH tunnel to the source closed unexpectedly` (or `target`). A drop before
-RedisShake starts also skips the `emptyDbBeforeSync` flush.
+`The SSH tunnel to the source closed unexpectedly` (or `target`).
+
+With `emptyDbBeforeSync`, a drop before the flush is sent skips the flush. A
+flush that has already been sent cannot be recalled: if a tunnel drops while it
+runs, the target ends up empty, RedisShake is not started, and the job carries
+the notice `The target was emptied before the SSH tunnel dropped, and nothing
+was copied to it.`
+
+A tunnelled connection normally has its bastion host key pinned from the first
+time BetterDB connected to it. If none is stored yet, the job's tunnel pins the
+key the bastion presents, the same way the connection itself does.
 
 Limits:
 

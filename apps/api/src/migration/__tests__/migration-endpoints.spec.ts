@@ -1,6 +1,6 @@
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
 import { MigrationEndpointResolver, dialEndpoint, tunnelClosedMessage } from '../migration-endpoints';
-import { FakeTunnels, SSH_TUNNEL as TUNNEL } from './helpers/fake-tunnels';
+import { FakeHostKeys, FakeTunnels, SSH_TUNNEL as TUNNEL } from './helpers/fake-tunnels';
 
 function config(overrides: Partial<DatabaseConnectionConfig> = {}): DatabaseConnectionConfig {
   return { id: 'c', name: 'c', host: 'db.internal', port: 6379, createdAt: 0, ...overrides };
@@ -9,7 +9,7 @@ function config(overrides: Partial<DatabaseConnectionConfig> = {}): DatabaseConn
 describe('MigrationEndpointResolver', () => {
   it('returns the stored host and port and opens nothing when neither side is tunnelled', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
     const source = config({ host: 'src.internal', port: 6379 });
     const target = config({ host: 'tgt.internal', port: 6380 });
 
@@ -22,7 +22,7 @@ describe('MigrationEndpointResolver', () => {
 
   it('ignores a saved tunnel that is disabled', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
     const source = config({ sshTunnel: { ...TUNNEL, enabled: false } });
 
     const endpoints = await resolver.open('job-1', { source, target: config() }, jest.fn());
@@ -33,7 +33,7 @@ describe('MigrationEndpointResolver', () => {
 
   it('opens a job-owned tunnel to the stored host and dials its local port', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
     const source = config({ host: 'src.internal', port: 6390, password: 'pw', tls: true, sshTunnel: TUNNEL });
 
     const endpoints = await resolver.open('job-1', { source, target: config() }, jest.fn());
@@ -57,7 +57,7 @@ describe('MigrationEndpointResolver', () => {
 
   it('gives each tunnelled side its own tunnel', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
 
     const endpoints = await resolver.open(
       'job-2',
@@ -71,7 +71,7 @@ describe('MigrationEndpointResolver', () => {
 
   it('closes every tunnel it opened, once', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
     const endpoints = await resolver.open(
       'job-3',
       { source: config({ sshTunnel: TUNNEL }), target: config({ sshTunnel: TUNNEL }) },
@@ -86,7 +86,7 @@ describe('MigrationEndpointResolver', () => {
 
   it('reports which side dropped when a tunnel closes on its own', async () => {
     const tunnels = new FakeTunnels();
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
     const onTunnelClosed = jest.fn();
     await resolver.open('job-4', { source: config(), target: config({ sshTunnel: TUNNEL }) }, onTunnelClosed);
 
@@ -98,7 +98,7 @@ describe('MigrationEndpointResolver', () => {
   it('closes the source tunnel and names the side when the target tunnel cannot be opened', async () => {
     const tunnels = new FakeTunnels();
     tunnels.failFor = 'target';
-    const resolver = new MigrationEndpointResolver(tunnels);
+    const resolver = new MigrationEndpointResolver(tunnels, new FakeHostKeys());
 
     await expect(
       resolver.open(
@@ -108,6 +108,41 @@ describe('MigrationEndpointResolver', () => {
       ),
     ).rejects.toThrow('Could not open the SSH tunnel to the target: All configured authentication methods failed');
     expect(tunnels.closed).toEqual(['migration:job-5:source']);
+  });
+
+  it('pins the host key a bastion presents when the connection has none stored', async () => {
+    const tunnels = new FakeTunnels();
+    const hostKeys = new FakeHostKeys();
+    const resolver = new MigrationEndpointResolver(tunnels, hostKeys);
+    const { hostKeyFingerprint: _unpinned, ...unpinned } = TUNNEL;
+
+    await resolver.open('job-6', { source: config({ id: 'src', sshTunnel: unpinned }), target: config() }, jest.fn());
+
+    expect(hostKeys.pinned).toEqual([{ id: 'src', fingerprint: 'SHA256:presented' }]);
+  });
+
+  it('pins nothing when the connection already stores a fingerprint', async () => {
+    const tunnels = new FakeTunnels();
+    const hostKeys = new FakeHostKeys();
+    const resolver = new MigrationEndpointResolver(tunnels, hostKeys);
+
+    await resolver.open('job-7', { source: config({ sshTunnel: TUNNEL }), target: config() }, jest.fn());
+
+    expect(hostKeys.pinned).toEqual([]);
+  });
+
+  it('pins nothing from a tunnel that could not be opened', async () => {
+    const tunnels = new FakeTunnels();
+    tunnels.failFor = 'source';
+    const hostKeys = new FakeHostKeys();
+    const resolver = new MigrationEndpointResolver(tunnels, hostKeys);
+    const { hostKeyFingerprint: _unpinned, ...unpinned } = TUNNEL;
+
+    await expect(
+      resolver.open('job-8', { source: config({ sshTunnel: unpinned }), target: config() }, jest.fn()),
+    ).rejects.toThrow('Could not open the SSH tunnel to the source');
+
+    expect(hostKeys.pinned).toEqual([]);
   });
 });
 

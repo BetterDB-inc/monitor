@@ -639,6 +639,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  async pinLearnedSshHostKey(id: string, fingerprint: string): Promise<void> {
+    const config = this.configs.get(id);
+    if (!config?.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+      return;
+    }
+    config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
+    this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
+    await this.persistLearnedHostKey(config);
+  }
+
   /**
    * Encrypt the secret fields of an SSH tunnel config for storage. `privateKeyPath`
    * is a filesystem path, not a secret, and is left as-is.

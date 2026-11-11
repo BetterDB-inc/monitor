@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { SshTunnelService } from '../database/ssh/ssh-tunnel.service';
 
 export interface DialEndpoint {
@@ -19,6 +20,8 @@ export interface MigrationEndpoints {
 
 type TunnelOpener = Pick<SshTunnelService, 'createTunnel' | 'closeTunnel'>;
 
+type HostKeyStore = Pick<ConnectionRegistry, 'pinLearnedSshHostKey'>;
+
 const LOOPBACK = '127.0.0.1';
 
 export function dialEndpoint(config: Pick<MigrationConnectionConfig, 'host' | 'port' | 'dial'>): DialEndpoint {
@@ -35,7 +38,10 @@ export function tunnelClosedMessage(side: MigrationSide): string {
 
 @Injectable()
 export class MigrationEndpointResolver {
-  constructor(@Inject(SshTunnelService) private readonly tunnels: TunnelOpener) {}
+  constructor(
+    @Inject(SshTunnelService) private readonly tunnels: TunnelOpener,
+    @Inject(ConnectionRegistry) private readonly hostKeys: HostKeyStore,
+  ) {}
 
   async open(
     jobId: string,
@@ -55,6 +61,7 @@ export class MigrationEndpointResolver {
       const tunnel = config.sshTunnel;
       if (!tunnel || !usesSshTunnel(config)) return config;
       const key = `migration:${jobId}:${side}`;
+      let learnedHostKey: string | undefined;
       try {
         const port = await this.tunnels.createTunnel(key, {
           sshHost: tunnel.host,
@@ -67,11 +74,17 @@ export class MigrationEndpointResolver {
           privateKeyPath: tunnel.privateKeyPath,
           passphrase: tunnel.passphrase,
           hostKeyFingerprint: tunnel.hostKeyFingerprint,
+          onHostKey: (fingerprint) => {
+            learnedHostKey = fingerprint;
+          },
           remoteHost: config.host,
           remotePort: config.port,
           onUnexpectedClose: () => onTunnelClosed(side),
         });
         keys.push(key);
+        if (learnedHostKey !== undefined) {
+          await this.hostKeys.pinLearnedSshHostKey(config.id, learnedHostKey);
+        }
         return { ...config, dial: { host: LOOPBACK, port } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
