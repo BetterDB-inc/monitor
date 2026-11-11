@@ -141,6 +141,7 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   forgetTopology(connectionId?: string): void {
     const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
     this.discoveryCacheByConnection.delete(cacheKey);
+    this.discoveryInFlight.delete(cacheKey);
   }
 
   private freshCache(cacheKey: string): DiscoveredNode[] | null {
