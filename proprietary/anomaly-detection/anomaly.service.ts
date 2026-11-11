@@ -84,6 +84,19 @@ import {
   reshardSkewSignature,
 } from './reshard-pressure-detector';
 import {
+  HOT_SHARD_BLIND_MS,
+  HOT_SHARD_HOLD_MS,
+  HOT_SHARD_RAISE_FACTOR,
+  HOT_SHARD_TOP_SLOTS,
+  HotShardDetail,
+  HotShardFinding,
+  HotShardSlot,
+  describeHotShard,
+  hotShardSignature,
+  hotShardSlots,
+  judgeHotShards,
+} from './hot-shard-detector';
+import {
   BACKLOG_COVERAGE_CRITICAL_SEC,
   BACKLOG_COVERAGE_WARNING_SEC,
   BacklogCoverageLevel,
@@ -188,6 +201,8 @@ import {
   isReplicaRole,
 } from '@app/database/parsers/replication-info.parser';
 import { ClusterDiscoveryService } from '@app/cluster/cluster-discovery.service';
+import { ClusterMetricsService } from '@app/cluster/cluster-metrics.service';
+import { ShardLoadService } from '@app/cluster/shard-load.service';
 import { isWriteCommand } from '@app/cluster/write-commands';
 import { parseLatencyStatsSection } from '@app/metrics/latencystats-parser';
 import {
@@ -495,6 +510,7 @@ const ADOPTED_METRICS: MetricType[] = [
   MetricType.BACKLOG_COVERAGE_RISK,
   MetricType.RESYNC_ESCALATION,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
   MetricType.REPLICA_SLOT_STATE,
   MetricType.RAFT_HEALTH,
 ];
@@ -694,6 +710,13 @@ export class AnomalyService
   private reshardWatchedSince = new Map<string, number>();
   private reshardMissedReads = new Set<string>();
   private reshardNodeSelves = new Map<string, { self: ClusterNode; readAt: number }>();
+  private hotShardFirstSeen = new Map<string, Map<string, number>>();
+  private activeHotShards = new Map<string, Set<string>>();
+  private hotShardEventIds = new Map<string, Map<string, string>>();
+  private hotShardSampleAt = new Map<string, number>();
+  private hotShardJudgedAt = new Map<string, number>();
+  private hotShardDetails = new Map<string, Map<string, HotShardDetail>>();
+  private hotShardSince = new Map<string, Map<string, number>>();
   // Full-resync failure loop (valkey#1836): per-connection window/cycle state
   // folded from INFO replication on the polled replica itself.
   private resyncLoopState = new Map<string, ResyncLoopState>();
@@ -1019,6 +1042,10 @@ export class AnomalyService
     private readonly clientListCache?: ClientListCache,
     @Optional()
     private readonly retentionPolicy?: RetentionPolicyService,
+    @Optional()
+    private readonly shardLoad?: ShardLoadService,
+    @Optional()
+    private readonly clusterMetrics?: ClusterMetricsService,
   ) {
     super(connectionRegistry);
     this.correlator = new Correlator(this.correlationIntervalMs, (anomaly) =>
@@ -1259,6 +1286,13 @@ export class AnomalyService
     this.reshardSkewFirstSeen.delete(connectionId);
     this.activeReshardSkews.delete(connectionId);
     this.reshardSkewEventIds.delete(connectionId);
+    this.hotShardFirstSeen.delete(connectionId);
+    this.activeHotShards.delete(connectionId);
+    this.hotShardEventIds.delete(connectionId);
+    this.hotShardSampleAt.delete(connectionId);
+    this.hotShardJudgedAt.delete(connectionId);
+    this.hotShardDetails.delete(connectionId);
+    this.hotShardSince.delete(connectionId);
     this.forgetNodeWriteP99(connectionId);
     this.reshardWriteP99.delete(connectionId);
     this.reshardThinViewLogged.delete(connectionId);
@@ -2020,6 +2054,7 @@ export class AnomalyService
           // it runs in BOTH topology modes.
           await this.detectOrphanedSlotKeys(ctx, timestamp, nodes);
           await this.detectReshardPressure(info, ctx, timestamp, nodes, cpuUtilizationSample);
+          await this.detectHotShards(ctx, timestamp, nodes);
         }
         aclClusterNodes = nodes;
         if (nodes && !this.dialsDataNodes(ctx.connectionId)) {
@@ -2382,6 +2417,7 @@ export class AnomalyService
         cob: rows(MetricType.REPL_BUFFER_PRESSURE),
       });
       this.adoptReshardEvents(connectionId, rows(MetricType.RESHARD_SHARD_SKEW));
+      this.adoptHotShardEvents(connectionId, rows(MetricType.HOT_SHARD));
       this.adoptReplicaSlotEvents(connectionId, rows(MetricType.REPLICA_SLOT_STATE));
       if (rows(MetricType.RAFT_HEALTH).some((e) => e.severity === AnomalySeverity.CRITICAL)) {
         this.raftLeaderlessActive.set(connectionId, true);
@@ -6186,6 +6222,224 @@ export class AnomalyService
     }
   }
 
+  private async detectHotShards(
+    ctx: ConnectionContext,
+    timestamp: number,
+    nodes: ClusterNode[],
+  ): Promise<void> {
+    if (!this.shardLoad) return;
+    const connectionId = ctx.connectionId;
+    const selfId = nodes.find((node) => node.flags.includes('myself'))?.id;
+    try {
+      const sample = this.shardLoad.getLatest(connectionId);
+      const isNew =
+        sample !== null &&
+        sample.timestamp > (this.hotShardSampleAt.get(connectionId) ?? -Infinity) &&
+        timestamp - sample.timestamp <= HOT_SHARD_BLIND_MS;
+      if (!isNew) {
+        const judgedAt = this.hotShardJudgedAt.get(connectionId);
+        if (judgedAt === undefined) this.hotShardJudgedAt.set(connectionId, timestamp);
+        else if (timestamp - judgedAt > HOT_SHARD_BLIND_MS && this.tracksHotShards(connectionId)) {
+          await this.applyHotShardGate(ctx, timestamp, timestamp, [], selfId);
+          this.rememberHotShards(connectionId, timestamp, []);
+        }
+        return;
+      }
+      this.hotShardSampleAt.set(connectionId, sample.timestamp);
+      this.hotShardJudgedAt.set(connectionId, timestamp);
+
+      const eventIds = this.hotShardEventIds.get(connectionId);
+      const open = new Set(
+        sample.shards
+          .map((shard) => shard.nodeId)
+          .filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))),
+      );
+      const findings = this.isReshardWindowOpen(connectionId, timestamp)
+        ? null
+        : judgeHotShards(sample, open);
+      const held =
+        findings === null ||
+        (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
+      if (held) {
+        this.restartHotShardHold(connectionId);
+        return;
+      }
+      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, findings, selfId);
+      this.rememberHotShards(connectionId, sample.timestamp, findings);
+    } catch (err) {
+      this.logger.warn(
+        `Hot shard check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  private tracksHotShards(connectionId: string): boolean {
+    return (
+      (this.hotShardEventIds.get(connectionId)?.size ?? 0) > 0 ||
+      (this.hotShardFirstSeen.get(connectionId)?.size ?? 0) > 0
+    );
+  }
+
+  private isReshardWindowOpen(connectionId: string, timestamp: number): boolean {
+    const clusterKey = this.connectionClusterKeys.get(connectionId);
+    if (clusterKey === undefined) return false;
+    const intervalMs = this.getIntervalMs();
+    return isReshardActive(
+      this.freshReshardShards(clusterKey, timestamp, intervalMs),
+      timestamp,
+      RESHARD_QUIET_POLLS * intervalMs,
+    );
+  }
+
+  private async isSlotMigrationInFlight(
+    connectionId: string,
+    sampledAt: number,
+    findings: HotShardFinding[],
+  ): Promise<boolean> {
+    if (!this.clusterMetrics) return false;
+    const firstSeen = this.hotShardFirstSeen.get(connectionId);
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const aboutToRaise = findings.some((finding) => {
+      const signature = hotShardSignature(finding.shardId);
+      const seenAt = firstSeen?.get(signature);
+      return (
+        seenAt !== undefined && !eventIds?.has(signature) && sampledAt - seenAt >= HOT_SHARD_HOLD_MS
+      );
+    });
+    if (!aboutToRaise) return false;
+    return (await this.clusterMetrics.getSlotMigrations(connectionId)).length > 0;
+  }
+
+  private restartHotShardHold(connectionId: string): void {
+    const firstSeen = this.hotShardFirstSeen.get(connectionId);
+    if (!firstSeen) return;
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    for (const signature of [...firstSeen.keys()]) {
+      if (!eventIds?.has(signature)) firstSeen.delete(signature);
+    }
+  }
+
+  private applyHotShardGate(
+    ctx: ConnectionContext,
+    timestamp: number,
+    sampledAt: number,
+    findings: HotShardFinding[],
+    selfId: string | undefined,
+  ): Promise<void> {
+    const nodeAddrOf = (finding: HotShardFinding) =>
+      finding.shardId === selfId ? undefined : finding.nodeAddr;
+    return this.applyTopologyPersistenceGate({
+      ctx,
+      timestamp: sampledAt,
+      findings,
+      signatureOf: (finding) => hotShardSignature(finding.shardId),
+      firstSeenByConn: this.hotShardFirstSeen,
+      activeByConn: this.activeHotShards,
+      minPersistMs: HOT_SHARD_HOLD_MS,
+      eventIdsByConn: this.hotShardEventIds,
+      metricType: MetricType.HOT_SHARD,
+      contextOf: (finding) => this.nodeContext(ctx, nodeAddrOf(finding)),
+      buildEvent: (finding, signature) =>
+        this.buildHotShardEvent(ctx, timestamp, sampledAt, finding, signature, nodeAddrOf(finding)),
+    });
+  }
+
+  private hotShardTopSlots(connectionId: string, finding: HotShardFinding): HotShardSlot[] {
+    const slots = this.shardLoad?.getTopSlots(
+      connectionId,
+      finding.shardId,
+      HOT_SHARD_TOP_SLOTS,
+      finding.over[0],
+    );
+    return hotShardSlots(finding, slots ?? []);
+  }
+
+  private buildHotShardEvent(
+    ctx: ConnectionContext,
+    timestamp: number,
+    sampledAt: number,
+    finding: HotShardFinding,
+    signature: string,
+    nodeAddr: string | undefined,
+  ): AnomalyEvent {
+    const since = this.hotShardFirstSeen.get(ctx.connectionId)?.get(signature) ?? sampledAt;
+    const sinceBySignature = this.connectionClaims(
+      this.hotShardSince,
+      ctx.connectionId,
+      () => new Map<string, number>(),
+    );
+    sinceBySignature.set(signature, since);
+    return {
+      id: randomUUID(),
+      timestamp,
+      metricType: MetricType.HOT_SHARD,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: finding[finding.over[0]].ratio,
+      baseline: 1,
+      zScore: 0,
+      stdDev: 0,
+      threshold: HOT_SHARD_RAISE_FACTOR,
+      message: describeHotShard(
+        finding,
+        this.hotShardTopSlots(ctx.connectionId, finding),
+        sampledAt - since,
+      ),
+      resolved: false,
+      connectionId: ctx.connectionId,
+      ...(nodeAddr ? { nodeAddr } : {}),
+      dedupeKey: signature,
+    };
+  }
+
+  private rememberHotShards(
+    connectionId: string,
+    sampledAt: number,
+    findings: HotShardFinding[],
+  ): void {
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    const since = this.hotShardSince.get(connectionId);
+    const details = new Map<string, HotShardDetail>();
+    for (const finding of findings) {
+      const signature = hotShardSignature(finding.shardId);
+      if (!eventIds?.has(signature)) continue;
+      details.set(signature, {
+        shardId: finding.shardId,
+        nodeAddr: finding.nodeAddr,
+        slotCount: finding.slotCount,
+        since: since?.get(signature) ?? sampledAt,
+        sampledAt,
+        cpu: finding.cpu,
+        network: finding.network,
+        rankedBy: finding.over[0],
+        topSlots: this.hotShardTopSlots(connectionId, finding),
+      });
+    }
+    if (details.size > 0) this.hotShardDetails.set(connectionId, details);
+    else this.hotShardDetails.delete(connectionId);
+    for (const signature of [...(since?.keys() ?? [])]) {
+      if (!eventIds?.has(signature)) since!.delete(signature);
+    }
+  }
+
+  private adoptHotShardEvents(connectionId: string, open: StoredAnomalyEvent[]): void {
+    const eventIds = this.hotShardEventIds.get(connectionId) ?? new Map<string, string>();
+    const since = this.hotShardSince.get(connectionId) ?? new Map<string, number>();
+    const tracked = new Set(eventIds.values());
+    for (const event of [...open].sort((a, b) => b.timestamp - a.timestamp)) {
+      if (tracked.has(event.id)) continue;
+      const signature = event.dedupeKey;
+      if (signature === undefined || eventIds.has(signature)) {
+        this.closeLater(event.id);
+        continue;
+      }
+      eventIds.set(signature, event.id);
+      since.set(signature, event.timestamp);
+    }
+    if (eventIds.size > 0) this.hotShardEventIds.set(connectionId, eventIds);
+    if (since.size > 0) this.hotShardSince.set(connectionId, since);
+  }
+
   private reshardShardSnapshot(
     key: string,
     clusterKey: string,
@@ -8735,6 +8989,12 @@ export class AnomalyService
 
   // Public API methods
 
+  getHotShards(connectionId: string): HotShardDetail[] {
+    return [...(this.hotShardDetails.get(connectionId)?.values() ?? [])].sort(
+      (a, b) => b[b.rankedBy].ratio - a[a.rankedBy].ratio,
+    );
+  }
+
   getRecentEvents(limit = 100, metricType?: MetricType): AnomalyEvent[] {
     let events = [...this.recentAnomalies].reverse();
 
@@ -10516,6 +10776,7 @@ export class AnomalyService
       ...(backlogEventId ? [backlogEventId] : []),
       ...(this.staleBacklogEventIds.get(connectionId) ?? []),
       ...(this.reshardSkewEventIds.get(connectionId)?.values() ?? []),
+      ...(this.hotShardEventIds.get(connectionId)?.values() ?? []),
       ...(this.replicaSlotEventIds.get(connectionId)?.values() ?? []),
       ...(this.legacyReplicaSlotEvents.get(connectionId) ?? []).map((e) => e.id),
       this.adoptedReshardEventIds.get(connectionId),

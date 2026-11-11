@@ -56,6 +56,28 @@ describe('ShardLoadService', () => {
     expect(service.getLatest('conn-a')).toBeNull();
   });
 
+  it('ranks the top slots by the metric asked for', () => {
+    const service = new ShardLoadService();
+    const stats = (cpu: number, bytes: number) => ({
+      key_count: 1,
+      cpu_usec: cpu,
+      network_bytes_in: bytes,
+      network_bytes_out: 0,
+    });
+    const at = (step: number): NodeSlotStats[] => [
+      {
+        nodeId: 'n1',
+        address: '10.0.0.1:6379',
+        stats: { 0: stats(900 * step, 0), 1: stats(100 * step, 500 * step) },
+      },
+    ];
+    service.record('conn-a', at(0), 0);
+    service.record('conn-a', at(1), 1_000);
+
+    expect(service.getTopSlots('conn-a', 'n1', 1)[0].slot).toBe(0);
+    expect(service.getTopSlots('conn-a', 'n1', 1, 'network')[0].slot).toBe(1);
+  });
+
   it('forgets a connection', () => {
     const service = new ShardLoadService();
     service.record('conn-a', reading({ 0: 0 }), 0);

@@ -71,6 +71,7 @@ export enum MetricType {
   /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
   CONNECTION_CHURN = 'connection_churn',
   RESHARD_SHARD_SKEW = 'reshard_shard_skew',
+  HOT_SHARD = 'hot_shard',
   RETRY_AMPLIFICATION = 'retry_amplification',
   ERROR_REPLIES = 'error_replies',
   REPLICATION_DIVERGENCE = 'replication_divergence',
@@ -118,6 +119,7 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.LARGE_REPLY_PRESSURE,
   MetricType.CONNECTION_CHURN,
   MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
   MetricType.RETRY_AMPLIFICATION,
   MetricType.ERROR_REPLIES,
   MetricType.REPLICATION_DIVERGENCE,

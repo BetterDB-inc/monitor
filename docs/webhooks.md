@@ -454,7 +454,7 @@ If the replica alerts again, the old event closes with no `replication.recovered
 
 `incidentUrl` opens the incident that holds the event. It is only present when `FRONTEND_URL` is set.
 
-A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
+A finding on a primary that a cluster connection reads but that is not registered, such as `reshard_shard_skew` or `hot_shard`, also carries `nodeAddr`, and its `sourceHost` and `sourcePort` are that primary's address rather than the registered node's.
 
 #### anomaly.sequence.detected (Pro)
 
