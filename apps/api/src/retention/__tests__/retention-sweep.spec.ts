@@ -93,6 +93,16 @@ describe.each<[string, AdapterFactory]>(adapters)('retention sweep (%s)', (name,
     expect(results[store]).toBe(1);
   });
 
+  it('calls an ACL audit entry captured in the cutoff second recent, as the sweep does', async () => {
+    const fixture = sweepFixtures.acl_entries;
+    await fixture.seed(storage, { expiredAtMs: CUTOFF_MS - 1000, recentAtMs: CUTOFF_MS });
+    expect(await agesOfRemainingRows(fixture)).toEqual(['expired', 'recent']);
+
+    await runRetentionSweep(storage, CUTOFF_MS, logger);
+
+    expect(await agesOfRemainingRows(fixture)).toEqual(['recent']);
+  });
+
   if (storesNotKept.length > 0) {
     it.each(storesNotKept)('has no %s rows to prune', async (store) => {
       await expect(sweepFixtures[store].seed(storage, SEED_TIMES)).rejects.toThrow(

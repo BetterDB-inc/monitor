@@ -16,7 +16,9 @@ export interface SweepFixtureTimes {
 /**
  * Two rows of one swept store, written through the store's own save method: one whose
  * prune-relevant time is `expiredAtMs` and one at `recentAtMs`. `remainingAtMs` returns that
- * time, in milliseconds, for each of them the store still returns.
+ * time, in milliseconds, for each of them the store still returns. A store that keeps whole
+ * seconds returns the last millisecond of the row's second, because the sweep keeps every row
+ * of the second the cutoff falls in.
  */
 export interface SweepFixture {
   seed(storage: StoragePort, times: SweepFixtureTimes): Promise<void>;
@@ -37,6 +39,7 @@ const ages = ({ expiredAtMs, recentAtMs }: SweepFixtureTimes): number[] => [
 
 const toSeconds = (ms: number): number => Math.floor(ms / 1000);
 const toMs = (seconds: number): number => seconds * 1000;
+const lastMsOfSecond = (seconds: number): number => toMs(seconds) + 999;
 
 async function withClockAt<T>(ms: number, run: () => Promise<T>): Promise<T> {
   const clock = jest.spyOn(Date, 'now').mockReturnValue(ms);
@@ -303,7 +306,7 @@ export const sweepFixtures: Record<string, SweepFixture> = {
     },
     remainingAtMs: async (storage) =>
       (await storage.getAclEntries({ connectionId: CONNECTION_ID })).map((row) =>
-        toMs(row.capturedAt),
+        lastMsOfSecond(row.capturedAt),
       ),
   },
 
