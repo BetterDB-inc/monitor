@@ -6,7 +6,7 @@ import { ClusterNode } from '../common/types/metrics.types';
 import { MetricsParser } from '../database/parsers/metrics.parser';
 import { tlsIdentityOptions } from '../database/adapters/tls-servername';
 import { parseNodeAddress } from '../topology/membership-diff';
-import { readClusterShards, withShardMetadata } from './shard-metadata';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from './shard-metadata';
 
 export interface DiscoveredNode {
   id: string;
@@ -82,7 +82,10 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
       try {
         const client = this.connectionRegistry.get(connectionId);
         const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
-        const nodes = withShardMetadata(clusterNodes, shards);
+        const nodes = withConfiguredZones(
+          withShardMetadata(clusterNodes, shards),
+          this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+        );
         if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
         return this.remember(cacheKey, nodes);
       } catch (error) {

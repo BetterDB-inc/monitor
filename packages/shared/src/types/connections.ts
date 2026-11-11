@@ -210,6 +210,7 @@ export interface DatabaseConnectionConfig {
   connectionType?: DatabaseConnectionType;
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
+  nodeAvailabilityZones?: NodeAvailabilityZones;
   /** Status of credential validation (not persisted, set at runtime) */
   credentialStatus?: CredentialStatus;
   /** Error message when credentials are invalid */
@@ -251,6 +252,74 @@ export function parseJsonColumn<T extends object>(value: unknown): T | undefined
  */
 export function parseTlsConfig(value: unknown): TlsConfig | undefined {
   return parseJsonColumn<TlsConfig>(value);
+}
+
+export type NodeAvailabilityZones = Record<string, string>;
+
+export const MAX_NODE_AVAILABILITY_ZONES = 1000;
+export const MAX_AVAILABILITY_ZONE_LENGTH = 64;
+
+export type NodeAvailabilityZonesResult =
+  | { ok: true; zones: NodeAvailabilityZones | undefined }
+  | { ok: false; error: string };
+
+function normalizeNodeAddress(address: string): string | undefined {
+  const trimmed = address.trim().toLowerCase();
+  const separator = trimmed.lastIndexOf(':');
+  if (separator <= 0) return undefined;
+  const rawHost = trimmed.slice(0, separator);
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
+  const port = trimmed.slice(separator + 1);
+  if (!host || /[\s=@,\[\]]/.test(host) || !/^\d{1,5}$/.test(port)) return undefined;
+  const portNumber = Number(port);
+  if (portNumber < 1 || portNumber > 65535) return undefined;
+  return `${host}:${portNumber}`;
+}
+
+export function normalizeNodeAvailabilityZones(value: unknown): NodeAvailabilityZonesResult {
+  if (value === null || value === undefined) return { ok: true, zones: undefined };
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, error: 'Availability zones must be an object of host:port to zone' };
+  }
+  const entries = Object.entries(value);
+  if (entries.length > MAX_NODE_AVAILABILITY_ZONES) {
+    return { ok: false, error: `At most ${MAX_NODE_AVAILABILITY_ZONES} nodes can be mapped to a zone` };
+  }
+  const zones: NodeAvailabilityZones = {};
+  for (const [rawAddress, rawZone] of entries) {
+    const address = normalizeNodeAddress(rawAddress);
+    if (!address) {
+      return { ok: false, error: `Invalid node address '${rawAddress}': expected host:port` };
+    }
+    const zone = typeof rawZone === 'string' ? rawZone.trim() : '';
+    if (!zone) {
+      return { ok: false, error: `Availability zone for '${address}' must be a non-empty string` };
+    }
+    if (/[\r\n]/.test(zone)) {
+      return { ok: false, error: `Availability zone for '${address}' must be a single line` };
+    }
+    if (zone.includes('=')) {
+      return { ok: false, error: `Availability zone for '${address}' must not contain '='` };
+    }
+    if (zone.length > MAX_AVAILABILITY_ZONE_LENGTH) {
+      return {
+        ok: false,
+        error: `Availability zone for '${address}' must be at most ${MAX_AVAILABILITY_ZONE_LENGTH} characters`,
+      };
+    }
+    if (Object.prototype.hasOwnProperty.call(zones, address)) {
+      return { ok: false, error: `Duplicate node address '${address}'` };
+    }
+    zones[address] = zone;
+  }
+  return { ok: true, zones: entries.length > 0 ? zones : undefined };
+}
+
+export function parseNodeAvailabilityZones(value: unknown): NodeAvailabilityZones | undefined {
+  const parsed = parseJsonColumn<Record<string, unknown>>(value);
+  if (!parsed) return undefined;
+  const result = normalizeNodeAvailabilityZones(parsed);
+  return result.ok ? result.zones : undefined;
 }
 
 export function hasOwnKeyAnalytics(membership: TopologyMembership | undefined): boolean {
@@ -344,6 +413,7 @@ export interface ConnectionStatus {
   connectionType?: 'direct' | 'agent' | 'external';
   autoRegisterNodes?: boolean;
   membership?: TopologyMembership;
+  nodeAvailabilityZones?: NodeAvailabilityZones;
   capabilities?: ConnectionCapabilities;
   runtimeCapabilities?: import('./health').RuntimeCapabilities;
   /** Status of credential validation */

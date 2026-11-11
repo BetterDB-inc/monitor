@@ -17,6 +17,7 @@ import {
   ConnectionIdResponseDto,
   SuccessResponseDto,
   SetAutoRegisterDto,
+  SetNodeAvailabilityZonesDto,
 } from '../common/dto/connections.dto';
 import { withTimeout } from '../common/utils/with-timeout';
 
@@ -258,6 +259,24 @@ export class ConnectionsController {
         HttpStatus.BAD_REQUEST,
       );
     }
+  }
+
+  @Patch(':id/availability-zones')
+  @ApiOperation({
+    summary: 'Set the node-to-availability-zone map of a connection',
+    description:
+      'Replaces the map of node address (host:port) to availability zone. It fills the zone of cluster nodes whose server reports none (before Valkey 9.1); a zone the server reports always wins. An empty map clears it. Set through a cluster member, the map is stored on its seed connection.',
+  })
+  @ApiParam({ name: 'id', description: 'Connection ID' })
+  @ApiResponse({ status: 200, description: 'Availability zones updated', type: SuccessResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid node address or zone' })
+  @ApiResponse({ status: 404, description: 'Connection not found' })
+  async setNodeAvailabilityZones(
+    @Param('id') id: string,
+    @Body() body: SetNodeAvailabilityZonesDto,
+  ): Promise<SuccessResponseDto> {
+    await this.registry.setNodeAvailabilityZones(id, body.zones);
+    return { success: true };
   }
 
   @Delete(':id')

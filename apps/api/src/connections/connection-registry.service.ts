@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, tlsConfigStatus } from '@betterdb/shared';
+import { TopologyMembership, ConnectionStatus, CreateConnectionRequest, CredentialStatus, TestConnectionResponse, DatabaseConnectionConfig, DatabaseConnectionType, NodeAvailabilityZones, normalizeNodeAvailabilityZones, tlsConfigStatus } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
 import { UnifiedDatabaseAdapter } from '../database/adapters/unified.adapter';
@@ -1205,6 +1205,7 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
         connectionType: config.host === 'agent' ? 'agent' : (config.connectionType ?? 'direct'),
         autoRegisterNodes: config.autoRegisterNodes,
         membership: config.membership,
+        nodeAvailabilityZones: this.zoneMapOwner(config).nodeAvailabilityZones,
       });
     }
 
@@ -1216,7 +1217,12 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     if (!live) {
       return config;
     }
-    return { ...config, membership: live.membership, autoRegisterNodes: live.autoRegisterNodes };
+    return {
+      ...config,
+      membership: live.membership,
+      autoRegisterNodes: live.autoRegisterNodes,
+      nodeAvailabilityZones: live.nodeAvailabilityZones,
+    };
   }
 
   async reconnect(id: string): Promise<void> {
@@ -1589,6 +1595,43 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
       this.configs.set(id, { ...config, autoRegisterNodes });
       await this.storage.updateConnection(id, { autoRegisterNodes });
     });
+  }
+
+  getNodeAvailabilityZones(id?: string): NodeAvailabilityZones | undefined {
+    const config = this.getConfig(id);
+    return config ? this.zoneMapOwner(config).nodeAvailabilityZones : undefined;
+  }
+
+  async setNodeAvailabilityZones(id: string, value: unknown): Promise<void> {
+    const requested = this.configs.get(id);
+    if (!requested) {
+      throw new NotFoundException(`Connection '${id}' not found.`);
+    }
+    const result = normalizeNodeAvailabilityZones(value);
+    if (!result.ok) {
+      throw new BadRequestException(result.error);
+    }
+    const nodeAvailabilityZones = result.zones;
+    const requestedOwner = this.zoneMapOwner(requested);
+    if (requestedOwner.connectionType === 'external' || requestedOwner.host === 'agent') {
+      throw new BadRequestException('Availability zones can only be set on a direct connection');
+    }
+    const ownerId = requestedOwner.id;
+    await this.withSeedLock(ownerId, async () => {
+      if (!this.configs.has(ownerId)) {
+        throw new NotFoundException(`Connection '${ownerId}' not found.`);
+      }
+      await this.storage.updateConnection(ownerId, { nodeAvailabilityZones });
+      const owner = this.configs.get(ownerId);
+      if (owner) {
+        this.configs.set(ownerId, { ...owner, nodeAvailabilityZones });
+      }
+    });
+  }
+
+  private zoneMapOwner(config: DatabaseConnectionConfig): DatabaseConnectionConfig {
+    const seedId = config.membership?.seedId;
+    return (seedId && this.configs.get(seedId)) || config;
   }
 
   private pickDefaultCandidate(): string | null {

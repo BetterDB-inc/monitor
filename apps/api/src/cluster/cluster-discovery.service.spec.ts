@@ -64,6 +64,7 @@ describe('ClusterDiscoveryService', () => {
       get: jest.fn().mockReturnValue(mockDbClient),
       getDefaultId: jest.fn().mockReturnValue('test-connection'),
       getConfig: jest.fn().mockReturnValue({ id: 'test-connection', host: 'localhost', port: 6379 }),
+      getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
       list: jest.fn().mockReturnValue([{
         id: 'test-connection',
         name: 'Test Connection',
@@ -155,6 +156,56 @@ describe('ClusterDiscoveryService', () => {
       ]);
       expect(nodes[0]).not.toHaveProperty('availabilityZone');
       expect(nodes[0]).not.toHaveProperty('shardId');
+    });
+
+    it('fills the zone from the connection map when the server reports none', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
+        {
+          slots: [[0, 5460]],
+          nodes: [
+            { id: 'node1-id-abc123', role: 'master', availabilityZone: 'us-east-1a' },
+            { id: 'node2-id-def456', role: 'replica' },
+          ],
+        },
+      ]);
+      mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({
+        '192.168.1.10:6379': 'rack-a',
+        '192.168.1.11:6379': 'rack-b',
+      });
+
+      const nodes = await service.discoverNodes('conn-1');
+
+      expect(mockConnectionRegistry.getNodeAvailabilityZones).toHaveBeenCalledWith('conn-1');
+      expect(nodes[0]).toMatchObject({ id: 'node1-id-abc123', availabilityZone: 'us-east-1a' });
+      expect(nodes[1]).toMatchObject({ id: 'node2-id-def456', availabilityZone: 'rack-b' });
+    });
+
+    it('fills the zone from the connection map on a reply without zones, as before 9.1', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockResolvedValue([
+        {
+          slots: [[0, 5460]],
+          nodes: [
+            { id: 'node1-id-abc123', role: 'master' },
+            { id: 'node2-id-def456', role: 'replica' },
+          ],
+        },
+      ]);
+      mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '192.168.1.10:6379': 'rack-a' });
+
+      const nodes = await service.discoverNodes('conn-1');
+
+      expect(nodes[0]).toMatchObject({ id: 'node1-id-abc123', availabilityZone: 'rack-a' });
+      expect(nodes[1]).not.toHaveProperty('availabilityZone');
+    });
+
+    it('fills the zone from the connection map when CLUSTER SHARDS fails', async () => {
+      mockDbClient.getClusterShards = jest.fn().mockRejectedValue(new Error('ERR unknown subcommand'));
+      mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '192.168.1.11:6379': 'rack-b' });
+
+      const nodes = await service.discoverNodes('conn-1');
+
+      expect(nodes[0]).not.toHaveProperty('availabilityZone');
+      expect(nodes[1]).toMatchObject({ id: 'node2-id-def456', availabilityZone: 'rack-b' });
     });
 
     it('reads CLUSTER SHARDS once per cached discovery', async () => {

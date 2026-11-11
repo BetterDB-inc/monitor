@@ -311,9 +311,37 @@ CONFIG SET availability-zone us-east-1a
 
 ### Fallback on Redis/Older Valkey
 
-Valkey 8.1 and 9.0 accept the `availability-zone` config but do not return it, or the shard id, in `CLUSTER SHARDS`. On those versions, on Valkey 8.0 and earlier, and on Redis, both fields are left out of the API responses and the Cluster page shows no zone. Everything else on the Cluster page works as before.
+Valkey 8.1 and 9.0 accept the `availability-zone` config but do not return it, or the shard id, in `CLUSTER SHARDS`. On those versions, on Valkey 8.0 and earlier, and on Redis, the server reports neither field. The shard id is left out, and the zone is left out unless you supply it yourself (see below). Everything else on the Cluster page works as before.
 
-BetterDB reads the fields with the `CLUSTER SHARDS` command (`+cluster|shards` in the [minimum ACL](minimum-acl)). If that command fails, the nodes are returned without the two fields.
+BetterDB reads the fields with the `CLUSTER SHARDS` command (`+cluster|shards` in the [minimum ACL](minimum-acl)). If that command fails, the nodes are returned without the shard id and with only the zones you supplied.
+
+### Setting Zones Yourself
+
+When the server does not report zones, you can tell BetterDB which zone each node is in. On the Cluster page, click **Availability zones** and enter one node per line:
+
+```text
+10.0.0.1:7001=us-east-1a
+10.0.0.2:7002=us-east-1b
+node-3.internal:7003=us-east-1c
+```
+
+- The address is the node's `host:port` as `CLUSTER NODES` shows it (without the `@` cluster bus port), or its announced hostname and port. On a TLS connection that is the TLS port. The host is not case-sensitive, and an IPv6 address can be written with or without brackets (`[2001:db8::1]:7001`).
+- An entry that matches no node is kept but has no effect, so a node that changes address shows no zone until its line is updated.
+- A zone the server reports itself always wins. The map only fills nodes with no reported zone, so it can stay in place through an upgrade to Valkey 9.1.
+- A line with no zone is ignored, and saving with no zones clears the map.
+- The map belongs to the connection. For a cluster with auto-registered nodes it is stored on the seed connection and applies to all of its nodes, whichever of them you set it through.
+- The map can be set on direct connections only, not on agent connections.
+- The Cluster page shows the new zones right away. Node discovery (`/api/metrics/cluster/nodes/discover` and the MCP `get_cluster_nodes` tool) is cached and can take up to 30 seconds to follow.
+
+The same map can be set through the API. The body replaces the whole map, and an empty object clears it:
+
+```bash
+curl -b cookies.txt -c cookies.txt -X PATCH http://localhost:3001/api/connections/<connection-id>/availability-zones \
+  -H 'Content-Type: application/json' \
+  -d '{"zones": {"10.0.0.1:7001": "us-east-1a", "10.0.0.2:7002": "us-east-1b"}}'
+```
+
+A zone can be up to 64 characters and cannot contain `=`. A map can hold up to 1000 nodes. The shard id has no fallback.
 
 ## Auto-Detection (DB_TYPE=auto)
 

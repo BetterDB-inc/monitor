@@ -620,6 +620,137 @@ describe('ConnectionRegistry membership', () => {
     await expect(registry.setAutoRegister('auto', true)).rejects.toThrow('Auto-registration can only be set on a seed connection');
   });
 
+  describe('node availability zones', () => {
+    const zones = { '10.0.0.1:7001': 'us-east-1a' };
+    const child = { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' as const, source: 'cluster' as const } };
+
+    it('stores a normalised map on the connection', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+
+      await registry.setNodeAvailabilityZones('seed', { ' 10.0.0.1:7001 ': ' us-east-1a ' });
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: zones });
+      expect(registry.getNodeAvailabilityZones('seed')).toEqual(zones);
+    });
+
+    it('clears the map when given an empty one', async () => {
+      const { registry, storage } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+
+      await registry.setNodeAvailabilityZones('seed', {});
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: undefined });
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('rejects an invalid map without storing it', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+
+      await expect(registry.setNodeAvailabilityZones('seed', { '10.0.0.1': 'us-east-1a' })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('rejects an unknown connection', async () => {
+      const { registry } = build();
+
+      await expect(registry.setNodeAvailabilityZones('missing', zones)).rejects.toThrow("Connection 'missing' not found.");
+    });
+
+    it.each([
+      ['an agent connection', { id: 'remote', host: 'agent', port: 0 }],
+      ['an external connection', { id: 'remote', connectionType: 'external' as const }],
+    ])('rejects %s, which is not stored like a direct one', async (_case, config) => {
+      const { registry, storage } = build();
+      put(registry, config);
+
+      await expect(registry.setNodeAvailabilityZones('remote', zones)).rejects.toThrow(
+        'Availability zones can only be set on a direct connection',
+      );
+      await expect(registry.setNodeAvailabilityZones('remote', zones)).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('remote')).toBeUndefined();
+    });
+
+    it('keeps a map that was set while the connection was reconnecting', async () => {
+      const { registry } = build();
+      put(registry, seed);
+      let connected!: () => void;
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () =>
+          ({
+            connect: jest.fn(() => new Promise<void>((resolve) => (connected = resolve))),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+          }) as never,
+      );
+
+      const reconnecting = registry.reconnect('seed');
+      await registry.setNodeAvailabilityZones('seed', zones);
+      connected();
+      await reconnecting;
+
+      expect(registry.getNodeAvailabilityZones('seed')).toEqual(zones);
+    });
+
+    it('keeps the stored map when the storage write fails', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      storage.updateConnection.mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(registry.setNodeAvailabilityZones('seed', zones)).rejects.toThrow('disk full');
+
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('stores a map set through a cluster member on its seed', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      put(registry, child);
+
+      await registry.setNodeAvailabilityZones('auto', zones);
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: zones });
+      expect(registry.getConfig('auto')?.nodeAvailabilityZones).toBeUndefined();
+    });
+
+    it('gives a cluster member the map of its seed', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      put(registry, child);
+
+      expect(registry.getNodeAvailabilityZones('auto')).toEqual(zones);
+    });
+
+    it('uses the map of the default connection when no id is given', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      (registry as unknown as Internals).defaultId = 'seed';
+
+      expect(registry.getNodeAvailabilityZones()).toEqual(zones);
+    });
+
+    it('has no map for an unknown connection', () => {
+      const { registry } = build();
+
+      expect(registry.getNodeAvailabilityZones('missing')).toBeUndefined();
+    });
+
+    it('lists the map on the seed and on its members', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      put(registry, child);
+
+      const listed = registry.list();
+
+      expect(listed.find((connection) => connection.id === 'seed')?.nodeAvailabilityZones).toEqual(zones);
+      expect(listed.find((connection) => connection.id === 'auto')?.nodeAvailabilityZones).toEqual(zones);
+    });
+  });
+
   it('serialises work under the same seed lock', async () => {
     const { registry } = build();
     const order: string[] = [];

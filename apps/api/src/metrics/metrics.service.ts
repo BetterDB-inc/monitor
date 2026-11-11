@@ -22,7 +22,7 @@ import {
 import { analyzeSlowLogPatterns } from './slowlog-analyzer';
 import { StoragePort, toSlowLogEntry } from '../common/interfaces/storage-port.interface';
 import { isReplicaRole } from '../database/parsers/replication-info.parser';
-import { readClusterShards, withShardMetadata } from '../cluster/shard-metadata';
+import { readClusterShards, withConfiguredZones, withShardMetadata } from '../cluster/shard-metadata';
 
 /** Comma-separated addresses of slot-owning primaries missing from a slot stats response. */
 export const SLOT_STATS_FAILED_NODES_HEADER = 'x-slot-stats-failed-nodes';
@@ -151,7 +151,10 @@ export class MetricsService {
   async getClusterNodes(connectionId?: string): Promise<ClusterNode[]> {
     const client = this.getClient(connectionId);
     const [nodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
-    return withShardMetadata(nodes, shards);
+    return withConfiguredZones(
+      withShardMetadata(nodes, shards),
+      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+    );
   }
 
   async getClusterSlotStats(orderBy?: 'key-count' | 'cpu-usec', limit?: number, connectionId?: string): Promise<SlotStats> {
