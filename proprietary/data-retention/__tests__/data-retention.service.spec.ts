@@ -106,9 +106,16 @@ describe('DataRetentionService', () => {
   ] as const;
 
   // Rollups compare bucket_start, so they get the cutoff aligned down to its
-  // bucket (the straddling bucket survives with its raw rows); every other
-  // store gets the cutoff itself.
-  const exactCutoffPruneMethods = allPruneMethods.filter((m) => m !== 'pruneOldClientAnalyticsRollups');
+  // bucket (the straddling bucket survives with its raw rows). ACL audit rows
+  // store captured_at in seconds, so they get the cutoff in seconds. Every
+  // other store gets the cutoff itself.
+  const exactCutoffPruneMethods = allPruneMethods.filter(
+    (m) => m !== 'pruneOldClientAnalyticsRollups' && m !== 'pruneOldEntries',
+  );
+  const expectAclCutoffInSeconds = (cutoff: number) => {
+    expect(storage.pruneOldEntries).toHaveBeenCalledTimes(1);
+    expect(storage.pruneOldEntries).toHaveBeenCalledWith(Math.floor(cutoff / 1000));
+  };
   const expectRollupCutoff = (cutoff: number) => {
     expect(clientRollupBucketStart(cutoff)).toBeLessThan(cutoff);
     expect(storage.pruneOldClientAnalyticsRollups).toHaveBeenCalledTimes(1);
@@ -136,6 +143,7 @@ describe('DataRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
     expectRollupCutoff(expectedCutoff);
+    expectAclCutoffInSeconds(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
@@ -152,6 +160,7 @@ describe('DataRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
     expectRollupCutoff(expectedCutoff);
+    expectAclCutoffInSeconds(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }
@@ -167,6 +176,7 @@ describe('DataRetentionService', () => {
       expect(storage[method]).toHaveBeenCalledWith(expectedCutoff);
     }
     expectRollupCutoff(expectedCutoff);
+    expectAclCutoffInSeconds(expectedCutoff);
     for (const method of samplePruneMethods) {
       expect(storage[method]).toHaveBeenCalledWith(NOW - 7 * MS_PER_DAY);
     }
