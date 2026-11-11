@@ -640,13 +640,16 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
   }
 
   async pinLearnedSshHostKey(id: string, fingerprint: string): Promise<void> {
-    const config = this.configs.get(id);
-    if (!config?.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
-      return;
-    }
-    config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
-    this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
-    await this.persistLearnedHostKey(config);
+    const seedId = this.configs.get(id)?.membership?.seedId ?? id;
+    await this.withSeedLock(seedId, async () => {
+      const config = this.configs.get(id);
+      if (!config?.sshTunnel?.enabled || config.sshTunnel.hostKeyFingerprint) {
+        return;
+      }
+      config.sshTunnel = { ...config.sshTunnel, hostKeyFingerprint: fingerprint };
+      this.logger.log(`Pinned SSH host key for ${config.name} on first use (${fingerprint})`);
+      await this.persistLearnedHostKey(config);
+    });
   }
 
   /**

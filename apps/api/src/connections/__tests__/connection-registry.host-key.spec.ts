@@ -114,6 +114,36 @@ describe('ConnectionRegistry.pinLearnedSshHostKey', () => {
     expect(storage.saveConnection).not.toHaveBeenCalled();
   });
 
+  it('finishes storing the fingerprint before a concurrent removal deletes the record', async () => {
+    await start([tunnelled()]);
+    let finishSave: () => void = () => undefined;
+    storage.saveConnection.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+
+    const pin = registry.pinLearnedSshHostKey('c1', 'SHA256:from-migration');
+    await new Promise((resolve) => setImmediate(resolve));
+    const removal = registry.removeConnection('c1');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(storage.saveConnection).toHaveBeenCalledTimes(1);
+    expect(storage.deleteConnection).not.toHaveBeenCalled();
+
+    finishSave();
+    await Promise.all([pin, removal]);
+
+    expect(storage.deleteConnection).toHaveBeenCalledWith('c1');
+    expect(registry.getConfig('c1')).toBeNull();
+  });
+
+  it('stores nothing for a connection that was removed first', async () => {
+    await start([tunnelled()]);
+
+    const removal = registry.removeConnection('c1');
+    const pin = registry.pinLearnedSshHostKey('c1', 'SHA256:from-migration');
+    await Promise.all([removal, pin]);
+
+    expect(storage.saveConnection).not.toHaveBeenCalled();
+  });
+
   it('ignores a connection it does not know', async () => {
     await start([tunnelled()]);
 

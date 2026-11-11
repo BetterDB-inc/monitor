@@ -450,9 +450,10 @@ while a job runs, the job stops and fails with
 
 With `emptyDbBeforeSync`, a drop before the flush is sent skips the flush. A
 flush that has already been sent cannot be recalled: if a tunnel drops while it
-runs, the target ends up empty, RedisShake is not started, and the job carries
-the notice `The target was emptied before the SSH tunnel dropped, and nothing
-was copied to it.`
+runs, RedisShake is not started and the target may already be empty. When the
+flush was confirmed, the job carries the notice `The target was emptied before
+the SSH tunnel dropped, and nothing was copied to it.` Without the notice the
+flush may or may not have run, so check the target before you retry.
 
 A tunnelled connection normally has its bastion host key pinned from the first
 time BetterDB connected to it. If none is stored yet, the job's tunnel pins the
