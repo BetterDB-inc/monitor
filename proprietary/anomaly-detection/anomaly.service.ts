@@ -6791,7 +6791,8 @@ export class AnomalyService
       intervalMs: Math.max(settings.intervalMs, this.getIntervalMs()),
       nodesPerZone: settings.nodesPerZone,
       randomNodes: settings.randomNodes,
-      readView: (node) => (canDial ? this.readTopologyView(ctx, node) : Promise.resolve(null)),
+      canRead: canDial,
+      readView: (node) => this.readTopologyView(ctx, node),
     });
     if (round) await this.judgeTopologyDivergence(ctx, timestamp, round, canDial);
   }

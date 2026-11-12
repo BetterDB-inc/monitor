@@ -20,10 +20,17 @@ export interface TopologyDisagreement {
   positions: DivergencePosition[];
 }
 
+export interface SlotStreak {
+  slots: number[][];
+  firstSeenAt: number;
+  rounds: number;
+}
+
 export interface TrackedDisagreement extends TopologyDisagreement {
   firstSeenAt: number;
   lastSeenAt: number;
   rounds: number;
+  slotStreaks?: SlotStreak[];
 }
 
 export interface DivergenceRound {
@@ -241,6 +248,31 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
   return shared.sort((x, y) => x[0] - y[0]);
 }
 
+function mergeSlotRanges(ranges: number[][]): number[][] {
+  const merged: number[][] = [];
+  for (const [start, end = start] of [...ranges].sort((x, y) => x[0] - y[0])) {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1] + 1) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+function subtractSlotRanges(from: number[][], taken: number[][]): number[][] {
+  const gone = mergeSlotRanges(taken);
+  const left: number[][] = [];
+  for (const [start, end = start] of from) {
+    let next = start;
+    for (const [goneStart, goneEnd] of gone) {
+      if (goneEnd < next || goneStart > end) continue;
+      if (goneStart > next) left.push([next, goneStart - 1]);
+      next = goneEnd + 1;
+    }
+    if (next <= end) left.push([next, end]);
+  }
+  return left;
+}
+
 function parseSlotRangeList(text: string | undefined): number[][] {
   return (text ?? '')
     .split(/\s+/)
@@ -317,15 +349,25 @@ export class DivergenceTracker {
   }
 
   private advance(disagreement: TopologyDisagreement, at: number): TrackedDisagreement {
-    const fresh = { ...disagreement, firstSeenAt: at, lastSeenAt: at, rounds: 1 };
     const previous = this.entries.get(disagreement.key);
-    if (!previous) return fresh;
+    if (disagreement.slots?.length) {
+      const slotStreaks = this.slotStreaksAfter(previous?.slotStreaks ?? [], disagreement.slots, at);
+      const [{ firstSeenAt, rounds }] = slotStreaks;
+      return { ...disagreement, firstSeenAt, lastSeenAt: at, rounds, slotStreaks };
+    }
+    if (!previous) return { ...disagreement, firstSeenAt: at, lastSeenAt: at, rounds: 1 };
+    return { ...disagreement, firstSeenAt: previous.firstSeenAt, lastSeenAt: at, rounds: previous.rounds + 1 };
+  }
 
-    const continued = { ...disagreement, firstSeenAt: previous.firstSeenAt, lastSeenAt: at, rounds: previous.rounds + 1 };
-    if (!disagreement.slots || !previous.slots) return continued;
-
-    const shared = intersectSlotRanges(previous.slots, disagreement.slots);
-    return shared.length > 0 ? { ...continued, slots: shared } : fresh;
+  private slotStreaksAfter(previous: SlotStreak[], slots: number[][], at: number): SlotStreak[] {
+    const lasting = previous
+      .map((streak) => ({ ...streak, slots: intersectSlotRanges(streak.slots, slots), rounds: streak.rounds + 1 }))
+      .filter((streak) => streak.slots.length > 0);
+    const joined = subtractSlotRanges(
+      slots,
+      previous.flatMap((streak) => streak.slots),
+    );
+    return joined.length > 0 ? [...lasting, { slots: joined, firstSeenAt: at, rounds: 1 }] : lasting;
   }
 }
 
@@ -334,12 +376,13 @@ export function confirmedDisagreements(
   at: number,
   rule: ConfirmationRule,
 ): TrackedDisagreement[] {
-  return tracked.filter(
-    (entry) =>
-      entry.lastSeenAt >= at &&
-      entry.rounds >= rule.minRounds &&
-      at - entry.firstSeenAt >= (rule.minAgeMs?.[entry.kind] ?? 0),
-  );
+  return tracked.flatMap((entry) => {
+    if (entry.lastSeenAt < at || entry.rounds < rule.minRounds) return [];
+    if (at - entry.firstSeenAt < (rule.minAgeMs?.[entry.kind] ?? 0)) return [];
+    if (!entry.slotStreaks) return [entry];
+    const lasting = entry.slotStreaks.filter((streak) => streak.rounds >= rule.minRounds);
+    return [{ ...entry, slots: mergeSlotRanges(lasting.flatMap((streak) => streak.slots)) }];
+  });
 }
 
 export function divergenceSignature(dissent: string[]): string {

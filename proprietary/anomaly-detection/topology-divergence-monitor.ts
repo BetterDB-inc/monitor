@@ -33,6 +33,7 @@ export interface DivergencePoll {
   intervalMs: number;
   nodesPerZone: number;
   randomNodes: number;
+  canRead: boolean;
   readView: (node: ClusterNode) => Promise<ClusterNode[] | null>;
 }
 
@@ -57,6 +58,7 @@ interface ClusterRounds {
   anchor?: string;
   anchorSeenAt: number;
   lastRoundAt: number;
+  lastBlindRoundAt: number;
   running: boolean;
   members: Map<string, { nodeId: string; seenAt: number }>;
   offered: Map<string, { nodes: ClusterNode[]; at: number }>;
@@ -92,12 +94,14 @@ export class TopologyDivergenceMonitor {
     const state = this.stateOf(input.clusterKey);
     const idleMs = TOPOLOGY_DIVERGENCE_IDLE_ROUNDS * input.intervalMs;
     state.members.set(input.connectionId, { nodeId: self.id, seenAt: input.at });
+    if (!input.canRead && state.anchor === input.connectionId) state.anchor = undefined;
 
     const anchorIdle = input.at - state.anchorSeenAt > idleMs;
     if (state.anchor && state.anchor !== input.connectionId && !anchorIdle) {
       if (state.observers.has(self.id)) state.offered.set(self.id, { nodes: input.nodes, at: input.at });
       return null;
     }
+    if (!input.canRead) return this.blindRound(state, input, self);
     state.anchor = input.connectionId;
     state.anchorSeenAt = input.at;
     if (state.running || input.at - state.lastRoundAt < input.intervalMs) return null;
@@ -142,6 +146,7 @@ export class TopologyDivergenceMonitor {
       state = {
         anchorSeenAt: -Infinity,
         lastRoundAt: -Infinity,
+        lastBlindRoundAt: -Infinity,
         running: false,
         members: new Map(),
         offered: new Map(),
@@ -155,6 +160,24 @@ export class TopologyDivergenceMonitor {
       this.clusters.set(clusterKey, state);
     }
     return state;
+  }
+
+  private blindRound(state: ClusterRounds, input: DivergencePoll, self: ClusterNode): DivergenceRoundResult | null {
+    if (state.running || input.at - state.lastBlindRoundAt < input.intervalMs) return null;
+    state.lastBlindRoundAt = input.at;
+    state.tracker.observe({ at: input.at, disagreements: [], unanswered: [], views: 1 });
+    state.last = {
+      clusterKey: input.clusterKey,
+      anchorConnectionId: input.connectionId,
+      at: input.at,
+      status: 'insufficient_views',
+      observers: [self.id],
+      unanswered: [],
+      disagreements: state.tracker.tracked(),
+      nodes: new Map(input.nodes.map((node) => [node.id, node])),
+      selves: new Map([[self.id, self]]),
+    };
+    return state.last;
   }
 
   private async runRound(
@@ -203,7 +226,7 @@ export class TopologyDivergenceMonitor {
       else reads.push(byId.get(id) as ClusterNode);
     }
 
-    const replies = await Promise.all(reads.map((node) => input.readView(node).catch(() => null)));
+    const replies = await Promise.all(reads.map((node) => this.readWithin(input.readView, node)));
     replies.forEach((reply, i) => {
       const id = reads[i].id;
       if (reply && myselfOf(reply)?.id === id) {
@@ -249,6 +272,19 @@ export class TopologyDivergenceMonitor {
       nodes,
       selves,
     };
+  }
+
+  private readWithin(readView: DivergencePoll['readView'], node: ClusterNode): Promise<ClusterNode[] | null> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS);
+      Promise.resolve()
+        .then(() => readView(node))
+        .catch(() => null)
+        .then((view) => {
+          clearTimeout(timer);
+          resolve(view);
+        });
+    });
   }
 
   private backingOff(state: ClusterRounds, id: string, at: number): boolean {

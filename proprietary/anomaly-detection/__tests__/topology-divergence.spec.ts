@@ -445,10 +445,51 @@ describe('DivergenceTracker', () => {
 
     tracker.observe(round(1000, [slots([[100, 200]])]));
     tracker.observe(round(6000, [slots([[150, 300]])]));
-    expect(tracker.tracked()).toMatchObject([{ rounds: 2, slots: [[150, 200]] }]);
+    expect(tracker.tracked()).toMatchObject([
+      {
+        rounds: 2,
+        firstSeenAt: 1000,
+        slots: [[150, 300]],
+        slotStreaks: [
+          { slots: [[150, 200]], rounds: 2, firstSeenAt: 1000 },
+          { slots: [[201, 300]], rounds: 1, firstSeenAt: 6000 },
+        ],
+      },
+    ]);
 
     tracker.observe(round(11000, [slots([[400, 400]])]));
     expect(tracker.tracked()).toMatchObject([{ rounds: 1, firstSeenAt: 11000, slots: [[400, 400]] }]);
+  });
+
+  it('lists a slot that joins a dispute once it has disagreed for the required rounds', () => {
+    const tracker = new DivergenceTracker();
+    const confirmedSlots = (at: number) =>
+      confirmedDisagreements(tracker.tracked(), at, { minRounds: 3 }).map((entry) => entry.slots);
+
+    tracker.observe(round(1000, [slots([[0, 100]])]));
+    tracker.observe(round(6000, [slots([[0, 100]])]));
+    tracker.observe(round(11000, [slots([[0, 300], [500, 600]])]));
+    expect(tracker.tracked()[0].slots).toEqual([[0, 300], [500, 600]]);
+    expect(confirmedSlots(11000)).toEqual([[[0, 100]]]);
+
+    tracker.observe(round(16000, [slots([[0, 300], [500, 600]])]));
+    expect(confirmedSlots(16000)).toEqual([[[0, 100]]]);
+
+    tracker.observe(round(21000, [slots([[0, 300], [500, 600]])]));
+    expect(confirmedSlots(21000)).toEqual([[[0, 300], [500, 600]]]);
+  });
+
+  it('confirms only the slots that stayed in dispute for the required rounds', () => {
+    const tracker = new DivergenceTracker();
+
+    tracker.observe(round(1000, [slots([[0, 10]])]));
+    tracker.observe(round(6000, [slots([[5, 15]])]));
+    tracker.observe(round(11000, [slots([[10, 20]])]));
+
+    expect(confirmedDisagreements(tracker.tracked(), 11000, { minRounds: 3 })).toMatchObject([{ slots: [[10, 10]] }]);
+
+    tracker.observe(round(16000, [slots([[30, 40]])]));
+    expect(confirmedDisagreements(tracker.tracked(), 16000, { minRounds: 3 })).toEqual([]);
   });
 
   it('holds every count through a round with fewer than two views', () => {
