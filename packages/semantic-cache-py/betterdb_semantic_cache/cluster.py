@@ -21,10 +21,20 @@ def _cursor_done(cursor: Any) -> bool:
         return not cursor
 
 
+def is_cluster_client(client: Any) -> bool:
+    """Return True if the client is a ValkeyCluster or similar cluster client."""
+    try:
+        from valkey.asyncio.cluster import ValkeyCluster
+
+        return isinstance(client, ValkeyCluster)
+    except ImportError:
+        return False
+
+
 async def cluster_scan(
     client: Any,
     pattern: str,
-    on_keys: Callable[[list[str], Any], Awaitable[None]],
+    on_keys: Callable[[list[str], Any], Awaitable[bool | None]],
     count: int = 100,
 ) -> None:
     """Scan matching keys across all master nodes (cluster) or the single node
@@ -33,13 +43,11 @@ async def cluster_scan(
     The same client is passed to on_keys in both modes. valkey-py's cluster
     client routes individual single-key commands automatically, so callers can
     pipeline DEL/GET per-key without hitting CROSSSLOT errors.
-    """
-    try:
-        from valkey.asyncio.cluster import ValkeyCluster
 
-        is_cluster = isinstance(client, ValkeyCluster)
-    except ImportError:
-        is_cluster = False
+    Return False from on_keys to stop scanning early (remaining cursors and
+    nodes are skipped).
+    """
+    is_cluster = is_cluster_client(client)
 
     if is_cluster:
         import asyncio
@@ -52,7 +60,10 @@ async def cluster_scan(
                 "SCAN", Exception("cluster has no master nodes visible")
             )
 
+        stopped = False
         for node in nodes:
+            if stopped:
+                break
             cursor: Any = 0
             while True:
                 try:
@@ -64,7 +75,9 @@ async def cluster_scan(
 
                 decoded = [k.decode() if isinstance(k, bytes) else k for k in keys]
                 if decoded:
-                    await on_keys(decoded, client)
+                    if (await on_keys(decoded, client)) is False:
+                        stopped = True
+                        break
                 if _cursor_done(cursor):
                     break
     else:
@@ -77,6 +90,7 @@ async def cluster_scan(
 
             decoded = [k.decode() if isinstance(k, bytes) else k for k in keys]
             if decoded:
-                await on_keys(decoded, client)
+                if (await on_keys(decoded, client)) is False:
+                    break
             if _cursor_done(cursor):
                 break

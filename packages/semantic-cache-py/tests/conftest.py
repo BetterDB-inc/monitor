@@ -52,11 +52,18 @@ def make_telemetry() -> Telemetry:
     return Telemetry(tracer=tracer, metrics=metrics)
 
 
-def _ft_info_response(dim: int = 2, has_binary_refs: bool = True) -> list:
+def _ft_info_response(
+    dim: int = 2,
+    has_binary_refs: bool = True,
+    has_usage_fields: bool = True,
+) -> list:
     """Build a minimal FT.INFO-style response."""
     attrs = [["identifier", "embedding", "type", "VECTOR", "index", ["dimensions", str(dim)]]]
     if has_binary_refs:
         attrs.append(["identifier", "binary_refs"])
+    if has_usage_fields:
+        attrs.append(["identifier", "hit_count"])
+        attrs.append(["identifier", "last_accessed_at"])
     return ["attributes", attrs]
 
 

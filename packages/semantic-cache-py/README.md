@@ -118,6 +118,43 @@ async def my_judge(inp: dict) -> bool:
 | `rerank` | `RerankOptions` | `None` | Rerank hook; see `RerankOptions` |
 | `judge` | `JudgeOptions` | `None` | LLM-as-judge for borderline hits. Not supported by `check_batch()`; raises `SemanticCacheUsageError` |
 
+## Per-entry hit analytics
+
+Hits update `hit_count` and `last_accessed_at` in the background, and slide
+`default_ttl` in the same script. `entry_analytics()` returns never-hit and
+cold counts plus the hottest entries.
+
+```python
+from betterdb_semantic_cache import (
+    EntryAnalyticsOptions,
+    SemanticCache,
+    SemanticCacheOptions,
+    UsageTrackingOptions,
+)
+
+cache = SemanticCache(SemanticCacheOptions(
+    client=client,
+    embed_fn=embed_fn,
+    default_ttl=3600,
+    # Optional. Defaults to the "betterdb_semantic_cache" logger.
+    # Warnings cover failed usage writes and the SCAN analytics fallback.
+    logger=my_logger,
+    # Read replicas and servers that block EVAL: stop the writes.
+    # usage_tracking=UsageTrackingOptions(enabled=False),
+))
+
+report = await cache.entry_analytics(EntryAnalyticsOptions(top_n=10, cold_after_days=7))
+```
+
+Cost saved is independent of usage tracking. A hit still reads `cost_micros`
+from the entry and adds it to the `cost_saved_micros` stat.
+
+`initialize()` does not drop an existing index. Indexes created by this
+version include `hit_count` and `last_accessed_at`. An older index is left as
+it is (no `FT.DROPINDEX`), and analytics samples it with `SCAN` until you
+recreate it. `flush()` is the path that drops the index: `FT.DROPINDEX`
+without the `DD` flag, then a separate delete of the cache keys.
+
 ## Telemetry
 
 The published wheel includes anonymous product analytics powered by PostHog.
