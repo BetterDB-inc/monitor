@@ -5,6 +5,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
   ConflictException,
+  BadGatewayException,
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
@@ -43,7 +44,8 @@ import {
 } from './execution/cutover';
 import { shouldExcludeFunctions, isRdbRestoreCompatible } from './fork-compat';
 import { probeSourceFunctionsClusterAware, parseNodeAddress } from './function-presence';
-import { assertLiveMigrationPair } from './live-connections';
+import { assertLiveMigrationPair, assertTunnelSupport } from './live-connections';
+import { MigrationEndpointResolver, tunnelClosedMessage, type MigrationEndpoints, type MigrationSide } from './migration-endpoints';
 import { sweepStaleJobFiles } from './execution/stale-job-files';
 
 /** Set on jobs stopped by an API shutdown rather than by the user. */
@@ -52,6 +54,9 @@ export const SHUTDOWN_CANCEL_MESSAGE = 'Stopped because BetterDB shut down';
 /** Returned (503) for a migration requested once shutdown has begun. */
 export const SHUTDOWN_START_MESSAGE =
   'BetterDB is shutting down; start the migration again after it restarts.';
+
+export const TARGET_EMPTIED_NOTHING_COPIED_NOTICE =
+  'The target was emptied before the migration stopped, and nothing was copied to it.';
 
 /**
  * Everything runRedisShake needs to do before it spawns the process: the
@@ -94,6 +99,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
   constructor(
     private readonly connectionRegistry: ConnectionRegistry,
     private readonly migrationService: MigrationService,
+    private readonly endpointResolver: MigrationEndpointResolver,
   ) {}
 
   /**
@@ -232,6 +238,12 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     const targetClusterSection = (targetInfo as Record<string, Record<string, string>>).cluster ?? {};
     const targetIsCluster = String(targetClusterSection['cluster_enabled'] ?? '0') === '1';
 
+    assertTunnelSupport(sourceConfig, targetConfig, {
+      sourceIsCluster: clusterEnabled,
+      targetIsCluster,
+      preferReplica: mode === 'redis_shake_sync' && req.syncReaderOptions?.preferReplica === true,
+    });
+
     const expectedShards = mode === 'redis_shake_sync'
       ? await countSourceShards(sourceAdapter, clusterEnabled)
       : null;
@@ -250,17 +262,39 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     const statusPortReservation = mode === 'redis_shake_sync' ? await reservePort() : null;
     const statusPort = statusPortReservation?.port ?? null;
 
+    const id = randomUUID();
+    let droppedBeforeStart: MigrationSide | undefined;
+    let endpoints: MigrationEndpoints;
+    try {
+      endpoints = await this.endpointResolver.open(id, { source: sourceConfig, target: targetConfig }, (side) => {
+        const running = this.jobs.get(id);
+        if (running) {
+          this.handleTunnelClosed(running, side);
+        } else {
+          droppedBeforeStart ??= side;
+        }
+      });
+    } catch (err: unknown) {
+      await statusPortReservation?.release();
+      throw new BadGatewayException(err instanceof Error ? err.message : String(err));
+    }
+
     // Re-check after the awaits above: shutdown may have started (and taken its
     // snapshot of jobs and runs) while the cluster probes and port reservation
     // were outstanding. From here to trackRun() there is no await on the success
     // path, so a job registered below is always visible to onModuleDestroy.
     if (this.shuttingDown) {
       await statusPortReservation?.release();
+      await endpoints.close();
       throw new ServiceUnavailableException(SHUTDOWN_START_MESSAGE);
+    }
+    if (droppedBeforeStart !== undefined) {
+      await statusPortReservation?.release();
+      await endpoints.close();
+      throw new BadGatewayException(tunnelClosedMessage(droppedBeforeStart));
     }
 
     // 5. Create the job
-    const id = randomUUID();
     const job: ExecutionJob = {
       id,
       mode,
@@ -286,12 +320,14 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       process: null,
       tomlPath: null,
       pidPath: null,
+      closeTunnels: endpoints.close,
     };
     // 6. Evict old jobs before inserting the new one
     try {
       this.evictOldJobs();
     } catch (err) {
       await statusPortReservation?.release();
+      await endpoints.close();
       throw err;
     }
 
@@ -312,7 +348,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
       try {
         const tomlContent = mode === 'redis_shake_sync'
-          ? buildSyncReaderToml(sourceConfig, targetConfig, {
+          ? buildSyncReaderToml(endpoints.source, endpoints.target, {
               sourceIsCluster: clusterEnabled,
               syncReaderOptions: req.syncReaderOptions ?? {},
               targetIsCluster,
@@ -320,7 +356,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
               excludeFunctions,
               statusPort: statusPort ?? undefined,
             })
-          : buildScanReaderToml(sourceConfig, targetConfig, {
+          : buildScanReaderToml(endpoints.source, endpoints.target, {
               sourceIsCluster: clusterEnabled,
               targetIsCluster,
               rsOptions,
@@ -330,7 +366,9 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         writeFileSync(tomlPath, tomlContent, { encoding: 'utf-8', mode: 0o600 });
         job.tomlPath = tomlPath;
       } catch (err) {
+        this.jobs.delete(id);
         await statusPortReservation?.release();
+        await endpoints.close();
         throw err;
       }
 
@@ -355,7 +393,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
 
       this.trackRun(id, this.runRedisShake(job, binaryPath!, preSpawn));
     } else {
-      this.trackRun(id, this.runCommandMode(job, sourceConfig, targetConfig, clusterEnabled, targetIsCluster));
+      this.trackRun(id, this.runCommandMode(job, endpoints.source, endpoints.target, clusterEnabled, targetIsCluster));
     }
 
     return { id, status: 'pending' };
@@ -371,9 +409,11 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
     targetAdapter: ReturnType<ConnectionRegistry['get']>,
     targetConfig: NonNullable<ReturnType<ConnectionRegistry['getConfig']>>,
     targetIsCluster: boolean,
-  ): Promise<void> {
+    shouldStop: () => boolean,
+  ): Promise<boolean> {
     if (targetIsCluster) {
       const nodes = await targetAdapter.getClusterNodes();
+      if (shouldStop()) return false;
       const masters = nodes.filter(n => n.flags.includes('master'));
       await Promise.all(masters.map(async (master) => {
         const { host, port } = parseNodeAddress(master.address);
@@ -394,9 +434,11 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         }
       }));
     } else {
+      if (shouldStop()) return false;
       await targetAdapter.getClient().flushall();
     }
     this.logger.log(`Execution pre-flush: flushed target before migration`);
+    return true;
   }
 
   /**
@@ -461,18 +503,30 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       // by the finally block (TOML unlinked, completedAt set) — the credential-bearing
       // TOML never lingers, and the job doesn't stay half-finished. Guarded on cancel
       // so we never wipe a target for a run the caller already stopped.
-      if (preSpawn.emptyDbBeforeSync && (job.status as string) !== 'cancelled') {
+      const stopped = () => (job.status as string) === 'cancelled' || job.tunnelError !== undefined;
+      if (stopped()) return;
+      let targetFlushed = false;
+      if (preSpawn.emptyDbBeforeSync) {
         try {
-          await this.flushTargetBeforeSync(preSpawn.targetAdapter, preSpawn.targetConfig, preSpawn.targetIsCluster);
+          targetFlushed = await this.flushTargetBeforeSync(
+            preSpawn.targetAdapter,
+            preSpawn.targetConfig,
+            preSpawn.targetIsCluster,
+            stopped,
+          );
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           throw new Error(`Target pre-flush failed: ${message}`);
         }
-        if ((job.status as string) === 'cancelled') return;
       }
 
       await preSpawn.statusPortReservation?.release();
-      if ((job.status as string) === 'cancelled') return;
+      if (stopped()) {
+        if (targetFlushed) {
+          job.notices.push(TARGET_EMPTIED_NOTHING_COPIED_NOTICE);
+        }
+        return;
+      }
 
       const proc = spawn(binaryPath, [job.tomlPath!], {
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -601,6 +655,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      this.applyTunnelFailure(job);
       this.clearCutoverTimer(job);
       await preSpawn.statusPortReservation?.release();
       if (!job.completedAt) {
@@ -617,6 +672,7 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
       job.process = null;
       job.tomlPath = null;
       job.pidPath = null;
+      await this.closeTunnels(job);
     }
   }
 
@@ -674,13 +730,45 @@ export class MigrationExecutionService implements OnModuleInit, OnModuleDestroy 
         this.logger.error(`Execution ${job.id} error: ${message}`);
       }
     } finally {
+      this.applyTunnelFailure(job);
       if (!job.completedAt) {
         job.completedAt = Date.now();
       }
+      await this.closeTunnels(job);
     }
   }
 
   // ── Shared methods ──
+
+  private handleTunnelClosed(job: ExecutionJob, side: MigrationSide): void {
+    const finished = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
+    if (finished || job.tunnelError !== undefined) {
+      return;
+    }
+    job.tunnelError = tunnelClosedMessage(side);
+    this.logger.error(`Execution ${job.id}: ${job.tunnelError}`);
+    this.killProcess(job);
+    job.dropConnections?.();
+  }
+
+  private applyTunnelFailure(job: ExecutionJob): void {
+    if (job.tunnelError === undefined || job.status === 'cancelled') {
+      return;
+    }
+    this.markCutoverFailed(job);
+    job.status = 'failed';
+    job.error = job.tunnelError;
+    job.failureCode = undefined;
+  }
+
+  private async closeTunnels(job: ExecutionJob): Promise<void> {
+    try {
+      await job.closeTunnels?.();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Execution ${job.id}: could not close an SSH tunnel: ${message}`);
+    }
+  }
 
   private trackRun(id: string, run: Promise<void>): void {
     const tracked = run

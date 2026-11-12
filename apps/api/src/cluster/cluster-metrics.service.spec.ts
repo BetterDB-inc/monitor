@@ -603,6 +603,27 @@ used_cpu_user:20.3\r
         expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461 })]);
       });
 
+      it.each([
+        [
+          'target',
+          '[5461->-c0ffee99]',
+          { sourceNodeId: 'abc123node1', targetNodeId: 'c0ffee99', targetAddress: '' },
+        ],
+        [
+          'source',
+          '[5461-<-c0ffee99]',
+          { sourceNodeId: 'c0ffee99', sourceAddress: '', targetNodeId: 'abc123node1' },
+        ],
+      ])('keeps a legacy marker whose %s is not in the topology', async (_, marker, expected) => {
+        const self = 'abc123node1 192.168.1.10:6379 myself,master - 0 0 1 connected 0-5460';
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
+        nodeClients({ abc123node1: { nodes: `${self} ${marker}\n` } });
+
+        const check = await service.checkSlotMigrations('conn-1');
+
+        expect(check.migrations).toEqual([expect.objectContaining({ slot: 5461, ...expected })]);
+      });
+
       it('counts a server without GETSLOTMIGRATIONS as answered', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({ def456node2: { jobsError: new Error("ERR unknown subcommand 'GETSLOTMIGRATIONS'") } });
@@ -622,6 +643,15 @@ used_cpu_user:20.3\r
         nodeClients({ fff789node3: { nodesError: new Error('ECONNRESET') } });
 
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
+      });
+
+      it('is incomplete when the topology lists no healthy primary to ask', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([]);
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({
+          migrations: [],
+          complete: false,
+        });
       });
 
       it('is incomplete when a primary cannot be dialed', async () => {
@@ -898,9 +928,9 @@ used_cpu_user:20.3\r
       expect(service.coveredBySeed('seed')).toBe(false);
     });
 
-    it('keeps its own node when discovery fails', async () => {
+    it('does not decide when discovery fails', async () => {
       mockDiscoveryService.discoverNodes.mockRejectedValue(new Error('down'));
-      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBe(false);
+      await expect(service.usesClusterWideSlotStats('node-a')).resolves.toBeNull();
     });
   });
 
@@ -997,6 +1027,17 @@ used_cpu_user:20.3\r
       expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledWith('conn-1');
       expect(result.failedNodes).toEqual([]);
       expect(Object.keys(result.stats).sort()).toEqual(['0', '1', '9']);
+      expect(result.nodeStats).toBeUndefined();
+    });
+
+    it('gives no per-node stats when the topology lists no primary that owns slots', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [] },
+      ]);
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(result.failedNodes).toEqual([]);
       expect(result.nodeStats).toBeUndefined();
     });
 

@@ -4,15 +4,17 @@ import { Button } from '../components/ui/button';
 import { EmptyState } from '../components/ui/empty-state';
 import { Skeleton } from '../components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { RefreshCw, Server, Info } from 'lucide-react';
+import { RefreshCw, Server, Info, MapPin } from 'lucide-react';
 import { useCluster } from '../hooks/useCluster';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useConnectionDialog } from '../hooks/useConnectionDialog';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
 import { SlotHeatmap } from '../components/cluster/SlotHeatmap';
 import { ClusterNodesTable } from '../components/cluster/ClusterNodesTable';
+import { AvailabilityZonesDialog } from '../components/cluster/AvailabilityZonesDialog';
 import { NodeStatsComparison } from '../components/cluster/NodeStatsComparison';
 import { ClusterSlowlog } from '../components/cluster/ClusterSlowlog';
 import { ReplicationLag } from '../components/cluster/ReplicationLag';
@@ -22,7 +24,7 @@ import { buildSlotNodeMap } from '../types/cluster';
 import { formatBytes, formatDurationUs } from '../lib/utils';
 
 export function ClusterDashboard() {
-  const { currentConnection } = useConnection();
+  const { currentConnection, refreshConnections } = useConnection();
   const {
     isClusterMode,
     isLoading,
@@ -119,6 +121,12 @@ export function ClusterDashboard() {
       .slice(0, 10);
   }, [slotStats, slotNodeMap, rankByCpu]);
 
+  const zonesDialog = useConnectionDialog(currentConnection?.id);
+  const handleZonesSaved = async () => {
+    await refreshConnections();
+    refetch();
+  };
+
   // Find node address by ID
   const getNodeAddress = (nodeId: string): string => {
     const node = nodes.find((n) => n.id === nodeId);
@@ -193,15 +201,35 @@ export function ClusterDashboard() {
             Monitoring {masters.length} master nodes and {replicas.length} replicas
           </p>
         </div>
-        <button
-          type="button"
-          onClick={refetch}
-          className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
-        >
-          <RefreshCw className="w-4 h-4" />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {currentConnection && currentConnection.connectionType !== 'agent' && (
+            <Button type="button" variant="outline" onClick={() => zonesDialog.onOpenChange(true)}>
+              <MapPin className="w-4 h-4" />
+              Availability zones
+            </Button>
+          )}
+          <button
+            type="button"
+            onClick={refetch}
+            className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {currentConnection && (
+        <AvailabilityZonesDialog
+          key={currentConnection.id}
+          open={zonesDialog.open}
+          onOpenChange={zonesDialog.onOpenChange}
+          connectionId={currentConnection.id}
+          nodes={nodes}
+          zones={currentConnection.nodeAvailabilityZones}
+          onSaved={handleZonesSaved}
+        />
+      )}
 
       {/* Tabs */}
       <Tabs defaultValue="overview" className="space-y-4">

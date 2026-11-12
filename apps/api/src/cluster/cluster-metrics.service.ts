@@ -558,8 +558,10 @@ export class ClusterMetricsService {
    *   other registered connection is one of the nodes its discovery lists.
    *   Nodes registered one by one each keep their own node's slots. A replica
    *   reports its primary's slots, so registering both counts that shard twice.
+   * Null when that discovery fails, so the caller does not take it for a
+   * change of mode.
    */
-  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean> {
+  async usesClusterWideSlotStats(connectionId?: string): Promise<boolean | null> {
     const id = connectionId ?? this.connectionRegistry.getDefaultId() ?? undefined;
     if (!id) return true;
     if (this.connectionRegistry.getConfig(id)?.membership) return false;
@@ -570,7 +572,7 @@ export class ClusterMetricsService {
     try {
       nodes = await this.discoveryService.discoverNodes(id);
     } catch {
-      return false;
+      return null;
     }
     const registeredElsewhere = (host: string, port: number) => {
       const owner = this.connectionRegistry.findConfigByHostPort(host, port);
@@ -779,7 +781,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
-      nodeStats: ownershipDrifted ? undefined : nodeStats,
+      nodeStats: ownershipDrifted || nodeStats.length === 0 ? undefined : nodeStats,
     };
   }
 
@@ -884,26 +886,26 @@ export class ClusterMetricsService {
         const [nodeId, address] = parts;
         for (const slotRange of parts.slice(8)) {
           const migrating = slotRange.match(/\[(\d+)->-([a-f0-9]+)\]/i);
-          const target = migrating && findNode(migrating[2]);
-          if (migrating && target) {
+          if (migrating) {
+            const target = findNode(migrating[2]);
             addLegacy({
               slot: parseInt(migrating[1], 10),
               sourceNodeId: nodeId,
               sourceAddress: address,
-              targetNodeId: target.id,
-              targetAddress: target.address,
+              targetNodeId: target?.id ?? migrating[2],
+              targetAddress: target?.address ?? '',
               state: 'migrating',
               keysRemaining: undefined, // Can't get this without node connection
             });
           }
 
           const importing = slotRange.match(/\[(\d+)-<-([a-f0-9]+)\]/i);
-          const source = importing && findNode(importing[2]);
-          if (importing && source) {
+          if (importing) {
+            const source = findNode(importing[2]);
             addLegacy({
               slot: parseInt(importing[1], 10),
-              sourceNodeId: source.id,
-              sourceAddress: source.address,
+              sourceNodeId: source?.id ?? importing[2],
+              sourceAddress: source?.address ?? '',
               targetNodeId: nodeId,
               targetAddress: address,
               state: 'importing',
@@ -962,6 +964,7 @@ export class ClusterMetricsService {
     // A new primary has no slots until its first import lands, so include every primary.
     const masters = nodes.filter((node) => node.role === 'master');
     const primaries = masters.filter((node) => node.healthy);
+    if (primaries.length === 0) complete = false;
     if (masters.some((node) => !node.healthy && node.slots.length > 0)) complete = false;
     await Promise.all(
       primaries.map((primary) =>

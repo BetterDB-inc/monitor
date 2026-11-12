@@ -2911,11 +2911,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     try {
       let result: ClusterSlotStatsResult;
-      if (
-        client.getCapabilities().clusterEnabled &&
-        this.clusterMetricsService &&
-        (await this.clusterMetricsService.usesClusterWideSlotStats(connectionId))
-      ) {
+      const clusterWide =
+        client.getCapabilities().clusterEnabled && this.clusterMetricsService
+          ? await this.clusterMetricsService.usesClusterWideSlotStats(connectionId)
+          : false;
+      if (clusterWide && this.clusterMetricsService) {
         // The fan-out must finish inside this pass, or a later pass retires the
         // epoch and every primary's answer is thrown away.
         const now = Date.now();
@@ -2940,7 +2940,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
           this.slotStatsFanOuts.delete(connectionId);
         }
       } else {
-        this.shardLoadService?.forget(connectionId);
+        if (clusterWide === false) this.shardLoadService?.forget(connectionId);
         result = {
           stats: await this.readOwnTopSlots(client),
           failedNodes: [],
@@ -3960,7 +3960,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const label of stale) {
       this.pollStale.labels(label).set(1);
     }
+    this.dropExpiredShardLoad(Date.now());
     await this.removeSeriesForLabels(stale, SWEEP_EXCLUSIONS);
+  }
+
+  private dropExpiredShardLoad(now: number): void {
+    for (const [connectionId, state] of this.perConnectionState) {
+      if (state.currentShardLabels.size === 0) continue;
+      const sample = this.shardLoadService?.getLatest(connectionId) ?? null;
+      if (sample !== null && now - sample.timestamp <= this.stalenessMs) continue;
+      const connLabel = this.getConnectionLabel(connectionId);
+      if (connLabel !== null) this.exportShardLoad(connectionId, connLabel, state, now);
+    }
   }
 
   private async removeSeriesForLabels(

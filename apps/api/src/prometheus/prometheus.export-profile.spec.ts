@@ -1021,6 +1021,71 @@ describe('PrometheusService slot stats', () => {
       }
     });
 
+    it('ages the shard load out on a scrape while no cluster pass finishes', async () => {
+      const { harness, clusterMetrics, stalenessMs } = clusterHarness();
+      const freshness = harness.service['freshness'];
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        freshness.observe('conn-1', LABEL, now);
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        now += stalenessMs;
+        freshness.markFresh('conn-1', LABEL, now);
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        now += 1;
+        freshness.markFresh('conn-1', LABEL, now);
+        expect(await harness.service.getMetrics()).not.toContain(
+          'betterdb_cluster_shard_cpu_usec_per_second{',
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
+    it('keeps the shard load through a pass that cannot tell how the cluster is read', async () => {
+      const { harness, clusterMetrics } = clusterHarness();
+      const shardLoad = (harness.service as unknown as { shardLoadService: ShardLoadService })
+        .shardLoadService;
+      const forget = jest.spyOn(shardLoad, 'forget');
+      let now = 1_000_000;
+      const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(0, 0));
+        await runSlotStats(harness);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(15_000, 5_000));
+        await runSlotStats(harness);
+
+        clusterMetrics.usesClusterWideSlotStats.mockReturnValue(null as never);
+        now += 5_000;
+        await runSlotStats(harness);
+
+        expect(forget).not.toHaveBeenCalled();
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+
+        clusterMetrics.usesClusterWideSlotStats.mockReturnValue(true);
+        now += 5_000;
+        clusterMetrics.getClusterSlotStatsResult.mockResolvedValueOnce(fanOut(45_000, 20_000));
+        await runSlotStats(harness);
+
+        expect(await harness.service.getMetrics()).toContain(
+          `betterdb_cluster_shard_cpu_usec_per_second{connection="${LABEL}",node="10.0.0.1:6379",node_id="p1"} 3000`,
+        );
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it('stamps a shard load sample with the time its read finished', async () => {
       const { harness, clusterMetrics } = clusterHarness();
       let now = 1_000_000;
