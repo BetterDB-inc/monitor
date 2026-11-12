@@ -645,6 +645,15 @@ used_cpu_user:20.3\r
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
       });
 
+      it('is incomplete when the topology lists no healthy primary to ask', async () => {
+        mockDiscoveryService.discoverNodes.mockResolvedValueOnce([]);
+
+        await expect(service.checkSlotMigrations()).resolves.toEqual({
+          migrations: [],
+          complete: false,
+        });
+      });
+
       it('is incomplete when a primary cannot be dialed', async () => {
         mockDiscoveryService.discoverNodes.mockResolvedValueOnce(primaries);
         nodeClients({});
@@ -1018,6 +1027,17 @@ used_cpu_user:20.3\r
       expect(mockDiscoveryService.forgetTopology).toHaveBeenCalledWith('conn-1');
       expect(result.failedNodes).toEqual([]);
       expect(Object.keys(result.stats).sort()).toEqual(['0', '1', '9']);
+      expect(result.nodeStats).toBeUndefined();
+    });
+
+    it('gives no per-node stats when the topology lists no primary that owns slots', async () => {
+      mockDiscoveryService.discoverNodes.mockResolvedValueOnce([
+        { id: 'p1', address: '10.0.0.1:6379', role: 'master', healthy: true, slots: [] },
+      ]);
+
+      const result = await service.getClusterSlotStatsResult('key-count', 10, 'conn-1');
+
+      expect(result.failedNodes).toEqual([]);
       expect(result.nodeStats).toBeUndefined();
     });
 

@@ -781,7 +781,7 @@ export class ClusterMetricsService {
       stats: mergeSlotStats(perNode, orderBy, validLimit),
       failedNodes,
       failedSlotRanges,
-      nodeStats: ownershipDrifted ? undefined : nodeStats,
+      nodeStats: ownershipDrifted || nodeStats.length === 0 ? undefined : nodeStats,
     };
   }
 
@@ -964,6 +964,7 @@ export class ClusterMetricsService {
     // A new primary has no slots until its first import lands, so include every primary.
     const masters = nodes.filter((node) => node.role === 'master');
     const primaries = masters.filter((node) => node.healthy);
+    if (primaries.length === 0) complete = false;
     if (masters.some((node) => !node.healthy && node.slots.length > 0)) complete = false;
     await Promise.all(
       primaries.map((primary) =>
