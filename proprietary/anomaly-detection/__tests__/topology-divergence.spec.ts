@@ -216,6 +216,15 @@ describe('compareTopologyViews', () => {
     ]);
   });
 
+  it('gives a slot two nodes claim at the same epoch to the same owner in every view', () => {
+    const clash = { p2: { slots: [[0, 100], [5461, 10922]], configEpoch: 1 } };
+    const first = view('p1', clash);
+    const second = view('p2', clash);
+    second.nodes.reverse();
+
+    expect(compareTopologyViews([first, second])).toEqual([]);
+  });
+
   it('reports only the slots in dispute, as ranges', () => {
     const moved = {
       p1: { slots: [[0, 99], [201, 5460]] },
@@ -490,6 +499,40 @@ describe('DivergenceTracker', () => {
 
     tracker.observe(round(16000, [slots([[30, 40]])]));
     expect(confirmedDisagreements(tracker.tracked(), 16000, { minRounds: 3 })).toEqual([]);
+  });
+
+  it('keeps the count of a slot dispute while another one between the same owners comes and goes', () => {
+    const lasting = { p1: { slots: [[0, 5461]] }, p2: { slots: [[5462, 10922]] } };
+    const withSibling = { p1: { slots: [[1, 5461]] }, p2: { slots: [[0, 0], [5462, 10922]] } };
+    const seenWith = (patches: Record<string, NodePatch>) =>
+      compareTopologyViews([view('p1'), view('p2', patches), view('p3')]);
+    const tracker = new DivergenceTracker();
+
+    tracker.observe(round(1000, seenWith(lasting)));
+    tracker.observe(round(6000, seenWith(withSibling)));
+    expect(tracker.tracked()).toMatchObject([
+      { key: 'slot_owner:p1|p2', slots: [[5461, 5461]], rounds: 2 },
+      { key: 'slot_owner:p1|p2#2', slots: [[0, 0]], rounds: 1 },
+    ]);
+
+    tracker.observe(round(11000, seenWith(lasting)));
+    expect(confirmedDisagreements(tracker.tracked(), 11000, { minRounds: 3 })).toMatchObject([
+      { key: 'slot_owner:p1|p2', slots: [[5461, 5461]], rounds: 3, firstSeenAt: 1000 },
+    ]);
+  });
+
+  it('gives a new slot dispute a key no other dispute between the same owners holds', () => {
+    const tracker = new DivergenceTracker();
+    const second = { ...slots([[900, 950]]), key: 'slot_owner:p1|p2#2' };
+
+    tracker.observe(round(1000, [slots([[100, 200]]), second]));
+    tracker.observe(round(6000, [slots([[900, 950]])]));
+    tracker.observe(round(11000, [slots([[900, 950]]), { ...slots([[100, 200]]), key: 'slot_owner:p1|p2#2' }]));
+
+    expect(tracker.tracked()).toMatchObject([
+      { key: 'slot_owner:p1|p2', slots: [[100, 200]], rounds: 1 },
+      { key: 'slot_owner:p1|p2#2', slots: [[900, 950]], rounds: 3 },
+    ]);
   });
 
   it('holds every count through a round with fewer than two views', () => {
