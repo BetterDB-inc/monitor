@@ -6886,7 +6886,7 @@ export class AnomalyService
 
     for (const group of groups) {
       if (eventIds.has(group.signature) && !open.get(group.signature)?.group) {
-        open.set(group.signature, { group, lastConfirmedAt: round.at, clean: 0 });
+        open.set(group.signature, { group, lastCountedAt: round.at, clean: 0 });
       }
     }
     const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
