@@ -294,6 +294,20 @@ describe('compareTopologyViews', () => {
     expect(compareTopologyViews([view('p1', {}, [stranger]), view('p2')])).toEqual([]);
   });
 
+  it('matches no handshake entry to an address two node ids share', () => {
+    const replaced = replica('new3', 6, 'p3', 3);
+    const stuck: ClusterNode = { ...replica('f00d', 6, '-', 0), flags: ['handshake'] };
+    const old = view('p1');
+    const fresh = view('p2', { r3: null }, [replaced]);
+    const meeting = view('p3', { r3: null }, [stuck]);
+
+    const found = compareTopologyViews([old, fresh, meeting]);
+
+    expect(compareTopologyViews([fresh, old, meeting])).toEqual(found);
+    expect(found.map((d) => d.key)).toEqual(['membership:new3', 'membership:r3']);
+    expect(found.flatMap((d) => d.positions.map((position) => position.value))).not.toContain('handshake');
+  });
+
   it('describes an isolated node as one observer against the rest', () => {
     const everyoneElseFailing = {
       p2: failing(),
@@ -614,6 +628,21 @@ describe('groupDivergences', () => {
     expect(signatureOf([four[3], four[1], four[2], four[0]])).toEqual(signatureOf(four));
   });
 
+  it('groups ties the same way whichever order they come in', () => {
+    const first = tracked('failure_flags:x', [
+      { value: 'failing', observers: ['a'] },
+      { value: 'ok', observers: ['b'] },
+    ]);
+    const second = tracked('failure_flags:y', [
+      { value: 'failing', observers: ['b'] },
+      { value: 'ok', observers: ['c'] },
+    ]);
+    const signaturesOf = (order: Array<typeof first>) => groupDivergences(order).map((group) => group.signature);
+
+    expect(signaturesOf([first, second])).toEqual(['topology_divergence:a', 'topology_divergence:b']);
+    expect(signaturesOf([second, first])).toEqual(signaturesOf([first, second]));
+  });
+
   it('keeps the name of a tie when the sides swap what they claim', () => {
     const before = groupDivergences([
       tracked('failure_flags:x', [
@@ -741,7 +770,42 @@ describe('settleOpenDivergences', () => {
       expect(settle(open, at).has(SIGNATURE)).toBe(true);
       expect(settle(open, at + 5000, pending).has(SIGNATURE)).toBe(true);
     }
-    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 5000, pending).has(SIGNATURE)).toBe(false);
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 5000, pending).has(SIGNATURE)).toBe(true);
+  });
+
+  it('keeps an event open past the blind limit while compared rounds still count the divergence', () => {
+    const open = new Map<string, OpenDivergence>();
+    const pending = { pendingSignatures: new Set([SIGNATURE]) };
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    for (let at = 5000; at <= TOPOLOGY_DIVERGENCE_BLIND_MS + 60000; at += 5000) {
+      expect(settle(open, at, pending).has(SIGNATURE)).toBe(true);
+    }
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 65000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 70000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 75000).has(SIGNATURE)).toBe(false);
+  });
+
+  it('measures the blind limit from the last compared round that counted the divergence', () => {
+    const open = new Map<string, OpenDivergence>();
+    const pending = { pendingSignatures: new Set([SIGNATURE]) };
+    const lastCounted = TOPOLOGY_DIVERGENCE_BLIND_MS + 60000;
+    settle(open, 0, { confirmed: [confirmedGroup] });
+    for (let at = 5000; at <= lastCounted; at += 5000) settle(open, at, pending);
+
+    const blind = { comparable: false };
+    expect(settle(open, lastCounted + 5000, blind).has(SIGNATURE)).toBe(true);
+    expect(settle(open, lastCounted + TOPOLOGY_DIVERGENCE_BLIND_MS, blind).has(SIGNATURE)).toBe(true);
+    expect(settle(open, lastCounted + TOPOLOGY_DIVERGENCE_BLIND_MS + 1, blind).has(SIGNATURE)).toBe(false);
+  });
+
+  it('holds the blind limit for a divergence still counted in rounds it could not compare', () => {
+    const open = new Map<string, OpenDivergence>();
+    const blind = { comparable: false, pendingSignatures: new Set([SIGNATURE]) };
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS, blind).has(SIGNATURE)).toBe(true);
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 1, blind).has(SIGNATURE)).toBe(false);
   });
 
   it('keeps the clean count through a round it could not compare', () => {

@@ -80,10 +80,14 @@ function statusOf(node: ClusterNode): MemberStatus {
 }
 
 function indexViews(views: TopologyView[]): ViewIndex[] {
-  const idByAddress = new Map<string, string>();
+  const idsByAddress = new Map<string, Set<string>>();
   for (const view of views) {
     for (const node of view.nodes) {
-      if (statusOf(node) === 'known') idByAddress.set(hostPort(node.address), node.id);
+      if (statusOf(node) !== 'known') continue;
+      const address = hostPort(node.address);
+      const ids = idsByAddress.get(address);
+      if (ids) ids.add(node.id);
+      else idsByAddress.set(address, new Set([node.id]));
     }
   }
 
@@ -101,8 +105,10 @@ function indexViews(views: TopologyView[]): ViewIndex[] {
     }
     for (const node of view.nodes) {
       if (statusOf(node) !== 'handshake') continue;
-      const realId = idByAddress.get(hostPort(node.address));
-      if (realId && !status.has(realId)) status.set(realId, 'handshake');
+      const ids = idsByAddress.get(hostPort(node.address));
+      if (ids?.size !== 1) continue;
+      const [realId] = ids;
+      if (!status.has(realId)) status.set(realId, 'handshake');
     }
     return { observerId: view.observerId, known, status };
   });
@@ -355,6 +361,7 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
     if (candidates.length === 1) join(candidates[0], disagreement);
     else if (candidates.length > 1) split.push({ disagreement, candidates });
   }
+  split.sort((a, b) => compareText(a.disagreement.key, b.disagreement.key));
   for (const { disagreement, candidates } of split) {
     const settled = candidates.find((candidate) => members.has(divergenceSignature(candidate)));
     join(settled ?? candidates[0], disagreement);
@@ -376,7 +383,7 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
 
 export interface OpenDivergence {
   group?: DivergenceGroup;
-  lastConfirmedAt: number;
+  lastCountedAt: number;
   clean: number;
 }
 
@@ -392,7 +399,7 @@ export function settleOpenDivergences(input: {
   const { open, at } = input;
   const signatures = new Set(input.openSignatures);
   for (const signature of signatures) {
-    if (!open.has(signature)) open.set(signature, { lastConfirmedAt: at, clean: 0 });
+    if (!open.has(signature)) open.set(signature, { lastCountedAt: at, clean: 0 });
   }
   for (const signature of [...open.keys()]) {
     if (!signatures.has(signature)) open.delete(signature);
@@ -403,13 +410,18 @@ export function settleOpenDivergences(input: {
   for (const [signature, entry] of open) {
     const group = confirmed.get(signature);
     if (group) {
-      open.set(signature, { group, lastConfirmedAt: at, clean: 0 });
+      open.set(signature, { group, lastCountedAt: at, clean: 0 });
       continue;
     }
     const pending = input.pendingSignatures.has(signature);
-    if (!input.comparable || pending) {
-      if (pending) entry.clean = 0;
-      if (at - entry.lastConfirmedAt <= TOPOLOGY_DIVERGENCE_BLIND_MS) kept.add(signature);
+    if (pending) entry.clean = 0;
+    if (!input.comparable) {
+      if (at - entry.lastCountedAt <= TOPOLOGY_DIVERGENCE_BLIND_MS) kept.add(signature);
+      continue;
+    }
+    if (pending) {
+      entry.lastCountedAt = at;
+      kept.add(signature);
       continue;
     }
     entry.clean += 1;
