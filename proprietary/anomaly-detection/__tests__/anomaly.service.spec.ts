@@ -23266,6 +23266,28 @@ describe('AnomalyService', () => {
       expect(divergenceEvents().filter((e) => !e.resolved)).toMatchObject([{ id: open[0].id }]);
     });
 
+    it('still closes the replaced warning when storage refuses the close once', async () => {
+      views.b = { c: { epoch: 9 } };
+      await rounds(3);
+      const warning = divergenceEvents()[0];
+      views.b = { c: { epoch: 9 }, a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(2);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await rounds(1);
+      expect(divergenceEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL)).toHaveLength(1);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(false);
+
+      await (service as any).drainPersistenceOutbox();
+      await rounds(2);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(true);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toMatchObject([
+        { severity: AnomalySeverity.CRITICAL, dedupeKey: 'topology_divergence:b' },
+      ]);
+    });
+
     it('holds a slot dispute while an owner is still moving those slots', async () => {
       views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
       migrations.b = [['name', 'job-1', 'state', 'running', 'slot_ranges', '0-5460']];
