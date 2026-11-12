@@ -236,6 +236,7 @@ import {
   buildDivergenceDetail,
   divergenceMessage,
   divergenceSeverity,
+  outranksSeverity,
   toDivergenceNode,
 } from './topology-divergence-report';
 import { ShardLoadService } from '@app/cluster/shard-load.service';
@@ -759,6 +760,7 @@ export class AnomalyService
   private activeTopologyDivergences = new Map<string, Set<string>>();
   private topologyDivergenceEventIds = new Map<string, Map<string, string>>();
   private topologyDivergenceEventOwners = new Map<string, string>();
+  private topologyDivergenceEventSeverity = new Map<string, AnomalySeverity>();
   private topologyDivergenceOpen = new Map<string, Map<string, OpenDivergence>>();
   private topologyDivergenceAnchors = new Map<string, string>();
   private topologyDivergenceNodeTimeouts = new Map<string, { ms: number; readAt: number }>();
@@ -6863,6 +6865,8 @@ export class AnomalyService
       minRounds,
     });
 
+    await this.closeOutrankedTopologyDivergences(ctx.connectionId, groups, eventIds);
+
     await this.applyTopologyPersistenceGate({
       ctx,
       timestamp,
@@ -6886,7 +6890,28 @@ export class AnomalyService
     }
     const tracked = new Set([...this.topologyDivergenceEventIds.values()].flatMap((ids) => [...ids.values()]));
     for (const eventId of [...this.topologyDivergenceEventOwners.keys()]) {
-      if (!tracked.has(eventId)) this.topologyDivergenceEventOwners.delete(eventId);
+      if (tracked.has(eventId)) continue;
+      this.topologyDivergenceEventOwners.delete(eventId);
+      this.topologyDivergenceEventSeverity.delete(eventId);
+    }
+  }
+
+  private async closeOutrankedTopologyDivergences(
+    connectionId: string,
+    groups: DivergenceGroup[],
+    eventIds: Map<string, string>,
+  ): Promise<void> {
+    for (const group of groups) {
+      const eventId = eventIds.get(group.signature);
+      const raised = eventId ? this.topologyDivergenceEventSeverity.get(eventId) : undefined;
+      if (!eventId || !raised || !outranksSeverity(divergenceSeverity(group), raised)) continue;
+      eventIds.delete(group.signature);
+      this.activeTopologyDivergences.get(connectionId)?.delete(group.signature);
+      try {
+        await this.resolveAnomalyOutcome(eventId);
+      } catch {
+        this.closeLater(eventId);
+      }
     }
   }
 
@@ -7045,13 +7070,15 @@ export class AnomalyService
   ): AnomalyEvent {
     const nodeAddr = this.topologyDivergenceNodeAddr(round, group);
     const id = randomUUID();
+    const severity = divergenceSeverity(group);
     this.topologyDivergenceEventOwners.set(id, ctx.connectionId);
+    this.topologyDivergenceEventSeverity.set(id, severity);
     return {
       id,
       timestamp,
       metricType: MetricType.TOPOLOGY_DIVERGENCE,
       anomalyType: AnomalyType.SPIKE,
-      severity: divergenceSeverity(group),
+      severity,
       value: group.disagreements.length,
       baseline: 0,
       zScore: 0,
@@ -7077,6 +7104,7 @@ export class AnomalyService
       }
       eventIds.set(signature, event.id);
       this.topologyDivergenceEventOwners.set(event.id, connectionId);
+      this.topologyDivergenceEventSeverity.set(event.id, event.severity as AnomalySeverity);
     }
     if (eventIds.size > 0) this.topologyDivergenceEventIds.set(connectionId, eventIds);
   }
@@ -7087,7 +7115,9 @@ export class AnomalyService
     this.activeTopologyDivergences.delete(connectionId);
     this.topologyDivergenceEventIds.delete(connectionId);
     for (const [eventId, owner] of [...this.topologyDivergenceEventOwners]) {
-      if (owner === connectionId) this.topologyDivergenceEventOwners.delete(eventId);
+      if (owner !== connectionId) continue;
+      this.topologyDivergenceEventOwners.delete(eventId);
+      this.topologyDivergenceEventSeverity.delete(eventId);
     }
     const watched = new Set(this.connectionClusterKeys.values());
     for (const [clusterKey, anchor] of [...this.topologyDivergenceAnchors]) {

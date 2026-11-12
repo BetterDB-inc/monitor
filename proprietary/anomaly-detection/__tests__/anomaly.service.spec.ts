@@ -23241,6 +23241,31 @@ describe('AnomalyService', () => {
       expect(divergenceEvents()[0].message).toContain('the owner of slots 0-5460');
     });
 
+    it('replaces the warning with a critical when the same nodes start to dispute slot owners', async () => {
+      views.b = { c: { epoch: 9 } };
+      await rounds(3);
+      expect(divergenceEvents()).toMatchObject([{ severity: AnomalySeverity.WARNING, resolved: false }]);
+      const warning = divergenceEvents()[0];
+
+      views.b = { c: { epoch: 9 }, a: { slots: '' }, b: { slots: '0-10922' } };
+      await rounds(3);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().find((e) => e.id === warning.id)?.resolved).toBe(true);
+      const open = divergenceEvents().filter((e) => !e.resolved);
+      expect(open).toMatchObject([{ severity: AnomalySeverity.CRITICAL, dedupeKey: 'topology_divergence:b' }]);
+      expect(open[0].message).toContain('the owner of slots 0-5460');
+      expect(service.getTopologyDivergence('conn-1').divergences).toMatchObject([
+        { eventId: open[0].id, confirmed: true },
+      ]);
+
+      views.b = { c: { epoch: 9 } };
+      await rounds(4);
+
+      expect(divergenceEvents()).toHaveLength(2);
+      expect(divergenceEvents().filter((e) => !e.resolved)).toMatchObject([{ id: open[0].id }]);
+    });
+
     it('holds a slot dispute while an owner is still moving those slots', async () => {
       views.b = { a: { slots: '' }, b: { slots: '0-10922' } };
       migrations.b = [['name', 'job-1', 'state', 'running', 'slot_ranges', '0-5460']];

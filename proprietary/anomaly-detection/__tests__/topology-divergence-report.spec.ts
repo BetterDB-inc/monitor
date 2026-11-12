@@ -5,6 +5,7 @@ import {
   buildDivergenceDetail,
   divergenceMessage,
   divergenceSeverity,
+  outranksSeverity,
   toDivergenceNode,
 } from '../topology-divergence-report';
 import { AnomalySeverity } from '../types';
@@ -127,6 +128,14 @@ describe('DIVERGENCE_SEVERITY_BY_KIND', () => {
       membership: AnomalySeverity.WARNING,
       config_epoch: AnomalySeverity.WARNING,
     });
+  });
+});
+
+describe('outranksSeverity', () => {
+  it('is true only for a strictly higher severity', () => {
+    expect(outranksSeverity(AnomalySeverity.CRITICAL, AnomalySeverity.WARNING)).toBe(true);
+    expect(outranksSeverity(AnomalySeverity.WARNING, AnomalySeverity.WARNING)).toBe(false);
+    expect(outranksSeverity(AnomalySeverity.WARNING, AnomalySeverity.CRITICAL)).toBe(false);
   });
 });
 

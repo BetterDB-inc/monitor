@@ -126,6 +126,10 @@ export function divergenceMessage(
   );
 }
 
+export function outranksSeverity(severity: AnomalySeverity, other: AnomalySeverity): boolean {
+  return SEVERITY_ORDER.indexOf(severity) > SEVERITY_ORDER.indexOf(other);
+}
+
 export function divergenceSeverity(group: DivergenceGroup): AnomalySeverity {
   const ranks = group.disagreements.map((d) => SEVERITY_ORDER.indexOf(DIVERGENCE_SEVERITY_BY_KIND[d.kind]));
   return SEVERITY_ORDER[Math.max(...ranks)];
