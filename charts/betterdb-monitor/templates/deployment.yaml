@@ -102,6 +102,16 @@ spec:
             - name: BETTERDB_TELEMETRY
               value: "false"
             {{- end }}
+            {{- /* default dict: a release upgraded with --reuse-values has no webhooks block */}}
+            {{- $webhooks := .Values.webhooks | default dict }}
+            {{- with $webhooks.allowedPrivateCidrs }}
+            - name: WEBHOOK_ALLOWED_PRIVATE_CIDRS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with $webhooks.allowedPrivateHosts }}
+            - name: WEBHOOK_ALLOWED_PRIVATE_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
