@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsString, IsNumber, IsInt, IsBoolean, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
+import { IsString, IsNumber, IsInt, IsBoolean, IsObject, IsOptional, IsIn, Min, Max, MinLength, MaxLength, ValidateNested, ValidateIf } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ENV_DEFAULT_ID } from '../../connections/connection.constants';
 import type {
@@ -249,6 +249,14 @@ export class ConnectionStatusDto implements ConnectionStatus {
 
   @ApiPropertyOptional({ description: 'Cluster membership details when this connection was registered as a cluster node', type: TopologyMembershipDto })
   membership?: TopologyMembership;
+
+  @ApiPropertyOptional({
+    description: 'Availability zone per node address (host:port), used where the server reports none; a cluster member carries the map of its seed',
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { '10.0.0.1:7001': 'us-east-1a' },
+  })
+  nodeAvailabilityZones?: Record<string, string>;
 }
 
 /**
@@ -421,6 +429,17 @@ export class SetAutoRegisterDto {
   @ValidateIf((_, value) => value !== null)
   @IsBoolean()
   enabled: boolean | null;
+}
+
+export class SetNodeAvailabilityZonesDto {
+  @ApiProperty({
+    description: 'Availability zone per node address (host:port); an empty object clears the map',
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { '10.0.0.1:7001': 'us-east-1a', '10.0.0.2:7002': 'us-east-1b' },
+  })
+  @IsObject()
+  zones: Record<string, string>;
 }
 
 /**

@@ -93,14 +93,18 @@ describe('MetricsService.getClusterNodes', () => {
     },
   ];
 
-  function makeClusterService(getClusterShards: jest.Mock) {
+  function makeClusterService(getClusterShards: jest.Mock, zones?: Record<string, string>) {
     const client = { getClusterNodes: jest.fn().mockResolvedValue(clusterNodes), getClusterShards };
-    const registry = { get: jest.fn().mockReturnValue(client) } as unknown as ConnectionRegistry;
-    return new MetricsService(registry, {} as StoragePort);
+    const registry = {
+      get: jest.fn().mockReturnValue(client),
+      getDefaultId: jest.fn().mockReturnValue(null),
+      getNodeAvailabilityZones: jest.fn().mockReturnValue(zones),
+    } as unknown as ConnectionRegistry;
+    return { service: new MetricsService(registry, {} as StoragePort), registry };
   }
 
   it('adds the availability zone and shard id from CLUSTER SHARDS', async () => {
-    const service = makeClusterService(
+    const { service } = makeClusterService(
       jest.fn().mockResolvedValue([
         {
           shardId: 'shard-1',
@@ -116,8 +120,65 @@ describe('MetricsService.getClusterNodes', () => {
   });
 
   it('returns the nodes unchanged when CLUSTER SHARDS fails', async () => {
-    const service = makeClusterService(jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')));
+    const { service } = makeClusterService(jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')));
 
     await expect(service.getClusterNodes()).resolves.toEqual(clusterNodes);
+  });
+
+  it('fills the zone from the connection map when the server reports none', async () => {
+    const { service, registry } = makeClusterService(jest.fn().mockResolvedValue([]), { '10.0.0.1:6379': 'rack-a' });
+
+    await expect(service.getClusterNodes('conn-1')).resolves.toEqual([{ ...clusterNodes[0], availabilityZone: 'rack-a' }]);
+    expect(registry.getNodeAvailabilityZones).toHaveBeenCalledWith('conn-1');
+  });
+
+  it('reads the zone map of the default connection the nodes came from when the default changes mid-read', async () => {
+    let defaultId = 'conn-a';
+    const client = {
+      getClusterNodes: jest.fn(async () => {
+        defaultId = 'conn-b';
+        return clusterNodes;
+      }),
+      getClusterShards: jest.fn().mockResolvedValue([]),
+    };
+    const registry = {
+      get: jest.fn().mockReturnValue(client),
+      getDefaultId: jest.fn(() => defaultId),
+      getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
+    };
+    const service = new MetricsService(registry as unknown as ConnectionRegistry, {} as StoragePort);
+
+    await service.getClusterNodes();
+
+    expect(registry.get).toHaveBeenCalledWith('conn-a');
+    expect(registry.getNodeAvailabilityZones).toHaveBeenCalledWith('conn-a');
+  });
+
+  it('fills the zone from the connection map on a reply without zones, as before 9.1', async () => {
+    const { service } = makeClusterService(
+      jest.fn().mockResolvedValue([{ slots: [[0, 16383]], nodes: [{ id: 'primary-1', role: 'master' }] }]),
+      { '10.0.0.1:6379': 'rack-a' },
+    );
+
+    await expect(service.getClusterNodes()).resolves.toEqual([{ ...clusterNodes[0], availabilityZone: 'rack-a' }]);
+  });
+
+  it('fills the zone from the connection map when CLUSTER SHARDS fails', async () => {
+    const { service } = makeClusterService(jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')), {
+      '10.0.0.1:6379': 'rack-a',
+    });
+
+    await expect(service.getClusterNodes()).resolves.toEqual([{ ...clusterNodes[0], availabilityZone: 'rack-a' }]);
+  });
+
+  it('keeps the zone the server reports over the connection map', async () => {
+    const { service } = makeClusterService(
+      jest.fn().mockResolvedValue([
+        { slots: [[0, 16383]], nodes: [{ id: 'primary-1', role: 'master', availabilityZone: 'us-east-1a' }] },
+      ]),
+      { '10.0.0.1:6379': 'rack-a' },
+    );
+
+    await expect(service.getClusterNodes()).resolves.toEqual([{ ...clusterNodes[0], availabilityZone: 'us-east-1a' }]);
   });
 });

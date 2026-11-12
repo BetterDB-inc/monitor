@@ -1,4 +1,5 @@
 import type Valkey from 'iovalkey';
+import { nodeAddressKeys, type NodeAvailabilityZones } from '@betterdb/shared';
 import type { ClusterShard } from '../common/types/metrics.types';
 import { withTimeout } from '../common/utils/with-timeout';
 import { MetricsParser } from '../database/parsers/metrics.parser';
@@ -91,5 +92,33 @@ export function withShardMetadata<T extends { id: string }>(
   return nodes.map((node) => {
     const metadata = byNodeId.get(node.id);
     return metadata ? { ...node, ...metadata } : node;
+  });
+}
+
+interface ZonedNode {
+  address: string;
+  hostname?: string;
+  availabilityZone?: string;
+}
+
+function configuredZone(node: ZonedNode, zones: NodeAvailabilityZones): string | undefined {
+  for (const key of nodeAddressKeys(node)) {
+    if (zones[key]) {
+      return zones[key];
+    }
+  }
+  return undefined;
+}
+
+export function withConfiguredZones<T extends ZonedNode>(nodes: T[], zones: NodeAvailabilityZones | undefined): T[] {
+  if (!zones || Object.keys(zones).length === 0) {
+    return nodes;
+  }
+  return nodes.map((node) => {
+    if (node.availabilityZone) {
+      return node;
+    }
+    const availabilityZone = configuredZone(node, zones);
+    return availabilityZone ? { ...node, availabilityZone } : node;
   });
 }
