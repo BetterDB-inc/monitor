@@ -720,6 +720,45 @@ Before you start one:
 - A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
 - The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
 
+### topology_divergence
+**What it measures**: Whether the nodes of a cluster describe the same cluster. Several nodes are asked for their own `CLUSTER NODES` and the answers are compared
+**Why anomalies matter**: Every other cluster check reads one node's view. When a zone or a single node is cut off, the nodes on each side still answer, and each view looks consistent on its own. Only the comparison shows that they disagree
+**Typical baseline**: Every sampled node reports the same failure flags, config epochs, slot owners and members
+**Source**: `CLUSTER NODES` on a sample of nodes, each on that node's own connection
+**Detection method**: State-based detector (not z-score based). It runs on gossip clusters only, not under Raft.
+
+**Which nodes are asked.** One round runs every 5 seconds for each cluster, however many connections watch it. The node the connection points at always takes part. On top of that:
+
+- When the nodes report availability zones (Valkey 9.1+ `availability-zone`, or zones configured on the connection), one node is asked per zone, so a zone that is cut off is always on one side of the comparison.
+- Nodes without a zone share a quota of 3. When the zones give fewer than 3 nodes in total, more are added until there are 3.
+- A node that is registered as its own connection is preferred, and its view is taken from that connection's own poll at no extra cost. Primaries are preferred over replicas.
+- The same nodes are asked again in the next round. A node that does not answer is replaced, unless it is part of a disagreement that is still being counted.
+- A node that another node flags `fail?` or `fail` is asked for its own view as well, at most 2 such nodes per round. That is how a node that is cut off in one direction only shows up.
+- No round asks more than 12 nodes. In a cluster with more zones than that, some zones are not sampled.
+
+**What is compared.** For every node that two or more views describe:
+
+- failure flags: one view marks it `fail?` or `fail`, another does not. A node's opinion of itself is not counted.
+- config epoch
+- slot owner: two views name different owners for the same slots
+- membership: one view knows the node, another does not or still has it in handshake
+
+**When an event is raised.** A disagreement has to be seen in 3 rounds in a row, about 10 seconds. A disagreement about failure flags also has to last one `cluster-node-timeout` (read from the cluster, 15 seconds when it cannot be read), because nodes legitimately disagree for that long while a failure is being detected. A membership disagreement has to last 60 seconds, so a node that is joining or was just forgotten is not reported. A slot owner disagreement is held back while one of the two owners is still migrating those slots (`MIGRATING`/`IMPORTING` markers, or an unfinished job in `CLUSTER GETSLOTMIGRATIONS` on Valkey 9.0+); when the owners cannot be asked, it is reported.
+
+All disagreements that put the same nodes against the rest are one event. The event names the smaller side first:
+
+```
+Cluster views diverge for 15s: 10.0.1.5:6379 (eu-west-1a) disagrees with 10.0.2.7:6379 (eu-west-1b), 10.0.3.2:6379 (eu-west-1c) about the failure state of 12 nodes and the owner of slots 0-5460.
+```
+
+It is CRITICAL when slot owners are in dispute, because clients can then be sent to different nodes for the same key, and a WARNING otherwise. When exactly one node stands against the rest, the event carries that node's address as `nodeAddr`. The text is written when the event is raised; [`GET /api/anomaly/topology-divergence`](#get-topology-divergence) returns the current state.
+
+**When it closes.** The event closes after 3 rounds in which the views agree. A round in which the nodes of one side do not answer, or fewer than two views could be read, is neither agreement nor disagreement: the count is kept and the event stays open. When that lasts 5 minutes the event is closed. An event that is resolved by hand is raised again while the views still differ. The event of a connection that is removed is closed. After a restart the open event is picked up instead of raised a second time.
+
+**What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is asked once at most; after that its view comes from that connection's poll. A cluster reached through an agent is not sampled, because the monitor cannot dial its nodes there; the report then says `insufficient_views`.
+
+**What it cannot see.** A disagreement among nodes that were not sampled. With the default of one node per zone, a single cut-off node is only caught when it is the sampled one or when a sampled node flags it. Raise `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` to widen the sample. A partition that heals in less than 3 rounds is not reported.
+
 ## Configuration
 
 ### Environment Variables
@@ -738,6 +777,19 @@ ANOMALY_CACHE_TTL_MS=3600000
 
 # Prometheus metrics update interval (default: 30000 = 30 seconds)
 ANOMALY_PROMETHEUS_INTERVAL_MS=30000
+
+# Cluster view divergence (topology_divergence), gossip clusters only
+# Compare the cluster views of several nodes (default: true)
+ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED=true
+# Nodes asked per availability zone (default: 1)
+ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE=1
+# Nodes asked among those without a zone, and the smallest sample (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES=3
+# Rounds in a row a disagreement must hold before it is raised, and
+# rounds of agreement before it is closed (default: 3)
+ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS=3
+# Time between rounds in milliseconds, never shorter than the poll interval (default: 5000)
+ANOMALY_TOPOLOGY_DIVERGENCE_INTERVAL_MS=5000
 
 # Persistence-child stall detection thresholds (seconds)
 # Frozen key progress for this long fires CRITICAL (default: 60)
@@ -1077,6 +1129,57 @@ The open [`hot_shard`](#hot_shard) events of one cluster connection, with the nu
     "keysSampledAt": 1704067200000
   }
 ]
+```
+
+### Get Topology Divergence
+
+```http
+GET /api/anomaly/topology-divergence
+X-Connection-ID: <connection-id>
+```
+
+What the last [`topology_divergence`](#topology_divergence) round of the connection's cluster saw. The connection header is required. Any connection that watches the cluster returns the same report. It is kept in memory and rebuilt by the first round after a restart.
+
+`status` is `ok` when at least two views were compared, `insufficient_views` when only the connection's own view could be read, and `not_sampled` when no round has run: the connection is not a gossip cluster, the check is off, or the first round is still to come. `observers` are the nodes asked in the round and `unanswered` those that gave no view. Each entry of `divergences` is one group of nodes against the rest: `sides[0]` is the smaller side. `confirmed` is `false` while the disagreement is still being counted and no event is open; `eventId` is then `null`. `positions` lists, for each disagreement, what was claimed and which nodes claimed it. For `failure_flags` the value is `ok` or `failing` (the view flags the node `fail?` or `fail`), for `config_epoch` the epoch, for `slot_owner` the node id of the owner or `unassigned`, and for `membership` one of `known`, `handshake`, `noaddr` or `missing`. `rounds` is the number of rounds in a row the disagreement was seen and `since` when it was first seen.
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "sampledAt": 1704067200000,
+  "observers": [
+    { "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" },
+    { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+    { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+  ],
+  "unanswered": [],
+  "divergences": [
+    {
+      "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+      "confirmed": true,
+      "since": 1704067185000,
+      "sides": [
+        { "nodes": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+        { "nodes": [
+          { "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" },
+          { "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }
+        ] }
+      ],
+      "disagreements": [
+        {
+          "kind": "failure_flags",
+          "subject": [{ "nodeId": "7c1d0e2f55bb6a1d8c2f5a7b9d3e1f2a4b6c8d0e", "address": "10.0.2.7:6379", "role": "primary", "availabilityZone": "eu-west-1b" }],
+          "positions": [
+            { "value": "failing", "observers": [{ "nodeId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d", "address": "10.0.1.5:6379", "role": "primary", "availabilityZone": "eu-west-1a" }] },
+            { "value": "ok", "observers": [{ "nodeId": "9e3f1a2b44cc7b2e9d3a6b8c0e4f2a3b5c7d9e1f", "address": "10.0.3.2:6379", "role": "primary", "availabilityZone": "eu-west-1c" }] }
+          ],
+          "rounds": 4,
+          "since": 1704067185000
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ### Resolve Anomaly or Group
