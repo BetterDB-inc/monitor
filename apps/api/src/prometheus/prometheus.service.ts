@@ -929,7 +929,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     this.logCaptureLostEntries = this.createGauge(
       'log_capture_lost_entries_total',
-      'Slow log and command log entries the server dropped before BetterDB read them, since BetterDB started',
+      'Slow log and command log entries BetterDB never read, dropped by the server or outside the newest 128 a poll reads, since BetterDB started',
       ['log'],
     );
 

@@ -309,11 +309,14 @@ Valkey-specific metrics for tracking large request/reply commands.
 
 ### Lost Log Entries
 
-The server keeps only the newest `slowlog-max-len` / `commandlog-*-max-len` entries, and BetterDB reads the newest 128 of each log every 30 seconds. Entry ids are a per-process counter that `SLOWLOG RESET` and `COMMANDLOG RESET` do not restart, so when the oldest id of a poll is more than one above the newest id of the poll before it, the ids in between were logged and dropped before BetterDB read them.
+The server keeps only the newest `slowlog-max-len` / `commandlog-*-max-len` entries, and BetterDB reads the newest 128 of each log every 30 seconds. Entry ids are a per-process counter that `SLOWLOG RESET` and `COMMANDLOG RESET` do not restart, so when the oldest id of a poll is more than one above the newest id of the poll before it, the ids in between were logged and never read by BetterDB. That happens in two ways:
 
-| Metric                                    | Type  | Labels | Description                                                                              | Example |
-| ----------------------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------- | ------- |
-| `betterdb_log_capture_lost_entries_total` | gauge | `log`  | Entries the server dropped before BetterDB read them, since BetterDB started              | `72`    |
+- the server dropped them: more entries were logged between two polls than the log's max-len holds, or the log was reset
+- more than 128 entries were logged between two polls: the older ones may still be on the server, but a poll reads only the newest 128
+
+| Metric                                    | Type  | Labels | Description                                                                                                                  | Example |
+| ----------------------------------------- | ----- | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `betterdb_log_capture_lost_entries_total` | gauge | `log`  | Entries BetterDB never read, dropped by the server or outside the newest 128 a poll reads, since BetterDB started            | `72`    |
 
 **Labels**: `log` is `slowlog`, `commandlog-slow`, `commandlog-large-request` or `commandlog-large-reply`.
 
@@ -325,7 +328,7 @@ Not counted, because the previous id is not one this process read from the same 
 - a server restart, seen as a changed `run_id`, or as ids starting over when `INFO` is refused
 - a log that was empty with nothing stored for it at the poll before
 
-A non-zero increase means the slow log, pattern metrics and anomaly correlation for that window are built from an incomplete history. Raise `slowlog-max-len` (or the matching `commandlog-*-max-len`), or raise the logging threshold so fewer commands are logged.
+A non-zero increase means the slow log, pattern metrics and anomaly correlation for that window are built from an incomplete history. Raising `slowlog-max-len` (or the matching `commandlog-*-max-len`) helps only up to the 128 entries one poll reads. Beyond that, raise the logging threshold (`slowlog-log-slower-than`, or the matching `commandlog-*` threshold) so fewer commands are logged.
 
 ### Vector Index Metrics
 
@@ -920,7 +923,7 @@ topk(5, betterdb_slowlog_pattern_avg_duration_us)
 # Slowlog growth rate
 rate(betterdb_slowlog_length[5m])
 
-# Entries dropped before BetterDB read them, per log, in the last hour
+# Entries BetterDB never read, per log, in the last hour
 sum by (connection, log) (increase(betterdb_log_capture_lost_entries_total[1h])) > 0
 ```
 

@@ -142,7 +142,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       const missed = this.gaps.completePoll(ctx.connectionId, SLOWLOG_CAPTURE, entries, currentLastSeenId);
       if (missed > 0) {
         this.logger.warn(
-          `Slow log of ${ctx.connectionName} dropped ${missed} entries before they were read (after id ${currentLastSeenId})`
+          `Slow log of ${ctx.connectionName}: ${missed} entries after id ${currentLastSeenId} were never read (dropped by the server, or more than 128 logged between two polls)`
         );
       }
 

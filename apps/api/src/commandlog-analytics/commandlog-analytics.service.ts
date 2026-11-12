@@ -196,7 +196,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
         const missed = this.gaps.completePoll(ctx.connectionId, capture, entries, currentLastSeenId);
         if (missed > 0) {
           this.logger.warn(
-            `Command log ${type} of ${ctx.connectionName} dropped ${missed} entries before they were read (after id ${currentLastSeenId})`
+            `Command log ${type} of ${ctx.connectionName}: ${missed} entries after id ${currentLastSeenId} were never read (dropped by the server, or more than 128 logged between two polls)`
           );
         }
 
