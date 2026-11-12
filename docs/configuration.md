@@ -246,12 +246,15 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 
 ### Anomaly Detection
 
-| Variable                         | Required | Default   | Description                                           |
-| -------------------------------- | -------- | --------- | ----------------------------------------------------- |
-| `ANOMALY_DETECTION_ENABLED`      | No       | `true`    | Enable anomaly detection features (Pro tier required) |
-| `ANOMALY_POLL_INTERVAL_MS`       | No       | `1000`    | Anomaly detection polling interval (milliseconds)     |
-| `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
-| `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
+| Variable                                 | Required | Default   | Description                                                                                                                            |
+| ---------------------------------------- | -------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANOMALY_DETECTION_ENABLED`              | No       | `true`    | Enable anomaly detection features (Pro tier required)                                                                                 |
+| `ANOMALY_POLL_INTERVAL_MS`               | No       | `1000`    | Anomaly detection polling interval (milliseconds)                                                                                     |
+| `ANOMALY_CACHE_TTL_MS`                   | No       | `3600000` | Anomaly detection cache TTL (milliseconds)                                                                                            |
+| `ANOMALY_PROMETHEUS_INTERVAL_MS`         | No       | `30000`   | Prometheus summary update interval (milliseconds)                                                                                     |
+| `ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS`     | No       | `true`    | Leave BetterDB's own clients (`BetterDB-Monitor`, `BetterDB-Agent`, `BetterDB-CLI`, and `-` suffixes) out of slowlog anomaly counts. `BetterDB-Migration-*` still counts |
+| `ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES` | No       | empty     | Comma-separated client-name prefixes also left out of slowlog anomaly counts, for example `valkey-operator`                            |
+| `ANOMALY_SLOWLOG_IGNORE_COMMANDS`        | No       | empty     | Comma-separated slowlog commands to leave out of anomaly counts, lower-case `cmd` or `cmd\|subcmd`, for example `cluster\|slot-stats,latency\|histogram` |
 
 ### Monitor Health Gate
 

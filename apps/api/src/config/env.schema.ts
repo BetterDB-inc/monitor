@@ -191,6 +191,16 @@ export const envSchema = z
     ANOMALY_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1000),
     ANOMALY_CACHE_TTL_MS: z.coerce.number().int().min(1000).default(3600000),
     ANOMALY_PROMETHEUS_INTERVAL_MS: z.coerce.number().int().min(1000).default(30000),
+    // Slowlog anomalies ignore BetterDB's own clients unless this is `false`.
+    ANOMALY_SLOWLOG_IGNORE_OWN_CLIENTS: z
+      .string()
+      .default('true')
+      .transform((v) => v !== 'false'),
+    // Comma-separated client-name prefixes, for example `valkey-operator`.
+    ANOMALY_SLOWLOG_IGNORE_CLIENT_PREFIXES: z.string().default(''),
+    // Comma-separated lower-case `cmd` or `cmd|subcmd`, for example
+    // `cluster|slot-stats,latency|histogram`.
+    ANOMALY_SLOWLOG_IGNORE_COMMANDS: z.string().default(''),
 
     KV_CACHE_FOOTPRINT_INTERVAL_MS: z.string().optional(),
     KV_CACHE_SCAN_MAX_KEYS: z.string().optional(),

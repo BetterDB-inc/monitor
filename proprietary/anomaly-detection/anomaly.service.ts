@@ -1582,12 +1582,14 @@ export class AnomalyService
         });
       }
 
-      // Slowlog rate-of-change detection (sourced from SlowLogAnalyticsService, not INFO)
-      const currentSlowlogId = this.slowLogAnalytics.getLastSeenId(ctx.connectionId);
-      if (currentSlowlogId !== null) {
-        const lastId = this.lastSlowlogId.get(ctx.connectionId);
-        const delta = Math.max(0, currentSlowlogId - (lastId ?? currentSlowlogId));
-        this.lastSlowlogId.set(ctx.connectionId, currentSlowlogId);
+      // Slowlog rate-of-change detection. Counts new entries that are not
+      // BetterDB's own (or otherwise ignored). getLastSeenId stays the raw id
+      // for the Prometheus exporter.
+      const currentExternal = this.slowLogAnalytics.getExternalEntryCount(ctx.connectionId);
+      if (currentExternal !== null) {
+        const lastCount = this.lastSlowlogId.get(ctx.connectionId);
+        const delta = Math.max(0, currentExternal - (lastCount ?? currentExternal));
+        this.lastSlowlogId.set(ctx.connectionId, currentExternal);
 
         // Lazily create buffer/detector on first available data
         if (!buffers.has(MetricType.SLOWLOG_LAST_ID)) {

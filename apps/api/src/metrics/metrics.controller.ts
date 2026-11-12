@@ -92,7 +92,12 @@ export class MetricsController {
   @ApiOperation({ summary: 'Get slowlog entries', description: 'Retrieve slowlog entries from Valkey/Redis' })
   @ApiHeader({ name: 'x-connection-id', required: false, description: 'Connection ID to target' })
   @ApiQuery({ name: 'count', required: false, description: 'Number of entries to return' })
-  @ApiQuery({ name: 'excludeMonitor', required: false, description: 'Set to true to exclude BetterDB-Monitor commands' })
+  @ApiQuery({
+    name: 'excludeMonitor',
+    required: false,
+    description:
+      'Set to true to exclude BetterDB monitor, agent, and CLI commands, including suffixed client names',
+  })
   @ApiQuery({ name: 'startTime', required: false, description: 'Filter entries after this Unix timestamp (seconds)' })
   @ApiQuery({ name: 'endTime', required: false, description: 'Filter entries before this Unix timestamp (seconds)' })
   @ApiResponse({ status: 200, description: 'Slowlog entries retrieved successfully', type: [SlowLogEntryDto] })
