@@ -424,10 +424,13 @@ export function confirmedDisagreements(
   rule: ConfirmationRule,
 ): TrackedDisagreement[] {
   return tracked.flatMap((entry) => {
+    const minAgeMs = rule.minAgeMs?.[entry.kind] ?? 0;
     if (entry.lastSeenAt < at || entry.rounds < rule.minRounds) return [];
-    if (at - entry.firstSeenAt < (rule.minAgeMs?.[entry.kind] ?? 0)) return [];
+    if (at - entry.firstSeenAt < minAgeMs) return [];
     if (!entry.slotStreaks) return [entry];
-    const lasting = entry.slotStreaks.filter((streak) => streak.rounds >= rule.minRounds);
+    const lasting = entry.slotStreaks.filter(
+      (streak) => streak.rounds >= rule.minRounds && at - streak.firstSeenAt >= minAgeMs,
+    );
     return [{ ...entry, slots: mergeSlotRanges(lasting.flatMap((streak) => streak.slots)) }];
   });
 }
