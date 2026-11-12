@@ -27,6 +27,7 @@ import {
 } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { withTimeout } from '@app/common/utils/with-timeout';
+import { isNegativeEnvValue } from '@app/common/utils/env-bool';
 import { isAuthErrorReply } from '@app/common/utils/auth-error';
 import { dialsDataNodes } from '@app/connections/data-node-reach';
 import {
@@ -1135,7 +1136,7 @@ export class AnomalyService
     const divergence = TOPOLOGY_DIVERGENCE_DEFAULTS;
     const divergenceEnabled = this.configService.get<string | boolean>('ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED');
     this.topologyDivergenceSettings = {
-      enabled: !['false', '0'].includes(String(divergenceEnabled ?? true).toLowerCase()),
+      enabled: !isNegativeEnvValue(String(divergenceEnabled ?? true)),
       nodesPerZone: Math.max(1, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE', divergence.nodesPerZone)),
       randomNodes: Math.max(2, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES', divergence.randomNodes)),
       minRounds: Math.max(1, this.numberEnv('ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS', divergence.minRounds)),

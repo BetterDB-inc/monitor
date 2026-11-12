@@ -252,7 +252,7 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_POLL_INTERVAL_MS`       | No       | `1000`    | Anomaly detection polling interval (milliseconds)     |
 | `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
-| `ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED` | No | `true` | Compare the cluster views of several nodes of a gossip cluster ([topology_divergence](anomaly-detection.md#topology_divergence)) |
+| `ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED` | No | `true` | Compare the cluster views of several nodes of a gossip cluster ([topology_divergence](anomaly-detection.md#topology_divergence)). `false`, `0`, `no` or `off` switches it off |
 | `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` | No | `1` | Nodes asked for their view per availability zone |
 | `ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES` | No | `3` | Nodes asked among those without a zone, and the smallest sample |
 | `ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS` | No | `3` | Rounds in a row a disagreement must hold before it is raised, and rounds of agreement before it is closed |

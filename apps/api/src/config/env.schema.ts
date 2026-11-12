@@ -194,7 +194,7 @@ export const envSchema = z
     ANOMALY_TOPOLOGY_DIVERGENCE_ENABLED: z
       .string()
       .default('true')
-      .transform((v) => v !== 'false'),
+      .transform((v) => !isNegativeEnvValue(v)),
     ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE: z.coerce.number().int().min(1).max(11).default(1),
     ANOMALY_TOPOLOGY_DIVERGENCE_RANDOM_NODES: z.coerce.number().int().min(2).max(12).default(3),
     ANOMALY_TOPOLOGY_DIVERGENCE_MIN_POLLS: z.coerce.number().int().min(1).default(3),
