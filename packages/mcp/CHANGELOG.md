@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on Valkey 9.1 and later. On older versions `availabilityZone` is returned
   for nodes listed in the connection's zone map.
 
+### Changed
+
+- `get_cluster_nodes` returns a `state` for each node: `failed` for a node
+  flagged `fail`, `suspect` for one flagged `fail?` (PFAIL), `handshake` or
+  `noaddr`, and `healthy` otherwise. A node its peers only suspect was
+  reported as healthy before.
+
+### Deprecated
+
+- The `healthy` boolean on `get_cluster_nodes` nodes: use `state`. It is
+  still returned and is now `true` only when `state` is `healthy`.
+
 ### Fixed
 
 - The monitor started by `--autostart` or `start_monitor` no longer inherits

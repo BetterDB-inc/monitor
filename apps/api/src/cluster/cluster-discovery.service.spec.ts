@@ -160,7 +160,7 @@ describe('ClusterDiscoveryService', () => {
           masterId: undefined,
           slots: [[0, 5460]],
           configEpoch: 1,
-          healthy: true,
+          state: 'healthy',
           flags: ['master', 'myself'],
         },
         {
@@ -170,7 +170,7 @@ describe('ClusterDiscoveryService', () => {
           masterId: 'node1-id-abc123',
           slots: [],
           configEpoch: 1,
-          healthy: true,
+          state: 'healthy',
           flags: ['slave'],
         },
       ]);
@@ -311,47 +311,29 @@ describe('ClusterDiscoveryService', () => {
       expect(mockDbClient.getClusterNodes).toHaveBeenCalledTimes(2);
     });
 
-    it('should mark nodes as healthy based on flags', async () => {
+    it('reports nodes with no failure flag as healthy', async () => {
       const nodes = await service.discoverNodes();
 
-      nodes.forEach(node => {
-        expect(node.healthy).toBe(true);
-      });
+      expect(nodes.map((node) => node.state)).toEqual(['healthy', 'healthy']);
     });
 
-    it('keeps a node healthy when only the answering node\'s bus link to it is down', async () => {
-      // Link state is the answering node's cluster-bus link, not Monitor's
-      // reach; the parser keeps it in its own field, never in flags.
-      mockDbClient.getClusterNodes.mockResolvedValueOnce([
-        {
-          ...mockClusterNodes[0],
-          flags: ['master'],
-          linkState: 'disconnected',
-        },
-      ]);
-
-      await service.cleanupIdleConnections(0);
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      const nodes = await service.discoverNodes();
-      expect(nodes[0].healthy).toBe(true);
-    });
-
-    it('should mark nodes as unhealthy when failed', async () => {
-      mockDbClient.getClusterNodes.mockResolvedValueOnce([
-        {
-          ...mockClusterNodes[0],
-          flags: ['master', 'fail'],
-          linkState: 'connected',
-        },
-      ]);
-
-      // Clear cache to force new discovery
-      await service.cleanupIdleConnections(0);
-      await new Promise(resolve => setTimeout(resolve, 100));
+    it.each([
+      ['a failure its peers agreed on', ['master', 'fail'], 'connected', 'failed'],
+      ['a failure its peers only suspect', ['master', 'fail?'], 'connected', 'suspect'],
+      ['a suspected failure on a replica', ['slave', 'fail?'], 'connected', 'suspect'],
+      ['a handshake that has not finished', ['master', 'handshake'], 'connected', 'suspect'],
+      ['no known address', ['master', 'noaddr'], 'connected', 'suspect'],
+      ['an agreed failure and no known address', ['master', 'fail', 'noaddr'], 'disconnected', 'failed'],
+      ['a suspected and an agreed failure', ['master', 'fail?', 'fail'], 'disconnected', 'failed'],
+      ["only the answering node's bus link down", ['master'], 'disconnected', 'healthy'],
+    ])('reports a node with %s as %s', async (_case, flags, linkState, state) => {
+      mockDbClient.getClusterNodes.mockResolvedValueOnce([{ ...mockClusterNodes[0], flags, linkState }]);
+      service.forgetTopology();
 
       const nodes = await service.discoverNodes();
-      expect(nodes[0].healthy).toBe(false);
+
+      expect(nodes[0].state).toBe(state);
+      expect(nodes[0]).not.toHaveProperty('healthy');
     });
 
     it('should skip nodes that are neither master nor replica', async () => {
@@ -1016,6 +998,12 @@ describe('ClusterDiscoveryService', () => {
       expect(client.call).toHaveBeenCalledWith('CLUSTER', 'NODES');
       expect(client.disconnect).toHaveBeenCalled();
       expect(mockDbClient.getClusterNodes).not.toHaveBeenCalled();
+    });
+
+    it('reports a suspected failure read on a socket of its own', async () => {
+      dedicatedClient(jest.fn().mockResolvedValue('abc 10.0.0.2:7002@17002 master,fail? - 0 0 1 connected 0-16383\n'));
+      const nodes = await service.discoverNodesIsolated('test-connection', 10_000);
+      expect(nodes).toEqual([expect.objectContaining({ id: 'abc', state: 'suspect' })]);
     });
 
     it('bounds the dial and the command with timers that do not depend on the peer', async () => {

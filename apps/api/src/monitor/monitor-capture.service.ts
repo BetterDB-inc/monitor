@@ -559,7 +559,7 @@ export class MonitorCaptureService {
     try {
       const nodes = await this.boundStartStep(this.clusterDiscovery.discoverNodes(connectionId));
       return nodes
-        .filter((n) => n.role === 'master' && n.healthy)
+        .filter((n) => n.role === 'master' && n.state !== 'failed')
         .map((n) => ({ id: n.id, address: n.address }));
     } catch (err) {
       this.logger.warn(
