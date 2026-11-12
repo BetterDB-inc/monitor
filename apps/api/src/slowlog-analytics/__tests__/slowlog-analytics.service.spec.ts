@@ -222,4 +222,38 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     expect(service.getExternalEntryCount('conn-1')).toBe(1);
     expect(saved).toHaveLength(3);
   });
+
+  it('matches a command-only entry whatever its arguments, and a subcommand entry only for that subcommand', async () => {
+    process.env.ANOMALY_SLOWLOG_IGNORE_COMMANDS = 'get,cluster|slot-stats';
+    service = buildService();
+    served = [
+      entry(11, 'app', ['GET', 'user:1']),
+      entry(12, 'app', ['GET', 'user:2']),
+      entry(13, 'app', ['CLUSTER', 'SLOT-STATS', 'ORDERBY', 'key-count']),
+      entry(14, 'app', ['CLUSTER', 'NODES']),
+      entry(15, 'app', ['SET', 'k', 'v']),
+    ];
+
+    await poll();
+
+    expect(service.getExternalEntryCount('conn-1')).toBe(2);
+  });
+
+  it('counts entries logged but not read, from the id gap, except on the first poll', async () => {
+    // Stored id is 10 and the log is at 1015: that gap is from before this
+    // process polled, so only the entries read are counted.
+    served = [entry(1014, 'BetterDB-Monitor'), entry(1015, 'app')];
+    await poll();
+    expect(service.getExternalEntryCount('conn-1')).toBe(1);
+
+    // 400 entries were logged since id 1015; only the newest 128 can be read.
+    served = Array.from({ length: 128 }, (_, i) =>
+      entry(1288 + i, i < 3 ? 'BetterDB-Monitor' : 'app'),
+    );
+    await poll();
+
+    expect(service.getLastSeenId('conn-1')).toBe(1415);
+    // 1 from the first poll + 125 read from `app` + 272 never read.
+    expect(service.getExternalEntryCount('conn-1')).toBe(398);
+  });
 });

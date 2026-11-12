@@ -27,14 +27,6 @@ function csvList(value: string | undefined): string[] {
     .filter((part) => part.length > 0);
 }
 
-/** First argument, or `cmd|subcmd` when a second argument is present. */
-function slowlogCommandKey(command: string[]): string {
-  return command
-    .slice(0, 2)
-    .map((part) => part.toLowerCase())
-    .join('|');
-}
-
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
   protected readonly logger = new Logger(SlowLogAnalyticsService.name);
@@ -43,6 +35,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   private lastSeenIds = new Map<string, number | null>();
   // New slowlog entries that anomaly detection should count. Own clients and
   // the configured prefixes/commands are stored, but they do not move this.
+  // Entries logged but never read (see `unread` in pollConnection) do.
   // Reset wherever lastSeenIds is deleted: a moved log source, or a removed
   // connection. Absent means this connection has not completed a poll yet.
   private externalEntryCounts = new Map<string, number>();
@@ -149,7 +142,8 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         ? entries.filter(e => e.id > currentLastSeenId)
         : entries;
 
-      if (!this.externalEntryCounts.has(ctx.connectionId)) {
+      const firstPoll = !this.externalEntryCounts.has(ctx.connectionId);
+      if (firstPoll) {
         this.externalEntryCounts.set(ctx.connectionId, 0);
       }
 
@@ -158,8 +152,6 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
-
-      const externalAdded = newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length;
 
       // Transform to storage format
       const storedEntries: StoredSlowLogEntry[] = newEntries.map(e => ({
@@ -190,6 +182,24 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       if (storedLastSeenId === null || storedLastSeenId === undefined || maxId > storedLastSeenId) {
         this.lastSeenIds.set(ctx.connectionId, maxId);
       }
+
+      // Slowlog ids are sequential, so the id gap is how many entries were
+      // logged since the last poll. Any beyond the ones read here (more than
+      // the 128 fetched, or already rotated out of the log) have no known
+      // client, so they are counted: a burst must not be capped at the fetch
+      // size. Skipped on the first poll, where the gap spans the time before
+      // this process was polling.
+      const unread =
+        firstPoll || typeof currentLastSeenId !== 'number'
+          ? 0
+          : Math.max(0, maxId - currentLastSeenId - newEntries.length);
+      if (unread > 0) {
+        this.logger.warn(
+          `Slow log for ${ctx.connectionName} gained ${unread} entries that were gone before they could be read; they are counted for anomaly detection but not stored`,
+        );
+      }
+      const externalAdded =
+        newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length + unread;
       if (externalAdded > 0) {
         const previous = this.externalEntryCounts.get(ctx.connectionId) ?? 0;
         this.externalEntryCounts.set(ctx.connectionId, previous + externalAdded);
@@ -306,7 +316,13 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     if (this.ignoreOwnClients && isBetterDbClientName(name)) return true;
     if (name && this.ignoreClientPrefixes.some((prefix) => name.startsWith(prefix))) return true;
     if (this.ignoreCommands.size === 0) return false;
-    const key = slowlogCommandKey(entry.command ?? []);
-    return key.length > 0 && this.ignoreCommands.has(key);
+    // `get` matches GET with any arguments; `cluster|slot-stats` matches only
+    // that subcommand.
+    const [cmd, sub] = (entry.command ?? []).slice(0, 2).map((part) => part.toLowerCase());
+    if (!cmd) return false;
+    return (
+      this.ignoreCommands.has(cmd) ||
+      (sub !== undefined && this.ignoreCommands.has(`${cmd}|${sub}`))
+    );
   }
 }
