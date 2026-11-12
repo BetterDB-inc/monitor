@@ -18,6 +18,7 @@ import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { AllowMembers } from '../auth/guards/roles.decorator';
 import { ClusterDiscoveryService } from '../cluster/cluster-discovery.service';
+import { withHealthy } from '../cluster/node-health-response';
 import { LiveConnectionGuard } from '../external-metrics/live-connection.guard';
 import { StoragePort, StoredCaptureSession } from '../common/interfaces/storage-port.interface';
 import { CaptureScheduler } from './capture-scheduler';
@@ -182,13 +183,7 @@ export class MonitorController {
       }
       return {
         isCluster: true,
-        nodes: nodes.map((n) => ({
-          id: n.id,
-          address: n.address,
-          role: n.role,
-          state: n.state,
-          healthy: n.healthy,
-        })),
+        nodes: nodes.map((n) => withHealthy({ id: n.id, address: n.address, role: n.role, state: n.state })),
       };
     } catch {
       // Single-instance connections throw when asked for cluster nodes. That's

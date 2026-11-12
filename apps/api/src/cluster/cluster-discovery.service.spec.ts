@@ -161,7 +161,6 @@ describe('ClusterDiscoveryService', () => {
           slots: [[0, 5460]],
           configEpoch: 1,
           state: 'healthy',
-          healthy: true,
           flags: ['master', 'myself'],
         },
         {
@@ -172,7 +171,6 @@ describe('ClusterDiscoveryService', () => {
           slots: [],
           configEpoch: 1,
           state: 'healthy',
-          healthy: true,
           flags: ['slave'],
         },
       ]);
@@ -317,7 +315,6 @@ describe('ClusterDiscoveryService', () => {
       const nodes = await service.discoverNodes();
 
       expect(nodes.map((node) => node.state)).toEqual(['healthy', 'healthy']);
-      expect(nodes.map((node) => node.healthy)).toEqual([true, true]);
     });
 
     it.each([
@@ -336,7 +333,7 @@ describe('ClusterDiscoveryService', () => {
       const nodes = await service.discoverNodes();
 
       expect(nodes[0].state).toBe(state);
-      expect(nodes[0].healthy).toBe(state === 'healthy');
+      expect(nodes[0]).not.toHaveProperty('healthy');
     });
 
     it('should skip nodes that are neither master nor replica', async () => {

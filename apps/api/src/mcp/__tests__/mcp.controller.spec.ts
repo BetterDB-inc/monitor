@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { HttpException, HttpStatus, Logger, NotFoundException } from '@nestjs/common';
-import { ClusterDiscoveryService } from '../../cluster/cluster-discovery.service';
 import { McpController } from '../mcp.controller';
 
 describe('McpController', () => {
@@ -43,40 +42,6 @@ describe('McpController', () => {
     );
 
     await expect(controller.getHealth('missing')).rejects.toBeInstanceOf(NotFoundException);
-  });
-
-  it('reports a cluster node its peers suspect as suspect, and one they agreed has failed as failed', async () => {
-    const node = { master: '-', pingSent: 0, pongReceived: 0, configEpoch: 1, linkState: 'connected', slots: [] };
-    const clusterRegistry = {
-      getDefaultId: jest.fn().mockReturnValue('conn-1'),
-      getNodeAvailabilityZones: jest.fn().mockReturnValue(undefined),
-      get: jest.fn().mockReturnValue({
-        getClusterNodes: jest.fn().mockResolvedValue([
-          { ...node, id: 'a', address: '10.0.0.1:6379@16379', flags: ['master'] },
-          { ...node, id: 'b', address: '10.0.0.2:6379@16379', flags: ['master', 'fail?'] },
-          { ...node, id: 'c', address: '10.0.0.3:6379@16379', flags: ['master', 'fail'] },
-        ]),
-        getClusterShards: jest.fn().mockResolvedValue(undefined),
-      }),
-    };
-    const discovery = new ClusterDiscoveryService(clusterRegistry as any);
-    const withDiscovery = new McpController(
-      clusterRegistry as any,
-      metricsService as any,
-      {} as any,
-      {} as any,
-      discovery,
-      {} as any,
-      {} as any,
-    );
-
-    const nodes = await withDiscovery.getClusterNodes('conn-1');
-
-    expect(nodes).toEqual([
-      expect.objectContaining({ id: 'a', state: 'healthy', healthy: true }),
-      expect.objectContaining({ id: 'b', state: 'suspect', healthy: false }),
-      expect.objectContaining({ id: 'c', state: 'failed', healthy: false }),
-    ]);
   });
 
   it('still wraps non-http failures in a generic 500', async () => {

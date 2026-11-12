@@ -12,7 +12,7 @@ import {
 } from '../membership-diff';
 
 function node(id: string, address: string, flags: string[] = ['master']): DiscoveredNode {
-  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true };
+  return { id, address, flags, role: 'master', slots: [], configEpoch: 0, state: 'healthy' };
 }
 
 function member(id: string, address: string, membership: Partial<TopologyMembership> = {}): MemberSnapshot {
@@ -72,7 +72,7 @@ describe('desiredFromDiscovery', () => {
   });
 
   it('stamps cluster source in desiredFromDiscovery', () => {
-    const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy', healthy: true }];
+    const nodes = [{ id: 'n2', address: '10.0.0.2:7002@17002', flags: ['master'], role: 'master', slots: [], configEpoch: 0, state: 'healthy' }];
     expect(desiredFromDiscovery({ host: 'seed', port: 7001 }, nodes as never)[0].source).toBe('cluster');
   });
 });
