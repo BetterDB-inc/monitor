@@ -38,7 +38,7 @@ function harness(ids: string[] = IDS) {
     asked.push(node.id);
     return answers.has(node.id) ? (answers.get(node.id) ?? null) : viewOf(node.id, {}, ids);
   };
-  const poll = (connectionId: string, observerId: string, at: number, patches: Patches = {}) =>
+  const poll = (connectionId: string, observerId: string, at: number, patches: Patches = {}, canRead = true) =>
     monitor.poll({
       clusterKey: CLUSTER,
       connectionId,
@@ -47,6 +47,7 @@ function harness(ids: string[] = IDS) {
       intervalMs: INTERVAL,
       nodesPerZone: 1,
       randomNodes: 3,
+      canRead,
       readView,
     });
   return { monitor, asked, answers, poll };
@@ -155,6 +156,58 @@ describe('TopologyDivergenceMonitor', () => {
     expect(await poll('conn-1', 'a1', 4 * INTERVAL)).toBeNull();
   });
 
+  it('leaves the rounds to a connection that can read the other nodes', async () => {
+    const { monitor, poll, asked } = harness();
+
+    for (let at = 0; at <= 4 * INTERVAL; at += 1000) await poll('agent', 'a1', at, {}, false);
+    expect(asked).toEqual([]);
+    expect(monitor.anchorOf(CLUSTER)).toBeUndefined();
+
+    const first = await poll('conn-2', 'b1', 4 * INTERVAL + 500);
+    expect(first).toMatchObject({ anchorConnectionId: 'conn-2', status: 'ok', unanswered: [] });
+    expect(asked).toEqual(['a1', 'c1']);
+
+    for (let at = 5 * INTERVAL; at <= 9 * INTERVAL; at += 1000) {
+      expect(await poll('agent', 'a1', at, {}, false)).toBeNull();
+      await poll('conn-2', 'b1', at + 500);
+    }
+    expect(monitor.anchorOf(CLUSTER)).toBe('conn-2');
+  });
+
+  it('uses the view a connection that cannot read the other nodes offers', async () => {
+    const { poll, asked } = harness();
+
+    await poll('conn-2', 'b1', 0);
+    await poll('agent', 'a1', 1000, { c2: failing }, false);
+    asked.length = 0;
+    const round = await poll('conn-2', 'b1', INTERVAL);
+
+    expect(asked).toEqual(['c1']);
+    expect(round?.disagreements.map((d) => d.key)).toEqual(['failure_flags:c2']);
+  });
+
+  it('says it cannot compare while only a connection that cannot read is polling', async () => {
+    const { monitor, poll, asked } = harness();
+
+    const round = await poll('agent', 'a1', 0, {}, false);
+
+    expect(round).toMatchObject({ status: 'insufficient_views', observers: ['a1'], unanswered: [] });
+    expect(monitor.lastRound(CLUSTER)).toBe(round);
+    expect(await poll('agent', 'a1', 1000, {}, false)).toBeNull();
+    expect(await poll('agent', 'a1', INTERVAL, {}, false)).toMatchObject({ status: 'insufficient_views' });
+    expect(asked).toEqual([]);
+  });
+
+  it('gives up the rounds once its connection can no longer read the other nodes', async () => {
+    const { monitor, poll } = harness();
+
+    await poll('conn-1', 'a1', 0);
+    await poll('conn-1', 'a1', INTERVAL, {}, false);
+    expect(monitor.anchorOf(CLUSTER)).toBeUndefined();
+
+    expect(await poll('conn-2', 'b1', INTERVAL + 1)).toMatchObject({ anchorConnectionId: 'conn-2' });
+  });
+
   it('reports a node that does not answer and backs off from it', async () => {
     const { poll, asked, answers } = harness(['a1', 'b1', 'c1']);
     answers.set('b1', null);
@@ -196,6 +249,7 @@ describe('TopologyDivergenceMonitor', () => {
       intervalMs: INTERVAL,
       nodesPerZone: 1,
       randomNodes: 3,
+      canRead: true,
       readView: async () => {
         throw new Error('connection refused');
       },
