@@ -10069,6 +10069,31 @@ describe('AnomalyService', () => {
       expect(events()[0]).toMatchObject({ baseline: 2, dedupeKey: 'replid:replid-1' });
     });
 
+    it('expects replicas on a promoted replica, as on the primary it replicated from', async () => {
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+      const alone = (replid: string, replid2: string) => ({
+        ...flatInfo(0),
+        master_replid: replid,
+        master_replid2: replid2,
+      });
+
+      await detect(flatInfo(2), mockCtx, now, null, '10.0.0.9:6379');
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        // Promoted from the primary above, and an unrelated primary without replicas.
+        await detect(alone('replid-2', 'replid-1'), mockCtx, now, null, '10.0.0.10:6379');
+        await detect(alone('replid-3', '0'.repeat(40)), mockCtx, now, null, '10.0.0.11:6379');
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: 'replid:replid-2',
+        nodeAddr: '10.0.0.10:6379',
+      });
+    });
+
     it('continues a fan-out WARNING on the primary’s own connection after a restart', async () => {
       const direct: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
       const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);

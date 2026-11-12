@@ -7978,7 +7978,7 @@ export class AnomalyService
       key = `${clusterKey}:${slots}`;
     } else {
       const path = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
-      key = this.primaryReplicaKeyOf(path, info.master_replid);
+      key = this.primaryReplicaKeyOf(path, info, timestamp);
     }
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
@@ -8047,12 +8047,30 @@ export class AnomalyService
    * or fan-out address the primary is read through. A path keeps its state
    * when the ID changes: a restarted primary is still the same primary.
    */
-  private primaryReplicaKeyOf(path: string, replid: string | undefined): string {
+  private primaryReplicaKeyOf(
+    path: string,
+    info: Record<string, string>,
+    timestamp: number,
+  ): string {
+    const replid = info.master_replid;
     const used = this.primaryReplicaPaths.get(path);
     let key = used !== undefined && this.primaryReplicaState.has(used) ? used : undefined;
     if (key === undefined && replid) {
-      const known = [...this.primaryReplicaState].find(([, state]) => state.replid === replid);
-      key = known?.[0] ?? `replid:${replid}`;
+      const withReplid = (id: string) =>
+        [...this.primaryReplicaState].find(([, state]) => state.replid === id);
+      key = withReplid(replid)?.[0] ?? `replid:${replid}`;
+      // A promoted replica reports the ID it replicated from as
+      // `master_replid2`. It starts with the replica count that primary was
+      // expected to have, so it alerts when the failover leaves it alone. The
+      // count is copied, not shared: the former primary may still be observed.
+      const former = withReplid(info.master_replid2 ?? '')?.[1];
+      if (former && !this.primaryReplicaState.has(key)) {
+        this.primaryReplicaState.set(key, {
+          ...createShardReplicaState(timestamp),
+          expectedReplicas: former.expectedReplicas,
+          expectedSeenAt: former.expectedSeenAt,
+        });
+      }
     }
     key ??= path;
     this.primaryReplicaPaths.set(path, key);
