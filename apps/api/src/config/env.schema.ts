@@ -280,6 +280,17 @@ export const envSchema = z
     // above the TILT trigger so a merely-slow loop still records RTT samples.
     ANOMALY_INFO_TIMEOUT_MS: z.coerce.number().int().min(1).default(5000),
 
+    // Primary without replicas (#714): how long a primary may have no synced
+    // replica before a WARNING and a CRITICAL (0 turns that level off), and how
+    // long a replica count stays expected after it was last seen.
+    ANOMALY_PRIMARY_NO_REPLICA_WARN_MS: z.coerce.number().int().min(0).default(5000),
+    ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS: z.coerce.number().int().min(0).default(30000),
+    ANOMALY_PRIMARY_REPLICAS_EXPECTATION_TTL_MS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .default(24 * 60 * 60 * 1000),
+
     // OTLP trace ingestion (AI observability Phase 2)
     OTEL_INGEST_ENABLED: z
       .string()

@@ -491,6 +491,7 @@ When a cluster or Sentinel group is registered through one connection (the seed)
 - fork memory risk
 - replica output-buffer pressure, without the per-replica Prometheus gauge
 - reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+- primary without replicas, without the early CRITICAL for persistence being off
 
 Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
 
@@ -668,6 +669,27 @@ Some metrics have custom thresholds beyond Z-score:
 **Source**: `CLUSTER INFO` (`cluster_raft_*` fields)
 **Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
 
+### primary_without_replicas
+**What it measures**: Whether a primary that normally has replicas still has one in sync
+**Why anomalies matter**: While no replica is in sync, the primary holds the only copy of the shard. With persistence off, losing it loses the shard's data. A Kubernetes operator roll that restarts both replicas of a shard before either is back in sync produces this window on every shard
+**Typical baseline**: At least one replica in `state=online`
+**Source**: `INFO replication` (`role`, `connected_slaves`, `slaveN` or `replicaN` state) of the primary, and the node's own line in `CLUSTER NODES` for its slots
+**Detection method**: State-based detector (not z-score based). A WARNING is raised once the primary has had no replica in `state=online` for 5 seconds, and a CRITICAL once that has lasted 30 seconds. A replica that is attached but still syncing (for example `state=wait_bgsave`) does not count. Both events resolve after 2 polls in a row with a synced replica. The message names the primary, its slots, how long the window has lasted and the attached, synced and expected replica counts:
+
+```
+CRITICAL: Primary 10.244.4.28:6379 (90735665) for slots 4096-5460 has had no synced replica for 31 s (0 attached, 0 synced, 2 expected). Persistence is off, so losing this node now loses its data. If a rolling update is in progress, pause it until a replica reports master_link_status:up.
+```
+
+It only fires for a shard that is expected to have replicas. The expected count is the highest `connected_slaves` the monitor has seen on that shard. It rises at once and is lowered only after 24 hours without seeing it, at which point an open event resolves. A standalone instance or a shard that never had a replica is never reported. Neither is a shard whose replicas were already missing when the monitor first saw it, because nothing is expected yet.
+
+In a cluster, only a primary that owns slots is checked. A restarted node that reports `role:master` with no slots is not a primary at risk. One event per level is open per shard, whichever connections observe it: the connection that reads the cluster, a connection registered for the node itself, or both. The shard is identified by its slot ranges, so a failover or a primary that returns under a new address continues the same episode. A reshard that changes the slot ranges is tracked as a new shard.
+
+The CRITICAL is raised at 5 seconds instead of 30 when no replica is attached at all and persistence is known to be off: `aof_enabled:0` and an empty `save`. `save` is read with `CONFIG GET` by the config drift check. When it cannot be read, or when the primary is read through another connection's [per-node coverage](#per-node-coverage), persistence counts as unknown and the CRITICAL waits for 30 seconds.
+
+The detector is not held back during a planned rolling update, because that is when the window appears. If no connection observes the shard for 5 minutes, its open events are closed.
+
+The thresholds are set with `ANOMALY_PRIMARY_NO_REPLICA_WARN_MS` and `ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS`. Set one to `0` to turn that level off, or both to turn the detector off.
+
 ### hot_shard
 **What it measures**: CPU time per second on the slots of each shard, compared with the other shards of the cluster
 **Why anomalies matter**: One shard carrying far more than the others is the first to saturate, while the cluster as a whole still looks healthy
@@ -746,6 +768,14 @@ MONITOR_PERSISTENCE_STALL_SEC=60
 MONITOR_PERSISTENCE_WARN_SEC=120
 # Elapsed time ceiling before a child fires CRITICAL (default: 600)
 MONITOR_PERSISTENCE_CRIT_SEC=600
+
+# Primary without replicas thresholds (milliseconds); 0 turns a level off
+# No synced replica for this long fires WARNING (default: 5000)
+ANOMALY_PRIMARY_NO_REPLICA_WARN_MS=5000
+# No synced replica for this long fires CRITICAL (default: 30000)
+ANOMALY_PRIMARY_NO_REPLICA_CRIT_MS=30000
+# How long a replica count stays expected after it was last seen (default: 86400000 = 24 hours)
+ANOMALY_PRIMARY_REPLICAS_EXPECTATION_TTL_MS=86400000
 ```
 
 ### Runtime Settings
