@@ -328,7 +328,7 @@ Not counted, because the previous id is not one this process read from the same 
 - a server restart, seen as a changed `run_id`, or as ids starting over when `INFO` is refused
 - a log that was empty with nothing stored for it at the poll before
 
-A non-zero increase means the slow log, pattern metrics and anomaly correlation for that window are built from an incomplete history. Raising `slowlog-max-len` (or the matching `commandlog-*-max-len`) helps only up to the 128 entries one poll reads. Beyond that, raise the logging threshold (`slowlog-log-slower-than`, or the matching `commandlog-*` threshold) so fewer commands are logged.
+Each log is counted on its own. A non-zero increase means the stored history of the log named by the `log` label is incomplete for that window, and so are the pattern metrics and analysis built from that log; the other logs are not affected. Raising that log's max-len (`slowlog-max-len`, or the matching `commandlog-*-max-len`) helps only up to the 128 entries one poll reads. Beyond that, raise its logging threshold (`slowlog-log-slower-than`, or the matching `commandlog-*` threshold) so fewer commands are logged.
 
 ### Vector Index Metrics
 
