@@ -10051,9 +10051,56 @@ describe('AnomalyService', () => {
         severity: AnomalySeverity.WARNING,
         baseline: 2,
         connectionId: 'conn-2',
-        dedupeKey: 'connection:conn-2',
+        dedupeKey: 'replid:replid-1',
       });
       expect(events()[0].nodeAddr).toBeUndefined();
+    });
+
+    it('keeps a primary on its state when it restarts with a new replication ID', async () => {
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+
+      await detect(flatInfo(2), mockCtx, now, null);
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        await detect({ ...flatInfo(0), master_replid: 'replid-2' }, mockCtx, now, null);
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({ baseline: 2, dedupeKey: 'replid:replid-1' });
+    });
+
+    it('continues a fan-out WARNING on the primary’s own connection after a restart', async () => {
+      const direct: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+      // Raised through fan-out by conn-1 before the restart, 10 seconds ago.
+      const stored = {
+        id: 'stored-1',
+        timestamp: now - 10_000,
+        metricType: MetricType.PRIMARY_WITHOUT_REPLICAS,
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        dedupeKey: 'replid:replid-1',
+        nodeAddr: '10.0.0.9:6379',
+      };
+      storage.getAnomalyEvents.mockImplementation((query: { metricType?: string }) =>
+        Promise.resolve(query?.metricType === MetricType.PRIMARY_WITHOUT_REPLICAS ? [stored] : []),
+      );
+
+      // The primary's own connection polls before conn-1 picks its event up.
+      await detect(flatInfo(0), direct, now, null);
+      (service as any).adoptPrimaryReplicaEvents('conn-1', [stored], now);
+      for (let s = 0; s < 20; s++) {
+        now += 1000;
+        await detect(flatInfo(0), direct, now, null);
+      }
+
+      expect(events().map((e) => [e.severity, e.baseline, e.connectionId])).toEqual([
+        [AnomalySeverity.CRITICAL, 2, 'conn-2'],
+      ]);
+
+      await detect(flatInfo(2), direct, (now += 1000), null);
+      await detect(flatInfo(2), direct, (now += 1000), null);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
     });
   });
 

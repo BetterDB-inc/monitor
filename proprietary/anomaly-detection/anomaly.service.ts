@@ -844,13 +844,15 @@ export class AnomalyService
   private activeOrphanedSlots = new Map<string, Set<string>>();
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
-  // Primary without replicas (#714). Keyed by shard (cluster key + slot ranges),
-  // or by address for a primary read through fan-out, NOT by connection: every
+  // Primary without replicas (#714). Keyed by shard, NOT by connection: every
   // connection that observes a shard shares one state, so it raises one event
   // and a failover or a hand-over to another connection continues the same
-  // episode. Only a registered standalone primary is keyed by its connection.
+  // episode. A cluster shard is keyed by cluster key + slot ranges, a primary
+  // outside a cluster by its replication ID. `primaryReplicaPaths` holds the
+  // state key each connection or fan-out address last used.
   private primaryReplicaState = new Map<string, ShardReplicaState>();
   private primaryReplicaEvents = new Map<string, PrimaryReplicaEvent[]>();
+  private primaryReplicaPaths = new Map<string, string>();
   private readonly primaryReplicaConfig: PrimaryWithoutReplicasConfig;
   // Replication output-buffer pressure (valkey#3963): per-connection replica
   // hysteresis state, cached slave limit triplet with slow recheck, and the
@@ -1392,6 +1394,7 @@ export class AnomalyService
     // resolve its events, so they are closed. Its expected replica count is
     // kept until the sweep drops it: a connection added in its place must
     // still alert when the replicas are already gone.
+    this.primaryReplicaPaths.delete(`connection:${connectionId}`);
     for (const [key, state] of this.primaryReplicaState) {
       state.healthyPolls.delete(connectionId);
       if (state.observers.delete(connectionId) && state.observers.size === 0) {
@@ -7966,9 +7969,7 @@ export class AnomalyService
     this.sweepPrimaryReplicaShards(timestamp);
     if (info.role !== 'master') return;
 
-    // A primary read through fan-out is keyed by its address, so the connection
-    // that takes it over from another one continues with what that one learnt.
-    let key = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
+    let key: string;
     let slots: string | null = null;
     if (self) {
       const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
@@ -7976,12 +7977,13 @@ export class AnomalyService
       slots = canonicalSlotKey(self.slots);
       key = `${clusterKey}:${slots}`;
     } else {
-      this.continuePrimaryReplicaState(key, info.master_replid);
+      const path = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
+      key = this.primaryReplicaKeyOf(path, info.master_replid);
     }
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
-    if (!self) state.replid = info.master_replid;
+    if (!self && info.master_replid) state.replid = info.master_replid;
 
     // A node that has not learnt its own address yet announces `:port`.
     const announced = self ? this.clientAddress(self.address) : '';
@@ -8038,24 +8040,23 @@ export class AnomalyService
   }
 
   /**
-   * Outside a cluster one primary can be read through fan-out or by its own
-   * connection, under different keys. The path that reads it for the first
-   * time continues the state the other one left, matched by replication ID,
-   * so the expected replica count survives the hand-over.
+   * State key of a primary outside a cluster: the replication ID it was first
+   * seen with. Fan-out and the primary's own connection both read that ID, so
+   * every path to one primary shares one state, and an event picked up after a
+   * restart is under the key the next poll looks for. `path` is the connection
+   * or fan-out address the primary is read through. A path keeps its state
+   * when the ID changes: a restarted primary is still the same primary.
    */
-  private continuePrimaryReplicaState(key: string, replid: string | undefined): void {
-    if (!replid || this.primaryReplicaState.has(key)) return;
-    for (const [previous, state] of this.primaryReplicaState) {
-      if (state.replid !== replid) continue;
-      this.primaryReplicaState.delete(previous);
-      this.primaryReplicaState.set(key, state);
-      const events = this.primaryReplicaEvents.get(previous);
-      if (events) {
-        this.primaryReplicaEvents.delete(previous);
-        this.primaryReplicaEvents.set(key, events);
-      }
-      return;
+  private primaryReplicaKeyOf(path: string, replid: string | undefined): string {
+    const used = this.primaryReplicaPaths.get(path);
+    let key = used !== undefined && this.primaryReplicaState.has(used) ? used : undefined;
+    if (key === undefined && replid) {
+      const known = [...this.primaryReplicaState].find(([, state]) => state.replid === replid);
+      key = known?.[0] ?? `replid:${replid}`;
     }
+    key ??= path;
+    this.primaryReplicaPaths.set(path, key);
+    return key;
   }
 
   /**
@@ -8110,8 +8111,14 @@ export class AnomalyService
       const idleMs = timestamp - state.lastSeenAt;
       if (idleMs <= unobservedMs) continue;
       this.closePrimaryReplicaEvents(key);
-      if (idleMs > this.primaryReplicaConfig.expectationTtlMs) this.primaryReplicaState.delete(key);
-      else endPrimaryReplicaEpisode(state);
+      if (idleMs <= this.primaryReplicaConfig.expectationTtlMs) {
+        endPrimaryReplicaEpisode(state);
+        continue;
+      }
+      this.primaryReplicaState.delete(key);
+      for (const [path, used] of this.primaryReplicaPaths) {
+        if (used === key) this.primaryReplicaPaths.delete(path);
+      }
     }
   }
 
@@ -8140,6 +8147,9 @@ export class AnomalyService
       state.expectedReplicas = Math.max(state.expectedReplicas, event.baseline);
       state.zeroSince ??= event.timestamp;
       if (level === 'critical' || state.alerted === 'none') state.alerted = level;
+      // The key of a primary outside a cluster carries its replication ID, so
+      // whichever connection reads that primary next finds this state.
+      if (key.startsWith('replid:')) state.replid ??= key.slice('replid:'.length);
       // Until the shard is observed again, the adopting connection answers for it.
       state.observers.add(connectionId);
       this.primaryReplicaState.set(key, state);
