@@ -8,6 +8,9 @@ import {
   confirmedDisagreements,
   dissentOf,
   groupDivergences,
+  migrationTouchesSlots,
+  type OpenDivergence,
+  settleOpenDivergences,
 } from '../topology-divergence';
 
 type NodePatch = Partial<ClusterNode> | null;
@@ -90,6 +93,44 @@ describe('compareTopologyViews', () => {
     ]);
 
     expect(found).toEqual([]);
+  });
+
+  it('reports fail? against fail only when another observer says ok', () => {
+    const found = compareTopologyViews([
+      view('p1', { p3: failing('fail') }),
+      view('p2', { p3: failing('fail?') }),
+      view('r1'),
+    ]);
+
+    expect(found).toEqual([
+      {
+        key: 'failure_flags:p3',
+        kind: 'failure_flags',
+        subjectIds: ['p3'],
+        positions: [
+          { value: 'failing', observers: ['p1', 'p2'] },
+          { value: 'ok', observers: ['r1'] },
+        ],
+      },
+    ]);
+  });
+
+  it('reads a node every observer flags as agreement', () => {
+    const found = compareTopologyViews([
+      view('p1', { p3: failing('fail?') }),
+      view('p2', { p3: failing('fail') }),
+      view('r1', { p3: failing('fail?') }),
+      view('r2', { p3: failing('fail') }),
+    ]);
+
+    expect(found).toEqual([]);
+  });
+
+  it('gives the same answer whichever view comes first', () => {
+    const views = [view('p1', { p3: failing() }), view('p2'), view('r1', { p3: failing() }), view('r2')];
+
+    expect(compareTopologyViews([...views].reverse())).toEqual(compareTopologyViews(views));
+    expect(compareTopologyViews([views[2], views[0], views[3], views[1]])).toEqual(compareTopologyViews(views));
   });
 
   it('leaves a node out of the vote on its own failure', () => {
@@ -181,10 +222,23 @@ describe('compareTopologyViews', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0].key).toBe('membership:r3');
+    expect(found[0].subjectIds).toEqual(['r3']);
     expect(found[0].positions).toEqual([
       { value: 'handshake', observers: ['p2'] },
       { value: 'known', observers: ['p1'] },
     ]);
+  });
+
+  it('never makes a subject of the temporary id of a handshake entry', () => {
+    const stuck: ClusterNode = { ...replica('f00d', 6, '-', 9), flags: ['handshake', 'fail?'] };
+    const found = compareTopologyViews([
+      view('p1'),
+      view('p2', { r3: null }, [stuck]),
+      view('p3', {}, [{ ...stuck, id: 'cafe' }]),
+    ]);
+
+    expect(found.map((d) => d.key)).toEqual(['membership:r3']);
+    expect(found.flatMap((d) => d.subjectIds)).toEqual(['r3']);
   });
 
   it('reports a node one view holds without an address', () => {
@@ -366,6 +420,19 @@ describe('DivergenceTracker', () => {
     expect(tracker.tracked()).toEqual([]);
   });
 
+  it('neither grows nor resets a count in a round one side gave no view', () => {
+    const tracker = new DivergenceTracker();
+
+    tracker.observe(round(1000, [flags('x', ['a'], ['b', 'c'])]));
+    tracker.observe(round(6000, [flags('x', ['a'], ['b', 'c'])]));
+    tracker.observe(round(11000, [], ['a']));
+    tracker.observe(round(16000, [], ['a']));
+    expect(tracker.tracked()).toMatchObject([{ firstSeenAt: 1000, lastSeenAt: 6000, rounds: 2 }]);
+
+    tracker.observe(round(21000, [flags('x', ['a'], ['b', 'c'])]));
+    expect(tracker.tracked()).toMatchObject([{ firstSeenAt: 1000, lastSeenAt: 21000, rounds: 3 }]);
+  });
+
   it('forgets what it could not see again within the blind limit', () => {
     const tracker = new DivergenceTracker();
 
@@ -494,6 +561,38 @@ describe('groupDivergences', () => {
     expect(groups[0]).toMatchObject({ signature: 'topology_divergence:p3', dissent: ['p3'], others: ['p1', 'p2'] });
   });
 
+  it('names a tie of equal sides the same way whichever observer answers first', () => {
+    const signatureOf = (views: TopologyView[]) => {
+      const tracker = new DivergenceTracker();
+      tracker.observe({ at: 1000, disagreements: compareTopologyViews(views), unanswered: [], views: views.length });
+      return groupDivergences(tracker.tracked()).map((group) => [group.signature, group.dissent, group.others]);
+    };
+    const pair = [view('p1', { p3: failing() }), view('p2')];
+    const four = [view('p1', { p3: failing() }), view('p2', { p3: failing() }), view('r1'), view('r2')];
+
+    expect(signatureOf(pair)).toEqual([['topology_divergence:p1', ['p1'], ['p2']]]);
+    expect(signatureOf([...pair].reverse())).toEqual(signatureOf(pair));
+    expect(signatureOf(four)).toEqual([['topology_divergence:p1,p2', ['p1', 'p2'], ['r1', 'r2']]]);
+    expect(signatureOf([four[3], four[1], four[2], four[0]])).toEqual(signatureOf(four));
+  });
+
+  it('keeps the name of a tie when the sides swap what they claim', () => {
+    const before = groupDivergences([
+      tracked('failure_flags:x', [
+        { value: 'failing', observers: ['a'] },
+        { value: 'ok', observers: ['b'] },
+      ]),
+    ]);
+    const after = groupDivergences([
+      tracked('failure_flags:x', [
+        { value: 'failing', observers: ['b'] },
+        { value: 'ok', observers: ['a'] },
+      ]),
+    ]);
+
+    expect(after[0].signature).toBe(before[0].signature);
+  });
+
   it('makes one group of a two-sided partition', () => {
     const groups = groupDivergences([
       tracked('failure_flags:zone-a-node', [
@@ -508,5 +607,114 @@ describe('groupDivergences', () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({ dissent: ['a'], others: ['b', 'c'] });
+  });
+});
+
+describe('migrationTouchesSlots', () => {
+  const owner = primary('p1', 1, [[0, 5460]], 1);
+
+  it('is false without any migration', () => {
+    expect(migrationTouchesSlots([[100, 200]], owner, [])).toBe(false);
+    expect(migrationTouchesSlots([[100, 200]], null, [])).toBe(false);
+  });
+
+  it('sees a slot the owner marks as migrating or importing', () => {
+    const migrating = { ...owner, migratingSlots: [{ slot: 150, targetNodeId: 'p2' }] };
+    const importing = { ...owner, importingSlots: [{ slot: 100, sourceNodeId: 'p2' }] };
+    const elsewhere = { ...owner, migratingSlots: [{ slot: 900, targetNodeId: 'p2' }] };
+
+    expect(migrationTouchesSlots([[100, 200]], migrating, [])).toBe(true);
+    expect(migrationTouchesSlots([[100, 200]], importing, [])).toBe(true);
+    expect(migrationTouchesSlots([[100, 200]], elsewhere, [])).toBe(false);
+  });
+
+  it('sees a running migration job over the disputed slots', () => {
+    const job = (state: string, slot_ranges: string) => ({ name: 'job', state, slot_ranges });
+
+    expect(migrationTouchesSlots([[100, 200]], owner, [job('snapshotting', '0-99 180-300')])).toBe(true);
+    expect(migrationTouchesSlots([[100, 200]], owner, [job('snapshotting', '201-300')])).toBe(false);
+    expect(migrationTouchesSlots([[100, 200]], owner, [job('success', '100-200')])).toBe(false);
+    expect(migrationTouchesSlots([[150, 150]], owner, [job('paused', '150')])).toBe(true);
+  });
+});
+
+describe('settleOpenDivergences', () => {
+  const SIGNATURE = 'topology_divergence:a';
+  const confirmedGroup = { signature: SIGNATURE, dissent: ['a'], others: ['b', 'c'], disagreements: [] };
+  const settle = (open: Map<string, OpenDivergence>, at: number, patch: Record<string, unknown> = {}) =>
+    settleOpenDivergences({
+      open,
+      openSignatures: [SIGNATURE],
+      confirmed: [],
+      pendingSignatures: new Set<string>(),
+      comparable: true,
+      at,
+      minRounds: 3,
+      ...patch,
+    });
+
+  it('keeps an event open until the views agreed for the required rounds', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    expect(settle(open, 5000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 10000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 15000).has(SIGNATURE)).toBe(false);
+  });
+
+  it('starts the clean count over when the divergence is confirmed again', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+    settle(open, 5000);
+    settle(open, 10000);
+    settle(open, 15000, { confirmed: [confirmedGroup] });
+
+    expect(settle(open, 20000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 25000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 30000).has(SIGNATURE)).toBe(false);
+    expect(open.get(SIGNATURE)?.group).toBe(confirmedGroup);
+  });
+
+  it('does not count a round it could not compare as clean', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    for (let at = 5000; at <= 60000; at += 5000) {
+      expect(settle(open, at, { comparable: false }).has(SIGNATURE)).toBe(true);
+    }
+    expect(settle(open, 65000).has(SIGNATURE)).toBe(true);
+  });
+
+  it('does not count a round where the divergence is being counted again as clean', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    for (let at = 5000; at <= 30000; at += 5000) {
+      expect(settle(open, at, { pendingSignatures: new Set([SIGNATURE]) }).has(SIGNATURE)).toBe(true);
+    }
+  });
+
+  it('lets go of an event it could not confirm again within the blind limit', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS, { comparable: false }).has(SIGNATURE)).toBe(true);
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 1, { comparable: false }).has(SIGNATURE)).toBe(false);
+  });
+
+  it('gives an event it did not raise itself the same rounds to be confirmed', () => {
+    const open = new Map<string, OpenDivergence>();
+
+    expect(settle(open, 0).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 5000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 10000).has(SIGNATURE)).toBe(false);
+  });
+
+  it('forgets an event that is no longer open', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+    settle(open, 5000, { openSignatures: [] });
+
+    expect(open.size).toBe(0);
   });
 });

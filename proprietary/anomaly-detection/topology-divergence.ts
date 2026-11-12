@@ -51,6 +51,7 @@ export const UNASSIGNED_SLOT_OWNER = 'unassigned';
 
 const SLOT_COUNT = 16384;
 const FAILING_FLAGS = ['fail', 'fail?'];
+const FINISHED_MIGRATION_STATES = ['success', 'failed', 'cancelled'];
 
 type MemberStatus = 'known' | 'handshake' | 'noaddr';
 
@@ -230,6 +231,27 @@ export function intersectSlotRanges(a: number[][], b: number[][]): number[][] {
   return shared.sort((x, y) => x[0] - y[0]);
 }
 
+function parseSlotRangeList(text: string | undefined): number[][] {
+  return (text ?? '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((range) => range.split('-').map(Number))
+    .filter((range) => range.every(Number.isInteger))
+    .map(([start, end = start]) => [start, end]);
+}
+
+export function migrationTouchesSlots(
+  slots: number[][],
+  self: ClusterNode | null,
+  jobs: ReadonlyArray<Record<string, string>>,
+): boolean {
+  const marked = [...(self?.migratingSlots ?? []), ...(self?.importingSlots ?? [])].map(({ slot }) => [slot, slot]);
+  const moving = jobs
+    .filter((job) => !FINISHED_MIGRATION_STATES.includes(job.state))
+    .flatMap((job) => parseSlotRangeList(job.slot_ranges));
+  return intersectSlotRanges(slots, [...marked, ...moving]).length > 0;
+}
+
 function dissentCandidates(disagreement: TopologyDisagreement): string[][] {
   const largest = Math.max(...disagreement.positions.map((position) => position.observers.length));
   return disagreement.positions
@@ -346,4 +368,46 @@ export function groupDivergences(tracked: TrackedDisagreement[]): DivergenceGrou
       };
     })
     .sort((a, b) => compareText(a.signature, b.signature));
+}
+
+export interface OpenDivergence {
+  group?: DivergenceGroup;
+  lastConfirmedAt: number;
+  clean: number;
+}
+
+export function settleOpenDivergences(input: {
+  open: Map<string, OpenDivergence>;
+  openSignatures: Iterable<string>;
+  confirmed: DivergenceGroup[];
+  pendingSignatures: ReadonlySet<string>;
+  comparable: boolean;
+  at: number;
+  minRounds: number;
+}): Set<string> {
+  const { open, at } = input;
+  const signatures = new Set(input.openSignatures);
+  for (const signature of signatures) {
+    if (!open.has(signature)) open.set(signature, { lastConfirmedAt: at, clean: 0 });
+  }
+  for (const signature of [...open.keys()]) {
+    if (!signatures.has(signature)) open.delete(signature);
+  }
+
+  const confirmed = new Map(input.confirmed.map((group) => [group.signature, group]));
+  const kept = new Set<string>();
+  for (const [signature, entry] of open) {
+    const group = confirmed.get(signature);
+    if (group) {
+      open.set(signature, { group, lastConfirmedAt: at, clean: 0 });
+      continue;
+    }
+    if (!input.comparable || input.pendingSignatures.has(signature)) {
+      if (at - entry.lastConfirmedAt <= TOPOLOGY_DIVERGENCE_BLIND_MS) kept.add(signature);
+      continue;
+    }
+    entry.clean += 1;
+    if (entry.clean < input.minRounds) kept.add(signature);
+  }
+  return kept;
 }
