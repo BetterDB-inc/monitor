@@ -16,7 +16,7 @@ import { parseReplicaLines } from '@app/database/parsers/replication-info.parser
  * raise it.
  */
 
-/** Healthy polls in a row that end an episode. */
+/** Healthy polls in a row, by one connection, that end an episode. */
 export const PRIMARY_NO_REPLICA_RESOLVE_POLLS = 2;
 
 export interface PrimaryWithoutReplicasConfig {
@@ -49,6 +49,8 @@ export interface PrimaryReplicaInput {
   synced: number;
   /** True only when persistence is known to be off. Null when it cannot be read. */
   persistenceOff: boolean | null;
+  /** The connection that made this observation. */
+  observer: string;
   timestamp: number;
 }
 
@@ -58,9 +60,12 @@ export interface ShardReplicaState {
   expectedSeenAt: number;
   /** First poll of the current run with no synced replica. */
   zeroSince: number | null;
-  healthyPolls: number;
+  /** Healthy polls in a row during an open episode, per observing connection. */
+  healthyPolls: Map<string, number>;
   alerted: 'none' | 'warning' | 'critical';
   lastSeenAt: number;
+  /** Connections that have observed the shard. */
+  observers: Set<string>;
 }
 
 export interface PrimaryWithoutReplicasFinding {
@@ -80,10 +85,18 @@ export function createShardReplicaState(timestamp: number): ShardReplicaState {
     expectedReplicas: 0,
     expectedSeenAt: timestamp,
     zeroSince: null,
-    healthyPolls: 0,
+    healthyPolls: new Map(),
     alerted: 'none',
     lastSeenAt: timestamp,
+    observers: new Set(),
   };
+}
+
+/** Ends the current episode. The expected replica count is kept. */
+export function endPrimaryReplicaEpisode(state: ShardReplicaState): void {
+  state.zeroSince = null;
+  state.healthyPolls.clear();
+  state.alerted = 'none';
 }
 
 /** Replicas a primary's own INFO reports as in sync (`state=online`). */
@@ -119,8 +132,9 @@ export function evaluatePrimaryWithoutReplicas(
   // as a replica. It causes this state; it is not a primary at risk.
   if (input.role !== 'master' || input.ownsSlots === false) return null;
 
-  const { timestamp, attached, synced } = input;
+  const { timestamp, attached, synced, observer } = input;
   state.lastSeenAt = timestamp;
+  state.observers.add(observer);
 
   const expectationExpired = timestamp - state.expectedSeenAt > config.expectationTtlMs;
   if (attached >= state.expectedReplicas || expectationExpired) {
@@ -129,17 +143,21 @@ export function evaluatePrimaryWithoutReplicas(
   }
 
   if (synced > 0 || state.expectedReplicas === 0) {
-    state.zeroSince = null;
-    if (state.alerted === 'none') return null;
-    state.healthyPolls += 1;
-    if (state.healthyPolls >= PRIMARY_NO_REPLICA_RESOLVE_POLLS) {
-      state.alerted = 'none';
-      state.healthyPolls = 0;
+    if (state.alerted === 'none') {
+      state.zeroSince = null;
+      return null;
     }
+    // The clock keeps running until recovery is confirmed, so a replica that
+    // is online for a single poll cannot push the CRITICAL back. Healthy polls
+    // are counted per connection: two connections that observe the shard in
+    // the same poll cycle are one healthy poll, not two.
+    const healthyPolls = (state.healthyPolls.get(observer) ?? 0) + 1;
+    state.healthyPolls.set(observer, healthyPolls);
+    if (healthyPolls >= PRIMARY_NO_REPLICA_RESOLVE_POLLS) endPrimaryReplicaEpisode(state);
     return null;
   }
 
-  state.healthyPolls = 0;
+  state.healthyPolls.clear();
   state.zeroSince ??= timestamp;
   const zeroForMs = timestamp - state.zeroSince;
 

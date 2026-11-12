@@ -20,6 +20,7 @@ function input(over: Partial<PrimaryReplicaInput>): PrimaryReplicaInput {
     attached: 2,
     synced: 2,
     persistenceOff: null,
+    observer: 'conn-1',
     timestamp: T0,
     ...over,
   };
@@ -115,6 +116,32 @@ describe('evaluatePrimaryWithoutReplicas', () => {
 
     expect(run(state, START + 11_000, 10, ZERO)).toEqual([]);
     expect(state.alerted).toBe('warning');
+  });
+
+  it('keeps the clock running through a single healthy poll, so the CRITICAL is not pushed back', () => {
+    const state = healthyShard();
+    // Polls at 0s..28s, one healthy poll at 29s, then none again at 30s.
+    expect(run(state, START, 29, ZERO).map((f) => f.severity)).toEqual(['warning']);
+    run(state, START + 29_000, 1, { attached: 1, synced: 1 });
+    const findings = run(state, START + 30_000, 1, ZERO);
+
+    expect(findings.map((f) => f.severity)).toEqual(['critical']);
+    expect(findings[0].zeroForMs).toBe(30_000);
+  });
+
+  it('counts two connections that report the shard in one poll cycle as one healthy poll', () => {
+    const state = healthyShard();
+    run(state, START, 10, ZERO);
+    const healthyCycle = (timestamp: number) => {
+      for (const observer of ['conn-1', 'conn-2']) {
+        run(state, timestamp, 1, { attached: 1, synced: 1, observer });
+      }
+    };
+
+    healthyCycle(START + 10_000);
+    expect(state.alerted).toBe('warning');
+    healthyCycle(START + 11_000);
+    expect(state.alerted).toBe('none');
   });
 
   it('counts a replica that is attached but not synced as no replica', () => {

@@ -241,6 +241,7 @@ import {
   PrimaryWithoutReplicasConfig,
   ShardReplicaState,
   createShardReplicaState,
+  endPrimaryReplicaEpisode,
   evaluatePrimaryWithoutReplicas,
   syncedReplicaCount,
 } from './primary-without-replicas-detector';
@@ -537,6 +538,13 @@ const ADOPTED_METRICS: MetricType[] = [
 
 /** A shard no connection has observed for this long has its open events closed. */
 const PRIMARY_REPLICA_UNOBSERVED_MS = 5 * 60_000;
+
+/** An open primary_without_replicas event and the connection it is stored under. */
+interface PrimaryReplicaEvent {
+  id: string;
+  connectionId: string;
+  level: 'warning' | 'critical';
+}
 
 const NODE_ADOPTED_METRICS: MetricType[] = [MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE];
 
@@ -837,11 +845,12 @@ export class AnomalyService
   // Per-connection per-shard failover-churn windows (valkey#3996, gossip mode).
   private failoverChurnState = new Map<string, FailoverChurnStateMap>();
   // Primary without replicas (#714). Keyed by shard (cluster key + slot ranges),
-  // or by node for a standalone primary, NOT by connection: every connection
-  // that observes a shard shares one state, so it raises one event and a
-  // failover or a new address continues the same episode.
+  // or by address for a primary read through fan-out, NOT by connection: every
+  // connection that observes a shard shares one state, so it raises one event
+  // and a failover or a hand-over to another connection continues the same
+  // episode. Only a registered standalone primary is keyed by its connection.
   private primaryReplicaState = new Map<string, ShardReplicaState>();
-  private primaryReplicaEventIds = new Map<string, string[]>();
+  private primaryReplicaEvents = new Map<string, PrimaryReplicaEvent[]>();
   private readonly primaryReplicaConfig: PrimaryWithoutReplicasConfig;
   // Replication output-buffer pressure (valkey#3963): per-connection replica
   // hysteresis state, cached slave limit triplet with slow recheck, and the
@@ -1379,10 +1388,11 @@ export class AnomalyService
     this.orphanedSlotFirstSeen.delete(connectionId);
     this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
-    // Only the standalone primaries this connection observed. A cluster shard's
-    // state is shared with the other connections of that cluster.
-    for (const key of [...this.primaryReplicaState.keys()]) {
-      if (key.startsWith('node:') && isTopologyStateKeyOf(key.slice('node:'.length), connectionId)) {
+    // A shard this connection was the last to observe has no one left to
+    // resolve its events. One that another connection observes is kept.
+    for (const [key, state] of [...this.primaryReplicaState]) {
+      state.healthyPolls.delete(connectionId);
+      if (state.observers.delete(connectionId) && state.observers.size === 0) {
         this.primaryReplicaState.delete(key);
         this.closePrimaryReplicaEvents(key);
       }
@@ -2487,7 +2497,11 @@ export class AnomalyService
         this.raftLeaderlessActive.set(connectionId, true);
       }
       this.adoptRaftFlappingEvents(connectionId, rows(MetricType.RAFT_HEALTH), timestamp);
-      this.adoptPrimaryReplicaEvents(rows(MetricType.PRIMARY_WITHOUT_REPLICAS), timestamp);
+      this.adoptPrimaryReplicaEvents(
+        connectionId,
+        rows(MetricType.PRIMARY_WITHOUT_REPLICAS),
+        timestamp,
+      );
       this.openEventsAdopted.add(connectionId);
       this.openEventsRetry.delete(connectionId);
     } catch (err) {
@@ -7950,7 +7964,9 @@ export class AnomalyService
     this.sweepPrimaryReplicaShards(timestamp);
     if (info.role !== 'master') return;
 
-    let key = `node:${nodeAddr ? topologyStateKey(ctx.connectionId, nodeAddr) : ctx.connectionId}`;
+    // A primary read through fan-out is keyed by its address, so the connection
+    // that takes it over from another one continues with what that one learnt.
+    let key = nodeAddr ? `node:${nodeAddr}` : `connection:${ctx.connectionId}`;
     let slots: string | null = null;
     if (self) {
       const clusterKey = this.connectionClusterKeys.get(ctx.connectionId);
@@ -7958,6 +7974,7 @@ export class AnomalyService
       slots = canonicalSlotKey(self.slots);
       key = `${clusterKey}:${slots}`;
     }
+    await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
 
@@ -7975,6 +7992,7 @@ export class AnomalyService
         attached: this.parseNumber(info.connected_slaves) ?? 0,
         synced: syncedReplicaCount(info),
         persistenceOff: nodeAddr ? null : this.persistenceKnownOff(ctx.connectionId, info),
+        observer: ctx.connectionId,
         timestamp,
       },
       this.primaryReplicaConfig,
@@ -8000,15 +8018,48 @@ export class AnomalyService
         ...(nodeAddr ? { nodeAddr } : {}),
       };
       this.logger.warn(`Anomaly detected for ${ctx.connectionName}: ${event.message}`);
-      this.primaryReplicaEventIds.set(key, [...(this.primaryReplicaEventIds.get(key) ?? []), event.id]);
+      this.primaryReplicaEvents.set(key, [
+        ...(this.primaryReplicaEvents.get(key) ?? []),
+        { id: event.id, connectionId: ctx.connectionId, level: finding.severity },
+      ]);
       await this.addAnomaly(event, ctx);
     }
 
     if (state.alerted === 'none') {
-      const ids = this.primaryReplicaEventIds.get(key) ?? [];
-      this.primaryReplicaEventIds.delete(key);
-      for (const id of ids) await this.resolveAnomalyOutcome(id);
+      const events = this.primaryReplicaEvents.get(key) ?? [];
+      this.primaryReplicaEvents.delete(key);
+      for (const { id } of events) await this.resolveAnomalyOutcome(id);
     }
+  }
+
+  /**
+   * An operator can resolve an event while the shard still has no synced
+   * replica. The alert level then follows the events that are still open, so
+   * the resolved level is raised again instead of staying silent for the rest
+   * of the episode, as the other tracked detectors do.
+   */
+  private async reconcilePrimaryReplicaAlert(key: string): Promise<void> {
+    const state = this.primaryReplicaState.get(key);
+    const tracked = this.primaryReplicaEvents.get(key);
+    if (!state || !tracked || state.alerted === 'none') return;
+    const open: PrimaryReplicaEvent[] = [];
+    for (const event of tracked) {
+      const isOpen = await this.isTrackedEventOpen(
+        event.id,
+        event.connectionId,
+        MetricType.PRIMARY_WITHOUT_REPLICAS,
+      );
+      if (isOpen) open.push(event);
+    }
+    // Another connection may have raised or closed an event in the meantime.
+    if (open.length === tracked.length || this.primaryReplicaEvents.get(key) !== tracked) return;
+    if (open.length > 0) this.primaryReplicaEvents.set(key, open);
+    else this.primaryReplicaEvents.delete(key);
+    state.alerted = open.some((event) => event.level === 'critical')
+      ? 'critical'
+      : open.length > 0
+        ? 'warning'
+        : 'none';
   }
 
   /**
@@ -8034,31 +8085,37 @@ export class AnomalyService
       if (idleMs <= unobservedMs) continue;
       this.closePrimaryReplicaEvents(key);
       if (idleMs > this.primaryReplicaConfig.expectationTtlMs) this.primaryReplicaState.delete(key);
-      else Object.assign(state, { zeroSince: null, healthyPolls: 0, alerted: 'none' });
+      else endPrimaryReplicaEpisode(state);
     }
   }
 
   private closePrimaryReplicaEvents(key: string): void {
-    for (const id of this.primaryReplicaEventIds.get(key) ?? []) this.closeLater(id);
-    this.primaryReplicaEventIds.delete(key);
+    for (const { id } of this.primaryReplicaEvents.get(key) ?? []) this.closeLater(id);
+    this.primaryReplicaEvents.delete(key);
   }
 
   /** After a restart, continue the episode of each open event instead of leaving it open for good. */
-  private adoptPrimaryReplicaEvents(open: StoredAnomalyEvent[], timestamp: number): void {
+  private adoptPrimaryReplicaEvents(
+    connectionId: string,
+    open: StoredAnomalyEvent[],
+    timestamp: number,
+  ): void {
     for (const event of open) {
       const key = event.dedupeKey;
-      const tracked = key ? (this.primaryReplicaEventIds.get(key) ?? []) : [];
-      if (tracked.includes(event.id)) continue;
+      const tracked = key ? (this.primaryReplicaEvents.get(key) ?? []) : [];
+      if (tracked.some((t) => t.id === event.id)) continue;
       if (!key) {
         this.closeLater(event.id);
         continue;
       }
-      this.primaryReplicaEventIds.set(key, [...tracked, event.id]);
+      const level = event.severity === AnomalySeverity.CRITICAL ? 'critical' : 'warning';
+      this.primaryReplicaEvents.set(key, [...tracked, { id: event.id, connectionId, level }]);
       const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
       state.expectedReplicas = Math.max(state.expectedReplicas, event.baseline);
       state.zeroSince ??= event.timestamp;
-      if (event.severity === AnomalySeverity.CRITICAL) state.alerted = 'critical';
-      else if (state.alerted === 'none') state.alerted = 'warning';
+      if (level === 'critical' || state.alerted === 'none') state.alerted = level;
+      // Until the shard is observed again, the adopting connection answers for it.
+      state.observers.add(connectionId);
       this.primaryReplicaState.set(key, state);
     }
   }
