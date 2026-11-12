@@ -1,4 +1,5 @@
-import type { DatabaseConnectionConfig, RedisShakeOptions, SyncReaderOptions } from '@betterdb/shared';
+import type { RedisShakeOptions, SyncReaderOptions } from '@betterdb/shared';
+import { dialEndpoint, type MigrationConnectionConfig } from '../migration-endpoints';
 
 /**
  * Options for the RedisShake TOML builders. Passed as a single object rather than
@@ -82,8 +83,8 @@ function formatAddress(host: string, port: number): string {
 }
 
 export function buildScanReaderToml(
-  source: DatabaseConnectionConfig,
-  target: DatabaseConnectionConfig,
+  source: MigrationConnectionConfig,
+  target: MigrationConnectionConfig,
   opts: RedisShakeTomlOptions,
 ): string {
   const sourceIsCluster = opts.sourceIsCluster;
@@ -91,10 +92,12 @@ export function buildScanReaderToml(
   const rsOptions = opts.rsOptions ?? {};
   const excludeFunctions = opts.excludeFunctions ?? false;
 
-  const srcHost = validateHost(source.host);
-  const srcPort = validatePort(source.port);
-  const tgtHost = validateHost(target.host);
-  const tgtPort = validatePort(target.port);
+  const sourceDial = dialEndpoint(source);
+  const targetDial = dialEndpoint(target);
+  const srcHost = validateHost(sourceDial.host);
+  const srcPort = validatePort(sourceDial.port);
+  const tgtHost = validateHost(targetDial.host);
+  const tgtPort = validatePort(targetDial.port);
 
   const srcUsername = (!source.username || source.username === 'default') ? '' : source.username;
   const srcPassword = source.password ?? '';
@@ -133,8 +136,8 @@ try_diskless = ${rsOptions.tryDiskless ? 'true' : 'false'}
 }
 
 export function buildSyncReaderToml(
-  source: DatabaseConnectionConfig,
-  target: DatabaseConnectionConfig,
+  source: MigrationConnectionConfig,
+  target: MigrationConnectionConfig,
   opts: RedisShakeTomlOptions,
 ): string {
   const sourceIsCluster = opts.sourceIsCluster;
@@ -144,10 +147,12 @@ export function buildSyncReaderToml(
   const excludeFunctions = opts.excludeFunctions ?? false;
   const statusPortLine = opts.statusPort === undefined ? '' : `status_port = ${validatePort(opts.statusPort)}\n`;
 
-  const srcHost = validateHost(source.host);
-  const srcPort = validatePort(source.port);
-  const tgtHost = validateHost(target.host);
-  const tgtPort = validatePort(target.port);
+  const sourceDial = dialEndpoint(source);
+  const targetDial = dialEndpoint(target);
+  const srcHost = validateHost(sourceDial.host);
+  const srcPort = validatePort(sourceDial.port);
+  const tgtHost = validateHost(targetDial.host);
+  const tgtPort = validatePort(targetDial.port);
 
   const srcUsername = (!source.username || source.username === 'default') ? '' : source.username;
   const srcPassword = source.password ?? '';

@@ -13,6 +13,6 @@ import { ExternalMetricsStoreModule } from '../external-metrics/external-metrics
   imports: [ConfigModule, StorageModule, TelemetryModule, ExternalMetricsStoreModule],
   controllers: [ConnectionsController],
   providers: [ConnectionRegistry, RuntimeCapabilityTracker, SshTunnelService],
-  exports: [ConnectionRegistry, RuntimeCapabilityTracker],
+  exports: [ConnectionRegistry, RuntimeCapabilityTracker, SshTunnelService],
 })
 export class ConnectionsModule {}
