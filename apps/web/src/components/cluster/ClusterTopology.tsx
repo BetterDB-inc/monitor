@@ -95,6 +95,12 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
             <div className="text-xs text-muted-foreground font-mono truncate">
               {node.id.substring(0, 12)}...
             </div>
+            {node.availabilityZone && (
+              <div className="mt-1 text-xs truncate">
+                <span className="text-muted-foreground">Zone: </span>
+                <span className="font-medium">{node.availabilityZone}</span>
+              </div>
+            )}
             {isMaster && node.slots.length > 0 && (
               <div className="mt-2 text-xs">
                 <span className="text-muted-foreground">Slots: </span>
@@ -152,6 +158,12 @@ export function ClusterTopology({ nodes, nodeStats }: ClusterTopologyProps) {
               <span className="text-muted-foreground">Pong Received: </span>
               <span className="font-mono">{node.pongReceived}</span>
             </div>
+            {node.shardId && (
+              <div>
+                <span className="text-muted-foreground">Shard ID: </span>
+                <span className="font-mono break-all">{node.shardId}</span>
+              </div>
+            )}
             {isMaster && node.slots.length > 0 && (
               <div>
                 <span className="text-muted-foreground">Slot Ranges: </span>

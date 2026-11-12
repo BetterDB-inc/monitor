@@ -229,6 +229,8 @@ export interface ClusterNode {
   configEpoch: number;
   linkState: string;
   slots: number[][];
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface SlotStatsMetric {

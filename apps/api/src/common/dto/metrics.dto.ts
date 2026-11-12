@@ -301,6 +301,18 @@ export class ClusterNodeDto implements ClusterNode {
 
   @ApiProperty({ description: 'Slot ranges [[start, end], ...]', type: 'array', example: [[0, 5460]] })
   slots: number[][];
+
+  @ApiPropertyOptional({
+    description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',
+    example: 'us-east-1a',
+  })
+  availabilityZone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Id of the shard the node belongs to, from CLUSTER SHARDS (Valkey 9.1+)',
+    example: '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f',
+  })
+  shardId?: string;
 }
 
 /**
@@ -380,6 +392,18 @@ export class DiscoveredNodeDto {
 
   @ApiProperty({ description: 'Node health status', example: true })
   healthy: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',
+    example: 'us-east-1a',
+  })
+  availabilityZone?: string;
+
+  @ApiPropertyOptional({
+    description: 'Id of the shard the node belongs to, from CLUSTER SHARDS (Valkey 9.1+)',
+    example: '7c9e1b0f5a3d4e6f8a2b1c0d9e8f7a6b5c4d3e2f',
+  })
+  shardId?: string;
 }
 
 export class NodeStatsDto {

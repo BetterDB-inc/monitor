@@ -77,3 +77,47 @@ describe('MetricsService.getHealthSummary', () => {
     expect(summary.replicationLag).toBe(3);
   });
 });
+
+describe('MetricsService.getClusterNodes', () => {
+  const clusterNodes = [
+    {
+      id: 'primary-1',
+      address: '10.0.0.1:6379',
+      flags: ['master'],
+      master: '-',
+      pingSent: 0,
+      pongReceived: 0,
+      configEpoch: 1,
+      linkState: 'connected',
+      slots: [[0, 16383]],
+    },
+  ];
+
+  function makeClusterService(getClusterShards: jest.Mock) {
+    const client = { getClusterNodes: jest.fn().mockResolvedValue(clusterNodes), getClusterShards };
+    const registry = { get: jest.fn().mockReturnValue(client) } as unknown as ConnectionRegistry;
+    return new MetricsService(registry, {} as StoragePort);
+  }
+
+  it('adds the availability zone and shard id from CLUSTER SHARDS', async () => {
+    const service = makeClusterService(
+      jest.fn().mockResolvedValue([
+        {
+          shardId: 'shard-1',
+          slots: [[0, 16383]],
+          nodes: [{ id: 'primary-1', role: 'master', availabilityZone: 'us-east-1a' }],
+        },
+      ]),
+    );
+
+    await expect(service.getClusterNodes()).resolves.toEqual([
+      { ...clusterNodes[0], availabilityZone: 'us-east-1a', shardId: 'shard-1' },
+    ]);
+  });
+
+  it('returns the nodes unchanged when CLUSTER SHARDS fails', async () => {
+    const service = makeClusterService(jest.fn().mockRejectedValue(new Error('ERR unknown subcommand')));
+
+    await expect(service.getClusterNodes()).resolves.toEqual(clusterNodes);
+  });
+});

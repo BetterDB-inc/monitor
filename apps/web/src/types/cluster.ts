@@ -25,6 +25,8 @@ export interface DiscoveredNode {
   masterId?: string;
   slots: number[][];
   healthy: boolean;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 export interface NodeStats {
