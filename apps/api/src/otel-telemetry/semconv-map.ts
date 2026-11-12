@@ -257,6 +257,7 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
     'betterdb.commandlog.large_reply_by_pattern',
     '{entry}',
   ),
+  betterdb_log_capture_lost_entries_total: counter('betterdb.log_capture.lost_entries', '{entry}'),
   betterdb_acl_denied: gauge('betterdb.acl.denied', '{event}'),
   betterdb_acl_denied_by_reason: gauge('betterdb.acl.denied_by_reason', '{event}'),
   betterdb_acl_denied_by_user: gauge('betterdb.acl.denied_by_user', '{event}'),

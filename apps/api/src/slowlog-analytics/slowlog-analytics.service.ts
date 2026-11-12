@@ -16,6 +16,7 @@ import {
 } from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
+import { LogGapTracker, SLOWLOG_CAPTURE } from '../common/services/log-gap-tracker';
 
 @Injectable()
 export class SlowLogAnalyticsService extends MultiConnectionPoller implements OnModuleInit {
@@ -27,6 +28,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   // process, so when a connection lands on another one the tracker restarts
   // from that process's own last stored ID.
   private readonly logSources: LogSourceTracker;
+  private readonly gaps = new LogGapTracker();
 
   // Per-connection cache for Prometheus metrics
   private cachedEntries = new Map<string, SlowLogEntry[]>();
@@ -75,6 +77,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
           );
         }
         this.lastSeenIds.delete(ctx.connectionId);
+        this.gaps.sourceChanged(ctx.connectionId);
       }
 
       // Initialize lastSeenId from storage if not already set
@@ -100,24 +103,22 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       this.cachedAnalysis.set(ctx.connectionId, analyzeSlowLogPatterns(entries));
       this.lastCacheUpdate.set(ctx.connectionId, now);
 
-      // Detect ID wraparound (e.g., after SLOWLOG RESET)
-      if (entries.length > 0 && lastSeenId !== null) {
+      if (this.gaps.idsRestarted(ctx.connectionId, SLOWLOG_CAPTURE, entries, lastSeenId)) {
         const maxIdInBatch = Math.max(...entries.map(e => e.id));
-        if (maxIdInBatch < lastSeenId) {
-          this.logger.warn(
-            `Slowlog ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
-          );
-          this.lastSeenIds.set(ctx.connectionId, null);
-        }
+        this.logger.warn(
+          `Slowlog ID wraparound detected for ${ctx.connectionName} (lastSeenId: ${lastSeenId}, maxIdInBatch: ${maxIdInBatch}). Resetting tracker.`
+        );
+        this.lastSeenIds.set(ctx.connectionId, null);
       }
 
       // Filter out entries we've already seen
-      const currentLastSeenId = this.lastSeenIds.get(ctx.connectionId);
+      const currentLastSeenId = this.lastSeenIds.get(ctx.connectionId) ?? null;
       const newEntries = currentLastSeenId !== null
-        ? entries.filter(e => e.id > currentLastSeenId!)
+        ? entries.filter(e => e.id > currentLastSeenId)
         : entries;
 
       if (newEntries.length === 0) {
+        this.gaps.completePoll(ctx.connectionId, SLOWLOG_CAPTURE, entries, currentLastSeenId);
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
@@ -138,6 +139,12 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       }));
 
       const saved = await this.storage.saveSlowLogEntries(storedEntries, ctx.connectionId);
+      const missed = this.gaps.completePoll(ctx.connectionId, SLOWLOG_CAPTURE, entries, currentLastSeenId);
+      if (missed > 0) {
+        this.logger.warn(
+          `Slow log of ${ctx.connectionName}: ${missed} entries after id ${currentLastSeenId} were never read (dropped by the server, or more than 128 logged between two polls)`
+        );
+      }
 
       // Update lastSeenId to the highest ID we've seen
       const maxId = Math.max(...newEntries.map(e => e.id));
@@ -160,6 +167,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
     this.logSources.forget(connectionId);
+    this.gaps.forget(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);
@@ -222,6 +230,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
     }
     const client = this.connectionRegistry.get(connectionId);
     return client.getSlowLogLength();
+  }
+
+  getLostEntries(connectionId: string): ReadonlyMap<string, number> {
+    return this.gaps.lostEntries(connectionId);
   }
 
   getLastSeenId(connectionId?: string): number | null {
