@@ -15,11 +15,17 @@ type MockClient = {
   quit: jest.Mock;
   call: jest.Mock;
   dbsize: jest.Mock;
+  scan: jest.Mock;
 };
 
 const clients: MockClient[] = [];
 let clusterNodesRaw = '';
 let failingHosts = new Set<string>();
+let sourceKeyCount = 0;
+let onScan: (() => void) | undefined;
+let pendingQuits: Array<() => void> | undefined;
+let scanCursor = '1';
+let onDbsize: (() => void) | undefined;
 
 jest.mock('iovalkey', () => {
   const ctor = jest.fn().mockImplementation((opts: { host: string; port: number; connectionName?: string; tls?: { servername?: string } }) => {
@@ -36,9 +42,22 @@ jest.mock('iovalkey', () => {
         failingHosts.has(opts.host) ? Promise.reject(new Error('Connection is closed.')) : Promise.resolve(),
       ),
       disconnect: jest.fn(),
-      quit: jest.fn().mockResolvedValue('OK'),
+      quit: jest.fn().mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            if (pendingQuits === undefined) resolve('OK');
+            else pendingQuits.push(() => resolve('OK'));
+          }),
+      ),
       call: jest.fn().mockImplementation(async (...args: string[]) => (args[0] === 'CLUSTER' ? clusterNodesRaw : null)),
-      dbsize: jest.fn().mockResolvedValue(0),
+      dbsize: jest.fn().mockImplementation(async () => {
+        onDbsize?.();
+        return sourceKeyCount;
+      }),
+      scan: jest.fn().mockImplementation(async () => {
+        onScan?.();
+        return [scanCursor, []];
+      }),
     };
     clients.push(client);
     return client;
@@ -228,5 +247,119 @@ describe('runCommandMigration source clients', () => {
     expect(nodeA?.options.tls).toMatchObject({ cert: CERT, key: KEY });
     const nodeB = clients.find((c) => c.host === '10.0.0.2');
     expect(nodeB?.options.tls?.servername).toBeUndefined();
+  });
+});
+
+describe('runCommandMigration through an SSH tunnel', () => {
+  const source = { id: 's', name: 's', host: 'src.internal', port: 6379, createdAt: 0, dial: { host: '127.0.0.1', port: 40001 } };
+  const target = { id: 't', name: 't', host: 'tgt.internal', port: 6380, createdAt: 0, dial: { host: '127.0.0.1', port: 40002 } };
+
+  beforeEach(() => {
+    clients.length = 0;
+    failingHosts = new Set();
+    sourceKeyCount = 0;
+    onScan = undefined;
+    pendingQuits = undefined;
+    scanCursor = '1';
+    onDbsize = undefined;
+  });
+
+  it('dials both instances at their local tunnel ports', async () => {
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job: makeJob(), maxLogLines: 100 });
+
+    expect(clients.map((client) => `${client.options.connectionName}@${client.host}:${client.port}`)).toEqual([
+      'BetterDB-Migration-Target@127.0.0.1:40002',
+      'BetterDB-Migration-Source@127.0.0.1:40001',
+    ]);
+  });
+
+  it('stops scanning once a tunnel has dropped', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    let scans = 0;
+    onScan = () => {
+      scans += 1;
+      if (scans > 3) throw new Error('kept scanning after the tunnel dropped');
+      job.tunnelError = 'The SSH tunnel to the target closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(scans).toBe(1);
+    expect(job.progress).not.toBe(100);
+  });
+
+  it('lets the job disconnect every client while it runs', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    let disconnectedOnDrop: boolean[] = [];
+    onScan = () => {
+      job.tunnelError = 'The SSH tunnel to the target closed unexpectedly';
+      job.dropConnections?.();
+      disconnectedOnDrop = clients.map((client) => client.disconnect.mock.calls.length > 0);
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(disconnectedOnDrop).toEqual([true, true]);
+    expect(job.dropConnections).toBeUndefined();
+  });
+
+  it('does not dial when a tunnel dropped before it connects', async () => {
+    const job = makeJob();
+    job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    for (const client of clients) {
+      expect(client.connect).not.toHaveBeenCalled();
+      expect(client.quit).not.toHaveBeenCalled();
+      expect(client.disconnect).toHaveBeenCalled();
+    }
+  });
+
+  it('keeps the job able to disconnect clients until their quits settle', async () => {
+    const job = makeJob();
+    const quits: Array<() => void> = [];
+    pendingQuits = quits;
+
+    const run = runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+    for (let turn = 0; turn < 50 && quits.length < 2; turn++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(quits).toHaveLength(2);
+
+    job.dropConnections?.();
+    const disconnectedWhileQuitting = clients.map((client) => client.disconnect.mock.calls.length > 0);
+    for (const settle of quits) settle();
+    await run;
+
+    expect(disconnectedWhileQuitting).toEqual([true, true]);
+    expect(job.dropConnections).toBeUndefined();
+  });
+
+  it('does not report completion when a tunnel drops during the last scan', async () => {
+    const job = makeJob();
+    sourceKeyCount = 10;
+    scanCursor = '0';
+    onScan = () => {
+      job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(job.progress).not.toBe(100);
+    expect(job.logs.join('\n')).not.toContain('Migration complete');
+  });
+
+  it('does not report completion when a tunnel drops while an empty source is counted', async () => {
+    const job = makeJob();
+    onDbsize = () => {
+      job.tunnelError = 'The SSH tunnel to the source closed unexpectedly';
+    };
+
+    await runCommandMigration({ sourceConfig: source, targetConfig: target, sourceIsCluster: false, targetIsCluster: false, job, maxLogLines: 100 });
+
+    expect(job.progress).not.toBe(100);
   });
 });

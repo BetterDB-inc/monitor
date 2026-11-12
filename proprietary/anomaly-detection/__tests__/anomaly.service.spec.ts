@@ -2203,6 +2203,15 @@ describe('AnomalyService', () => {
       expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
     });
 
+    it('drops an event resolved by hand from the hot shard list at once', async () => {
+      await step(HOT, 6);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
     it('does not replace an event resolved by hand below the raise factor', async () => {
       const warm = [170_000, 100_000, 100_000];
       await step(HOT, 6);

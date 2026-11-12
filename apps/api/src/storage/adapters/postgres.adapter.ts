@@ -7,7 +7,7 @@ import { POSTGRES_LEGACY_ANOMALY_BACKFILL } from './anomaly-kind-backfill';
 import { toIncidentBoundary } from './incident-boundary-row';
 import { otelSpanCap, otelSpanCapCheckInterval, otelSpanLowWaterMark } from '../otel-span-cap';
 import { randomUUID } from 'crypto';
-import { parseSshTunnel, parseMembership, parseTlsConfig } from '@betterdb/shared';
+import { parseSshTunnel, parseMembership, parseTlsConfig, parseNodeAvailabilityZones } from '@betterdb/shared';
 import type {
   StoredScalingReadinessScore,
   ScalingReadinessScoreQuery,
@@ -2434,6 +2434,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS auto_register_nodes BOOLEAN;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS membership TEXT;
+      ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_availability_zones TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_username TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password TEXT;
       ALTER TABLE connections ADD COLUMN IF NOT EXISTS node_password_encrypted BOOLEAN;
@@ -6456,8 +6457,8 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
 
     await this.pool.query(
       `
-      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, is_default, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      INSERT INTO connections (id, name, host, port, username, password, password_encrypted, node_username, node_password, node_password_encrypted, db_index, tls, tls_config, auth_mode, ssh_tunnel, connection_type, auto_register_nodes, membership, node_availability_zones, is_default, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(id) DO UPDATE SET
         name = EXCLUDED.name,
         host = EXCLUDED.host,
@@ -6476,6 +6477,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         connection_type = EXCLUDED.connection_type,
         auto_register_nodes = EXCLUDED.auto_register_nodes,
         membership = EXCLUDED.membership,
+        node_availability_zones = EXCLUDED.node_availability_zones,
         is_default = EXCLUDED.is_default,
         updated_at = EXCLUDED.updated_at
     `,
@@ -6498,6 +6500,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
         config.connectionType ?? null,
         config.autoRegisterNodes ?? null,
         config.membership ? JSON.stringify(config.membership) : null,
+        config.nodeAvailabilityZones ? JSON.stringify(config.nodeAvailabilityZones) : null,
         config.isDefault || false,
         config.createdAt,
         config.updatedAt || null,
@@ -6532,6 +6535,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -6567,6 +6571,7 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
           ? undefined
           : row.auto_register_nodes,
       membership: parseMembership(row.membership),
+      nodeAvailabilityZones: parseNodeAvailabilityZones(row.node_availability_zones),
       isDefault: row.is_default,
       createdAt: Number(row.created_at),
       updatedAt: row.updated_at ? Number(row.updated_at) : undefined,
@@ -6624,6 +6629,10 @@ export class PostgresAdapter implements StoragePort, RawDatabaseHandleProvider {
     if ('membership' in updates) {
       setClauses.push(`membership = $${paramIndex++}`);
       params.push(updates.membership ? JSON.stringify(updates.membership) : null);
+    }
+    if ('nodeAvailabilityZones' in updates) {
+      setClauses.push(`node_availability_zones = $${paramIndex++}`);
+      params.push(updates.nodeAvailabilityZones ? JSON.stringify(updates.nodeAvailabilityZones) : null);
     }
 
     if (setClauses.length === 0) return;

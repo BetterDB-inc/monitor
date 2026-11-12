@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BETTERDB_TELEMETRY` is off.
 - `BETTERDB_MONITOR_<NAME>` variables are passed to the started monitor as
   `<NAME>`.
+- `get_cluster_nodes` returns `availabilityZone` and `shardId` for each node
+  on Valkey 9.1 and later. On older versions `availabilityZone` is returned
+  for nodes listed in the connection's zone map.
 
 ### Fixed
 

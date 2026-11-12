@@ -19,7 +19,6 @@ import {
   preflightNotes,
   serverlessCheckBlock,
   serverlessCheckNotes,
-  usesSshTunnel,
 } from './analysis-form/preflight';
 
 interface Props {
@@ -95,9 +94,6 @@ export function AnalysisForm({ onStart, isCloudMode }: Props) {
         return false;
       }
       if (connection.connectionType === 'external') {
-        return false;
-      }
-      if (usesSshTunnel(connection)) {
         return false;
       }
       if (role === 'target' && connection.isConnected === false) {

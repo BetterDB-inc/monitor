@@ -54,6 +54,26 @@ describe('ExecutionPanel replication lag', () => {
     expect(screen.queryByText(/^Lag:/)).toBeNull();
   });
 
+  it('keeps polling a cancelled job until it has finished and shows a notice added late', async () => {
+    const notice = 'The target was emptied before the migration stopped, and nothing was copied to it.';
+    vi.useFakeTimers();
+    try {
+      vi.mocked(fetchApi)
+        .mockResolvedValueOnce(syncResult({ status: 'cancelled' }))
+        .mockResolvedValue(syncResult({ status: 'cancelled', completedAt: Date.now(), notices: [notice] }));
+      render(<ExecutionPanel executionId="exec-1" onStopped={() => {}} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText('Cancelled')).toBeTruthy();
+      expect(screen.queryByText(notice)).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(screen.getByText(notice)).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(fetchApi).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops Fully synced while the latest poll has failed', async () => {
     vi.useFakeTimers();
     try {

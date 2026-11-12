@@ -28,7 +28,7 @@ import {
 import { probeSourceFunctions, aggregateFunctionPresence } from './fork-compat';
 import { isScannableMaster, parseNodeAddress } from './function-presence';
 import { connectWithin, NODE_CONNECT_OPTIONS, NODE_CONNECT_TIMEOUT_MS } from './node-connect';
-import { assertLiveMigrationPair } from './live-connections';
+import { assertLiveMigrationPair, assertTunnelSupport } from './live-connections';
 
 @Injectable()
 export class MigrationService {
@@ -234,6 +234,10 @@ export class MigrationService {
       const unreachableMasters: string[] = [];
 
       const clusterEnabled = String(clusterSection['cluster_enabled'] ?? '0');
+      assertTunnelSupport(config, target?.config ?? null, {
+        sourceIsCluster: clusterEnabled === '1',
+        targetIsCluster: job.result.targetIsCluster,
+      });
       if (clusterEnabled === '1') {
         isCluster = true;
         const nodes = await adapter.getClusterNodes();
