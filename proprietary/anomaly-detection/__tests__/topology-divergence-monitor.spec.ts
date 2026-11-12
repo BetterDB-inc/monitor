@@ -1,5 +1,9 @@
 import type { ClusterNode } from '@app/common/types/metrics.types';
-import { TopologyDivergenceMonitor, TOPOLOGY_DIVERGENCE_MAX_OBSERVERS } from '../topology-divergence-monitor';
+import {
+  TopologyDivergenceMonitor,
+  TOPOLOGY_DIVERGENCE_MAX_OBSERVERS,
+  TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS,
+} from '../topology-divergence-monitor';
 
 const CLUSTER = 'cluster:abc';
 const INTERVAL = 5000;
@@ -236,6 +240,36 @@ describe('TopologyDivergenceMonitor', () => {
     const round = await poll('conn-1', 'a1', 0);
 
     expect(round).toMatchObject({ unanswered: ['b1'], disagreements: [] });
+  });
+
+  it('finishes the round when a read never comes back', async () => {
+    jest.useFakeTimers();
+    try {
+      const monitor = new TopologyDivergenceMonitor(() => 0);
+      const pollAt = (connectionId: string, observerId: string, at: number) =>
+        monitor.poll({
+          clusterKey: CLUSTER,
+          connectionId,
+          nodes: viewOf(observerId),
+          at,
+          intervalMs: INTERVAL,
+          nodesPerZone: 1,
+          randomNodes: 3,
+          canRead: true,
+          readView: (node) => (node.id === 'c1' ? new Promise<never>(() => undefined) : Promise.resolve(viewOf(node.id))),
+        });
+
+      const hung = pollAt('conn-1', 'a1', 0);
+      await jest.advanceTimersByTimeAsync(TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS - 1);
+      expect(await pollAt('conn-2', 'b1', 4 * INTERVAL)).toBeNull();
+
+      await jest.advanceTimersByTimeAsync(1);
+      expect(await hung).toMatchObject({ status: 'ok', unanswered: ['c1'] });
+
+      expect(await pollAt('conn-2', 'b1', 5 * INTERVAL)).toMatchObject({ anchorConnectionId: 'conn-2' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('survives a read that throws', async () => {

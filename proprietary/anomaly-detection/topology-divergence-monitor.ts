@@ -226,7 +226,7 @@ export class TopologyDivergenceMonitor {
       else reads.push(byId.get(id) as ClusterNode);
     }
 
-    const replies = await Promise.all(reads.map((node) => input.readView(node).catch(() => null)));
+    const replies = await Promise.all(reads.map((node) => this.readWithin(input.readView, node)));
     replies.forEach((reply, i) => {
       const id = reads[i].id;
       if (reply && myselfOf(reply)?.id === id) {
@@ -272,6 +272,19 @@ export class TopologyDivergenceMonitor {
       nodes,
       selves,
     };
+  }
+
+  private readWithin(readView: DivergencePoll['readView'], node: ClusterNode): Promise<ClusterNode[] | null> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), TOPOLOGY_DIVERGENCE_NODE_TIMEOUT_FALLBACK_MS);
+      Promise.resolve()
+        .then(() => readView(node))
+        .catch(() => null)
+        .then((view) => {
+          clearTimeout(timer);
+          resolve(view);
+        });
+    });
   }
 
   private backingOff(state: ClusterRounds, id: string, at: number): boolean {
