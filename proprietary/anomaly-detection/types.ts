@@ -125,6 +125,18 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.RESYNC_ESCALATION,
 ]);
 
+/**
+ * Extractor metrics that read a lifetime INFO counter. A raw counter only grows,
+ * so its latest value always sits above the trailing mean and the z-score fires
+ * on steady load; AnomalyService feeds these detectors the per-second rate since
+ * the previous poll instead, and their readings print with a /s unit.
+ */
+export const COUNTER_RATE_METRICS: ReadonlySet<MetricType> = new Set([
+  MetricType.ACL_DENIED,
+  MetricType.EVICTED_KEYS,
+  MetricType.KEYSPACE_MISSES,
+]);
+
 export enum AnomalySeverity {
   INFO = 'info',
   WARNING = 'warning',
