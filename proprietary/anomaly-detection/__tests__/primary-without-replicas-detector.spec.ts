@@ -257,6 +257,20 @@ describe('evaluatePrimaryWithoutReplicas', () => {
     expect(run(off, START, 60, ZERO, { ...config, warnMs: 0, critMs: 0 })).toEqual([]);
   });
 
+  it('turns the early CRITICAL off together with the WARNING', () => {
+    const state = healthyShard();
+    const findings = run(
+      state,
+      START,
+      60,
+      { ...ZERO, persistenceOff: true },
+      { ...config, warnMs: 0 },
+    );
+
+    expect(findings.map((f) => f.severity)).toEqual(['critical']);
+    expect(findings[0].zeroForMs).toBe(30_000);
+  });
+
   it('raises the expectation at once and lowers it only after the TTL', () => {
     const state = healthyShard();
     run(state, START, 1, { attached: 3, synced: 3 });

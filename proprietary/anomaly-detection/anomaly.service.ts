@@ -1389,12 +1389,14 @@ export class AnomalyService
     this.activeOrphanedSlots.delete(connectionId);
     this.failoverChurnState.delete(connectionId);
     // A shard this connection was the last to observe has no one left to
-    // resolve its events. One that another connection observes is kept.
-    for (const [key, state] of [...this.primaryReplicaState]) {
+    // resolve its events, so they are closed. Its expected replica count is
+    // kept until the sweep drops it: a connection added in its place must
+    // still alert when the replicas are already gone.
+    for (const [key, state] of this.primaryReplicaState) {
       state.healthyPolls.delete(connectionId);
       if (state.observers.delete(connectionId) && state.observers.size === 0) {
-        this.primaryReplicaState.delete(key);
         this.closePrimaryReplicaEvents(key);
+        endPrimaryReplicaEpisode(state);
       }
     }
     this.forkMemoryState.delete(connectionId);
@@ -7973,10 +7975,13 @@ export class AnomalyService
       if (!clusterKey || self.slots.length === 0) return;
       slots = canonicalSlotKey(self.slots);
       key = `${clusterKey}:${slots}`;
+    } else {
+      this.continuePrimaryReplicaState(key, info.master_replid);
     }
     await this.reconcilePrimaryReplicaAlert(key);
     const state = this.primaryReplicaState.get(key) ?? createShardReplicaState(timestamp);
     this.primaryReplicaState.set(key, state);
+    if (!self) state.replid = info.master_replid;
 
     // A node that has not learnt its own address yet announces `:port`.
     const announced = self ? this.clientAddress(self.address) : '';
@@ -8029,6 +8034,27 @@ export class AnomalyService
       const events = this.primaryReplicaEvents.get(key) ?? [];
       this.primaryReplicaEvents.delete(key);
       for (const { id } of events) await this.resolveAnomalyOutcome(id);
+    }
+  }
+
+  /**
+   * Outside a cluster one primary can be read through fan-out or by its own
+   * connection, under different keys. The path that reads it for the first
+   * time continues the state the other one left, matched by replication ID,
+   * so the expected replica count survives the hand-over.
+   */
+  private continuePrimaryReplicaState(key: string, replid: string | undefined): void {
+    if (!replid || this.primaryReplicaState.has(key)) return;
+    for (const [previous, state] of this.primaryReplicaState) {
+      if (state.replid !== replid) continue;
+      this.primaryReplicaState.delete(previous);
+      this.primaryReplicaState.set(key, state);
+      const events = this.primaryReplicaEvents.get(previous);
+      if (events) {
+        this.primaryReplicaEvents.delete(previous);
+        this.primaryReplicaEvents.set(key, events);
+      }
+      return;
     }
   }
 

@@ -9703,6 +9703,19 @@ describe('AnomalyService', () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(replicas, opts));
     };
 
+    /** Flattened INFO of one non-cluster primary, as the detector receives it. */
+    const flatInfo = (replicas: number) => ({
+      role: 'master',
+      master_replid: 'replid-1',
+      connected_slaves: String(replicas),
+      ...Object.fromEntries(
+        Array.from({ length: replicas }, (_, i) => [
+          `slave${i}`,
+          `ip=10.0.1.${i},port=6379,state=online,offset=100,lag=0`,
+        ]),
+      ),
+    });
+
     /** Polls once per second, `seconds` times. */
     const pollFor = async (seconds: number, ctx: ConnectionContext = mockCtx) => {
       for (let s = 0; s < seconds; s++) {
@@ -9907,13 +9920,21 @@ describe('AnomalyService', () => {
       ]);
     });
 
-    it('forgets a standalone primary when its connection is removed', async () => {
+    it('closes the event of a standalone primary when its connection is removed', async () => {
       setReplicas(SYNCED, { cluster: false });
       await pollFor(1);
-      expect((service as any).primaryReplicaState.has('connection:conn-1')).toBe(true);
+      setReplicas([], { cluster: false });
+      await pollFor(10);
+      expect(events()).toHaveLength(1);
 
       (service as any).onConnectionRemoved('conn-1');
-      expect((service as any).primaryReplicaState.size).toBe(0);
+      expect((service as any).persistenceOutbox.resolvedAt(events()[0].id)).toEqual(
+        expect.any(Number),
+      );
+      expect((service as any).primaryReplicaState.get('connection:conn-1')).toMatchObject({
+        expectedReplicas: 2,
+        alerted: 'none',
+      });
     });
 
     it('closes the events of a cluster shard when its last observing connection is removed', async () => {
@@ -9931,9 +9952,25 @@ describe('AnomalyService', () => {
       expect(closedAt()).toBeUndefined();
 
       (service as any).onConnectionRemoved('conn-2');
-      expect((service as any).primaryReplicaState.size).toBe(0);
       expect((service as any).primaryReplicaEvents.size).toBe(0);
       expect(closedAt()).toEqual(expect.any(Number));
+    });
+
+    it('still alerts on a connection that replaces the last observer of a shard', async () => {
+      const replacement: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      await pollFor(1);
+      (service as any).onConnectionRemoved('conn-1');
+
+      // The replicas are already gone when the replacement first sees the shard.
+      setReplicas([]);
+      await pollFor(6, replacement);
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        connectionId: 'conn-2',
+      });
     });
 
     it('raises the alert again when its event is resolved while there is still no replica', async () => {
@@ -9975,18 +10012,14 @@ describe('AnomalyService', () => {
 
     it('keeps what was learnt about a fan-out primary when another connection takes it over', async () => {
       const second: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
-      const info = (replicas: number) => ({
-        role: 'master',
-        connected_slaves: String(replicas),
-        ...Object.fromEntries(
-          Array.from({ length: replicas }, (_, i) => [
-            `slave${i}`,
-            `ip=10.0.1.${i},port=6379,state=online,offset=100,lag=0`,
-          ]),
-        ),
-      });
       const observe = (ctx: ConnectionContext, replicas: number) =>
-        (service as any).detectPrimaryWithoutReplicas(info(replicas), ctx, now, null, '10.0.0.9:6379');
+        (service as any).detectPrimaryWithoutReplicas(
+          flatInfo(replicas),
+          ctx,
+          now,
+          null,
+          '10.0.0.9:6379',
+        );
 
       await observe(mockCtx, 2);
       for (let s = 0; s < 6; s++) {
@@ -10001,6 +10034,26 @@ describe('AnomalyService', () => {
         connectionId: 'conn-2',
         nodeAddr: '10.0.0.9:6379',
       });
+    });
+
+    it('keeps what fan-out learnt about a primary that is then registered as its own connection', async () => {
+      const direct: ConnectionContext = { ...mockCtx, connectionId: 'conn-2' };
+      const detect = (service as any).detectPrimaryWithoutReplicas.bind(service);
+
+      await detect(flatInfo(2), mockCtx, now, null, '10.0.0.9:6379');
+      for (let s = 0; s < 6; s++) {
+        now += 1000;
+        await detect(flatInfo(0), direct, now, null);
+      }
+
+      expect(events()).toHaveLength(1);
+      expect(events()[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        baseline: 2,
+        connectionId: 'conn-2',
+        dedupeKey: 'connection:conn-2',
+      });
+      expect(events()[0].nodeAddr).toBeUndefined();
     });
   });
 

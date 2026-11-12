@@ -66,6 +66,12 @@ export interface ShardReplicaState {
   lastSeenAt: number;
   /** Connections that have observed the shard. */
   observers: Set<string>;
+  /**
+   * Replication ID last seen on a primary outside a cluster, set by the anomaly
+   * service. It lets another connection that reads the same primary continue
+   * this state.
+   */
+  replid?: string;
 }
 
 export interface PrimaryWithoutReplicasFinding {
@@ -162,6 +168,8 @@ export function evaluatePrimaryWithoutReplicas(
   const zeroForMs = timestamp - state.zeroSince;
 
   const warn = config.warnMs > 0 && zeroForMs >= config.warnMs;
+  // The early CRITICAL is raised at the warning threshold, so turning the
+  // WARNING off turns it off too: the CRITICAL then waits for `critMs`.
   const nothingAttachedAndNoPersistence = input.persistenceOff === true && attached === 0;
   const critical =
     config.critMs > 0 && (zeroForMs >= config.critMs || (warn && nothingAttachedAndNoPersistence));
