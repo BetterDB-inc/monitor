@@ -2426,6 +2426,26 @@ describe('AnomalyService', () => {
         expect(hotEvents()[0].message).toContain('"user:42"');
       });
 
+      it('reads the keys again for the replacement of an event resolved by hand', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+        keys = { 0: [['later', 99]] };
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(hotEvents()).toHaveLength(2);
+        expect(hotEvents()[0].message).toContain('Hot keys: "later" (freq 99).');
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keysSampled: 1,
+          keysSampledAt: BASE + 7 * STEP_MS,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+      });
+
       it('keeps the last key names when a refresh fails, and reads again five minutes later', async () => {
         const client = hotNode();
         const discovery = dial(client);

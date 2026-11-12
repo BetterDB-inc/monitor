@@ -6315,6 +6315,7 @@ export class AnomalyService
       eventIds.delete(signature);
       this.activeHotShards.get(connectionId)?.delete(signature);
       this.hotShardDetails.get(connectionId)?.delete(signature);
+      this.hotShardKeys.get(connectionId)?.delete(signature);
     }
   }
 
