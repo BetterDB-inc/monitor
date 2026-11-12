@@ -16,6 +16,7 @@ from .normalizer import (
 )
 from .types import (
     AgentCacheOptions,
+    CacheResult,
     ConfigRefreshOptions,
     DiscoveryOptions,
     AgentCacheStats,
@@ -37,6 +38,7 @@ from .types import (
     ToolDefinition,
     ToolEffectivenessEntry,
     ToolPolicy,
+    ToolRecommendation,
     ToolResultBlock,
     ToolStats,
     ToolStoreOptions,
@@ -64,7 +66,9 @@ __all__ = [
     "TierStats",
     "SessionStats",
     "ToolStats",
+    "CacheResult",
     "ToolEffectivenessEntry",
+    "ToolRecommendation",
     # Content blocks
     "ContentBlock",
     "TextBlock",
