@@ -18,6 +18,7 @@ import { LatencyRegressionBanner } from '../components/anomalies/LatencyRegressi
 import { RaftHealthBanner } from '../components/anomalies/RaftHealthBanner';
 import { ReplicaSlotStateBanner } from '../components/anomalies/ReplicaSlotStateBanner';
 import { FanoutCoverageNotice } from '../components/anomalies/FanoutCoverageNotice';
+import { HotShardCaptureNotice } from '../components/anomalies/HotShardCaptureNotice';
 import { ReplicationDivergencePanel } from '../components/anomalies/ReplicationDivergencePanel';
 import { formatValue } from '../lib/formatters';
 import {
@@ -326,6 +327,7 @@ export function AnomalyDashboard() {
       <LatencyRegressionBanner events={latencyRegressionEvents ?? undefined} />
       <RaftHealthBanner events={raftHealthEvents ?? undefined} />
       <ReplicaSlotStateBanner events={replicaSlotStateEvents ?? undefined} />
+      <HotShardCaptureNotice connectionId={currentConnection?.id} />
       <FanoutCoverageNotice
         coverage={fanoutCoverage?.find((c) => c.connectionId === currentConnection?.id)}
         error={fanoutCoverageError}

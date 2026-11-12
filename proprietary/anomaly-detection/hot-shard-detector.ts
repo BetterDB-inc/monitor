@@ -39,6 +39,8 @@ export interface HotShardSlot {
 }
 
 export interface HotShardDetail extends HotShardKeyDetail {
+  eventId: string;
+  captureAvailable: boolean;
   shardId: string;
   nodeAddr: string;
   slotCount: number;
@@ -130,6 +132,7 @@ export function describeHotShard(
   topSlots: readonly HotShardSlot[],
   heldMs: number,
   topKeys: readonly HotShardKey[] = [],
+  keysNote = '',
 ): string {
   const listed = topSlots.slice(0, MESSAGE_TOP_SLOTS);
   const slots = listed
@@ -142,6 +145,7 @@ export function describeHotShard(
     `${describeCpu(finding.cpu)} for ${Math.round(heldMs / 1000)}s.` +
     describeNetwork(finding.network) +
     (listed.length > 0 ? ` Top slots by CPU: ${slots}.` : '') +
-    describeHotKeys(topKeys)
+    describeHotKeys(topKeys) +
+    keysNote
   );
 }

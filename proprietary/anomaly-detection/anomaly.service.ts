@@ -101,6 +101,7 @@ import {
   HOT_KEY_SLOTS,
   HotKeyRead,
   HotShardKeyDetail,
+  describeMissingKeys,
   hotKeysAfterRead,
   hotKeysUnavailable,
   sampleHotKeys,
@@ -6494,6 +6495,14 @@ export class AnomalyService
     });
   }
 
+  private canCaptureMissingKeys(connectionId: string, keys: HotKeyRead | undefined): boolean {
+    return (
+      keys?.keySource === 'unavailable' &&
+      !!this.clusterDiscovery &&
+      this.dialsDataNodes(connectionId)
+    );
+  }
+
   private hotShardTopSlots(connectionId: string, finding: HotShardFinding): HotShardSlot[] {
     const slots = this.shardLoad?.getTopSlots(connectionId, finding.shardId, HOT_SHARD_TOP_SLOTS);
     return hotShardSlots(finding, slots ?? []);
@@ -6515,6 +6524,7 @@ export class AnomalyService
       () => new Map<string, number>(),
     );
     sinceBySignature.set(signature, since);
+    const keys = this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail;
     return {
       id: randomUUID(),
       timestamp,
@@ -6530,7 +6540,10 @@ export class AnomalyService
         finding,
         topSlots,
         sampledAt - since,
-        this.hotShardKeys.get(ctx.connectionId)?.get(signature)?.detail.topKeys,
+        keys?.topKeys,
+        this.canCaptureMissingKeys(ctx.connectionId, keys)
+          ? describeMissingKeys(keys?.keyNote)
+          : '',
       ),
       resolved: false,
       connectionId: ctx.connectionId,
@@ -6552,8 +6565,13 @@ export class AnomalyService
     if (findings.length === 0) this.hotShardKeys.delete(connectionId);
     for (const finding of findings) {
       const signature = hotShardSignature(finding.shardId);
-      if (!eventIds?.has(signature)) continue;
+      const eventId = eventIds?.get(signature);
+      if (eventId === undefined) continue;
+      const read =
+        keys?.get(signature)?.detail ?? hotKeysUnavailable('the keys have not been read yet');
       details.set(signature, {
+        eventId,
+        captureAvailable: this.canCaptureMissingKeys(connectionId, read),
         shardId: finding.shardId,
         nodeAddr: finding.nodeAddr,
         slotCount: finding.slotCount,
@@ -6562,7 +6580,7 @@ export class AnomalyService
         cpu: finding.cpu,
         network: finding.network,
         topSlots: topSlots.get(finding.shardId) ?? [],
-        ...(keys?.get(signature)?.detail ?? hotKeysUnavailable('the keys have not been read yet')),
+        ...read,
       });
     }
     if (details.size > 0) this.hotShardDetails.set(connectionId, details);
