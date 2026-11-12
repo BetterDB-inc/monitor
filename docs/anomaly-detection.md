@@ -757,7 +757,12 @@ It is CRITICAL when slot owners are in dispute, because clients can then be sent
 
 **What it costs.** Each round sends one `CLUSTER NODES` to at most 11 other nodes, in parallel, with 2 seconds each. The reply has one line per node of the cluster, so it grows with the cluster. A node that does not answer is asked less often, down to once every 8 rounds. A node that is registered as its own connection is asked once at most; after that its view comes from that connection's poll. A cluster reached through an agent is not sampled, because the monitor cannot dial its nodes there; the report then says `insufficient_views`.
 
-**What it cannot see.** A disagreement among nodes that were not sampled. With the default of one node per zone, a single cut-off node is only caught when it is the sampled one or when a sampled node flags it. Raise `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` to widen the sample. A partition that heals in less than 3 rounds is not reported.
+**What it cannot see.**
+
+- A disagreement among nodes that were not sampled. With the default of one node per zone, a single cut-off node is only caught when it is the sampled one or when a sampled node flags it. Raise `ANOMALY_TOPOLOGY_DIVERGENCE_NODES_PER_ZONE` to widen the sample.
+- A partition that heals in less than 3 rounds, and a node that flaps in and out of `fail?` faster than that. The count starts over each time the views agree.
+- A partition the monitor is on one side of. The nodes it cannot reach give no view, so there is nothing to compare them with, and no event is raised. They are listed as `unanswered` in the report, and when no other node answers at all the report says `insufficient_views`. The views it does get then agree that the other nodes are failing. `cluster_state` and the fan-out coverage report that case.
+- The two sides are in the `message` as text only. The webhook payload has no separate field for them; the full lists are in the report.
 
 ## Configuration
 
