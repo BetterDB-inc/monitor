@@ -6267,12 +6267,10 @@ export class AnomalyService
       this.hotShardSampleAt.set(connectionId, sample.timestamp);
       this.hotShardJudgedAt.set(connectionId, timestamp);
 
+      const shardIds = sample.shards.map((shard) => shard.nodeId);
+      await this.forgetResolvedHotShards(connectionId, shardIds);
       const eventIds = this.hotShardEventIds.get(connectionId);
-      const open = new Set(
-        sample.shards
-          .map((shard) => shard.nodeId)
-          .filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))),
-      );
+      const open = new Set(shardIds.filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))));
       const findings = this.isReshardWindowOpen(connectionId, timestamp)
         ? null
         : judgeHotShards(sample, open);
@@ -6282,7 +6280,6 @@ export class AnomalyService
           this.hotShardTopSlots(connectionId, finding),
         ]),
       );
-      if (findings) await this.forgetResolvedHotShards(connectionId, findings);
       const held =
         findings === null ||
         (await this.isSlotMigrationInFlight(connectionId, sample.timestamp, findings));
@@ -6307,14 +6304,11 @@ export class AnomalyService
     );
   }
 
-  private async forgetResolvedHotShards(
-    connectionId: string,
-    findings: HotShardFinding[],
-  ): Promise<void> {
+  private async forgetResolvedHotShards(connectionId: string, shardIds: string[]): Promise<void> {
     const eventIds = this.hotShardEventIds.get(connectionId);
     if (!eventIds) return;
-    for (const finding of findings) {
-      const signature = hotShardSignature(finding.shardId);
+    for (const shardId of shardIds) {
+      const signature = hotShardSignature(shardId);
       const eventId = eventIds.get(signature);
       if (eventId === undefined) continue;
       if (await this.isTrackedEventOpen(eventId, connectionId, MetricType.HOT_SHARD)) continue;
@@ -7725,12 +7719,6 @@ export class AnomalyService
     }
   }
 
-  /**
-   * Whether an emitted anomaly is still present-and-unresolved in the storage-
-   * backed feed. Used by the dedupe gate when the event has been evicted from the
-   * in-memory ring, so a still-open stored row isn't duplicated. On a storage
-   * read error, assume still-open (conservative: avoid emitting a duplicate).
-   */
   private isTrackedEventOpen(
     id: string,
     connectionId: string,
@@ -7743,6 +7731,12 @@ export class AnomalyService
       : this.isAnomalyUnresolvedInStorage(id, connectionId, metricType);
   }
 
+  /**
+   * Whether an emitted anomaly is still present-and-unresolved in the storage-
+   * backed feed. Used by the dedupe gate when the event has been evicted from the
+   * in-memory ring, so a still-open stored row isn't duplicated. On a storage
+   * read error, assume still-open (conservative: avoid emitting a duplicate).
+   */
   private async isAnomalyUnresolvedInStorage(
     id: string,
     connectionId: string,

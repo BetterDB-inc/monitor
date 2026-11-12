@@ -2203,6 +2203,19 @@ describe('AnomalyService', () => {
       expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
     });
 
+    it('does not replace an event resolved by hand below the raise factor', async () => {
+      const warm = [170_000, 100_000, 100_000];
+      await step(HOT, 6);
+      await step(warm, 25);
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(warm, 2);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
     it('raises nothing while the shard load is not measured', async () => {
       for (let n = 0; n < 30; n += 1) await idle(STEP_MS);
 
