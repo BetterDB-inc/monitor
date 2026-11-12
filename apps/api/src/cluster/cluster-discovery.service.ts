@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { dialsDataNodes } from '../connections/data-node-reach';
@@ -69,9 +69,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
   }
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
-    // Use connection-specific cache key (default connection uses 'default')
-    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
-    const cacheKey = ownerId || 'default';
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId();
+    if (!ownerId) {
+      throw new NotFoundException('No connection available');
+    }
+    const cacheKey = ownerId;
     const cached = this.freshCache(cacheKey);
     if (cached) {
       return cached;

@@ -234,6 +234,15 @@ describe('ClusterDiscoveryService', () => {
       expect(mockConnectionRegistry.getNodeAvailabilityZones).toHaveBeenCalledWith('test-connection');
     });
 
+    it('refuses to discover with no connection to read from, instead of picking up a later default', async () => {
+      mockConnectionRegistry.getDefaultId.mockReturnValue(null);
+
+      await expect(service.discoverNodes()).rejects.toThrow('No connection available');
+
+      expect(mockConnectionRegistry.get).not.toHaveBeenCalled();
+      expect(mockConnectionRegistry.getNodeAvailabilityZones).not.toHaveBeenCalled();
+    });
+
     it('fills the zone from the connection map when CLUSTER SHARDS fails', async () => {
       shardsSocket.call.mockRejectedValue(new Error('ERR unknown subcommand'));
       mockConnectionRegistry.getNodeAvailabilityZones.mockReturnValue({ '192.168.1.11:6379': 'rack-b' });
