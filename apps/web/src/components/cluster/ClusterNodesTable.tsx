@@ -11,7 +11,7 @@ import {
   TableCell,
 } from '../ui/table';
 import { ChevronDown, ChevronRight, Server, Copy } from 'lucide-react';
-import { clusterNodeState } from '@betterdb/shared';
+import { clusterNodeState, type ClusterNodeState } from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
 
@@ -22,6 +22,12 @@ interface ClusterNodesTableProps {
 type SortColumn = 'address' | 'role' | 'slots' | 'state';
 type SortDirection = 'asc' | 'desc';
 type FilterTab = 'all' | 'masters' | 'replicas';
+
+const STATE_RANK: Record<ClusterNodeState, number> = { healthy: 0, suspect: 1, failed: 2 };
+
+function stateSortKey(node: ClusterNode): string {
+  return `${STATE_RANK[clusterNodeState(node.flags)]}:${node.linkState}`;
+}
 
 export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>('address');
@@ -71,8 +77,8 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
           bVal = countSlots(b.slots);
           break;
         case 'state':
-          aVal = a.linkState;
-          bVal = b.linkState;
+          aVal = stateSortKey(a);
+          bVal = stateSortKey(b);
           break;
       }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ClusterNode } from '../../types/metrics';
 import { ClusterNodesTable } from './ClusterNodesTable';
 import { ClusterTopology } from './ClusterTopology';
@@ -28,6 +28,13 @@ function row(address: string): HTMLElement {
   return screen.getByText(address).closest('tr') as HTMLElement;
 }
 
+function addressOrder(): string[] {
+  return screen
+    .getAllByRole('row')
+    .map((tableRow) => tableRow.textContent?.match(/10\.0\.0\.\d+:6379/)?.[0])
+    .filter((address): address is string => address !== undefined);
+}
+
 describe('ClusterNodesTable node state', () => {
   it('marks a node its peers suspect, and one they agreed has failed', () => {
     render(<ClusterNodesTable nodes={[healthy, suspect, failed]} />);
@@ -42,6 +49,31 @@ describe('ClusterNodesTable node state', () => {
     render(<ClusterNodesTable nodes={[clusterNode({ flags: ['master', flag] })]} />);
 
     expect(within(row('10.0.0.1:6379')).getByText('Suspect')).toBeInTheDocument();
+  });
+
+  it('sorts the State column by node state, then by link state', () => {
+    const unlinked = clusterNode({
+      id: 'd'.repeat(40),
+      address: '10.0.0.4:6379',
+      linkState: 'disconnected',
+    });
+    render(<ClusterNodesTable nodes={[failed, unlinked, suspect, healthy]} />);
+
+    fireEvent.click(screen.getByText('State'));
+    expect(addressOrder()).toEqual([
+      '10.0.0.1:6379',
+      '10.0.0.4:6379',
+      '10.0.0.2:6379',
+      '10.0.0.3:6379',
+    ]);
+
+    fireEvent.click(screen.getByText(/^State/));
+    expect(addressOrder()).toEqual([
+      '10.0.0.3:6379',
+      '10.0.0.2:6379',
+      '10.0.0.4:6379',
+      '10.0.0.1:6379',
+    ]);
   });
 });
 
