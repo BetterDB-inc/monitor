@@ -2,9 +2,7 @@ import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
 import { generateKeyPairSync } from 'crypto';
-import { rmSync } from 'fs';
 import * as jwt from 'jsonwebtoken';
-import { tmpdir } from 'os';
 import { join } from 'path';
 
 const TRUSTED_ORIGIN = 'http://localhost:5173';
@@ -22,7 +20,6 @@ const { publicKey, privateKey } = generateKeyPairSync('rsa', {
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -69,7 +66,7 @@ function nextIp(): string {
 describe('Workspace broker sign-in (E2E)', () => {
   let app: NestFastifyApplication;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-broker-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-broker.db');
 
   function tokenFor(
     state: string,
@@ -151,7 +148,6 @@ describe('Workspace broker sign-in (E2E)', () => {
     delete process.env.AUTH_SECRET;
     delete process.env.AUTH_PUBLIC_URL;
     process.env.NODE_ENV = 'test';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_BROKER_PUBLIC_KEY = publicKey;
@@ -177,9 +173,6 @@ describe('Workspace broker sign-in (E2E)', () => {
     if (app !== undefined) {
       await app.close();
     }
-    rmSync(sqlitePath, { force: true });
-    rmSync(`${sqlitePath}-wal`, { force: true });
-    rmSync(`${sqlitePath}-shm`, { force: true });
     for (const key of TOUCHED) {
       const value = previous.get(key);
       if (value === undefined) {

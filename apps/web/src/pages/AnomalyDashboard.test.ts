@@ -1,0 +1,47 @@
+import { describe, it, expect } from 'vitest';
+import { formatValue } from '../lib/formatters';
+import { formatRelatedCount } from './AnomalyDashboard';
+import { dateRangeFromParams } from '../components/ui/date-range';
+
+describe('formatRelatedCount', () => {
+  it('marks a member list the API cut short', () => {
+    expect(formatRelatedCount({ anomalies: [{}, {}], truncated: true })).toBe('2+');
+  });
+
+  it('shows the plain count otherwise', () => {
+    expect(formatRelatedCount({ anomalies: [{}, {}] })).toBe('2');
+  });
+});
+
+describe('formatValue', () => {
+  it('keeps a replication gap below 1 KiB in bytes', () => {
+    expect(formatValue(500, 'replication_divergence')).toBe('500.00 B');
+    expect(formatValue(100, 'replication_divergence')).toBe('100.00 B');
+  });
+
+  it('keeps a fractional replication gap in bytes', () => {
+    expect(formatValue(0.5, 'replication_divergence')).toBe('0.50 B');
+  });
+
+  it('writes larger replication gaps like the replication panel', () => {
+    expect(formatValue(8 * 1024 ** 2, 'replication_divergence')).toBe('8.00 MB');
+  });
+});
+
+describe('dateRangeFromParams', () => {
+  it('reads the range from the URL', () => {
+    expect(dateRangeFromParams('1000', '2000')).toEqual({
+      from: new Date(1000),
+      to: new Date(2000),
+    });
+  });
+
+  it('clears the range once start or end leaves the URL', () => {
+    expect(dateRangeFromParams(null, null)).toBeUndefined();
+    expect(dateRangeFromParams('1000', null)).toBeUndefined();
+  });
+
+  it('ignores a malformed range', () => {
+    expect(dateRangeFromParams('soon', '2000')).toBeUndefined();
+  });
+});

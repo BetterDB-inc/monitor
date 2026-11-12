@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { DiscoveryReaderService } from '../discovery-reader.service';
 import type { ConnectionRegistry } from '../../connections/connection-registry.service';
 
@@ -88,6 +89,21 @@ describe('DiscoveryReaderService.discover', () => {
     const svc = new DiscoveryReaderService(makeRegistry(call));
 
     await expect(svc.discover('c1')).resolves.toEqual([]);
+  });
+
+  it('notes a cluster redirect once instead of warning on every poll', async () => {
+    const client = {
+      call: jest.fn().mockRejectedValue(new Error('MOVED 8209 10.244.2.3:6379')),
+    };
+    const svc = new DiscoveryReaderService({} as ConnectionRegistry);
+    const log = jest.spyOn((svc as unknown as { logger: Logger }).logger, 'log').mockImplementation(() => undefined);
+    const warn = jest.spyOn((svc as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
+
+    await expect(svc.discoverWithClient(client as never)).resolves.toEqual([]);
+    await expect(svc.discoverWithClient(client as never)).resolves.toEqual([]);
+
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('returns [] on an empty registry', async () => {

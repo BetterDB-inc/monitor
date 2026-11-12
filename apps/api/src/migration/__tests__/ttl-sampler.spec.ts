@@ -97,3 +97,14 @@ describe('sampleTtls', () => {
     expect(result.sampledKeyCount).toBe(1);
   });
 });
+
+describe('sampleTtls with binary keys', () => {
+  it('sends the raw key buffer to PTTL', async () => {
+    const client = createMockClient([-1]);
+    const raw = Buffer.from([0xff, 0x00]);
+
+    await sampleTtls(client, [raw]);
+
+    expect(client.pipeline.mock.results[0].value.pttl).toHaveBeenCalledWith(raw);
+  });
+});

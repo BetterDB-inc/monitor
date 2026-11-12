@@ -18,6 +18,19 @@ describe('ClientAnalyticsService', () => {
     expect(service.pollsSentinels()).toBe(true);
   });
 
+  it('forgets the cached client list of a removed connection', () => {
+    const clientListCache = { forget: jest.fn() };
+    const service = Object.create(ClientAnalyticsService.prototype) as unknown as {
+      clientListCache: typeof clientListCache;
+      onConnectionRemoved(connectionId: string): void;
+    };
+    service.clientListCache = clientListCache;
+
+    service.onConnectionRemoved('conn-1');
+
+    expect(clientListCache.forget).toHaveBeenCalledWith('conn-1');
+  });
+
   describe('getStats routing', () => {
     let storage: { getClientAnalyticsStats: jest.Mock; getClientConnectionHistory: jest.Mock };
     let rollup: {

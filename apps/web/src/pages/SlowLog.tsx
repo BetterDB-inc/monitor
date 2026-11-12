@@ -13,6 +13,7 @@ import { CommandLogTable } from '../components/metrics/CommandLogTable';
 import { SlowLogPatternAnalysisView } from '../components/metrics/SlowLogPatternAnalysis';
 import { ScanSkewAdvisory } from '../components/metrics/ScanSkewAdvisory';
 import { DateRangePicker, DateRange } from '../components/ui/date-range-picker';
+import { dateRangeFromParams } from '../components/ui/date-range';
 import { CapabilityStatusBanner } from '../components/CapabilityStatusBanner';
 import type { CommandLogType, LogSortBy } from '../types/metrics';
 
@@ -59,16 +60,9 @@ export function SlowLog() {
   const [page, setPage] = useState(0);
 
   // Time filter state — initialise from URL ?start=&end= (epoch ms)
-  const [dateRange, setDateRange] = useState<DateRange | undefined>(() => {
-    const s = searchParams.get('start');
-    const e = searchParams.get('end');
-    if (s && e) {
-      const from = new Date(Number(s));
-      const to = new Date(Number(e));
-      if (!isNaN(from.getTime()) && !isNaN(to.getTime())) return { from, to };
-    }
-    return undefined;
-  });
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(() =>
+    dateRangeFromParams(searchParams.get('start'), searchParams.get('end')),
+  );
 
   const handleDateRangeChange = (range: DateRange | undefined) => {
     setDateRange(range);

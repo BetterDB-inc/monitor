@@ -11,7 +11,6 @@ import { Input } from '../../ui/input';
 import { connectionTypeSuffix, isClusterChild } from '../../../utils/connectionType';
 import { EngineBadge } from './EngineBadge';
 import type { EndpointRole } from './EndpointPanel';
-import { usesSshTunnel } from './preflight';
 
 interface Props {
   open: boolean;
@@ -20,6 +19,8 @@ interface Props {
   selectedId: string | null;
   excludeId: string | null;
   onSelect: (connection: Connection) => void;
+  onSelectServerless?: () => void;
+  serverlessSelected?: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
@@ -39,9 +40,6 @@ function unavailableReason(
   }
   if (isClusterChild(connection)) {
     return 'Cluster node — pick its seed';
-  }
-  if (usesSshTunnel(connection)) {
-    return 'SSH tunnel — not supported yet';
   }
   if (role === 'target' && connection.isConnected === false) {
     return 'Offline — cannot accept writes';
@@ -68,6 +66,8 @@ export function ConnectionPicker({
   selectedId,
   excludeId,
   onSelect,
+  onSelectServerless,
+  serverlessSelected = false,
   onOpenChange,
 }: Props) {
   const [filter, setFilter] = useState('');
@@ -118,6 +118,27 @@ export function ConnectionPicker({
         />
 
         <div className="max-h-80 divide-y overflow-y-auto rounded-lg border">
+          {role === 'target' && onSelectServerless !== undefined && (
+            <button
+              type="button"
+              aria-current={serverlessSelected}
+              onClick={() => {
+                onSelectServerless();
+                handleOpenChange(false);
+              }}
+              className={`flex w-full items-center gap-4 px-4 py-3 text-left transition-colors ${
+                serverlessSelected ? 'bg-muted' : 'hover:bg-muted/60'
+              }`}
+            >
+              <span className="flex min-w-0 flex-1 flex-col gap-1">
+                <span className="text-sm font-medium">Check against ElastiCache Serverless</span>
+                <span className="text-xs text-muted-foreground">
+                  Readiness check only. No target connection needed.
+                </span>
+              </span>
+            </button>
+          )}
+
           {visible.length === 0 && (
             <p className="p-6 text-center text-sm text-muted-foreground">
               No connection matches “{filter}”.

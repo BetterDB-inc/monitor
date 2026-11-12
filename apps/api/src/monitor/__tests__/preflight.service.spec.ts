@@ -12,7 +12,7 @@ function makeService({
   acl = { username: 'default', hasMonitor: true },
   health = {
     allow: true,
-    signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
+    signals: { memoryPct: 0.1, oomEventsRecent: 0, replicationLagBytes: 0, replicaLinkDown: false, failoverInProgress: false },
     thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
   },
   monitorSupport,
@@ -29,7 +29,9 @@ function makeService({
     getConfig: jest.fn().mockReturnValue({ host, port: 6379 }),
   } as unknown as ConnectionRegistry;
   const aclChecker = { check: jest.fn().mockResolvedValue(acl) } as unknown as AclChecker;
-  const healthGate = { evaluate: jest.fn().mockResolvedValue(health) } as unknown as HealthGateService;
+  const healthGate = {
+    evaluateAdvisory: jest.fn().mockResolvedValue(health),
+  } as unknown as HealthGateService;
   const monitorSupportProbe = {
     probe: jest.fn(),
     getCached: jest.fn().mockReturnValue(monitorSupport),
@@ -98,7 +100,7 @@ describe('PreflightService', () => {
       estimatedBytes: 30_000 * 120,
     });
     expect(aclChecker.check).toHaveBeenCalledWith(CONNECTION_ID);
-    expect(healthGate.evaluate).toHaveBeenCalledWith(CONNECTION_ID);
+    expect(healthGate.evaluateAdvisory).toHaveBeenCalledWith(CONNECTION_ID);
   });
 
   it('detects provider from the connection host suffix', async () => {
@@ -144,7 +146,7 @@ describe('PreflightService', () => {
     const health = {
       allow: false,
       skipReason: 'memory_above_threshold',
-      signals: { memoryPct: 0.95, oomEventsRecent: 0, replicationLagBytes: 0, failoverInProgress: false },
+      signals: { memoryPct: 0.95, oomEventsRecent: 0, replicationLagBytes: 0, replicaLinkDown: false, failoverInProgress: false },
       thresholds: { memoryPctThreshold: 0.85, replicationLagThresholdBytes: 10485760 },
     };
     const { service } = makeService({

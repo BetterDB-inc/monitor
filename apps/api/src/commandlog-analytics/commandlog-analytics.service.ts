@@ -10,7 +10,12 @@ import {
 import { SlowLogPatternAnalysis } from '../common/types/metrics.types';
 import { analyzeSlowLogPatterns } from '../metrics/slowlog-analyzer';
 import { analyzeScanSkew, ScanSkewReport } from './scan-skew-analyzer';
-import { MultiConnectionPoller, ConnectionContext } from '../common/services/multi-connection-poller';
+import {
+  MultiConnectionPoller,
+  ConnectionContext,
+  describeLogSource,
+  LogSourceTracker,
+} from '../common/services/multi-connection-poller';
 import { ConnectionRegistry } from '../connections/connection-registry.service';
 import { RuntimeCapabilityTracker } from '../connections/runtime-capability-tracker.service';
 
@@ -23,6 +28,8 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
   // Nested Maps: connectionId -> (type -> lastSeenId)
   private lastSeenIds = new Map<string, Map<CommandLogType, number | null>>();
+  // Server process each connection's lastSeenIds belong to (command log IDs are per process).
+  private readonly logSources: LogSourceTracker;
 
   // Nested Maps: connectionId -> (type -> entries)
   private cachedEntries = new Map<string, Map<CommandLogType, CommandLogEntry[]>>();
@@ -35,6 +42,7 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     private readonly runtimeCapabilityTracker: RuntimeCapabilityTracker,
   ) {
     super(connectionRegistry);
+    this.logSources = new LogSourceTracker((id) => this.storage.hasRunIdLogEntries(id));
   }
 
   protected getIntervalMs(): number {
@@ -82,6 +90,22 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
       return;
     }
 
+    const read = await this.logSources.read(ctx);
+    if (!read) {
+      this.logger.debug(`Command log source for ${ctx.connectionName} is unknown; skipping this poll`);
+      return;
+    }
+    const { source } = read;
+    const moved = this.logSources.track(ctx.connectionId, read);
+    if (moved.changed) {
+      if (moved.previous !== undefined) {
+        this.logger.log(
+          `Command log source for ${ctx.connectionName} moved from ${moved.previous} to ${describeLogSource(source)}`,
+        );
+      }
+      this.lastSeenIds.delete(ctx.connectionId);
+    }
+
     // Initialize per-connection state if needed
     this.initConnectionState(ctx.connectionId);
 
@@ -89,18 +113,37 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
     const connectionLastSeenIds = this.lastSeenIds.get(ctx.connectionId)!;
     for (const type of this.LOG_TYPES) {
       if (connectionLastSeenIds.get(type) === null) {
-        const lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId);
+        const lastId = await this.storage.getLatestCommandLogId(type, ctx.connectionId, source);
         connectionLastSeenIds.set(type, lastId);
       }
+    }
+
+    const fetched: Array<{ type: CommandLogType; entries: CommandLogEntry[] }> = [];
+    for (const type of this.LOG_TYPES) {
+      try {
+        fetched.push({ type, entries: await ctx.client.getCommandLog(128, type) });
+      } catch (error) {
+        if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canCommandLog', error instanceof Error ? error : String(error))) {
+          this.logger.warn(`Command log disabled for ${ctx.connectionName} due to blocked command`);
+          return;
+        }
+        this.logger.error(`Error capturing ${type} command log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+
+    // A reconnect during the reads above moves the socket to another process;
+    // its entries must not be stored under this source.
+    if (!(await this.logSources.unchanged(ctx, read))) {
+      this.logger.debug(`Command log source for ${ctx.connectionName} changed during the read; skipping this poll`);
+      return;
     }
 
     const now = Date.now();
     const connectionCachedEntries = this.cachedEntries.get(ctx.connectionId)!;
     const connectionCachedAnalysis = this.cachedAnalysis.get(ctx.connectionId)!;
 
-    for (const type of this.LOG_TYPES) {
+    for (const { type, entries } of fetched) {
       try {
-        const entries = await ctx.client.getCommandLog(128, type);
         const lastSeenId = connectionLastSeenIds.get(type) ?? null;
 
         // Update cache for Prometheus metrics
@@ -141,8 +184,9 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
           clientName: e.clientName || '',
           type: type,
           capturedAt: now,
-          sourceHost: ctx.host,
-          sourcePort: ctx.port,
+          sourceHost: source.host,
+          sourcePort: source.port,
+          sourceRunId: source.runId,
           connectionId: ctx.connectionId,
         }));
 
@@ -156,17 +200,14 @@ export class CommandLogAnalyticsService extends MultiConnectionPoller implements
 
         this.logger.debug(`Saved ${saved} new ${type} command log entries for ${ctx.connectionName}`);
       } catch (error) {
-        if (this.runtimeCapabilityTracker.recordFailure(ctx.connectionId, 'canCommandLog', error instanceof Error ? error : String(error))) {
-          this.logger.warn(`Command log disabled for ${ctx.connectionName} due to blocked command`);
-          return;
-        }
-        this.logger.error(`Error capturing ${type} command log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        this.logger.error(`Error saving ${type} command log for ${ctx.connectionName}: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     }
   }
 
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
+    this.logSources.forget(connectionId);
     this.cachedEntries.delete(connectionId);
     this.cachedAnalysis.delete(connectionId);
     this.lastCacheUpdate.delete(connectionId);

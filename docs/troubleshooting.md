@@ -20,7 +20,7 @@ Common issues and solutions for BetterDB Monitor.
 3. If using Docker, ensure network connectivity:
    - Use `--network host` for localhost connections
    - Or use the container's IP/hostname on the Docker network
-4. Verify credentials if ACL is enabled
+4. Verify credentials if ACL is enabled. See [Minimum ACL](minimum-acl) for the permissions BetterDB needs.
 
 ### "NOAUTH Authentication required"
 

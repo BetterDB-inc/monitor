@@ -13,5 +13,8 @@
   },
   "devDependencies": {
     "tsx": "^4.19.0"
+  },
+  "overrides": {
+    "zod": "^4.6.6"
   }
 }

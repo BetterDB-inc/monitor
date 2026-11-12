@@ -63,7 +63,8 @@ groups:
 
       # High number of unresolved critical anomalies
       - alert: BetterDBUnresolvedCriticalAnomalies
-        expr: betterdb_anomaly_events_current{severity="critical"} > 3
+        # The gauge is per connection; summing keeps the threshold fleet-wide.
+        expr: sum without (connection) (betterdb_anomaly_events_current{severity="critical"}) > 3
         for: 10m
         labels:
           severity: warning
@@ -83,7 +84,7 @@ groups:
 
       # Persistent anomalies
       - alert: BetterDBPersistentAnomalies
-        expr: betterdb_anomaly_by_severity{severity!="info"} > 10
+        expr: sum without (connection) (betterdb_anomaly_by_severity{severity!="info"}) > 10
         for: 30m
         labels:
           severity: warning

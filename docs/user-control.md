@@ -136,7 +136,7 @@ To let an MCP client act as you, create a token under **Settings → MCP Tokens*
 and pass it to the client as `BETTERDB_TOKEN`:
 
 ```bash
-npx @betterdb/mcp
+npx -y @betterdb/mcp@1.6.0
 ```
 
 On self-hosted installs a token is **optional**: read tools work without one.

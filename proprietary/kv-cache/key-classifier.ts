@@ -95,13 +95,35 @@ export function hasSingleKeyEvidence(keys: ParsedLmcacheKey[]): boolean {
   return keys.some((parsed) => parsed.suffix === null);
 }
 
+export const modelId = (m: { model: string; dtype: string }) => `${m.model}|${m.dtype}`;
+
+export interface SuffixEvidence {
+  twoKey: boolean;
+  singleKey: boolean;
+}
+
+export function suffixEvidence(keys: ParsedLmcacheKey[]): Map<string, SuffixEvidence> {
+  const byModel = new Map<string, ParsedLmcacheKey[]>();
+  for (const parsed of keys) {
+    const id = modelId(parsed);
+    const group = byModel.get(id);
+    if (group) group.push(parsed);
+    else byModel.set(id, [parsed]);
+  }
+  return new Map(
+    [...byModel].map(([id, group]) => [id, { twoKey: hasTwoKeyEvidence(group), singleKey: hasSingleKeyEvidence(group) }]),
+  );
+}
+
 export function resolveTagSuffixes(
   keys: ParsedLmcacheKey[],
-  twoKey = hasTwoKeyEvidence(keys),
-  singleKey = hasSingleKeyEvidence(keys),
+  evidence: Map<string, SuffixEvidence> = suffixEvidence(keys),
 ): ParsedLmcacheKey[] {
-  if (!singleKey || twoKey) return keys;
-  return keys.map((parsed) => (isTagOrSuffix(parsed) ? { ...parsed, suffix: null } : parsed));
+  return keys.map((parsed) => {
+    const model = evidence.get(modelId(parsed));
+    const readsAsTag = model !== undefined && model.singleKey && !model.twoKey && isTagOrSuffix(parsed);
+    return readsAsTag ? { ...parsed, suffix: null } : parsed;
+  });
 }
 
 export function isChunkKey(parsed: ParsedLmcacheKey): boolean {

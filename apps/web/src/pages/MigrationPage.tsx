@@ -61,6 +61,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
 
   const canExecute = hasFeature(Feature.MIGRATION_EXECUTION);
   const blockingCount = job?.blockingCount ?? 0;
+  const isReadinessCheck = job !== null && job.targetConnectionId === undefined;
   const [executionMode, setExecutionMode] = useState<ExecutionMode>('command');
   const [preferReplica, setPreferReplica] = useState<boolean>(false);
   const [tryDiskless, setTryDiskless] = useState<boolean>(false);
@@ -232,7 +233,25 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
         <>
           <MigrationReport job={job} />
 
+          {isReadinessCheck && (
+            <div className="py-4 border-t space-y-3 mb-4">
+              <p className="text-sm text-muted-foreground">
+                This was a readiness check against ElastiCache Serverless. Pick a target connection to plan a migration.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <ExportBar job={job} phase={phase} />
+                <button
+                  onClick={() => resetToIdle()}
+                  className="px-4 py-2 text-sm border rounded-lg hover:bg-muted"
+                >
+                  Run another analysis
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Mode selector + Start Migration button */}
+          {!isReadinessCheck && (
           <div className="py-4 border-t space-y-3 mb-4">
             {canExecute && (
               <div className="flex items-center gap-3">
@@ -344,6 +363,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
               </button>
             </div>
           </div>
+          )}
         </>
       )}
 
@@ -544,7 +564,7 @@ export function MigrationPage({ isCloudMode }: { isCloudMode: boolean }) {
                   className="w-full text-left px-4 py-3 text-sm flex items-center justify-between hover:bg-muted/50 rounded-lg"
                 >
                   <span>
-                    {entry.sourceConnectionName ?? 'Source'} &rarr; {entry.targetConnectionName ?? 'Target'}
+                    {entry.sourceConnectionName ?? 'Source'} &rarr; {entry.targetConnectionName ?? (entry.targetProfile === 'elasticache_serverless' ? 'ElastiCache Serverless' : 'Target')}
                     <span className="text-muted-foreground ml-2">
                       &middot; {(entry.totalKeys ?? 0).toLocaleString()} keys
                       {(entry.blockingCount ?? 0) > 0 && (

@@ -42,17 +42,22 @@ export function SlotMigrations({ migrations }: SlotMigrationsProps) {
 
               return (
                 <div
-                  key={`${migration.slot}-${migration.sourceNodeId}-${migration.targetNodeId}`}
+                  key={`${migration.slotRange ?? migration.slot}-${migration.sourceNodeId}-${migration.targetNodeId}`}
                   className="p-4 border rounded-lg space-y-3"
                 >
                   {/* Header */}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Database className={`w-4 h-4 ${stateColor}`} />
-                      <span className="font-medium">Slot {migration.slot}</span>
+                      <span className="font-medium">
+                        {migration.slotRange ? `Slots ${migration.slotRange}` : `Slot ${migration.slot}`}
+                      </span>
                       <Badge className={`${stateBg} ${stateColor} border-0 capitalize text-xs`}>
                         {migration.state}
                       </Badge>
+                      {migration.phase && (
+                        <span className="text-xs text-muted-foreground">{migration.phase}</span>
+                      )}
                     </div>
                     {migration.keysRemaining !== undefined && (
                       <div className="text-xs font-medium">

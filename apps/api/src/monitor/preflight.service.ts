@@ -72,7 +72,7 @@ export class PreflightService {
 
     const [acl, health] = await Promise.all([
       this.aclChecker.check(connectionId),
-      this.healthGateService.evaluate(connectionId),
+      this.healthGateService.evaluateAdvisory(connectionId),
     ]);
 
     return {

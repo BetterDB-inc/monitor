@@ -52,7 +52,9 @@ export function VerdictSection({ job }: Props) {
     bannerBg = 'bg-green-50 border-green-200 dark:bg-green-950/30 dark:border-green-800';
     bannerText = 'text-green-800 dark:text-green-400';
     BannerIcon = CheckCircle;
-    bannerMessage = 'No compatibility issues found. Migration appears safe.';
+    bannerMessage = job.targetConnectionId === undefined && job.targetProfile === 'elasticache_serverless'
+      ? 'No ElastiCache Serverless readiness issues found.'
+      : 'No compatibility issues found. Migration appears safe.';
   }
 
   const sorted = [...job.incompatibilities].sort(
@@ -81,6 +83,11 @@ export function VerdictSection({ job }: Props) {
                     <span className="px-2 py-0.5 text-xs bg-muted text-muted-foreground rounded">
                       {item.category}
                     </span>
+                    {item.awsToolOnly && (
+                      <span className="px-2 py-0.5 text-xs bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 rounded">
+                        Blocks AWS migration
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-muted-foreground mt-1">{item.detail}</p>
                 </div>

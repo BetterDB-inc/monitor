@@ -138,6 +138,7 @@ describe('session presets against captured fixtures', () => {
     expect(preset.mergeSession(views).map((m) => m.content)).toEqual(
       fixture.expectations['pending-write'].contents,
     );
+    expect(preset.pendingInterrupts!(views)).toEqual([{ value: 'Confirm the booking?' }]);
   });
 
   it('agent-cache leaves writes folded into a newer checkpoint out of the merge', () => {
@@ -608,7 +609,7 @@ describe('presets with content blocks beyond text', () => {
       str(`${p}:writes:1f0-b|task-3|messages|0`, JSON.stringify(lc('AIMessage', 'second'))),
       str(`${p}:writes:1f0-b|task-2|messages|1`, JSON.stringify([lc('AIMessage', 'first b')])),
       str(`${p}:writes:1f0-b|task-2|messages|0`, JSON.stringify([lc('AIMessage', 'first a')])),
-      str(`${p}:writes:1f0-b|task-2|__interrupt__|0`, JSON.stringify([{ value: 'ask' }])),
+      str(`${p}:writes:1f0-b|task-2i|__interrupt__|0`, JSON.stringify([{ value: 'ask' }])),
       str(`${p}:last_intent`, 'book a flight'),
     ];
     const preset = getPreset('agent-cache');
@@ -619,7 +620,7 @@ describe('presets with content blocks beyond text', () => {
         `${p}:writes:1f0-b|task-3|messages|0`,
         `${p}:writes:1f0-b|task-2|messages|1`,
         `${p}:writes:1f0-b|task-2|messages|0`,
-        `${p}:writes:1f0-b|task-2|__interrupt__|0`,
+        `${p}:writes:1f0-b|task-2i|__interrupt__|0`,
         `${p}:last_intent`,
       ]);
       const withoutLatest = keys.map((k) => k.key).filter((k) => !k.endsWith('__checkpoint_latest'));
@@ -679,6 +680,105 @@ describe('presets with content blocks beyond text', () => {
         'second',
         'interrupted',
       ]);
+    });
+
+    const write = (key: string, value: unknown) => str(key, JSON.stringify(value));
+
+    it('lists the interrupts of the newest checkpoint apart from the messages', () => {
+      const withInterrupts = [
+        ...keys,
+        write(`${p}:writes:1f0-a|task-1|__interrupt__|0`, [{ value: 'stale' }]),
+        write(`${p}:writes:1f0-b|task-1|__interrupt__|0`, [
+          { value: 'Confirm the booking?', resumable: true },
+          { value: { question: 'Seats?', options: [1, 2] } },
+        ]),
+      ];
+      const views = parseSessionKeys(preset, withInterrupts);
+      expect(preset.pendingInterrupts!(views)).toEqual([
+        { value: 'Confirm the booking?' },
+        { value: { question: 'Seats?', options: [1, 2] } },
+        { value: 'ask' },
+      ]);
+      expect(preset.mergeSession(views).map((m) => m.role)).not.toContain('interrupt');
+    });
+
+    it('drops an interrupt answered by a resume keyed by its interrupt id', () => {
+      const pending = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-4|__interrupt__|0`, [{ id: 'i-4', value: 'by id' }]),
+        write(`${p}:writes:1f0-b|task-5|__interrupt__|0`, [{ id: 'i-5', value: 'open' }]),
+        write(`${p}:writes:1f0-b|i-4|__resume__|0`, ['yes']),
+        write(`${p}:writes:1f0-a|task-5|__resume__|0`, ['stale']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, pending))).toEqual([
+        { value: 'ask' },
+        { value: 'open' },
+      ]);
+    });
+
+    it('keeps an interrupt re-raised after a resume while the task still waits', () => {
+      const reraised = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-7|__interrupt__|0`, [{ id: 'i-7', value: 'second?' }]),
+        write(`${p}:writes:1f0-b|00000000-0000-0000-0000-000000000000|__resume__|0`, 'A'),
+        write(`${p}:writes:1f0-b|task-7|__resume__|1`, ['A']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, reraised))).toEqual([
+        { value: 'second?' },
+      ]);
+    });
+
+    it('drops the interrupt of a task that finished while a parallel task still waits', () => {
+      const answeredX = (finished: CapturedKey) => [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-x|__interrupt__|0`, [{ id: 'i-x', value: 'x?' }]),
+        write(`${p}:writes:1f0-b|task-y|__interrupt__|0`, [{ id: 'i-y', value: 'y?' }]),
+        write(`${p}:writes:1f0-b|i-x|__resume__|0`, ['X']),
+        write(`${p}:writes:1f0-b|task-x|__resume__|0`, ['X']),
+        finished,
+      ];
+      for (const finished of [
+        write(`${p}:writes:1f0-b|task-x|branch%3Ato%3Az|1`, '__start__'),
+        write(`${p}:writes:1f0-b|task-x|log|1`, ['x:X']),
+      ]) {
+        expect(preset.pendingInterrupts!(parseSessionKeys(preset, answeredX(finished)))).toEqual([
+          { value: 'ask' },
+          { value: 'y?' },
+        ]);
+      }
+    });
+
+    it('keeps a re-raised interrupt even when a resume is keyed by its interrupt id', () => {
+      const reraised = [
+        ...keys,
+        write(`${p}:writes:1f0-b|task-7|__interrupt__|0`, [{ id: 'i-7', value: 'second?' }]),
+        write(`${p}:writes:1f0-b|i-7|__resume__|0`, 'A'),
+        write(`${p}:writes:1f0-b|task-7|__resume__|1`, ['A']),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, reraised))).toEqual([
+        { value: 'ask' },
+        { value: 'second?' },
+      ]);
+    });
+
+    it('drops every interrupt once the checkpoint holds a plain resume', () => {
+      const resumed = [
+        ...keys,
+        write(`${p}:writes:1f0-b|00000000-0000-0000-0000-000000000000|__resume__|0`, 'yes'),
+      ];
+      expect(preset.pendingInterrupts!(parseSessionKeys(preset, resumed))).toEqual([]);
+    });
+
+    it('reads an interrupt raised without a value as an empty interrupt', () => {
+      const empty = [...keys, write(`${p}:writes:1f0-b|task-6|__interrupt__|0`, [{ id: 'i-6' }])];
+      const views = parseSessionKeys(preset, empty);
+      expect(views.every((v) => v.parsed)).toBe(true);
+      expect(preset.pendingInterrupts!(views)).toEqual([{ value: 'ask' }, {}]);
+    });
+
+    it('fails an interrupt write that is not a list of interrupts', () => {
+      const view = preset.parseKey(write(`${p}:writes:1f0-b|task-6|__interrupt__|0`, ['nope']));
+      expect(view.parsed).toBe(false);
     });
 
     it('appends pending message writes of the newest checkpoint in task and index order', () => {

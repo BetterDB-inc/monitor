@@ -1,4 +1,5 @@
 import Valkey from 'iovalkey';
+import { isElastiCacheServerlessHost } from '@betterdb/shared';
 import { WsClient } from './ws-client';
 import { CommandExecutor } from './command-executor';
 import type { AgentCommandMessage, AgentHelloMessage } from './protocol';
@@ -329,6 +330,7 @@ export class Agent {
         version: this.valkeyVersion,
         tls: this.config.valkeyTls,
         cluster: this.isCluster,
+        serverless: (this.config.awsServerless ?? false) || isElastiCacheServerlessHost(this.config.valkeyHost),
       },
       authMode: this.authProvider.mode,
     };

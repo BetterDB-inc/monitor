@@ -1,7 +1,7 @@
-import { neymanAllocation, splitBudget } from './allocation';
+import { evenAllocation, neymanAllocation, splitBudget } from './allocation';
 import type { AllocationInput } from './allocation';
 import { adjustedSkewness, isHeavyTailed, sampleVariance } from './sample-stats';
-import { estimate } from './size-estimator';
+import { estimate, likelyMissed } from './size-estimator';
 import type { NodeSample, SamplerClient, Stratum } from './sample-types';
 
 export const SAMPLE_BUDGET = 4000;
@@ -23,6 +23,8 @@ export class SamplerUnsupportedError extends Error {}
 export interface SamplerNode {
   name: string;
   client: SamplerClient;
+  ceiling?: number;
+  otherDbKeys?: boolean;
 }
 
 export interface SamplerOptions {
@@ -34,16 +36,25 @@ export interface SamplerOptions {
 
 type Reply = [Error | null, unknown];
 
+interface TypePass {
+  cursor: string;
+  keys: Set<string>;
+  pending: string[];
+}
+
 interface NodeState {
   name: string;
   dbSize: number;
   client: SamplerClient;
   deadline: number;
+  ceiling?: number;
+  otherDbKeys: boolean;
   seen: Set<string>;
   classified: Set<string>;
   sizes: Map<string, number[]>;
   census: Map<string, number>;
   exactCounts: Map<string, number>;
+  typePasses: Map<string, TypePass>;
   unmeasured: number;
   wrapped: boolean;
   counter: { sampled: number };
@@ -65,11 +76,14 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
         dbSize: dbSizes[index],
         client: node.client,
         deadline,
+        ceiling: node.ceiling,
+        otherDbKeys: node.otherDbKeys ?? false,
         seen: new Set(),
         classified: new Set(),
         sizes: new Map(),
         census: new Map(),
         exactCounts: new Map(),
+        typePasses: new Map(),
         unmeasured: 0,
         wrapped: false,
         counter,
@@ -81,6 +95,10 @@ export async function sampleNodes(nodes: SamplerNode[], options: SamplerOptions)
 }
 
 async function sampleNode(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
+  return { ...(await collect(quota, cap, state)), ceiling: state.ceiling, otherDbKeys: state.otherDbKeys };
+}
+
+async function collect(quota: number, cap: number, state: NodeState): Promise<NodeSample> {
   if (quota === 0) return { node: state.name, dbSize: state.dbSize, strata: [], exhausted: state.dbSize === 0, timedOut: false };
   const pilotQuota = Math.min(quota, Math.max(PILOT_MIN, Math.round(quota * PILOT_SHARE)));
   await pilot(state, pilotQuota, quota * CENSUS_FACTOR);
@@ -109,9 +127,14 @@ async function extend(state: NodeState, cap: number): Promise<void> {
     const heavyShort = new Set(
       sample.strata.filter((stratum) => isHeavyTailed(stratum) && stratum.sizes.length < Math.min(stratum.estimatedKeys, HEAVY_TAIL_MIN_SAMPLES)).map((stratum) => stratum.type),
     );
-    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0)) return;
-    const inputs = allocationInputs(state).filter((input) => heavyShort.size === 0 || heavyShort.has(input.type));
-    await grow(state, neymanAllocation(Math.min(measured, cap - measured), inputs));
+    const missed = state.ceiling !== undefined && !state.otherDbKeys && likelyMissed(totalBytes, ci95Bytes, state.ceiling, state.dbSize);
+    if (totalBytes <= 0 || (ci95Bytes / totalBytes <= TARGET_RELATIVE_CI && ciTrusted(sample) && heavyShort.size === 0 && !missed)) return;
+    const extra = Math.min(measured, cap - measured);
+    const inputs = allocationInputs(state);
+    await grow(
+      state,
+      missed ? evenAllocation(extra, inputs) : neymanAllocation(extra, inputs.filter((input) => heavyShort.size === 0 || heavyShort.has(input.type))),
+    );
     if (sampledTotal(state) <= measured) return;
   }
 }
@@ -145,23 +168,25 @@ async function pilot(state: NodeState, pilotQuota: number, censusLimit: number):
 }
 
 async function topUp(state: NodeState, type: string, target: number): Promise<number | null> {
-  const ofType = new Set<string>();
-  let cursor = '0';
+  const pass = state.typePasses.get(type) ?? { cursor: '0', keys: new Set<string>(), pending: [] };
+  state.typePasses.set(type, pass);
   do {
-    if (expired(state)) return null;
-    const [next, keys] = await scan(state.client, cursor, ['TYPE', type]);
-    cursor = next;
-    keys.forEach((key) => ofType.add(key));
-    const fresh = keys.filter((key) => !state.seen.has(key));
-    let index = 0;
-    while (index < fresh.length && sizesOf(state, type).length < target) {
-      const take = Math.min(BATCH_SIZE, target - sizesOf(state, type).length);
-      await measure(state, fresh.slice(index, index + take), type);
-      index += take;
+    if (pass.pending.length === 0) {
+      if (expired(state)) return null;
+      const [next, keys] = await scan(state.client, pass.cursor, ['TYPE', type]);
+      pass.cursor = next;
+      keys.forEach((key) => pass.keys.add(key));
+      pass.pending = keys.filter((key) => !state.seen.has(key));
     }
-    if (sizesOf(state, type).length >= target) return cursor === '0' ? ofType.size : null;
-  } while (cursor !== '0');
-  return ofType.size;
+    while (pass.pending.length > 0 && sizesOf(state, type).length < target) {
+      const take = Math.min(BATCH_SIZE, target - sizesOf(state, type).length);
+      await measure(state, pass.pending.slice(0, take), type);
+      pass.pending = pass.pending.slice(take);
+    }
+  } while (pass.cursor !== '0' && sizesOf(state, type).length < target);
+  if (pass.cursor !== '0') return null;
+  if (pass.pending.length === 0) state.typePasses.delete(type);
+  return pass.keys.size;
 }
 
 function raiseOnError(reply: Reply | undefined): void {

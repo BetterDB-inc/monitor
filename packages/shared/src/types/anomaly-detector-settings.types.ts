@@ -24,6 +24,7 @@ export const ANOMALY_DETECTOR_METRICS = [
   'blocked_clients',
   'keyspace_misses',
   'fragmentation_ratio',
+  'error_replies',
 ] as const;
 export type AnomalyDetectorMetric = (typeof ANOMALY_DETECTOR_METRICS)[number];
 

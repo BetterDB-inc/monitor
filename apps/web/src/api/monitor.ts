@@ -42,10 +42,12 @@ export interface PreflightProvider {
 export interface PreflightHealth {
   allow: boolean;
   skipReason?: string;
+  lagUnconfirmed?: boolean;
   signals: {
     memoryPct: number;
     oomEventsRecent: number;
-    replicationLagBytes: number;
+    replicationLagBytes: number | null;
+    replicaLinkDown: boolean | null;
     failoverInProgress: boolean;
   };
   thresholds: {
@@ -127,6 +129,12 @@ export interface CrossReferenceHotKey {
   rankInBaseline: number | null;
 }
 
+export interface CrossReferenceTopKey {
+  key: string;
+  count: number;
+  share: number;
+}
+
 export interface CrossReferenceSlowlogRegression {
   cmd: string;
   shape: string;
@@ -147,6 +155,7 @@ export interface CrossReferenceResult {
   };
   session: { startTs: number; endTs: number; capturedLineCount: number };
   newShapes: CrossReferenceNewShape[];
+  topKeys?: CrossReferenceTopKey[];
   hotKeyDelta: {
     newInTopK: CrossReferenceHotKey[];
     rankChanges: CrossReferenceHotKey[];

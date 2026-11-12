@@ -25,7 +25,7 @@ describe('Multi-Database Connection Isolation', () => {
         clientInfo: '127.0.0.1:12345',
         timestampCreated: Math.floor(Date.now() / 1000),
         timestampLastUpdated: Math.floor(Date.now() / 1000),
-        capturedAt: Date.now(),
+        capturedAt: Math.floor(Date.now() / 1000),
         sourceHost: 'localhost',
         sourcePort: 6379,
       };
@@ -199,7 +199,7 @@ describe('Multi-Database Connection Isolation', () => {
         clientInfo: '1.1.1.1:1',
         timestampCreated: Math.floor(Date.now() / 1000),
         timestampLastUpdated: Math.floor(Date.now() / 1000),
-        capturedAt: Date.now(),
+        capturedAt: Math.floor(Date.now() / 1000),
         sourceHost: 'hostA',
         sourcePort: 6379,
       }], CONN_A);
@@ -216,7 +216,7 @@ describe('Multi-Database Connection Isolation', () => {
         clientInfo: '2.2.2.2:2',
         timestampCreated: Math.floor(Date.now() / 1000),
         timestampLastUpdated: Math.floor(Date.now() / 1000),
-        capturedAt: Date.now(),
+        capturedAt: Math.floor(Date.now() / 1000),
         sourceHost: 'hostB',
         sourcePort: 6380,
       }], CONN_B);
@@ -333,18 +333,19 @@ describe('Multi-Database Connection Isolation', () => {
     });
 
     it('pruneOldEntries(cutoff, connectionId) (ACL) removes only that connection\'s old entries', async () => {
-      const makeAcl = (username: string, capturedAt: number) => ({
+      const toSeconds = (ms: number) => Math.floor(ms / 1000);
+      const makeAcl = (username: string, capturedAtMs: number) => ({
         id: 0, count: 1, reason: 'auth', context: 'GET', object: 'key',
         username, ageSeconds: 10, clientInfo: '127.0.0.1:1',
-        timestampCreated: Math.floor(capturedAt / 1000),
-        timestampLastUpdated: Math.floor(capturedAt / 1000),
-        capturedAt, sourceHost: 'localhost', sourcePort: 6379,
+        timestampCreated: toSeconds(capturedAtMs),
+        timestampLastUpdated: toSeconds(capturedAtMs),
+        capturedAt: toSeconds(capturedAtMs), sourceHost: 'localhost', sourcePort: 6379,
       });
 
       await storage.saveAclEntries([makeAcl('userA-old', OLD), makeAcl('userA-new', NOW)], CONN_A);
       await storage.saveAclEntries([makeAcl('userB-old', OLD), makeAcl('userB-new', NOW)], CONN_B);
 
-      const pruned = await storage.pruneOldEntries(CUTOFF, CONN_A);
+      const pruned = await storage.pruneOldEntries(toSeconds(CUTOFF), CONN_A);
       expect(pruned).toBe(1);
 
       const fromA = await storage.getAclEntries({ connectionId: CONN_A });

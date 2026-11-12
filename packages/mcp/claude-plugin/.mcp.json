@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "betterdb": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@betterdb/mcp@1.6.0",
+        "--no-monitor-tools"
+      ],
+      "env": {
+        "BETTERDB_URL": "${user_config.betterdb_url}",
+        "BETTERDB_TOKEN": "${user_config.betterdb_token}",
+        "BETTERDB_INSTANCE_ID": "${user_config.betterdb_instance_id}",
+        "BETTERDB_MCP_TELEMETRY": "${user_config.telemetry}"
+      }
+    }
+  }
+}

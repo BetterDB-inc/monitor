@@ -22,7 +22,7 @@ const ready: CacheSimulatorSnapshot = {
   status: 'ready',
   progress: null,
   instant: { usedMemory: 1_000_000, maxmemory: 2_000_000, maxmemoryPolicy: 'noeviction', totalKeys: 1000 },
-  estimate: { totalBytes: 500_000, ci95Bytes: 1000, avgKeyBytes: 500, stdKeyBytes: 40, sampleCount: 400, byType: [{ type: 'string', keys: 1000, avgBytes: 500, stdBytes: 40, sampled: 400 }], sampledAt: 1, partial: false },
+  estimate: { totalBytes: 500_000, ci95Bytes: 1000, avgKeyBytes: 500, stdKeyBytes: 40, sampleCount: 400, byType: [{ type: 'string', keys: 1000, avgBytes: 500, stdBytes: 40, sampled: 400 }], sampledAt: 1, partial: false, likelyMissedLargeKeys: false },
   growth: { keysPerDay: 25, bytesPerDay: 12_000, days: 30 },
 };
 
@@ -95,6 +95,19 @@ describe('CacheSimulator page', () => {
     render(<CacheSimulator />);
     expect((screen.getByLabelText('Growth rate (keys/day)') as HTMLInputElement).value).toBe('0');
     expect(screen.getByText(/Not enough history/)).toBeTruthy();
+  });
+
+  it('warns that the estimate may be low when large keys were likely missed', () => {
+    useQuery.mockReturnValue({ data: { ...ready, estimate: { ...ready.estimate, likelyMissedLargeKeys: true } } });
+    render(<CacheSimulator />);
+    expect(screen.getByText(/Some large keys were likely missed; the estimate may be low/)).toBeInTheDocument();
+    expect(screen.getByText(/dataset memory reported by INFO plus 24 bytes per key/)).toBeInTheDocument();
+  });
+
+  it('does not warn about missed keys when the sample explains the memory', () => {
+    useQuery.mockReturnValue({ data: ready });
+    render(<CacheSimulator />);
+    expect(screen.queryByText(/large keys were likely missed/)).toBeNull();
   });
 
   it('says no limit is set when maxmemory is 0', () => {

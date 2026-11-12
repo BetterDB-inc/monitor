@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-30
+
+### Added
+
+- **Judge cancellation via AbortSignal** — the `judgeFn` input now includes a
+  `signal: AbortSignal`. The cache creates an `AbortController` per judge
+  invocation and aborts it when `timeoutMs` elapses. Forward `signal` to your
+  LLM client (`fetch`, OpenAI/Anthropic SDKs) to cancel the in-flight request on
+  timeout instead of letting it run to completion and consume API quota. A
+  `judgeFn` that ignores `signal` behaves exactly as before.
+
+### Changed
+
+- `JudgeOptions.timeoutMs` JSDoc updated to describe the abort behavior.
+- Additive, not breaking for judges that ignore `signal`. Code that calls
+  `judgeFn` directly (e.g. custom tests) must now supply `signal`, since the
+  type field is required.
+
+### Fixed
+
+- **`flush()` could delete another cache's keys.** The cache name was put into
+  the `SCAN MATCH` pattern unescaped, so a cache named e.g. `app?` also matched
+  and deleted `appX:*` keys, and a name containing `[` could miss its own keys.
+  The name is now glob-escaped in the pattern; key names and the index prefix
+  are unchanged.
+
+## [0.13.0] - 2026-08-31
+
 ### Added
 
 - **Embedding model change detection** — `initialize()` now compares the
@@ -23,12 +51,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   omitted when the embedder is undescribed.
 - Optional `logger` option (default: `console`) for the operational warnings
   above. Pass `{ warn: () => {} }` to silence them.
-- **Judge cancellation via AbortSignal** — the `judgeFn` input now includes a
-  `signal: AbortSignal`. The cache creates an `AbortController` per judge
-  invocation and aborts it when `timeoutMs` elapses. Forward `signal` to your
-  LLM client (`fetch`, OpenAI/Anthropic SDKs) to cancel the in-flight request on
-  timeout instead of letting it run to completion and consume API quota. A
-  `judgeFn` that ignores `signal` behaves exactly as before.
 
 ### Changed
 
@@ -44,18 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{name}:embed:{tag}:{hash}`). Existing embedding-cache entries are not
   read after upgrade and expire on their own TTL; cached *responses* are
   untouched.
-- `JudgeOptions.timeoutMs` JSDoc updated to describe the abort behavior.
-- Additive, not breaking for judges that ignore `signal`. Code that calls
-  `judgeFn` directly (e.g. custom tests) must now supply `signal`, since the
-  type field is required.
 
 ### Fixed
 
-- **`flush()` could delete another cache's keys.** The cache name was put into
-  the `SCAN MATCH` pattern unescaped, so a cache named e.g. `app?` also matched
-  and deleted `appX:*` keys, and a name containing `[` could miss its own keys.
-  The name is now glob-escaped in the pattern; key names and the index prefix
-  are unchanged.
+- The `embed/google` subpath is now exported, so
+  `@betterdb/semantic-cache/embed/google` imports resolve (#408).
+
+## [0.12.0] - 2026-07-23
+
+### Fixed
+
+- **Telemetry delivery.** Events carry a user agent so they are no longer
+  filtered as bot traffic, and frozen serverless runtimes (AWS Lambda, GCP
+  Cloud Functions, Azure Functions) deliver events without a `waitUntil`.
+  The release build fails if the telemetry key was not injected (#320).
 
 ## [0.11.0] - 2026-07-12
 

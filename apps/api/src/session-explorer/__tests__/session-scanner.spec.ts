@@ -1,9 +1,11 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import Valkey from 'iovalkey';
 import calculateSlot from 'cluster-key-slot';
 import type { PresetDefinition } from '../presets/types';
-import { primaryClients } from '../primary-nodes';
-import { keysForSession, scanSessions } from '../session-scanner';
-import { FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
+import { primaryClients, withPrimaries } from '../primary-nodes';
+import type { DatabasePort } from '../../common/interfaces/database-port.interface';
+import { keysForSessionOn, scanSessions, type SessionKeysResult } from '../session-scanner';
+import { clientsOf, FakeEntry, FakeValkey, fakeDb, masterNode } from './fake-valkey';
 
 jest.mock('iovalkey', () => ({ __esModule: true, default: jest.fn() }));
 
@@ -22,6 +24,20 @@ const preset: PresetDefinition = {
 const keyRange = (from: number, count: number, session = 'a') =>
   Array.from({ length: count }, (_, i) => `s:${session}:${from + i}`);
 
+const keysForSession = (
+  db: DatabasePort,
+  pattern: string,
+  sessionPreset: PresetDefinition,
+  sessionId: string,
+  keyCap?: number,
+  pages?: number,
+) =>
+  withPrimaries(db, (primaries) =>
+    keysForSessionOn(primaries, pattern, sessionPreset, sessionId, keyCap, pages),
+  );
+
+const counted = (result: SessionKeysResult) => ({ ...result, failed: result.failed.size });
+
 const storeOf = (entries: Record<string, FakeEntry>) => new Map(Object.entries(entries));
 
 describe('scanSessions', () => {
@@ -38,7 +54,7 @@ describe('scanSessions', () => {
 
     expect(result.scannedKeys).toBe(10000);
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('scan')).toHaveLength(3);
+    expect(client.reader.callsOf('scan')).toHaveLength(3);
     expect(result.sessions).toEqual([expect.objectContaining({ sessionId: 'a', keyCount: 10000 })]);
   });
 
@@ -130,14 +146,14 @@ describe('scanSessions', () => {
   it('never calls KEYS', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     await scanSessions(fakeDb(client), 's:*', preset);
-    expect(client.callsOf('keys')).toHaveLength(0);
-    expect(client.calls.some((c) => c.name.toLowerCase().includes('keys'))).toBe(false);
+    expect(client.reader.callsOf('keys')).toHaveLength(0);
+    expect(client.reader.calls.some((c) => c.name.toLowerCase().includes('keys'))).toBe(false);
   });
 
   it('uses MATCH and COUNT 1000', async () => {
     const client = new FakeValkey(storeOf({ 's:a:1': { type: 'string' } }));
     await scanSessions(fakeDb(client), 's:*', preset);
-    expect(client.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:*', 'COUNT', 1000]);
+    expect(client.reader.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:*', 'COUNT', 1000]);
   });
 
   it('pipelines metadata', async () => {
@@ -147,12 +163,12 @@ describe('scanSessions', () => {
 
     const result = await scanSessions(fakeDb(client), 's:*', preset, { batch: 1000 });
 
-    expect(client.pipelineExecs).toBe(3);
-    expect(client.callsOf('type')).toHaveLength(0);
-    expect(client.callsOf('pipeline.type')).toHaveLength(2500);
-    expect(client.callsOf('pipeline.pttl')).toHaveLength(2500);
-    expect(client.callsOf('pipeline.memory')[0].args).toEqual(['USAGE', 's:a:0']);
-    expect(client.callsOf('pipeline.object')[0].args).toEqual(['IDLETIME', 's:a:0']);
+    expect(client.reader.pipelineExecs).toBe(3);
+    expect(client.reader.callsOf('type')).toHaveLength(0);
+    expect(client.reader.callsOf('pipeline.type')).toHaveLength(2500);
+    expect(client.reader.callsOf('pipeline.pttl')).toHaveLength(2500);
+    expect(client.reader.callsOf('pipeline.memory')[0].args).toEqual(['USAGE', 's:a:0']);
+    expect(client.reader.callsOf('pipeline.object')[0].args).toEqual(['IDLETIME', 's:a:0']);
     expect(result.sessions[0].keyCount).toBe(2500);
   });
 
@@ -180,7 +196,7 @@ describe('scanSessions', () => {
     );
     const result = await scanSessions(fakeDb(client), '*', preset);
     expect(result.sessions).toHaveLength(1);
-    expect(client.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['s:a:1']);
+    expect(client.reader.callsOf('pipeline.type').map((c) => c.args[0])).toEqual(['s:a:1']);
   });
 
   it('aggregates memory as sum and idle as min', async () => {
@@ -305,34 +321,50 @@ describe('scanSessions', () => {
     expect(result.sessions).toHaveLength(1);
   });
 
+  it('reports the server unavailable when its reader cannot connect', async () => {
+    const client = new FakeValkey();
+    const reader = new FakeValkey();
+    reader.connectError = new Error('ERR max number of clients reached');
+    client.duplicateWith = reader;
+    await expect(scanSessions(fakeDb(client), 's:*', preset)).rejects.toThrow(
+      ServiceUnavailableException,
+    );
+  });
+
   it('rethrows when the only node fails', async () => {
     const client = new FakeValkey();
-    client.scan = async () => {
+    const reader = new FakeValkey();
+    reader.scan = async () => {
       throw new Error('NOAUTH');
     };
+    client.duplicateWith = reader;
     await expect(scanSessions(fakeDb(client), 's:*', preset)).rejects.toThrow('NOAUTH');
     expect(client.disconnected).toBe(false);
+    expect(reader.disconnected).toBe(true);
   });
 });
 
 describe('primaryClients', () => {
   beforeEach(() => ValkeyMock.mockReset());
 
-  it('returns the parent client for standalone and never closes it', async () => {
+  it('reads standalone through a reader it closes, never the parent', async () => {
     const parent = new FakeValkey();
+    const reader = new FakeValkey();
+    parent.duplicateWith = reader;
     const result = await primaryClients(fakeDb(parent));
-    expect(result.clients).toEqual([parent]);
-    expect(result.failed).toBe(0);
+    expect(result.routes).toEqual([{ slots: [[0, 16383]], client: reader }]);
     await result.release();
+    expect(reader.disconnected).toBe(true);
     expect(parent.disconnected).toBe(false);
     expect(ValkeyMock).not.toHaveBeenCalled();
   });
 
-  it('keeps only masters with slots and connects to each by its own address', async () => {
+  it('keeps only masters with slots and connects to the others by their own address', async () => {
     const parent = new FakeValkey();
     const nodeA = new FakeValkey();
     const nodeB = new FakeValkey();
-    ValkeyMock.mockImplementationOnce(() => nodeA).mockImplementationOnce(() => nodeB);
+    parent.duplicateWith = nodeA;
+    ValkeyMock.mockImplementationOnce(() => nodeB);
     const replica = { ...masterNode('r', '10.0.0.9:7009'), flags: ['slave'], master: 'a' };
     const empty = { ...masterNode('e', '10.0.0.8:7008'), slots: [] };
     const db = fakeDb(parent, {
@@ -346,11 +378,8 @@ describe('primaryClients', () => {
 
     const result = await primaryClients(db);
 
-    expect(result.clients).toEqual([nodeA, nodeB]);
-    expect(ValkeyMock).toHaveBeenCalledTimes(2);
-    expect(ValkeyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ host: '10.0.0.1', port: 7000, lazyConnect: true }),
-    );
+    expect(clientsOf(result)).toEqual([nodeA, nodeB]);
+    expect(ValkeyMock).toHaveBeenCalledTimes(1);
     expect(ValkeyMock).toHaveBeenCalledWith(
       expect.objectContaining({ host: '10.0.0.2', port: 7002, lazyConnect: true }),
     );
@@ -369,7 +398,9 @@ describe('keysForSession', () => {
     const nodeA = new FakeValkey(
       storeOf({ 's:x:1': { type: 'string' }, 's:y:1': { type: 'string' } }),
     );
-    const nodeB = new FakeValkey(storeOf({ 's:x:2': { type: 'string' }, other: { type: 'string' } }));
+    const nodeB = new FakeValkey(
+      storeOf({ 's:x:2': { type: 'string' }, other: { type: 'string' } }),
+    );
     const byPort: Record<number, FakeValkey> = { 7001: nodeA, 7002: nodeB };
     ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
     const db = fakeDb(parent, {
@@ -379,7 +410,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(db, 's:*', preset, 'x');
 
     expect(result.keys.sort()).toEqual(['s:x:1', 's:x:2']);
-    expect(result).toMatchObject({ truncated: false, failedNodes: 0 });
+    expect(counted(result)).toMatchObject({ truncated: false, failed: 0 });
     expect(nodeA.disconnected && nodeB.disconnected).toBe(true);
   });
 
@@ -389,7 +420,7 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 3000);
     expect(result.keys).toHaveLength(3000);
     expect(result.truncated).toBe(true);
-    expect(client.callsOf('scan')).toHaveLength(1);
+    expect(client.reader.callsOf('scan')).toHaveLength(1);
   });
 
   it('finds session keys past the cap of non-matching keys', async () => {
@@ -419,7 +450,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(db, 's:*', preset, 'x');
 
-    expect(result).toEqual({ keys: ['s:x:1'], truncated: false, failedNodes: 2 });
+    expect(counted(result)).toEqual({ keys: ['s:x:1'], truncated: false, failed: 2 });
   });
 
   const byKey: PresetDefinition = {
@@ -433,8 +464,8 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: ['chat:1'], truncated: false, failedNodes: 0 });
-    expect(client.callsOf('scan')).toHaveLength(0);
+    expect(counted(result)).toEqual({ keys: ['chat:1'], truncated: false, failed: 0 });
+    expect(client.reader.callsOf('scan')).toHaveLength(0);
   });
 
   it('finds no session for a key outside the namespace pattern', async () => {
@@ -443,8 +474,8 @@ describe('keysForSession', () => {
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'other:1');
 
     expect(result.keys).toEqual([]);
-    expect(client.callsOf('exists')).toHaveLength(0);
-    expect(client.callsOf('scan')).toHaveLength(0);
+    expect(client.reader.callsOf('exists')).toHaveLength(0);
+    expect(client.reader.callsOf('scan')).toHaveLength(0);
   });
 
   it('finds no session for a key that does not exist', async () => {
@@ -452,7 +483,7 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 0 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 0 });
   });
 
   it('looks a session key up on the primary that owns its slot', async () => {
@@ -474,13 +505,67 @@ describe('keysForSession', () => {
     expect(nodeA.callsOf('exists')).toHaveLength(0);
   });
 
+  const splitCluster = (owner: FakeValkey, other: FakeValkey) => {
+    const byPort: Record<number, FakeValkey> = { 7001: other, 7002: owner };
+    ValkeyMock.mockImplementation((opts: { port: number }) => byPort[opts.port]);
+    const slot = calculateSlot('chat:1');
+    return fakeDb(new FakeValkey(), {
+      nodes: [
+        masterNode('a', '10.0.0.1:7001', [], [[(slot + 1) % 16384, (slot + 1) % 16384]]),
+        masterNode('b', '10.0.0.2:7002', [], [[slot, slot]]),
+      ],
+    });
+  };
+
+  it('finds no session when its owner answers but another primary is down', async () => {
+    const down = new FakeValkey();
+    down.connectError = new Error('ECONNREFUSED');
+
+    const result = await keysForSession(
+      splitCluster(new FakeValkey(), down),
+      'chat:*',
+      byKey,
+      'chat:1',
+    );
+
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 0 });
+  });
+
+  it('counts the owner once when it is the primary that is down', async () => {
+    const down = new FakeValkey();
+    down.connectError = new Error('ECONNREFUSED');
+
+    const result = await keysForSession(
+      splitCluster(down, new FakeValkey()),
+      'chat:*',
+      byKey,
+      'chat:1',
+    );
+
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
+  });
+
   it('reports the owning primary as failed when the lookup errors', async () => {
     const client = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
     client.movedKeys.add('chat:1');
 
     const result = await keysForSession(fakeDb(client), 'chat:*', byKey, 'chat:1');
 
-    expect(result).toEqual({ keys: [], truncated: false, failedNodes: 1 });
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
+  });
+
+  it('reports a session key whose slot no primary owns as a failure', async () => {
+    const node = new FakeValkey(storeOf({ 'chat:1': { type: 'list', value: [] } }));
+    ValkeyMock.mockImplementation(() => node);
+    const slot = calculateSlot('chat:1');
+    const db = fakeDb(new FakeValkey(), {
+      nodes: [masterNode('a', '10.0.0.1:7001', [], [[(slot + 1) % 16384, (slot + 1) % 16384]])],
+    });
+
+    const result = await keysForSession(db, 'chat:*', byKey, 'chat:1');
+
+    expect(counted(result)).toEqual({ keys: [], truncated: false, failed: 1 });
+    expect(node.callsOf('exists')).toHaveLength(0);
   });
 
   const byMatch: PresetDefinition = {
@@ -493,7 +578,7 @@ describe('keysForSession', () => {
 
     await keysForSession(fakeDb(client), 's:*', byMatch, 'x');
 
-    expect(client.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:x:*', 'COUNT', 1000]);
+    expect(client.reader.callsOf('scan')[0].args).toEqual(['0', 'MATCH', 's:x:*', 'COUNT', 1000]);
   });
 
   it('keeps only session keys inside the namespace pattern', async () => {
@@ -516,8 +601,8 @@ describe('keysForSession', () => {
 
     const result = await keysForSession(fakeDb(client), 's:*', preset, 'x', 10_000, 2);
 
-    expect(client.callsOf('scan')).toHaveLength(2);
-    expect(result).toEqual({ keys: [], truncated: true, failedNodes: 0 });
+    expect(client.reader.callsOf('scan')).toHaveLength(2);
+    expect(counted(result)).toEqual({ keys: [], truncated: true, failed: 0 });
   });
 
   it('lists a key seen on two primaries during slot migration once', async () => {

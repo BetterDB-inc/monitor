@@ -124,6 +124,10 @@ const CPU_TIME = 'CPU time consumed by the server, by state';
 
 const INFERENCE_LATENCY = 'Inference bucket latency by percentile';
 
+const SLOT_NETWORK_IO = 'Bytes received and sent for the cluster slot, by direction';
+const SHARD_NETWORK_IO =
+  'Smoothed bytes per second received and sent for the slots of the shard, by direction; sent bytes count replication once per replica';
+
 const PROCESS_CPU_TIME = 'CPU time consumed by the monitor process, by mode';
 
 const EVENT_LOOP_DELAY_STATS = ['min', 'max', 'mean', 'stddev', 'p50', 'p90', 'p99'] as const;
@@ -216,9 +220,27 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
     '{message}',
   ),
   betterdb_cluster_slot_keys: gauge('betterdb.cluster.slot.keys', '{key}'),
-  betterdb_cluster_slot_expires: gauge('betterdb.cluster.slot.expires', '{key}'),
-  betterdb_cluster_slot_reads_total: counter('betterdb.cluster.slot.reads', '{read}'),
-  betterdb_cluster_slot_writes_total: counter('betterdb.cluster.slot.writes', '{write}'),
+  betterdb_cluster_slot_cpu_usec_total: counter('betterdb.cluster.slot.cpu.time', 'us'),
+  betterdb_cluster_slot_network_bytes_in_total: described(
+    SLOT_NETWORK_IO,
+    counter('betterdb.cluster.slot.network.io', 'By', withAttributes({ 'network.io.direction': 'receive' })),
+  ),
+  betterdb_cluster_slot_network_bytes_out_total: described(
+    SLOT_NETWORK_IO,
+    counter('betterdb.cluster.slot.network.io', 'By', withAttributes({ 'network.io.direction': 'transmit' })),
+  ),
+  betterdb_cluster_shard_cpu_usec_per_second: gauge('betterdb.cluster.shard.cpu.rate', 'us/s'),
+  betterdb_cluster_shard_network_bytes_in_per_second: described(
+    SHARD_NETWORK_IO,
+    gauge('betterdb.cluster.shard.network.io.rate', 'By/s', withAttributes({ 'network.io.direction': 'receive' })),
+  ),
+  betterdb_cluster_shard_network_bytes_out_per_second: described(
+    SHARD_NETWORK_IO,
+    gauge('betterdb.cluster.shard.network.io.rate', 'By/s', withAttributes({ 'network.io.direction': 'transmit' })),
+  ),
+  betterdb_cluster_shard_cpu_share: gauge('betterdb.cluster.shard.cpu.share', '1'),
+  betterdb_cluster_shard_network_share: gauge('betterdb.cluster.shard.network.share', '1'),
+  betterdb_cluster_shard_slots: gauge('betterdb.cluster.shard.slots', '{slot}'),
   betterdb_commandstats_latency_us: gauge('betterdb.cmd.latency_avg', 'us'),
   betterdb_slowlog_length: gauge('betterdb.slowlog.length', '{entry}'),
   betterdb_slowlog_last_id: gauge('betterdb.slowlog.last_id', '{id}'),
@@ -282,6 +304,29 @@ export const SEMCONV_RULES: Readonly<Record<string, SemconvRule>> = {
   betterdb_anomaly_buffer_ready: gauge('betterdb.anomaly.buffer.ready', '1'),
   betterdb_anomaly_buffer_mean: gauge('betterdb.anomaly.buffer.mean', ''),
   betterdb_anomaly_buffer_stddev: gauge('betterdb.anomaly.buffer.stddev', ''),
+  betterdb_replication_gap_bytes: gauge('betterdb.replication.gap', 'By'),
+  betterdb_replication_seconds_behind: gauge('betterdb.replication.seconds_behind', 's'),
+  betterdb_replication_divergence_level: gauge('betterdb.replication.divergence_level', '1'),
+  betterdb_replication_write_rate_bytes_per_second: gauge(
+    'betterdb.replication.write_rate',
+    'By/s',
+  ),
+  betterdb_replication_backlog_coverage_seconds: gauge(
+    'betterdb.replication.backlog_coverage',
+    's',
+  ),
+  betterdb_connections_received_per_second: gauge(
+    'betterdb.connections.received_rate',
+    '{connection}/s',
+  ),
+  betterdb_connection_churn_per_op: gauge(
+    'betterdb.connections.churn_per_op',
+    '{connection}/{operation}',
+  ),
+  betterdb_retry_amplification_state: gauge('betterdb.anomaly.retry_amplification_state', '1'),
+  betterdb_anomaly_fanout_primaries: gauge('betterdb.anomaly.fanout_primaries', '{primary}'),
+  betterdb_anomaly_fanout_gap: gauge('betterdb.anomaly.fanout_gap', '1'),
+  betterdb_incident_active: gauge('betterdb.anomaly.incidents_active', '{incident}'),
   betterdb_metric_forecast_time_to_limit_seconds: gauge('betterdb.forecast.time_to_limit', 's'),
   betterdb_cve_findings: gauge('betterdb.cve.findings', '{finding}'),
   betterdb_cve_kev: gauge('betterdb.cve.kev', '{finding}'),

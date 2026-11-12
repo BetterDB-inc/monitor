@@ -1,8 +1,6 @@
 import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { Test } from '@nestjs/testing';
-import { rmSync } from 'fs';
-import { tmpdir } from 'os';
 import { join } from 'path';
 import { BETTER_AUTH, BetterAuthInstance } from '../src/auth/better-auth.factory';
 import { ROLE_REQUIRED_MESSAGE } from '../src/auth/guards/roles.guard';
@@ -11,12 +9,10 @@ const OWNER = { email: 'owner@example.com', password: 'correct horse battery', n
 const ADMIN = { email: 'admin@example.com', password: 'admin horse battery', name: 'Admin' };
 const HEIR = { email: 'heir@example.com', password: 'heir horse battery', name: 'Heir' };
 const TRUSTED_ORIGIN = 'http://localhost:5173';
-const LOCAL_CREDENTIAL_ISSUER = 'local:credential';
 
 const TOUCHED = [
   'WORKSPACE_DISABLED',
   'NODE_ENV',
-  'BETTERDB_DATA_DIR',
   'AUTH_PUBLIC_URL',
   'AUTH_SECRET',
   'STORAGE_TYPE',
@@ -50,7 +46,7 @@ describe('Workspace session authority (E2E)', () => {
   let adminId: string;
   let heirId: string;
   const previous = new Map<string, string | undefined>();
-  const sqlitePath = join(tmpdir(), `workspace-session-authority-${Date.now()}.db`);
+  const sqlitePath = join(process.env.BETTERDB_DATA_DIR!, 'workspace-session-authority.db');
 
   async function me(cookie: string): Promise<{ statusCode: number; body: MeBody }> {
     const response = await app.inject({
@@ -75,7 +71,6 @@ describe('Workspace session authority (E2E)', () => {
     await context.internalAdapter.linkAccount({
       userId: user.id,
       providerId: 'credential',
-      issuer: LOCAL_CREDENTIAL_ISSUER,
       accountId: user.id,
       password: hashedPassword,
     });
@@ -105,7 +100,6 @@ describe('Workspace session authority (E2E)', () => {
     delete process.env.WORKSPACE_DISABLED;
     delete process.env.AUTH_SECRET;
     process.env.NODE_ENV = 'production';
-    process.env.BETTERDB_DATA_DIR = '';
     process.env.STORAGE_TYPE = 'sqlite';
     process.env.STORAGE_SQLITE_FILEPATH = sqlitePath;
     process.env.AUTH_PUBLIC_URL = TRUSTED_ORIGIN;
@@ -157,9 +151,6 @@ describe('Workspace session authority (E2E)', () => {
         process.env[key] = value;
       }
     }
-    rmSync(sqlitePath, { force: true });
-    rmSync(`${sqlitePath}-wal`, { force: true });
-    rmSync(`${sqlitePath}-shm`, { force: true });
   });
 
   it('issues cookies that carry the cached session data', () => {

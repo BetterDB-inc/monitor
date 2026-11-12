@@ -2,6 +2,8 @@ import type Valkey from 'iovalkey';
 
 export interface SampledKey {
   key: string;
+  rawKey: Buffer;
+  keyBytes: number;
   type: string;
   clientIndex: number;
 }
@@ -20,13 +22,15 @@ export async function sampleKeyTypes(
   for (let ci = 0; ci < clients.length; ci++) {
     const client = clients[ci];
     const nodeKeys: string[] = [];
+    const nodeRawKeys: Buffer[] = [];
     let cursor = '0';
     do {
-      const [nextCursor, keys] = await client.scan(cursor, 'COUNT', 1000);
-      cursor = nextCursor;
+      const [nextCursor, keys] = await client.scanBuffer(cursor, 'COUNT', 1000);
+      cursor = String(nextCursor);
       for (const k of keys) {
         if (nodeKeys.length >= maxKeysPerNode) break;
-        nodeKeys.push(k);
+        nodeKeys.push(k.toString());
+        nodeRawKeys.push(k);
       }
       onProgress?.(allKeys.length + nodeKeys.length);
     } while (cursor !== '0' && nodeKeys.length < maxKeysPerNode);
@@ -34,15 +38,16 @@ export async function sampleKeyTypes(
     // Pipeline TYPE in batches of 1000
     for (let i = 0; i < nodeKeys.length; i += 1000) {
       const batch = nodeKeys.slice(i, i + 1000);
+      const rawBatch = nodeRawKeys.slice(i, i + 1000);
       const pipeline = client.pipeline();
-      for (const key of batch) {
-        pipeline.type(key);
+      for (const rawKey of rawBatch) {
+        pipeline.type(rawKey);
       }
       const results = await pipeline.exec();
       if (results) {
         for (let j = 0; j < batch.length; j++) {
           const [err, type] = results[j] ?? [];
-          allKeys.push({ key: batch[j], type: err ? 'unknown' : String(type), clientIndex: ci });
+          allKeys.push({ key: batch[j], rawKey: rawBatch[j], keyBytes: rawBatch[j].length, type: err ? 'unknown' : String(type), clientIndex: ci });
         }
       }
     }

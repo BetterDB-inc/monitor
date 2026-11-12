@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../ui/card';
 import { formatBytes } from '../../../lib/utils';
 import { KeyPanel } from './KeyPanel';
 import { MessageTimeline } from './MessageTimeline';
-import { formatTtl } from './format';
+import { displaySessionId, formatTtl } from './format';
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
@@ -21,6 +21,9 @@ function incompleteReasons(detail: SessionDetail): string[] {
   if (detail.missingKeys > 0) {
     reasons.push(`${plural(detail.missingKeys, 'key')} vanished before it could be read`);
   }
+  if (detail.erroredKeys > 0) {
+    reasons.push(`${plural(detail.erroredKeys, 'key')} could not be read`);
+  }
   return reasons;
 }
 
@@ -28,18 +31,38 @@ interface Props {
   detail: SessionDetail;
   onExport: () => void;
   exporting: boolean;
+  idPrefix?: string;
 }
 
-export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
+export function SessionDetailPanel({ detail, onExport, exporting, idPrefix = '' }: Props) {
   const reasons = detail.complete ? [] : incompleteReasons(detail);
+  const shownId = displaySessionId(detail.sessionId, idPrefix);
+  const totalMemoryBytes = detail.totalMemoryBytes ?? detail.memoryBytes;
+  const totalKeys = detail.totalKeys ?? detail.keys.length;
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
-          <CardTitle className="break-all font-mono text-base">{detail.sessionId}</CardTitle>
+          <CardTitle className="break-all font-mono text-base" title={detail.sessionId}>
+            {shownId}
+          </CardTitle>
+          {shownId !== detail.sessionId && (
+            <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+              {detail.sessionId}
+            </p>
+          )}
           <p className="mt-1 text-sm text-muted-foreground">
-            ~{detail.estimatedTokens.toLocaleString()} tokens · {formatBytes(detail.memoryBytes)} ·{' '}
-            TTL {formatTtl(detail.ttlMs)} · {plural(detail.keys.length, 'key')}
+            ~{detail.estimatedTokens.toLocaleString()} tokens ·{' '}
+            {detail.unmeasuredKeys > 0 ? (
+              <span title={`${plural(detail.unmeasuredKeys, 'key')} could not be measured`}>
+                ≥ {formatBytes(totalMemoryBytes)}
+              </span>
+            ) : (
+              formatBytes(totalMemoryBytes)
+            )}{' '}
+            · TTL {formatTtl(detail.ttlMs)} · {plural(totalKeys, 'key')}
+            {detail.skippedKeys > 0 &&
+              `, showing ${detail.selection ?? 'part of the session'} (${plural(detail.keys.length, 'key')} · ${formatBytes(detail.memoryBytes)})`}
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={onExport} disabled={exporting}>
@@ -68,7 +91,11 @@ export function SessionDetailPanel({ detail, onExport, exporting }: Props) {
         )}
         <section>
           <h3 className="mb-2 text-sm font-medium">Timeline</h3>
-          <MessageTimeline messages={detail.messages} />
+          <MessageTimeline
+            key={detail.sessionId}
+            messages={detail.messages}
+            interrupts={detail.interrupts}
+          />
         </section>
         <section className="space-y-2">
           <h3 className="text-sm font-medium">Keys</h3>

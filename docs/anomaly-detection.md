@@ -12,6 +12,8 @@ Comprehensive guide to BetterDB's real-time anomaly detection system for Valkey 
 - [Overview](#overview)
 - [How It Works](#how-it-works)
 - [Detected Patterns](#detected-patterns)
+- [Incident Sequence Rules](#incident-sequence-rules)
+- [Per-node coverage](#per-node-coverage)
 - [Severity Levels](#severity-levels)
 - [Monitored Metrics](#monitored-metrics)
 - [Configuration](#configuration)
@@ -330,6 +332,104 @@ Each condition fires once per episode and the tracking state clears when the chi
 
 ---
 
+### RETRY_AMPLIFICATION
+
+**Triggers**: Commands per client keep climbing while connected clients stay flat, error replies or connection churn move with them, and the server is under stress (a P99 latency regression, an error-reply burst or connection churn)
+
+**What it means**: Clients are retrying failed or slow calls, and the retries add load that makes the server slower, which causes more retries. Unlike a transient retry burst, this loop does not settle on its own.
+
+**Detection method**: A *state-based* detector over 60s windows, with a baseline taken from the median of the last 30 quiet windows. It raises no findings until it has collected 10 windows (10 minutes). A window is hot when:
+- Commands per client is at least 1.3× baseline and ops/sec at least 1.2× baseline
+- Connected clients stay within ±15% of baseline
+- At least one stress signal is present: a P99 regression (counted for up to 30 min after the event, matching how often the latency detector re-emits, and dropped once the latency guard sees the command healthy for 5 samples in a row; a verdict from the guard counts for 5 min, and after that the 30-min hold applies), error replies at 3× baseline (minimum 1/s), or reconnects at 3× baseline (minimum 1/s)
+
+A run of hot windows is classified once it reaches 3 windows. It qualifies in either of two shapes:
+- **Rising**: load rises at least 10% across the run, is not falling, and moves with stress *inside the run*. That means Pearson r ≥ 0.5 between commands per client and an error or churn rate that reached its stress level in the run. A P99 regression makes a window hot but cannot qualify a run alone, because organic growth through a fixed pool slows the server in the same way. The minimum rise keeps a 3-point correlation on flat, noisy load from passing.
+- **Step**: the last 3 windows are all at least 2× baseline, the latest is within 10% of their peak, and at least one of them shows retry evidence (an error-reply or reconnect burst). This catches a storm that jumps up, or overshoots and settles, then holds. Latency alone is not enough for a step, because a legitimate batch job through pooled clients looks the same.
+
+Findings carry `pattern: 'rising' | 'step'`. `correlation` is the in-run r for rising findings and `null` for steps.
+
+Runs that end before reaching 3 windows are recorded as transient. A run keeps at most 120 windows: its first and its latest 119. Past that, the correlation and related metrics come from those windows, and the reported length still counts the whole run.
+
+An episode ends after 2 cold windows, or when the monitor misses samples for longer than 2 windows or 3 poll intervals, whichever is longer. Anything shorter counts as the same episode, so a brief blip does not re-alert on the same storm. After a longer gap, a storm that is still running opens a new episode, and its finding fires again after 3 hot windows. If the windows in hand at a gap qualify, the finding is still raised, dated at the end of the episode and attributed to the episode's own span from stored snapshots and the `CLIENT LIST` reads already taken in that span.
+
+- **WARNING** when the run qualifies
+- **CRITICAL** when saturation is active in the latest window. Load and client saturation follow their detectors' live state. Control-plane saturation, rejected-connection and lockout-risk events count for 5 minutes. Ordinary CPU anomalies do not count, because they are relative to the recent mean and can be drops.
+
+If storage is unavailable, the finding stays as one event in memory and the shared persistence outbox retries it with the same ID, timestamp and related metrics. A level change while a save is pending raises a separate event. The `retry_amplification.detected` webhook goes out when the event is first saved, so it waits for the retry. If the outbox gives up on the event, no webhook goes out, and a run that is still hot raises the finding again. The episode's level counts as acknowledged as soon as the finding is raised, not when the save lands, so polls during a pending save do not raise it twice. The acknowledged level drops when the run's level drops, so a run that falls back to WARNING and climbs to CRITICAL again raises CRITICAL again. The outbox giving up on an event also resets it.
+
+When other findings share the correlation window, the group takes the likely cause: control-plane saturation first, then an auth attack or a failover, then a persistence stall, then retry amplification, then replication divergence. Memory growth with evictions also goes ahead of retry amplification, because retries are the side effect there. The retry event stays in the group either way.
+
+**OTLP-pushed instances**: Coverage follows the exporter's own push interval, taken from the median of the last 5 gaps between pushes, so a gap longer than 3 push intervals still counts as missed samples. Pushed metrics carry command, ops, client and connection counters but no error replies, and latency regressions are not tracked for pushed instances, so connection churn is the only stress signal there. Client attribution needs `CLIENT LIST` or stored client snapshots, and neither exists for a pushed instance, so `topContributors` is `null` there.
+
+**Other nodes**: A cluster connection also evaluates every other primary in `CLUSTER NODES`, and a Sentinel connection with data-node credentials evaluates each primary it monitors, using the same node list as [replication divergence](#replication_divergence). Each node keeps its own baseline and alerts on its own, with the node's address as `nodeAddr` and in the webhook `instance`. These nodes are read with `INFO clients`, `INFO memory`, `INFO stats` and `INFO replication` per poll. The reconnect rate comes from `total_connections_received`, but client attribution needs `CLIENT LIST`, so `topContributors` is `null` for them. Latency, saturation and other findings of the connection the node was reached through are not used for it, so its trigger is errors or churn and its level stays `warning`. The status tool lists each of these nodes under `nodes`. Primaries monitored as their own connection are skipped.
+
+**Limitations**: A plateau between 1.3× and 2× baseline that neither rises nor steps is not flagged. Client-side timeouts retried on the same connection, with no error replies or reconnects, leave no retry evidence on the server, so they are not flagged; the run stays a `candidate` in the status tool. The first 10 windows after monitoring starts are not screened, so if monitoring starts during elevated load, those windows raise the baseline and a later episode at a similar level may not be flagged. The baseline corrects itself as quiet windows replace them.
+
+**Client attribution**: The message and the `retry_amplification.detected` webhook name up to five top clients, grouped by client name, then non-default ACL user, then IP. The list interleaves two rankings:
+- Command-rate growth from `CLIENT LIST` `tot-cmds` (Valkey 8+), counting identities at 1.3× or more of their rate just before the episode and at 1 cmd/s or more during it, largest absolute increase first. Connections that opened during the episode count towards their identity, so a client that keeps reconnecting is still measured
+- Reconnect counts from the stored client snapshots, across the whole episode (its newest 30 minutes when it runs longer), counting identities with at least 3 new connections and 1.3× or more of the span before it
+
+Attribution sends no `CLIENT LIST` of its own. It reuses the client analytics poll, which runs on `CLIENT_ANALYTICS_POLL_INTERVAL_MS` (60s by default) on each monitored connection, including between episodes, so the rate just before an episode is known. Readings closer than 30s apart are skipped. If that poll is unavailable or the server stops answering it during an episode, the finding goes out with reconnect counts only. Reconnects come from the snapshots of the same poll. A client that connects, retries and disconnects between two captures does not appear, so short-lived retry connections can be undercounted. The reconnect rate in the trigger still includes them.
+
+A connection is one identity across captures, by client id, address and opening time (`age`): a client caught by `CLIENT LIST` before it ran `CLIENT SETNAME` is counted under the name it set later, in both rankings, and a new connection that a restarted server gives the id and address of an older one (every client of a Unix socket shares the address) is a connection of its own when it opened more than 30s after it. The identity is resolved once over the whole attribution span, the episode and the span before it together, so a connection that was unnamed in the baseline and named during the episode is the same client in both and its churn is not read as growth. The connection count in the newest capture uses the same identities. A connection that is never seen named stays under its user or IP. A new connection counts in the part of the span it opened in, the baseline or the episode, whichever capture first listed it, so both parts are counted the same way and one that opened just before the episode counts once, in the baseline. A connection listed twice in one capture, as when two polls are stored with the same timestamp, counts once. The command rates take the identity the stored captures give a connection, so a rename recorded by a capture that the 30s spacing of the readings skipped names its rate and its reconnects alike.
+
+BetterDB's own connections are recognised by name: `BetterDB-Monitor`, `BetterDB-Agent` and `BetterDB-CLI`, and names that start with one of them followed by `-`, such as the `BetterDB-Monitor-keyscan` key analytics clients. They stay in the captures, so the connection ids their reconnects consume are counted as theirs and not the application's, and are left out of the ranking. The remaining window is a capture taken during one of these connections' handshake, before `CLIENT SETNAME` has run on it: when no later capture lists it with its name, as with a short-lived key analytics client, it is counted under its user or IP.
+
+The stored captures are read for at most the newest 30 minutes of the episode, as long as the detector's own baseline of 30 windows, and for as long a span before the episode; the captures in between are not read, so a long episode is attributed over its newest 30 minutes and compared with the 30 minutes before it started. A read that would aggregate more than 250,000 rows (two 30-minute spans of 60s captures of about 4,000 clients) stops there, in about 0.15s, and the span is shortened to fit: the rows per capture are counted from the index, and the longest span that holds at most 250,000 rows is read instead, the same length on both sides, so the episode keeps its newest captures and the baseline the ones nearest the episode start. Every capture in the span is read whole. With 10,000 clients that is about the newest 12 minutes of the episode and the 12 before it. The span is no shorter than one 60s window on each side; when even that holds more rows, reconnects are not ranked and the finding ranks by command rate only. Either way a warning is logged once per episode with the minutes covered, and the finding's message ends with a short note (`Reconnects ranked over the newest 12 min only.` or `Reconnects not ranked: too many client captures.`). On SQLite the reads run synchronously; the bound holds them to about 2-3 seconds (244,000 rows took 2.2-3.0s on a busy 16-core host, and the three reads of a shortened span 1.9-3.0s in all with 10,000 clients, 2.8-4.0s with 20,000).
+
+The client ids consumed between two captures by connections that no capture lists are split evenly between the identities whose connections all opened in that interval. Each id is counted once: when the connection holding the highest id closes, the ids up to it are not counted again, and only a capture in which every connection opened after the previous one, with a lower highest id, is a server restart from which counting starts over. The interval between the last capture before the episode and the first one in it is split by time: each side counts the part of its ids that matches its share of the interval, so the ids are divided the way the connections are, by when they opened, and a steady pool does not read as episode reconnects. The shares are summed per identity and rounded once, to the nearest connection. The baseline's ids are counted from its first capture: when it is cut after a previous episode, the interval before that capture holds that episode's churn. The even split itself predates the identity rules above and is unchanged: when the monitor's own connections reconnect several times in one interval and one application connection opens after them, the application gets an even share of the monitor's ids, and one connection can reach the 3 reconnects a ranking needs. The stored captures keep a count, the oldest age and the highest id per identity, so without a count of the monitor's own connection opens per interval this case cannot be told from a retrier that keeps reconnecting and holds the newest id; any other split would credit that retrier's reconnects to the clients below it instead.
+
+**Recommended actions**:
+- Add exponential backoff with jitter and a retry budget
+- Put a circuit breaker in front of the instance
+- Set client timeouts above the observed P99
+- Throttle the clients whose command rate grew the most, then shed load until latency recovers. The group's recommendation names them (see [Computed values](#computed-values))
+
+### REPLICATION_DIVERGENCE
+
+**Triggers**: A connected replica's byte gap to the primary keeps growing, stays far behind, or stops draining
+
+**What it means**: The replica is falling behind even if `lag` still looks healthy, because `lag` measures how recently it acknowledged the stream, not how much it has applied:
+- Slow apply path on the replica (CPU, disk or network)
+- Bulk writes or resharding outrunning the replica
+- Replica that stopped applying or acknowledging the stream
+
+**Detection method**: This is a *window-based* detector, not a z-score spike. It compares each replica's offset with the primary's over windows of 30s or three poll intervals, whichever is longer, and emits:
+- **WARNING** when the gap grows across 4 consecutive windows
+- **WARNING** when the replica stays at least 30s behind for 2 windows, and **CRITICAL** at 120s
+- **CRITICAL** when the write rate is back within 20% of its baseline, but the gap has not halved over 4 windows and at its pace so far would take more than 8 windows to clear. Halving the gap restarts the count
+- **CRITICAL** when writes have stopped and the same check on the gap fails, so the replica is not applying the backlog. A window counts as stopped when the replication stream stays under 4 KiB/s, so PINGs count as idle
+- **WARNING** after 2 windows without acknowledgements, and **CRITICAL** after 4. This needs a gap of at least 1 MiB
+
+Gaps under 1 MiB or 5 seconds behind are ignored. Alerts only escalate, and close after 2 windows under those thresholds. See [`replication.divergence` and `replication.recovered`](./webhooks.md) for the webhook payloads.
+
+Replica offsets come from the primary's own `INFO replication`, so detection runs on every connection that reports a primary role, and also on primaries reached through a cluster or Sentinel connection:
+
+- A cluster connection reads `INFO` from every other primary listed in `CLUSTER NODES`, using the same per-node connections as cluster discovery. These connections log in with the cluster connection's own username and password. After a failover the new primary is picked up on the next poll, and open alerts on a node that is no longer a primary are closed. SSH-tunnelled cluster connections still read the other primaries, but the per-node connections dial the `CLUSTER NODES` addresses directly, outside the tunnel; when those reads fail, coverage says the connection is tunnelled. Cluster connections reached through the agent do not read other primaries: the monitor cannot dial them itself.
+- A Sentinel connection reads `INFO` from each primary it monitors, but only when the connection has its own data-node username or password, so the Sentinel credentials are never sent to an address Sentinel reports. Set them under **Data node credentials** when adding the connection (`nodeUsername` and `nodePassword` on `POST /api/connections`). Data nodes that need no `AUTH` still need an explicit setting: tick **Connect to data nodes without a username** and leave the password empty. Without either, none of the Sentinel's primaries are checked; this is logged once per connection and shown as *not covered* (see below), unless every primary is already its own connection or checked by another one. The monitor does not try without credentials: on an authenticated node that would fail on every poll and read as unreachable rather than unconfigured. A data-node password that cannot be decrypted (`ENCRYPTION_KEY` missing or rotated) counts as no credentials. The connection form stores no data-node settings for a certificate-authenticated Sentinel; add one through the API with `nodeUsername` set to `""` to check the data nodes with the client certificate. SSH-tunnelled and agent connections are skipped. When data-node credentials are set but another stored secret (password, TLS key or SSH material) cannot be decrypted, the primaries are not checked either. The list follows `SENTINEL MASTERS`, refreshed every 15 seconds.
+- Primaries that are already monitored as their own connected connection are skipped. Nodes flagged as failed or down are not read, but their open alerts stay open until they leave the topology. Up to 64 primaries are checked per connection, each with a 2 second timeout. Primaries past that limit are left to another connection that reaches them, and alerts of primaries no connection checks are closed. A primary that can't be reached is retried after 1 poll, then after 2, 4 and up to 8 polls, until a read succeeds. Unreachable primaries are logged once, when the count changes. When several connections reach the same primary, such as two registered nodes of one cluster or two Sentinels, only the first checks it. Another connection takes over when the first can no longer read it, or stops polling for 30 seconds.
+
+Alerts from these primaries carry the primary's address as `nodeAddr` and the address in the webhook `instance`, while `connectionId` stays the cluster or Sentinel connection.
+
+**Coverage**: each poll records how many primaries the connection checked, could not reach (flagged down, in retry backoff, or failed to answer), saw refuse the credentials (`WRONGPASS`, `NOAUTH` or `NOPERM`, also while in backoff), skipped past the 64-primary cap, and does not dial at all. A primary the topology flags as down is counted by the one connection that holds it, like a reachable one, so two connections of one topology do not both count it; a connection whose topology still lists that primary as reachable takes it over and reads it, since `fail?` and `s_down` are one seed's view. Only one connection tries such a takeover at a time, and the down holder keeps the primary until that read succeeds, so a takeover read that fails, or is in backoff after one, is not counted by the connection that tried it. Any other primary whose read fails, or that is in backoff after one, is counted unreachable (or as refusing the credentials) by each connection that tried it: a failed read releases the primary so another connection of the topology can take it over on its next poll, and both report it until one reads it. `reason` says why the fan-out dials nothing: `no_sentinel_credentials`, `sentinel_credentials_unreadable` (the data-node password could not be decrypted), `connection_secrets_unreadable` (another stored secret could not be decrypted), `certificate_auth`, `agent_connection` (cluster or Sentinel), `ssh_tunnel` (Sentinel), `fanout_failed` (the cycle failed before the reads, for example on a storage error, or the deployment has no cluster discovery to dial the primaries, which is logged once per connection; these seven count the primaries left unchecked as `notDialed`), `topology_unknown` (`SENTINEL MASTERS` not read yet), `topology_unreadable` (`CLUSTER NODES` or `SENTINEL MASTERS` itself failed on the latest read), `no_targets` (every other primary is its own connection), `covered_elsewhere` (every other primary is claimed by another connection, which reads it or holds it as down; see that connection's coverage) or `not_applicable` (standalone). `reason` is `null` whenever the connection has primaries of its own to count, even if it dialed none of them because each is in backoff or flagged down, so check the counts as well as `reason` for gaps. The counts are recorded as soon as the reads settle, or before the work that precedes them when there is nothing to read. Coverage that no poll has refreshed for 3 poll intervals (at least 30 seconds), such as that of a disconnected connection, is marked stale and its gauges are withdrawn on the next poll of any connection, summary update or API read. The anomaly dashboard shows a notice above the overview when the selected connection's primaries are not, or only partly, covered, when its coverage is stale (unless its last reason is `not_applicable`, `no_targets` or `covered_elsewhere`, which have no per-node checks to stop), or when the coverage cannot be loaded. The counts are returned by [`GET /api/anomaly/coverage`](#get-fan-out-coverage) and exported as `betterdb_anomaly_fanout_primaries{state}` (see [Prometheus metrics](./prometheus-metrics.md#fan-out-coverage-metrics)).
+
+**Replica cross-check**: Before an alert is raised or escalated, the monitor reads `INFO replication` from the replica itself and then from the primary, and compares the replica's `slave_repl_offset` with the primary's `master_repl_offset`. The replica is read through its own connection when it is monitored as one and connected, by node through cluster discovery on a cluster connection, or by address with the data-node credentials on a Sentinel connection that has them. A primary registered from a Sentinel connection uses its Sentinel connection's replica list and credentials. On Sentinel, only replicas listed in `SENTINEL REPLICAS` are dialed, so the credentials never go to an address that only the primary reports. Other replicas are not read.
+
+- If the replica's link is up and it is less than 1 MiB behind, the alert is skipped. The primary's view was stale because the replica's acknowledgements were late. The check runs again on the next window that would alert. A not-acking alert is never skipped this way: the primary still counts that replica as lagging for `min-replicas-to-write` and `WAIT`, and drops it at `repl-timeout`, so the alert is raised with the replica's view added, and the message says its acknowledgements are not reaching the primary.
+- Otherwise the alert is raised, and the message adds the replica's own gap and link status. When the replica's link is up and it reports `slave_read_repl_offset`, the message also says whether it has received data it has not applied yet (slow apply) or has applied everything it received (the stream is not reaching it fast enough).
+- If the replica cannot be read within 2 seconds, the poll has already spent 2 seconds on cross-checks, is not found, or follows a different replication ID than the primary, the alert is raised as before, without the replica's view.
+
+**Recommended actions**:
+- Compare the replica offset gap with the primary write rate over the next few minutes
+- Check replica host CPU, disk and network for a slow apply path
+- Review `client-output-buffer-limit replica` and `repl-backlog-size` against the write rate
+- If bulk writes or resharding are driving it, throttle them until the replica catches up
+
+**Example scenario**: A bulk import writes faster than a replica can apply. The gap grows for four windows while `lag` stays at 0, and a WARNING fires. The import ends and the write rate returns to baseline. Four windows later the gap has not halved and would take more than eight further windows to clear, so the alert escalates to CRITICAL.
+
+---
+
 ### UNKNOWN
 
 **Triggers**: Anomalies that don't match any defined pattern
@@ -346,6 +446,57 @@ Each condition fires once per episode and the tracking state clears when the chi
 - Correlate with external monitoring data
 
 **Example scenario**: `fragmentation_ratio` spikes to 2.5 with no other metrics affected.
+
+## Incident Sequence Rules
+
+Anomalies on one connection, or one cluster, are grouped into incidents. An incident stays open while events keep arriving within two minutes of each other, for at most 30 minutes. A sequence rule recognises a known chain of failures inside an incident, adds its diagnosis and recommendations, and keeps a later step in the same incident across a quiet gap, as long as the rule's span and the incident's 30-minute limit allow it.
+
+A rule's span is measured from its earliest matched event to its latest, using the time each event is stamped with. It is not how long a signal stays open: a warning raised earlier than the span allows does not count, however long it stays active. Optional signals are taken in when they are stamped within one span of the first step, before or after it. One optional signal can be taken into every match of a rule it falls within. An optional signal also joins an incident across a quiet gap once the rule has matched in it, when it is stamped within one span of that match's first step.
+
+Steps count in order: each step must come after the steps before it, within the span. A step with a lead may also come before the steps before it, by up to its lead. A later step alone never joins or extends an incident. A lead step joins across a quiet gap once the steps before the step it may precede were seen. A first step joins an incident across a quiet gap only when the incident already holds a lead step of the rule, stamped within that lead. Rules marked "same connection" only chain events from one connection. The others chain events from any node of the same cluster. When two rules match the same incident and give the same recommendation, it is listed once, on the first match.
+
+A metric marked ↑ only counts when it rose. A drop in that metric does not fill the step or optional signal, so a fall in ops/sec cannot stand in for a write rise. An event whose direction is not known, such as an incident's first event read back from storage, still counts.
+
+A compound rule replaces the rules it combines. When `reshard_divergence_pressure` matches, a `reshard_under_writes` or `divergence_under_pressure` match that shares a step event with it is not listed. Optional signals they share do not count, so the incident shows one diagnosis instead of two. A sequence group recorded for one of those rules before the compound rule matched stays recorded.
+
+Each recorded match sends one `anomaly.sequence.detected` webhook (Pro) with the diagnosis, the recommendations and, when `FRONTEND_URL` is set, a link to the incident. A compound rule that replaces an earlier match sends a second alert. Nothing is sent on recovery, and nothing is sent while the match cannot be stored; the alert goes out once the save succeeds. See the [webhook payload](./webhooks.md#anomalysequencedetected-pro).
+
+| Rule | Steps | Lead | Optional | Span | Same connection |
+| --- | --- | --- | --- | --- | --- |
+| `recovery_amplification` | `resync_escalation` → `fork_memory_risk`, `repl_buffer_pressure`, `memory_used`↑, `memory_overhead` or `output_kbps`↑ | — | `connection_churn`↑ | 10 min | yes |
+| `divergence_under_pressure` | `ops_per_sec`↑ or `input_kbps`↑ → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | yes |
+| `reshard_under_writes` | `reshard_shard_skew` → `replication_divergence` | — | `command_p99` | 15 min | no |
+| `reshard_divergence_pressure` | `reshard_shard_skew` → `replication_divergence` → `memory_used`↑, `memory_overhead` or `repl_buffer_pressure` | pressure step: 15 min | `ops_per_sec`↑, `input_kbps`↑, `command_p99`, `evicted_keys`↑, `evicted_clients`↑, `fork_memory_risk` | 15 min | yes |
+| `retry_storm` | `command_p99`↑, `error_replies`↑ or `connection_churn`↑ → `retry_amplification` | — | `client_saturation`, `load_saturation`, `rejected_connections`, `client_lockout_risk` | 10 min | yes |
+| `backlog_exhaustion` | `backlog_coverage_risk` → `resync_escalation` | `resync_escalation`: 5 min | — | 30 min | yes |
+
+Why each span is that long:
+
+- **recovery_amplification**: the cost of a full resync (fork, buffers, output) shows up within minutes of the escalation. Later pressure is unrelated.
+- **divergence_under_pressure**: divergence needs its warm-up and at least two closed 30s windows after the write rise, and replica buffers grow minutes after that. The divergence detector counts memory and buffer pressure seen since its divergence span began, so pressure may come before the divergence anywhere in the span.
+- **reshard_under_writes**: skew only fires during an active reshard, so the rule starts there. Replicas of the busy shards fall behind over the same minutes the divergence detector needs.
+- **reshard_divergence_pressure**: it combines `reshard_under_writes` and `divergence_under_pressure`, so it keeps their 15 minute span and the pressure step's lead. All three must come from the same node. A skew on one shard and divergence on another can still match `reshard_under_writes`, which chains events from any node of the cluster. Each failure slows the others' recovery: slot migration adds writes the lagging replicas must apply, the unapplied writes hold memory and buffer space on the primary, memory pressure can fail slot imports and keep the reshard running, and a full replica buffer drops the link and forces a resync.
+- **retry_storm**: retry amplification needs a sustained run of hot polls after the slow commands, errors or reconnects that start it. A retry amplification alert that names reconnects as its trigger fills both steps on its own, because the retry detector reads connection churn itself and a separate `connection_churn` alert often never fires, as on a fan-out primary. Saturation shows up within minutes of it or it has another cause. It is optional, because a retry loop that the server still absorbs is worth naming too, and it may come before the retry amplification anywhere in the span, since the retry detector rates a storm critical on saturation it already holds.
+- **backlog_exhaustion**: a coverage warning can be raised well before the disconnect that exhausts it, so this rule allows the full incident span from the warning to the resync. A resync escalation is stamped with the time the replica disconnected, up to five minutes before it is raised, so it may be stamped up to five minutes before the coverage warning.
+
+`reshard_shard_skew` fires when one shard's ops/sec, CPU, memory or write P99 is far above the others during a reshard, so it does not always mean slower writes. A `command_p99` regression is taken in as an optional step when there is one. A replica disconnect is stamped on `resync_escalation`, so it needs no step of its own. There is no general out-of-memory signal. Evictions and fork memory risk stand in for it.
+
+## Per-node coverage
+
+When a cluster or Sentinel group is registered through one connection (the seed), the seed runs every detector. Every other primary it reaches, up to 64, is read in parallel on each poll and runs:
+
+- replication divergence
+- retry amplification, without client names: the alert says client names are not available because the node is not a registered connection
+- backlog coverage risk and resync escalation
+- fork memory risk
+- replica output-buffer pressure, without the per-replica Prometheus gauge
+- reshard pressure, including write P99 read from `INFO latencystats` at most every 30 seconds
+
+Events from these primaries carry `nodeAddr`. Same-connection sequence rules (`backlog_exhaustion`, `recovery_amplification`) and the correlated signals on a divergence alert group them per node, so a non-seed shard's fork or output-buffer pressure shows on that shard's divergence, not the seed's. `divergence_under_pressure` cannot match on a non-seed shard, because its first step is a z-score write-rate spike, which only runs on registered connections.
+
+A node's divergence, backlog coverage, resync escalation, fork memory and output-buffer events close when it leaves the topology, is claimed by another connection, or is registered as its own connection, and when the seed is removed. Retry amplification alerts are not closed this way; they stay open, as they do on the seed. Open backlog coverage, resync escalation, fork memory and output-buffer events are picked up again per node after a restart, so a node that is still at risk does not raise a duplicate, and the events of a node that did not come back are closed. An output-buffer event is picked up for the replica it was raised on, and a picked-up resync-loop event keeps its 5 minute cooldown. Events of a node whose seed is removed before they are picked up are closed too.
+
+Each command to a primary gets 2 seconds of its own. One that does not answer in time drops that primary's connection once the poll's other commands on it have answered or timed out, so the next poll starts on a fresh one instead of queueing behind it. A primary that cannot be reached is backed off and logged as unreachable; none of the checks above run on it until it answers again. Z-score metrics and the other state-based detectors run only on registered connections. Register a node to get them. A primary whose replication ID matches a registered primary is treated as that connection and skipped, so a node Sentinel reports by IP is not checked twice when it is registered by hostname. The skip lasts while that connection is connected and polling; once it disconnects, or goes three poll intervals (at least 30 seconds) without a poll, the fan-out checks the primary again.
 
 ## Severity Levels
 
@@ -403,6 +554,9 @@ Some metrics have custom thresholds beyond Z-score:
 | `memory_used` | - | - | 3 | 60s |
 | `evicted_keys` | - | - | 2 | 30s |
 | `fragmentation_ratio` | 1.5 | 2.0 | 5 | 120s |
+| `error_replies` | 200/s | 2000/s | 2 | 60s |
+
+`error_replies` needs at least 20/s to alert. On a quiet instance almost any burst scores a high Z-score, so a Z-score alone only reaches warning here, and critical needs the absolute threshold.
 
 ## Monitored Metrics
 
@@ -492,6 +646,79 @@ Some metrics have custom thresholds beyond Z-score:
 **Typical baseline**: Idle (no save in progress) most of the time
 **Source**: `INFO persistence` (`rdb_bgsave_in_progress`, `current_save_keys_processed`/`current_save_keys_total`, `rdb_current_bgsave_time_sec`, `rdb_last_bgsave_status`, `aof_rewrite_in_progress`, `aof_current_rewrite_time_sec`, `aof_last_bgrewrite_status`)
 **Detection method**: State-based detector (not z-score based). Emits CRITICAL on frozen key progress, an elapsed-time ceiling, or an `ok` to `err` status transition, and WARNING on a long-running-but-advancing child. See the [PERSISTENCE_STALL pattern](#persistence_stall) for thresholds.
+
+### replication_divergence
+**What it measures**: Bytes each connected replica is behind the primary, and how many seconds that is at the current write rate
+**Why anomalies matter**: A replica can fall behind while `lag` stays low, which risks data loss on failover and full resyncs
+**Typical baseline**: Near zero
+**Source**: `INFO replication` (`master_repl_offset`, `slaveN` or `replicaN` offset, state and lag)
+**Detection method**: Window-based detector (not z-score based). See the [REPLICATION_DIVERGENCE pattern](#replication_divergence) for thresholds. The anomaly page shows each replica's status. Divergence sends `replication.divergence` instead of `anomaly.detected`.
+
+### connection_churn
+**What it measures**: New connections per second, and new connections per command
+**Why anomalies matter**: Clients reconnecting instead of reusing connections waste CPU on connection setup and TLS handshakes, and the client count doesn't show it
+**Typical baseline**: Low on pooled workloads
+**Source**: `INFO stats.total_connections_received`, `INFO stats.instantaneous_ops_per_sec` and `INFO clients.connected_clients`
+**Detection method**: Z-score spike detector (warning 3.0, critical 5.0, 2 consecutive samples, 60s cooldown). Only fires at 10 or more new connections per second while `connected_clients` stays flat, with under 10% of the new connections retained, and only when new connections per command spike too. Clients that open a connection per request, such as PHP-FPM or serverless functions, stay quiet during a traffic surge because connections rise with commands. A storm that reissues the same commands per connection looks the same and also stays quiet.
+
+### raft_health
+**What it measures**: Raft elections and quorum on Valkey Cluster V2
+**Why anomalies matter**: Repeated elections point to an unstable primary or a split network, and a lost quorum freezes writes
+**Typical baseline**: No elections
+**Source**: `CLUSTER INFO` (`cluster_raft_*` fields)
+**Detection method**: State-based detector (not z-score based). Three elections inside 60 seconds raise a flapping warning, which resolves after 60 seconds with no new election. A node that can't reach a leader raises a critical event, which resolves when quorum returns. A connection that leaves Raft resolves both.
+
+### hot_shard
+**What it measures**: CPU time per second on the slots of each shard, compared with the other shards of the cluster
+**Why anomalies matter**: One shard carrying far more than the others is the first to saturate, while the cluster as a whole still looks healthy
+**Typical baseline**: Shards within a small factor of each other
+**Source**: `CLUSTER SLOT-STATS` on every primary, read by the Prometheus poll (the [shard load metrics](prometheus-metrics.md#cluster-shard-load-metrics-valkey-80))
+**Detection method**: State-based detector (not z-score based). A shard is hot when its CPU rate is at least 2 times the cluster median and at least 100,000 CPU microseconds per second (10% of a core). A WARNING is raised once that has held for 60 seconds. It stays open while the shard is at least 1.5 times the median and at least three quarters of the floor, and resolves below that. One event is open per shard. The message names the shard, its address and its top slots by CPU.
+
+The network rate of a hot shard (bytes in plus bytes out) is reported with it as detail, and its share of the cluster's bytes is in the message, but it never raises an event. Bytes out count the replication stream once per replica, so a shard with more replicas, or more writes to replicate, sends more without serving more clients.
+
+The check needs three or more primaries that own slots, and Valkey 8.0+ with `cluster-slot-stats-enabled yes` on every node. It runs on the connection that reads the whole cluster, so a cluster whose nodes are registered one by one as separate connections is not checked. It is also off under the `vitals` export profile and with `METRICS_SLOT_STATS_TOP_N=0`, because the shard load is not measured then.
+
+Nothing is raised, and open events are kept as they are, while slots are moving: during a reshard, for two samples after a slot changes owner, and after a counter reset. `reshard_shard_skew` covers the reshard itself. A slot migration in flight, atomic or legacy, only delays a new event: the 60 seconds start over, and an open event can still resolve. An event that is resolved by hand is raised again only while its shard is at least 2 times the median, and a migration in flight delays that in the same way. The same holds when the monitor cannot ask every primary whether a slot is migrating. On Valkey 9.0+ that includes a monitoring user that may not run `CLUSTER GETSLOTMIGRATIONS`: no new event is raised until it is allowed (see [Minimum ACL](minimum-acl.md)). When no complete shard load sample arrives for 5 minutes, or `INFO` or `CLUSTER NODES` cannot be read for that long, open events are closed. That happens for example when one primary keeps failing. A connection that is disconnected is not polled at all, so its open events stay as they are until it is polled again.
+
+**Hot keys**: when the hot primary runs an LFU `maxmemory-policy` (`allkeys-lfu` or `volatile-lfu`), the event also names the hottest keys of the shard. Right before a new event is raised, and at most every 5 minutes while it stays open, BetterDB asks the hot primary for the first 500 key names of each of the shard's top 3 slots (`CLUSTER GETKEYSINSLOT`) and reads the access frequency of each name (`OBJECT FREQ`). That is at most 3 commands plus 1,500 `OBJECT FREQ` calls in 7 round trips, with a 2 second limit for the whole read. It runs no `KEYS` and no `SCAN`, and reads no value. The 10 keys with the highest frequency are kept, and the first 3 go into the message:
+
+```
+Hot shard 3f2a9c1e at 10.0.0.1:6379: CPU 3.1x the cluster median (61% of the cluster's slot CPU) for 60s. Top slots by CPU: 1234 (62% of the shard), 88 (9%). Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201).
+```
+
+`freq` is the server's LFU counter, not a request count. It runs from 0 to 255, grows logarithmically with access and decays over time, so several keys tied at 255 are normal. It ranks keys against each other; it does not measure their load.
+
+What the read can miss, and when it is skipped:
+
+- `CLUSTER GETKEYSINSLOT` returns the first 500 names of a slot, not the hottest. In a slot with more keys the hottest one can be missed. Compare `keysSampled` with the `keyCount` of the top slots to see how much was covered.
+- Without an LFU policy the node keeps no access frequency. The read stops at the first refusal, normally after one `OBJECT FREQ`.
+- The monitoring user may lack the two commands (see the [minimum ACL](minimum-acl.md#hot-shard-keys)), the read may time out, the node may answer with another error such as `CLUSTERDOWN` or `LOADING`, or the connection may reach the cluster through an agent, which does not dial the nodes.
+
+In the last two cases the event is raised without key names, the detail has `keySource: "unavailable"` and a `keyNote` with the reason, and the reason is logged once per connection. A later read of an open event that fails, or gets no name, does not take away the names of an earlier one: the detail keeps them with `keySource: "lfu"` and the `keysSampledAt` of the read they come from, and `keyNote` says that the last read gave none and why. The next read is 5 minutes later either way. A name that is not valid UTF-8 is still read, and is shown with replacement characters.
+
+**Key names leave the database with the message.** The message is stored with the event, written to the API log and sent to every webhook subscribed to `anomaly.detected`. It carries at most 3 names, each cut to 64 characters, with control and invisible characters written as `\xNN` or `\u{NNNN}` and quotes escaped. It is written once, when the event is raised; later reads only update the detail. The full list of up to 10 names is returned by [`GET /api/anomaly/hot-shards`](#get-hot-shards) only.
+
+**A capture can show the keys when the read cannot.** When the event has no key names and the monitor connects to the cluster nodes directly, the message ends with one more sentence, for example `Key names are not available (no LFU policy); a capture on this primary can show them.`, and the detail has `captureAvailable: true`. Nothing is started for you: a person starts a [MONITOR capture](monitor.md) on the hot primary.
+
+- In the UI, the Anomalies page shows a notice for each open hot shard without key names, with a **Capture on hot primary** action. The notice does not depend on the selected date range. The action opens the usual start dialog at a duration of 10 seconds instead of 30, which can be changed. The capture stays on the hot primary: the dialog offers no other node and no fan-out. The session page then lists the **Top keys in this capture**.
+- By API, take `shardId` from [`GET /api/anomaly/hot-shards`](#get-hot-shards) and send it as `targetNodeId`:
+
+  ```http
+  POST /api/monitor/sessions
+  Content-Type: application/json
+
+  { "connectionId": "<connection-id>", "targetNodeId": "<shardId>", "durationMs": 10000 }
+  ```
+
+  Then read `topKeys` from `GET /api/monitor/sessions/<session-id>/cross-reference?baseline=24h`.
+
+Before you start one:
+
+- `MONITOR` makes the node send every command it runs to the capture connection. On a primary that is already hot this adds load, so keep the capture short. The usual limits of a capture apply: its duration, its byte and line caps, and one capture per connection at a time.
+- The pre-flight health check is advice for a capture a person starts; it does not block it. The check and the throughput estimate are read from the node the connection points at, not from the hot primary. A hot primary runs more commands, so expect more lines and bytes than the estimate shows. The check looks at memory, recent OOM events, failover and replication, not at CPU.
+- A capture counts the first argument of a command as its key. `MGET a b c` counts `a` only, an `EVAL` counts its script text, and a command without a key, such as `CLUSTER NODES`, counts its first word.
+- The capture is not offered for a connection that reaches the cluster through an agent, because the monitor cannot open `MONITOR` on a node there.
 
 ## Configuration
 
@@ -700,6 +927,26 @@ GET /api/anomaly/groups?limit=50&pattern=memory_pressure
 }
 ```
 
+### Computed values
+
+Three detectors work out a target for the setting their recommendation names. The correlated group and the incident sequence match that hold the event carry it as `values`, next to the recommendation text, and so does the event's entry in the incident timeline:
+
+```json
+"values": [{ "setting": "repl-backlog-size", "current": 1, "target": 3, "unit": "MB" }]
+```
+
+| Event | Setting | Target |
+| --- | --- | --- |
+| `backlog_coverage_risk` | `repl-backlog-size` | The size that covers 75s of writes (the 60s warning plus 25%) at the write rate the coverage was measured with |
+| `repl_buffer_pressure` | `client-output-buffer-limit replica hard`, and `soft` when the soft limit is enabled and this buffer is already past 60% of it (a sustained soft-limit breach carries `soft` only) | Twice the replica's observed output buffer, so the same burst sits at 50% of each of those limits |
+| `fork_memory_risk` | `total_system_memory` | The RAM at which the projected fork peak sits at 70%, ten points under the 80% warning |
+
+At 10 MB and above, the target is rounded up to a whole MB and the current value to the nearest MB. Below 10 MB both are shown to one decimal, so a fraction of a megabyte does not display as the same whole number as its target. When an input is unknown (no backlog size, or no per-replica buffer because `CLIENT LIST` was denied or the finding is a resync loop), `values` is left out and the text stays as it is. A group keeps the larger target for each setting on each node, and sets `nodeAddr` when the event names one, so a later smaller replica does not replace a larger one and two nodes do not share a single target. A sequence match keeps only the values whose setting its own recommendations name. The timeline entry still shows the event's own values, including a fork RAM target whose setting the match text does not name.
+
+Values are kept in memory only. A group read back from storage still includes them while that group is in memory, and an incident rebuilt from storage keeps them while the event is still in the live incident buffer, including after it has left the 1,000-event recent list. Once those copies age out, the text remains and `values` is absent. The events endpoint returns the stored copy of a saved event, so it does not include them, and neither do webhook payloads.
+
+For retry amplification, the group's "Throttle or inspect the clients whose command rate grew the most" recommendation names the top clients and their growth (`Top clients: name checkout (cmds 4.2×, 12 reconnects)`), and keeps the fixed text when attribution is unavailable or no client stood out.
+
 ### Get Anomaly Summary
 
 ```http
@@ -755,6 +1002,81 @@ GET /api/anomaly/buffers
     }
   ]
 }
+```
+
+### Get Fan-out Coverage
+
+```http
+GET /api/anomaly/coverage
+X-Connection-ID: <connection-id>
+```
+
+One entry per polled connection (all connections without the header), with the outcome of its latest per-node fan-out. `reason` is set when the fan-out dials nothing; the values are listed under [REPLICATION_DIVERGENCE](#replication_divergence). `topology` is `cluster`, `sentinel`, or `null` before the mode is known. `tunnelled` is true for a connection behind an SSH tunnel. `targetLimit` is the most primaries one connection checks and `timeoutMs` the per-primary connect and `INFO` timeout. `ageMs` is the age of the entry by the server clock. Entries no poll has refreshed for 3 poll intervals (at least 30 seconds) are kept with `stale: true`, so a stopped fan-out does not read as covered.
+
+**Response**:
+```json
+[
+  {
+    "connectionId": "550e8400-e29b-41d4-a716-446655440000",
+    "topology": "cluster",
+    "checked": 3,
+    "unreachable": 2,
+    "authFailed": 1,
+    "skipped": 0,
+    "notDialed": 0,
+    "reason": null,
+    "tunnelled": false,
+    "targetLimit": 64,
+    "timeoutMs": 2000,
+    "timestamp": 1704067200000,
+    "ageMs": 4200,
+    "stale": false
+  }
+]
+```
+
+### Get Hot Shards
+
+```http
+GET /api/anomaly/hot-shards
+X-Connection-ID: <connection-id>
+```
+
+The open [`hot_shard`](#hot_shard) events of one cluster connection, with the numbers behind them. The connection header is required. The list is empty when no shard is hot. It is kept in memory and rebuilt from the next shard load sample after a restart.
+
+`cpu` gives the shard's CPU rate per second, its share of the cluster, the cluster median and the ratio the rule used. `network` gives the same for bytes in plus bytes out, without a ratio: it is detail only, and it includes replication, counted once per replica. `topSlots` (up to 5) are ranked by CPU. `topKeys` (up to 10, full names) are ranked by `freq`, the LFU counter of the key (0 to 255). `keySource` is `lfu` when the keys were read and `unavailable` when they were not, with the reason in `keyNote`. `keysSampledAt` is the time of the read the names come from and `keysSampled` the number of keys whose frequency it got. When a later read gave no names, the names of the earlier read stay and `keyNote` says so. `eventId` is the id of the open event. `captureAvailable` is `true` when the key names are missing and a [capture on the hot primary](#hot_shard) can show them.
+
+**Response**:
+```json
+[
+  {
+    "eventId": "0b9d2c1e-6f3a-4c57-9a41-2d8e7b5f1c30",
+    "captureAvailable": false,
+    "shardId": "3f2a9c1e77aa5d0c9b1e4f6a8c2d0e1f3a5b7c9d",
+    "nodeAddr": "10.0.0.1:6379",
+    "slotCount": 5461,
+    "since": 1704067140000,
+    "sampledAt": 1704067200000,
+    "cpu": { "perSecond": 930000, "share": 0.61, "median": 300000, "ratio": 3.1 },
+    "network": { "perSecond": 2097152, "share": 0.35, "median": 1887436 },
+    "topSlots": [
+      {
+        "slot": 1234,
+        "cpuUsecPerSecond": 576600,
+        "networkBytesPerSecond": 912000,
+        "keyCount": 1820,
+        "shareOfShard": 0.62
+      }
+    ],
+    "topKeys": [
+      { "key": "user:42", "slot": 1234, "freq": 255 },
+      { "key": "cart:{9}", "slot": 88, "freq": 201 }
+    ],
+    "keySource": "lfu",
+    "keysSampled": 1012,
+    "keysSampledAt": 1704067200000
+  }
+]
 ```
 
 ### Resolve Anomaly or Group

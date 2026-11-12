@@ -1,4 +1,7 @@
-import { fetchApi } from './client';
+import { fetchApi, fetchApiWithHeaders } from './client';
+
+// Must match the backend SLOT_STATS_FAILED_NODES_HEADER.
+const SLOT_STATS_FAILED_NODES_HEADER = 'x-slot-stats-failed-nodes';
 import type { DetailedHealthResponse } from '../types/health';
 import type {
   HealthResponse,
@@ -47,6 +50,10 @@ import type {
   CorrelatedAnomalyGroup,
   AnomalySummary,
   AnomalyBufferStats,
+  FanoutCoverage,
+  HotShardDetail,
+  ReplicaDivergenceHistory,
+  IncidentTimeline,
 } from '../types/anomaly';
 import type {
   DiscoveredNode,
@@ -151,7 +158,9 @@ export const metricsApi = {
     if (options?.endTime) params.set('endTime', options.endTime.toString());
     if (options?.limit) params.set('limit', options.limit.toString());
     const queryString = params.toString();
-    return fetchApi<ScanSkewReport>(`/commandlog-analytics/scan-skew${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<ScanSkewReport>(
+      `/commandlog-analytics/scan-skew${queryString ? `?${queryString}` : ''}`,
+    );
   },
   getSlowLogPatternAnalysis: (count?: number) => {
     const params = count ? `?count=${count}` : '';
@@ -230,8 +239,14 @@ export const metricsApi = {
   // Cluster endpoints
   getClusterInfo: () => fetchApi<Record<string, string>>('/metrics/cluster/info'),
   getClusterNodes: () => fetchApi<ClusterNode[]>('/metrics/cluster/nodes'),
-  getSlotStats: (orderBy: 'key-count' | 'cpu-usec' = 'key-count', limit = 100) =>
-    fetchApi<SlotStats>(`/metrics/cluster/slot-stats?orderBy=${orderBy}&limit=${limit}`),
+  /** `failedNodes` lists the primaries that did not answer for all their slots; those slots are missing from `stats`. */
+  getSlotStats: async (orderBy: 'key-count' | 'cpu-usec' = 'key-count', limit = 100) => {
+    const { data, headers } = await fetchApiWithHeaders<SlotStats>(
+      `/metrics/cluster/slot-stats?orderBy=${orderBy}&limit=${limit}`,
+    );
+    const failedNodes = headers.get(SLOT_STATS_FAILED_NODES_HEADER)?.split(',').filter(Boolean) ?? [];
+    return { stats: data, failedNodes };
+  },
 
   // New cluster monitoring endpoints
   discoverClusterNodes: (signal?: AbortSignal) =>
@@ -426,7 +441,9 @@ export const metricsApi = {
     if (params?.startTime) query.append('startTime', params.startTime.toString());
     if (params?.endTime) query.append('endTime', params.endTime.toString());
     const queryString = query.toString();
-    return fetchApi<CorrelatedAnomalyGroup[]>(`/anomaly/groups${queryString ? `?${queryString}` : ''}`);
+    return fetchApi<CorrelatedAnomalyGroup[]>(
+      `/anomaly/groups${queryString ? `?${queryString}` : ''}`,
+    );
   },
 
   getAnomalySummary: (params?: { startTime?: number; endTime?: number }) => {
@@ -438,6 +455,50 @@ export const metricsApi = {
   },
 
   getAnomalyBuffers: () => fetchApi<AnomalyBufferStats[]>('/anomaly/buffers'),
+
+  // Scoped to the current connection by the connection header.
+  getAnomalyCoverage: () => fetchApi<FanoutCoverage[]>('/anomaly/coverage'),
+
+  getHotShards: () => fetchApi<HotShardDetail[]>('/anomaly/hot-shards'),
+
+  getReplicationDivergence: (params?: { startTime?: number; endTime?: number }) => {
+    const query = new URLSearchParams();
+    if (params?.startTime) query.append('startTime', params.startTime.toString());
+    if (params?.endTime) query.append('endTime', params.endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<ReplicaDivergenceHistory[]>(
+      `/anomaly/replication-divergence${queryString ? `?${queryString}` : ''}`,
+    );
+  },
+
+  getIncidents: (
+    params?: { limit?: number; startTime?: number; endTime?: number },
+    signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams();
+    if (params?.limit !== undefined) query.append('limit', params.limit.toString());
+    if (params?.startTime !== undefined) query.append('startTime', params.startTime.toString());
+    if (params?.endTime !== undefined) query.append('endTime', params.endTime.toString());
+    const queryString = query.toString();
+    return fetchApi<IncidentTimeline[]>(
+      `/anomaly/incidents${queryString ? `?${queryString}` : ''}`,
+      { signal },
+    );
+  },
+
+  getIncident: (incidentId: string, startTime?: number, signal?: AbortSignal) => {
+    const query = startTime !== undefined ? `?startTime=${startTime}` : '';
+    return fetchApi<IncidentTimeline>(
+      `/anomaly/incidents/${encodeURIComponent(incidentId)}${query}`,
+      { signal },
+    );
+  },
+
+  findIncidentByEvent: (anomalyId: string, at: number, signal?: AbortSignal) =>
+    fetchApi<{ incidentId: string | null }>(
+      `/anomaly/incidents/by-event/${encodeURIComponent(anomalyId)}?at=${at}`,
+      { signal },
+    ),
 
   resolveAnomalyEvent: (id: string) =>
     fetchApi<{ success: boolean }>(`/anomaly/events/${encodeURIComponent(id)}/resolve`, {

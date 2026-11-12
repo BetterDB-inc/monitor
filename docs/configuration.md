@@ -149,6 +149,8 @@ This means:
 | `DB_PASSWORD` | No       | -           | Valkey/Redis password                       |
 | `DB_TYPE`     | No       | `auto`      | Database type: `auto`, `valkey`, or `redis` |
 
+BetterDB does not need an admin user. See [Minimum ACL](minimum-acl) for a read-only monitoring user and the features each command enables.
+
 ### Storage Backend
 
 | Variable                  | Required    | Default           | Description                                                                                                                                                                                                       |
@@ -215,6 +217,11 @@ A connection can reach its database through an SSH bastion/jump host (single hop
 | Variable               | Required | Default | Description                                                                                                                                                                                              |
 | ---------------------- | -------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BETTERDB_SSH_KEY_DIR` | No       | -       | Directory that server-side SSH private keys must live in. Enables the "server file path" key source; a connection's `privateKeyPath` must resolve inside this directory. Unset disables file-based keys. |
+| `BETTERDB_TLS_CERT_DIR` | No       | -       | Directory that server-side TLS files (CA bundle, client certificate, private key) must live in. Enables the "server file paths" source for a connection's `tlsConfig`; its `caPath`/`certPath`/`keyPath` must resolve inside this directory. Unset disables file paths (inline PEM still works). |
+| `DB_TLS_CA_FILE` | No       | -       | PEM CA bundle used to verify the env-configured database's server certificate (private PKI). |
+| `DB_TLS_CERT_FILE` / `DB_TLS_KEY_FILE` | No | - | PEM client certificate and private key presented to the env-configured database (mutual TLS). |
+| `DB_TLS_KEY_PASSPHRASE` | No       | -       | Passphrase for `DB_TLS_KEY_FILE`. |
+| `DB_AUTH_MODE` | No       | `password` | `certificate` sends no `AUTH`; the server maps the client certificate to an ACL user (`tls-auth-clients-user`). Requires `DB_TLS=true` and a client certificate + key. |
 
 **Private key sources**:
 
@@ -245,6 +252,18 @@ The Valkey/Redis client connects to `127.0.0.1:<local-forwarded-port>` through t
 | `ANOMALY_POLL_INTERVAL_MS`       | No       | `1000`    | Anomaly detection polling interval (milliseconds)     |
 | `ANOMALY_CACHE_TTL_MS`           | No       | `3600000` | Anomaly detection cache TTL (milliseconds)            |
 | `ANOMALY_PROMETHEUS_INTERVAL_MS` | No       | `30000`   | Prometheus summary update interval (milliseconds)     |
+
+### Monitor Health Gate
+
+These thresholds decide when anomaly-triggered and scheduled MONITOR captures are skipped. See [Monitor](monitor.md) for how each signal is read.
+
+| Variable                            | Required | Default    | Description                                                                                                                                            |
+| ----------------------------------- | -------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MONITOR_MEMORY_PCT_THRESHOLD`      | No       | `85`       | Skip when `used_memory` reaches this percentage of `maxmemory`                                                                                         |
+| `MONITOR_RECENT_OOM_WINDOW_MS`      | No       | `300000`   | Skip when an OOM-correlated anomaly occurred within this window (milliseconds)                                                                         |
+| `MONITOR_RECENT_FAILOVER_WINDOW_MS` | No       | `120000`   | Skip when a replication role change occurred within this window (milliseconds)                                                                         |
+| `MONITOR_REPLICATION_LAG_BYTES`     | No       | `10485760` | Skip when the furthest-behind replica's acked offset is at least this many bytes from the primary offset                                               |
+| `MONITOR_REPLICA_IO_STALE_SEC`      | No       | `30`       | Skip when `master_last_io_seconds_ago` on a replica, or a replica's `lag` on a primary, is greater than this; keep it above `repl-ping-replica-period` |
 
 ### Prometheus Metrics
 
@@ -299,7 +318,7 @@ Client analytics keeps two stores. Raw client snapshots (`client_snapshots`) fol
 
 | Variable       | Required | Default | Description                                                                                                                                                                    |
 | -------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages; unset = messages render without the link |
+| `FRONTEND_URL` | No       | -       | Public base URL of the web UI (e.g. `https://monitor.example.com`). Used to build "View in BetterDB" links in Slack/Discord messages and the `incidentUrl` field of `anomaly.detected` and `anomaly.sequence.detected`; unset = messages render without the link and the field is left out |
 
 ### License Configuration
 
@@ -562,7 +581,8 @@ Once running, access the web interface at:
 | Endpoint                  | Description                   |
 | ------------------------- | ----------------------------- |
 | `/`                       | Web UI dashboard              |
-| `/api/health`             | Health check endpoint         |
+| `/api/health`             | Health check endpoint (waits on the monitored database) |
+| `/api/health/live`        | Liveness: answers once the API is up. A probe that sends no cookie and no `Authorization` header does not touch storage. With user control on, a request that includes either resolves the caller against storage first, so a stalled database can delay it. Probes must omit both. |
 | `/docs`                   | Swagger/OpenAPI documentation |
 | `/api/prometheus/metrics` | Prometheus metrics endpoint   |
 
@@ -585,7 +605,7 @@ curl -c cookies.txt -X POST http://localhost:3001/api/auth/sign-in/email \
 curl -b cookies.txt -c cookies.txt http://localhost:3001/api/connections
 ```
 
-These routes stay open without a session: `/api/health`, `/api/version`,
+These routes stay open without a session: `/api/health` (including `/api/health/live`), `/api/version`,
 `/api/system/workspace`, `/api/prometheus/metrics`, the Swagger UI at `/docs`, the `/api/auth` and
 `/api/invite` routes, and reads under `/api/mcp`. Writes under `/api/mcp` that apply
 changes — approving or rejecting cache and memory proposals — need a session too.

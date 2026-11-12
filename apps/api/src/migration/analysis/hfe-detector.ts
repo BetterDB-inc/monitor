@@ -13,7 +13,7 @@ const MAX_HASH_FIELDS = 10_000;
 
 export async function detectHfe(
   client: Valkey,
-  hashKeys: string[],
+  hashKeys: Array<string | Buffer>,
   totalEstimatedHashKeys: number,
 ): Promise<HfeResult> {
   const result: HfeResult = {
@@ -30,7 +30,7 @@ export async function detectHfe(
   }
 
   // Check HLEN for each candidate, skip oversized ones
-  const validKeys: string[] = [];
+  const validKeys: Array<string | Buffer> = [];
   for (let i = 0; i < candidates.length; i += 1000) {
     const batch = candidates.slice(i, i + 1000);
     const pipeline = client.pipeline();
@@ -59,7 +59,7 @@ export async function detectHfe(
   }
 
   // HRANDFIELD to get up to 3 random fields per key
-  const keyFieldPairs: Array<{ key: string; field: string }> = [];
+  const keyFieldPairs: Array<{ key: string | Buffer; keyIndex: number; field: string }> = [];
   for (let i = 0; i < validKeys.length; i += 1000) {
     const batch = validKeys.slice(i, i + 1000);
     const pipeline = client.pipeline();
@@ -73,7 +73,7 @@ export async function detectHfe(
       if (err || !fields) continue;
       const fieldList = Array.isArray(fields) ? fields : [fields];
       for (const f of fieldList) {
-        keyFieldPairs.push({ key: batch[j], field: String(f) });
+        keyFieldPairs.push({ key: batch[j], keyIndex: i + j, field: String(f) });
       }
     }
   }
@@ -87,7 +87,7 @@ export async function detectHfe(
   // Pipeline HEXPIRETIME — wrap in try/catch for Redis (unknown command)
   try {
     let hfePositiveKeys = 0;
-    const checkedKeys = new Set<string>();
+    const checkedKeys = new Set<number>();
 
     const pipeline = client.pipeline();
     for (const { key, field } of keyFieldPairs) {
@@ -110,8 +110,8 @@ export async function detectHfe(
         }
         // HEXPIRETIME returns an array with the expiry time, >0 means HFE in use
         const expiry = Array.isArray(val) ? Number(val[0]) : Number(val);
-        if (expiry > 0 && !checkedKeys.has(keyFieldPairs[i].key)) {
-          checkedKeys.add(keyFieldPairs[i].key);
+        if (expiry > 0 && !checkedKeys.has(keyFieldPairs[i].keyIndex)) {
+          checkedKeys.add(keyFieldPairs[i].keyIndex);
           hfePositiveKeys++;
         }
       }

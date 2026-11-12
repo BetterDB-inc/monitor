@@ -40,6 +40,18 @@ export class HealthController {
     return this.isAnonymous(request) ? redactHealth(health) : health;
   }
 
+  @Get('live')
+  @ApiOperation({
+    summary: 'Liveness',
+    description:
+      'Answers as soon as the API process is serving requests, without touching any monitored database. ' +
+      'Use it for container liveness/readiness probes: GET /api/health waits on the database and stalls when the database does.',
+  })
+  @ApiResponse({ status: 200, description: 'The API process is up' })
+  getLive(): { status: 'ok' } {
+    return { status: 'ok' };
+  }
+
   @Get('detailed')
   @ApiOperation({
     summary: 'Get detailed health status',

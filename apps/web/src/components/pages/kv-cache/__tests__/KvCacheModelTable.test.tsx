@@ -16,4 +16,47 @@ describe('KvCacheModelTable', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Chunks and bytes are from the latest scan/)).toBeInTheDocument();
   });
+
+  it('says the hit rate is per model, shared by its dtype rows', () => {
+    render(<KvCacheModelTable latest={latest} buckets={[]} />);
+    expect(screen.getByText(/hit rate is per model/)).toBeInTheDocument();
+  });
+
+  it.each(['two_key', 'single_key'])(
+    'falls back to the connection layout %s for an entry stored without one',
+    (layout) => {
+      const legacy = {
+        layout,
+        perModel: [{ model: 'llama', dtype: 'bfloat16', chunksEst: 10, bytesEst: 2048 }],
+      } as unknown as KvCacheFootprintSnapshot;
+      render(<KvCacheModelTable latest={legacy} buckets={[]} />);
+      expect(screen.getAllByRole('row')[1]).toHaveTextContent(layout);
+    },
+  );
+
+  it('shows no layout for an entry stored without one on a mixed connection', () => {
+    const legacy = {
+      layout: 'mixed',
+      perModel: [{ model: 'llama', dtype: 'bfloat16', chunksEst: 10, bytesEst: 2048 }],
+    } as unknown as KvCacheFootprintSnapshot;
+    render(<KvCacheModelTable latest={legacy} buckets={[]} />);
+    const row = screen.getAllByRole('row')[1];
+    expect(row).toHaveTextContent('—');
+    expect(row).not.toHaveTextContent('mixed');
+  });
+
+  it('shows each model its own layout rather than the connection layout', () => {
+    const mixed = {
+      layout: 'mixed',
+      perModel: [
+        { model: 'llama', dtype: 'bfloat16', chunksEst: 10, bytesEst: 2048, layout: 'two_key' },
+        { model: 'qwen', dtype: 'half', chunksEst: 5, bytesEst: 1024, layout: 'single_key' },
+      ],
+    } as unknown as KvCacheFootprintSnapshot;
+    render(<KvCacheModelTable latest={mixed} buckets={[]} />);
+    const rows = screen.getAllByRole('row').slice(1);
+    expect(rows[0]).toHaveTextContent('two_key');
+    expect(rows[1]).toHaveTextContent('single_key');
+    expect(screen.queryByText('mixed')).not.toBeInTheDocument();
+  });
 });

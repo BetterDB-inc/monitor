@@ -98,6 +98,10 @@ function severityScore(level: ForkRiskLevel, kind: ForkRiskKind): number {
   return levelPart * 10 + kindPart;
 }
 
+export function forkAlertScore(state: ForkMemoryState): number {
+  return severityScore(state.ackedLevel, state.ackedKind);
+}
+
 export function createForkMemoryState(): ForkMemoryState {
   return { ackedLevel: 'none', ackedKind: 'projected-fork-oom' };
 }
@@ -279,4 +283,16 @@ export function acknowledgeForkMemoryFinding(
 ): void {
   state.ackedLevel = finding.level;
   state.ackedKind = finding.kind;
+}
+
+export function forkMemoryRearm(state: ForkMemoryState): () => void {
+  const { ackedLevel: previousLevel, ackedKind: previousKind } = state;
+  return () => {
+    if (
+      severityScore(previousLevel, previousKind) < severityScore(state.ackedLevel, state.ackedKind)
+    ) {
+      state.ackedLevel = previousLevel;
+      state.ackedKind = previousKind;
+    }
+  };
 }

@@ -1,6 +1,7 @@
 import { Logger, Module } from '@nestjs/common';
 import { ANOMALY_SERVICE } from '@betterdb/shared';
 import { AnomalyService } from './anomaly.service';
+import { ANOMALY_EVENT_SINK } from './types';
 import { AnomalyController } from './anomaly.controller';
 import { McpAnomalyController } from './mcp-anomaly.controller';
 import { AgentTokenGuard } from '@app/common/guards/agent-token.guard';
@@ -27,7 +28,11 @@ const tokenProviders = createAgentTokenProviders(logger, () => {
       provide: ANOMALY_SERVICE,
       useExisting: AnomalyService,
     },
+    {
+      provide: ANOMALY_EVENT_SINK,
+      useExisting: AnomalyService,
+    },
   ],
-  exports: [AnomalyService, ANOMALY_SERVICE],
+  exports: [AnomalyService, ANOMALY_SERVICE, ANOMALY_EVENT_SINK],
 })
 export class AnomalyModule {}

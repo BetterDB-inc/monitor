@@ -213,3 +213,12 @@ export function commitClientLockoutLevel(state: ClientLockoutState, level: Locko
   state.lastRejected = state.pendingRejected;
   state.pendingRejected = null;
 }
+
+export function clientLockoutRearm(state: ClientLockoutState, level: LockoutLevel): () => void {
+  const { level: previousLevel, lastRejected } = state;
+  return () => {
+    if (state.level !== level) return;
+    state.level = previousLevel;
+    state.lastRejected = lastRejected;
+  };
+}

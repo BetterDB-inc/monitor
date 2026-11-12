@@ -1,16 +1,18 @@
 import Valkey from 'iovalkey';
-import type { DatabaseConnectionConfig } from '@betterdb/shared';
+import type { MigrationConnectionConfig } from '../migration-endpoints';
 import type { ExecutionJob } from './execution-job';
 import { migrateKey } from './type-handlers';
-import { createClient, createTargetClient } from './client-factory';
+import { attachTlsRefresh, createClient, createTargetClient, nodeClientAuthOptions } from './client-factory';
+import { MetricsParser } from '../../database/parsers/metrics.parser';
+import { parseNodeAddress } from '../function-presence';
 
 const SCAN_COUNT = 500;
 const TYPE_BATCH = 500;
 const MIGRATE_BATCH = 50;
 
 export interface CommandMigrationOptions {
-  sourceConfig: DatabaseConnectionConfig;
-  targetConfig: DatabaseConnectionConfig;
+  sourceConfig: MigrationConnectionConfig;
+  targetConfig: MigrationConnectionConfig;
   sourceIsCluster: boolean;
   targetIsCluster: boolean;
   job: ExecutionJob;
@@ -24,40 +26,68 @@ export interface CommandMigrationOptions {
 export async function runCommandMigration(opts: CommandMigrationOptions): Promise<void> {
   const { sourceConfig, targetConfig, sourceIsCluster, targetIsCluster, job, maxLogLines } = opts;
   const sourceClients: Valkey[] = [];
-  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster);
+  const onTlsRefreshError = (message: string) => log(job, maxLogLines, message);
+  const targetClient = createTargetClient(targetConfig, 'BetterDB-Migration-Target', targetIsCluster, onTlsRefreshError);
+  const dropConnections = () => {
+    for (const client of [...sourceClients, targetClient]) client.disconnect();
+  };
+  job.dropConnections = dropConnections;
 
   try {
+    if (job.tunnelError !== undefined) return;
     await targetClient.connect();
     log(job, maxLogLines, `Connected to target${targetIsCluster ? ' (cluster mode)' : ''}`);
 
     // Build source clients (one per cluster master, or single standalone)
     if (sourceIsCluster) {
-      const discoveryClient = createClient(sourceConfig, 'BetterDB-Migration-Discovery');
-      await discoveryClient.connect();
+      const discoveryClient = createClient(sourceConfig, 'BetterDB-Migration-Discovery', onTlsRefreshError);
       try {
+        // Inside the try so a failed first dial still reaches the cleanup below
+        // and stops iovalkey's reconnect loop.
+        await discoveryClient.connect();
         const nodesRaw = await discoveryClient.call('CLUSTER', 'NODES') as string;
         const masters = parseClusterMasters(nodesRaw);
         log(job, maxLogLines, `Cluster mode: ${masters.length} master(s) detected`);
-        for (const { host, port } of masters) {
+        for (const { host, port, hostname } of masters) {
           const client = new Valkey({
             host,
             port,
-            username: sourceConfig.username || undefined,
-            password: sourceConfig.password || undefined,
-            tls: sourceConfig.tls ? {} : undefined,
+            ...nodeClientAuthOptions(sourceConfig, host, hostname),
             lazyConnect: true,
+            connectTimeout: 10_000,
+            commandTimeout: 15_000,
             connectionName: 'BetterDB-Migration-Source',
           });
-          await client.connect();
+          attachTlsRefresh(client, sourceConfig, host, hostname, onTlsRefreshError);
+          // Register before connecting: a client whose first dial fails keeps
+          // reconnecting in the background unless the outer cleanup quits it.
           sourceClients.push(client);
+          try {
+            await client.connect();
+          } catch (err) {
+            client.disconnect();
+            throw err;
+          }
         }
       } finally {
-        await discoveryClient.quit();
+        if (discoveryClient.status === 'ready') {
+          await discoveryClient.quit().catch(() => discoveryClient.disconnect());
+        } else {
+          discoveryClient.disconnect();
+        }
       }
     } else {
-      const client = createClient(sourceConfig, 'BetterDB-Migration-Source');
-      await client.connect();
+      const client = createClient(sourceConfig, 'BetterDB-Migration-Source', onTlsRefreshError);
+      // Register before connecting so the outer cleanup quits it, and stop the
+      // reconnect loop iovalkey starts when the first dial fails.
       sourceClients.push(client);
+      if (job.tunnelError !== undefined) return;
+      try {
+        await client.connect();
+      } catch (err) {
+        client.disconnect();
+        throw err;
+      }
     }
 
     log(job, maxLogLines, `Connected to source (${sourceClients.length} node(s))`);
@@ -70,6 +100,8 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
     }
     job.totalKeys = totalKeys;
     log(job, maxLogLines, `Total keys to migrate: ${totalKeys.toLocaleString()}`);
+
+    if (isCancelled(job)) return;
 
     if (totalKeys === 0) {
       log(job, maxLogLines, 'No keys to migrate');
@@ -148,37 +180,35 @@ export async function runCommandMigration(opts: CommandMigrationOptions): Promis
       } while (cursor !== '0');
     }
 
+    if (isCancelled(job)) return;
+
     job.progress = 100;
     log(job, maxLogLines,
       `Migration complete: ${job.keysTransferred.toLocaleString()} transferred, ${keysSkipped} skipped out of ${totalKeys.toLocaleString()} total`);
 
   } finally {
-    await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+    try {
+      if (job.tunnelError !== undefined) {
+        dropConnections();
+      } else {
+        await Promise.allSettled([...sourceClients, targetClient].map(c => c.quit()));
+      }
+    } finally {
+      job.dropConnections = undefined;
+    }
   }
 }
 
 // ── Helpers ──
 
-function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number }> {
-  const results: Array<{ host: string; port: number }> = [];
-  for (const line of nodesRaw.split('\n')) {
-    if (!line.trim()) continue;
-    const parts = line.split(' ');
-    const flags = parts[2] ?? '';
-    if (!flags.includes('master')) continue;
-    if (flags.includes('fail') || flags.includes('noaddr')) continue;
-    // address format: host:port@clusterport (host may be IPv6, e.g. [::1]:6379@16379)
-    const addrPart = (parts[1] ?? '').split('@')[0];
-    const lastColon = addrPart.lastIndexOf(':');
-    let host = lastColon > 0 ? addrPart.substring(0, lastColon) : '';
-    const port = lastColon > 0 ? parseInt(addrPart.substring(lastColon + 1), 10) : NaN;
-    // Strip IPv6 brackets — iovalkey expects bare addresses
-    if (host.startsWith('[') && host.endsWith(']')) {
-      host = host.slice(1, -1);
-    }
-    if (host && !isNaN(port)) {
-      results.push({ host, port });
-    }
+export function parseClusterMasters(nodesRaw: string): Array<{ host: string; port: number; hostname?: string }> {
+  const results: Array<{ host: string; port: number; hostname?: string }> = [];
+  for (const node of MetricsParser.parseClusterNodes(nodesRaw)) {
+    // Exact flag match: a `fail?` (pfail) master is only suspected down and still serves.
+    if (!node.flags.includes('master') || node.flags.includes('fail') || node.flags.includes('noaddr')) continue;
+    const { host, port } = parseNodeAddress(node.address);
+    // The announced hostname (cluster-announce-hostname) is what the node's certificate names.
+    if (host && !isNaN(port)) results.push(node.hostname ? { host, port, hostname: node.hostname } : { host, port });
   }
   return results;
 }
@@ -196,7 +226,7 @@ async function batchType(client: Valkey, keys: string[]): Promise<string[]> {
 }
 
 function isCancelled(job: ExecutionJob): boolean {
-  return (job.status as string) === 'cancelled';
+  return (job.status as string) === 'cancelled' || job.tunnelError !== undefined;
 }
 
 function log(job: ExecutionJob, maxLines: number, message: string): void {

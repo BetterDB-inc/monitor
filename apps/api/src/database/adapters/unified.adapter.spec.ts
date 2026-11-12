@@ -1,9 +1,17 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { Logger } from '@nestjs/common';
 import {
   GRAPH_MEMORY_PROBES_PER_SCAN,
   GRAPH_MEMORY_TTL_MS,
   QUIT_TIMEOUT_MS,
+  TLS_MATERIAL_RECHECK_MS,
+  WHOAMI_TIMEOUT_MS,
   UnifiedDatabaseAdapter,
 } from './unified.adapter';
+import * as tlsMaterial from './tls-material';
+import { generateTlsPair, type TlsPair } from '../../../test/helpers/tls-fixtures';
 
 // getInfo is exercised in isolation with a mocked client. Object.create bypasses
 // the real constructor (which would open a live Valkey connection).
@@ -148,39 +156,43 @@ describe('UnifiedDatabaseAdapter.getInfoParsed', () => {
   });
 });
 
+type PipelineReply = [Error | null, unknown];
+
+// A pipeline fake that answers each queued command, so key-scan tests can
+// assert which commands were sent instead of relying on reply positions.
+function fakeKeyPipeline(
+  reply: (command: string, key: string) => PipelineReply,
+  sent: string[] = [],
+  types: Record<string, string> = {},
+) {
+  return () => {
+    const queued: Array<[string, string]> = [];
+    const chain = {
+      memory: (_sub: string, key: string) => (queued.push(['MEMORY USAGE', key]), chain),
+      object: (sub: string, key: string) => (queued.push([`OBJECT ${sub}`, key]), chain),
+      ttl: (key: string) => (queued.push(['TTL', key]), chain),
+      type: (key: string) => (queued.push(['TYPE', key]), chain),
+      call: (command: string, key: string) => (queued.push([command, key]), chain),
+      exec: async () =>
+        queued.map(([command, key]) => {
+          sent.push(command);
+          return command === 'TYPE' ? [null, types[key] ?? 'string'] : reply(command, key);
+        }),
+    };
+    return chain;
+  };
+}
+
 describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
   const DAY = 86400;
 
   function makeScanAdapter(idleByKey: Record<string, number>) {
     const keys = Object.keys(idleByKey);
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
-    const pipeline = () => {
-      let key = '';
-      const chain = {
-        memory: (_sub: string, name: string) => {
-          key = name;
-          return chain;
-        },
-        object: () => chain,
-        ttl: () => chain,
-        type: () => chain,
-        strlen: () => chain,
-        llen: () => chain,
-        hlen: () => chain,
-        scard: () => chain,
-        zcard: () => chain,
-        xlen: () => chain,
-        exec: async () => [
-          [null, 100],
-          [null, idleByKey[key]],
-          [null, null],
-          [null, -1],
-          [null, 'string'],
-          [null, 5],
-        ],
-      };
-      return chain;
-    };
+    const pipeline = fakeKeyPipeline((command, key) => {
+      if (command === 'OBJECT IDLETIME') return [null, idleByKey[key]];
+      return [null, command === 'TTL' ? -1 : 100];
+    });
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),
@@ -209,30 +221,128 @@ describe('UnifiedDatabaseAdapter.collectKeyAnalytics — stale keys', () => {
   });
 });
 
-describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databases', () => {
-  function scanChain() {
-    const chain = {
-      memory: () => chain,
-      object: () => chain,
-      ttl: () => chain,
-      type: () => chain,
-      strlen: () => chain,
-      llen: () => chain,
-      hlen: () => chain,
-      scard: () => chain,
-      zcard: () => chain,
-      xlen: () => chain,
-      exec: async () => [
-        [null, 100],
-        [null, 10],
-        [null, null],
-        [null, -1],
-        [null, 'string'],
-        [null, 5],
-      ],
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — no error replies', () => {
+  function makeAdapter(
+    types: Record<string, string>,
+    reply: (command: string, key: string) => PipelineReply,
+    sent: string[],
+  ) {
+    const keys = Object.keys(types);
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    (adapter as unknown as { _client: unknown })._client = {
+      dbsize: jest.fn().mockResolvedValue(keys.length),
+      scan: jest.fn().mockResolvedValue(['0', keys]),
+      info: jest.fn().mockResolvedValue(`# Keyspace\r\ndb0:keys=${keys.length},expires=0,avg_ttl=0`),
+      pipeline: fakeKeyPipeline(reply, sent, types),
     };
-    return chain;
+    (adapter as unknown as { config: unknown }).config = {};
+    (adapter as unknown as { graphMemoryCache: Map<string, unknown> }).graphMemoryCache = new Map();
+    (adapter as unknown as { logger: unknown }).logger = { debug: jest.fn(), warn: jest.fn() };
+    return adapter;
   }
+
+  it('sends only the size command that matches each key type', async () => {
+    const sent: string[] = [];
+    const adapter = makeAdapter(
+      { s: 'string', l: 'list', h: 'hash', z: 'zset', j: 'ReJSON-RL' },
+      () => [null, 3],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const sizeCommands = sent.filter((c) => /^(STRLEN|LLEN|HLEN|SCARD|ZCARD|XLEN)$/.test(c));
+    expect(sizeCommands.sort()).toEqual(['HLEN', 'LLEN', 'STRLEN', 'ZCARD']);
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(5).fill('OBJECT IDLETIME'));
+    expect(result.keyDetails?.find((k) => k.keyName === 'l')?.cardinality).toBe(3);
+  });
+
+  it('drops a type that went stale and ignores inherited type names', async () => {
+    const sent: string[] = [];
+    const wrongType = new Error('WRONGTYPE Operation against a key holding the wrong kind of value');
+    const adapter = makeAdapter({ moved: 'string', proto: '__proto__' }, (command) =>
+      command === 'STRLEN' ? [wrongType, null] : [null, 3],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('moved')?.keyType).toBeNull();
+    expect(byName.get('proto')).toEqual(expect.objectContaining({ keyType: '__proto__', cardinality: null }));
+    expect(sent.filter((c) => c === 'STRLEN')).toHaveLength(1);
+  });
+
+  it('reports a key deleted after the batch TYPE as gone', async () => {
+    const adapter = makeAdapter({ gone: 'string', kept: 'string' }, (command, key) => {
+      if (command === 'TTL') return [null, key === 'gone' ? -2 : -1];
+      return [null, key === 'gone' && command === 'STRLEN' ? 0 : 3];
+    }, []);
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    const byName = new Map(result.keyDetails?.map((k) => [k.keyName, k]));
+    expect(byName.get('gone')).toEqual(expect.objectContaining({ keyType: 'none', cardinality: null }));
+    expect(byName.get('kept')).toEqual(expect.objectContaining({ keyType: 'string', cardinality: 3 }));
+  });
+
+  it('switches to OBJECT FREQ once IDLETIME errors under an LFU policy', async () => {
+    const sent: string[] = [];
+    const lfuError = new Error('ERR An LFU maxmemory policy is selected, idle time not tracked.');
+    const adapter = makeAdapter({ a: 'string', b: 'string', c: 'string' }, (command) =>
+      command === 'OBJECT IDLETIME' ? [lfuError, null] : [null, 7],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual([
+      'OBJECT IDLETIME',
+      'OBJECT FREQ',
+      'OBJECT FREQ',
+      'OBJECT FREQ',
+    ]);
+    expect(result.keyDetails?.filter((k) => k.freqScore === 7)).toHaveLength(3);
+  });
+
+  it('keeps OBJECT IDLETIME when a key fails for another reason', async () => {
+    const sent: string[] = [];
+    const noperm = new Error("NOPERM this user has no permissions to access the 'b' key");
+    const adapter = makeAdapter({ a: 'string', b: 'string', c: 'string' }, (command, key) =>
+      command === 'OBJECT IDLETIME' && key === 'b' ? [noperm, null] : [null, 7],
+      sent,
+    );
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(sent.filter((c) => c.startsWith('OBJECT'))).toEqual(Array(3).fill('OBJECT IDLETIME'));
+    expect(result.keyDetails?.filter((k) => k.idleSeconds === 7)).toHaveLength(2);
+  });
+
+  it('still scans the batch when the TYPE pipeline fails', async () => {
+    const sent: string[] = [];
+    const adapter = makeAdapter({ a: 'string', b: 'list' }, () => [null, 3], sent);
+    const client = (adapter as unknown as { _client: { pipeline: () => { exec: () => Promise<unknown> } } })._client;
+    const pipeline = client.pipeline;
+    let first = true;
+    client.pipeline = () => {
+      const chain = pipeline();
+      if (first) {
+        first = false;
+        chain.exec = () => Promise.reject(new Error('connection reset'));
+      }
+      return chain;
+    };
+
+    const [result] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
+
+    expect(result.scanned).toBe(2);
+    expect(result.keyDetails?.every((k) => k.cardinality === null)).toBe(true);
+  });
+});
+
+describe('UnifiedDatabaseAdapter.collectKeyAnalytics — multiple logical databases', () => {
+  const scanChain = fakeKeyPipeline((command) => [null, command === 'TTL' ? -1 : 10]);
 
   function fakeScanClient(keys: string[]) {
     return {
@@ -565,39 +675,18 @@ describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
     const keys = opts.keys ?? ['social'];
     const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
     const graphCalls: string[] = [];
-    const pipeline = () => {
-      const pipelineCalls: string[] = [];
-      const chain = {
-        memory: () => chain,
-        object: () => chain,
-        ttl: () => chain,
-        type: () => chain,
-        strlen: () => chain,
-        llen: () => chain,
-        hlen: () => chain,
-        scard: () => chain,
-        zcard: () => chain,
-        xlen: () => chain,
-        call: (command: string) => {
-          pipelineCalls.push(command);
+    const pipeline = fakeKeyPipeline(
+      (command) => {
+        if (command.startsWith('GRAPH.')) {
           graphCalls.push(command);
-          return chain;
-        },
-        exec: async () =>
-          pipelineCalls.length > 0
-            ? pipelineCalls.map((command) =>
-                command === 'GRAPH.MEMORY' ? opts.graphMemory : opts.graphStats,
-              )
-            : [
-                [null, opts.memoryUsage],
-                [null, 5],
-                [null, null],
-                [null, -1],
-                [null, opts.keyType],
-              ],
-      };
-      return chain;
-    };
+          return command === 'GRAPH.MEMORY' ? opts.graphMemory : opts.graphStats;
+        }
+        if (command === 'MEMORY USAGE') return [null, opts.memoryUsage];
+        return [null, command === 'TTL' ? -1 : 5];
+      },
+      [],
+      Object.fromEntries(keys.map((key) => [key, opts.keyType])),
+    );
     (adapter as unknown as { _client: unknown })._client = {
       dbsize: jest.fn().mockResolvedValue(keys.length),
       scan: jest.fn().mockResolvedValue(['0', keys]),
@@ -703,5 +792,381 @@ describe('UnifiedDatabaseAdapter — FalkorDB graph keys', () => {
     const [second] = await adapter.collectKeyAnalytics({ sampleSize: 100, scanBatchSize: 100 });
     expect(graphCalls.filter((c) => c === 'GRAPH.MEMORY')).toHaveLength(keys.length);
     expect(second.keyDetails?.every((d) => d.memoryBytes === 3 * MB)).toBe(true);
+  });
+});
+
+describe('UnifiedDatabaseAdapter — TLS material and certificate auth', () => {
+  // lazyConnect means the constructor builds the iovalkey client without
+  // dialing, so the options it was given can be inspected directly.
+  const CA = '-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n';
+  const CERT = '-----BEGIN CERTIFICATE-----\nclient\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+
+  it('sends AUTH credentials in password mode (unchanged behaviour)', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: 'db.example.com', port: 6379, username: 'default', password: '' });
+    const options = adapter.getClient().options;
+    expect(options.username).toBe('default');
+    expect(options.tls).toBeUndefined();
+  });
+
+  it('passes the user-supplied CA, certificate, key and passphrase to the TLS socket unmodified', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'monitor',
+      password: 'pw',
+      tls: true,
+      tlsConfig: { ca: CA, cert: CERT, key: KEY, passphrase: 'secret' },
+    });
+    const tls = adapter.getClient().options.tls!;
+    expect(tls.ca).toBe(CA);
+    expect(tls.cert).toBe(CERT);
+    expect(tls.key).toBe(KEY);
+    expect(tls.passphrase).toBe('secret');
+    // SNI is still applied alongside the material.
+    expect(tls.servername).toBe('db.example.com');
+    // Server verification is never weakened.
+    expect(tls.rejectUnauthorized).toBeUndefined();
+  });
+
+  it('omits username and password entirely in certificate mode so no AUTH is sent', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      username: 'default',
+      password: '',
+      tls: true,
+      tlsConfig: { cert: CERT, key: KEY },
+      authMode: 'certificate',
+    });
+    const options = adapter.getClient().options;
+    // iovalkey stores an absent credential as null; what matters is that it is
+    // falsy, which is the condition under which it skips AUTH entirely.
+    expect(options.username).toBeFalsy();
+    expect(options.password).toBeFalsy();
+    expect(options.tls?.cert).toBe(CERT);
+  });
+
+  it('defers an invalid auth/TLS combination to connect() instead of throwing from the constructor', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+    });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('reports the ACL user from ACL WHOAMI after connect, tolerating servers without ACL', async () => {
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => Promise.resolve('app-monitor'));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+    await expect(probe.call(adapter)).resolves.toBe('app-monitor');
+    expect(call).toHaveBeenCalledWith('ACL', 'WHOAMI');
+
+    call.mockImplementationOnce(() => Promise.reject(new Error("ERR unknown command 'ACL'")));
+    await expect(probe.call(adapter)).resolves.toBeUndefined();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — certificate rotation and probe deadline', () => {
+  // Real material: refreshes validate the pair before adopting it.
+  let pairA: TlsPair;
+  let pairB: TlsPair;
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeAll(() => {
+    pairA = generateTlsPair('node-a');
+    pairB = generateTlsPair('node-b');
+  });
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-rotation-'));
+    fs.writeFileSync(path.join(certDir, 'client.crt'), pairA.cert);
+    fs.writeFileSync(path.join(certDir, 'client.key'), pairA.key);
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+    jest.useRealTimers();
+  });
+
+  const fileAdapter = () =>
+    new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+  // An in-place rewrite within one filesystem timestamp tick can keep the stat
+  // fingerprint; give every write a distinct mtime so change detection is deterministic.
+  let mtime = 1_700_000_000;
+  const writeFile = (name: string, content: string) => {
+    const file = path.join(certDir, name);
+    fs.writeFileSync(file, content);
+    mtime += 1;
+    fs.utimesSync(file, mtime, mtime);
+  };
+  const writePair = (pair: TlsPair) => {
+    writeFile('client.crt', pair.cert);
+    writeFile('client.key', pair.key);
+  };
+  const certOf = (holder: { options: { tls?: { cert?: unknown } } }) => (holder.options.tls?.cert as Buffer | string | undefined)?.toString();
+
+  it('adopts a mismatched pair at construction with a warning rather than failing, so the reconnect refresh can heal it', () => {
+    // Files caught mid-rotation at boot: certificate B next to key A.
+    writeFile('client.crt', pairB.cert);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const adapter = fileAdapter();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/TLS material is not usable.*re-read before each reconnect/));
+      const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string }; tlsSetupError: Error | null });
+      expect(material.tlsSetupError).toBeNull();
+      expect(material.tlsMaterial.cert?.toString()).toBe(pairB.cert);
+
+      // The key lands: the forced re-read before a reconnect adopts the complete pair.
+      writeFile('client.key', pairB.key);
+      (adapter as unknown as { refreshTlsMaterial(force: boolean): void }).refreshTlsMaterial(true);
+      const client = (adapter as unknown as { _client: { options: { tls?: { cert?: unknown; key?: unknown } } } })._client;
+      expect(certOf(client)).toBe(pairB.cert);
+      expect((client.options.tls?.key as Buffer | string | undefined)?.toString()).toBe(pairB.key);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not record a fingerprint for unusable material, so a plain refresh re-reads it', () => {
+    writeFile('client.crt', pairB.cert);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const adapter = fileAdapter();
+      const internals = adapter as unknown as {
+        tlsMaterialFingerprint: string | undefined;
+        tlsMaterialCheckedAt: number;
+        tlsMaterial: { cert?: Buffer | string; key?: Buffer | string };
+        refreshTlsMaterial(force?: boolean): void;
+      };
+      expect(internals.tlsMaterialFingerprint).toBeUndefined();
+
+      // Simulate the race: the key landed after the read, so the files on disk
+      // are now complete and a fingerprint taken now would match them.
+      writeFile('client.key', pairB.key);
+      internals.tlsMaterialCheckedAt = 0;
+      internals.refreshTlsMaterial();
+      expect(internals.tlsMaterial.key?.toString()).toBe(pairB.key);
+      expect(internals.tlsMaterialFingerprint).toBeDefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('re-reads file-sourced material when iovalkey is about to reconnect', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    expect(certOf(client)).toBe(pairA.cert);
+
+    writePair(pairB);
+    client.emit('reconnecting');
+
+    expect(certOf(client)).toBe(pairB.cert);
+    // SNI survives the refresh.
+    expect(client.options.tls?.servername).toBe('db.example.com');
+  });
+
+  it('presents rotated files on every new socket, not only after a reconnect of the main client', () => {
+    jest.useFakeTimers();
+    const adapter = fileAdapter();
+    const newSocket = () =>
+      (adapter as unknown as { createValkeyClient(name: string): { options: { tls?: { cert?: Buffer | string; servername?: string } } } })
+        .createValkeyClient('scratch');
+    // A cached CLI client is kept current as well (it reconnects on its own).
+    const cliClient = { options: {} as { tls?: { cert?: Buffer | string } }, on: jest.fn() };
+    (adapter as unknown as { cliClient: unknown }).cliClient = cliClient;
+    expect(certOf(newSocket())).toBe(pairA.cert);
+
+    writePair(pairB);
+
+    // Within the recheck window nothing is stat-ed: scratch clients stay cheap.
+    expect(certOf(newSocket())).toBe(pairA.cert);
+
+    jest.advanceTimersByTime(TLS_MATERIAL_RECHECK_MS + 1);
+    // A scratch client (key analytics, CLI) built now carries the new material...
+    expect(certOf(newSocket())).toBe(pairB.cert);
+    // ...and so do the long-lived clients' option objects (cluster discovery copies the main one).
+    expect(certOf(adapter.getClient())).toBe(pairB.cert);
+    expect(adapter.getClient().options.tls?.servername).toBe('db.example.com');
+    expect(certOf(cliClient)).toBe(pairB.cert);
+  });
+
+  it('keeps the previous pair when a rotation is caught between writing the certificate and the key', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+
+    // Only the certificate has been replaced so far: the files do not match.
+    writeFile('client.crt', pairB.cert);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairA.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairA.key);
+
+    // The key lands: the next refresh adopts the complete new pair.
+    writeFile('client.key', pairB.key);
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairB.cert);
+    expect(client.options.tls?.key?.toString()).toBe(pairB.key);
+  });
+
+  it('re-reads before every reconnect but logs a change only when the files changed', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    const read = jest.spyOn(tlsMaterial, 'resolveTlsMaterial');
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const changedLogs = () =>
+      log.mock.calls.filter(([m]) => /TLS files changed on disk/.test(String(m))).length;
+    try {
+      client.emit('reconnecting');
+      client.emit('reconnecting');
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(changedLogs()).toBe(0);
+
+      writeFile('client.crt', pairA.cert);
+      client.emit('reconnecting');
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(changedLogs()).toBe(1);
+    } finally {
+      read.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('installs freshly read material on a forced reconnect when the fingerprint is unchanged', () => {
+    const fingerprint = jest.spyOn(tlsMaterial, 'tlsMaterialFingerprint').mockReturnValue('constant');
+    try {
+      const adapter = fileAdapter();
+      const client = adapter.getClient();
+      writePair(pairB);
+      client.emit('reconnecting');
+      expect(certOf(client)).toBe(pairB.cert);
+    } finally {
+      fingerprint.mockRestore();
+    }
+  });
+
+  it('warns once while the files stay unusable and logs when they recover', () => {
+    const adapter = fileAdapter();
+    const client = adapter.getClient();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      writeFile('client.crt', pairB.cert);
+      client.emit('reconnecting');
+      client.emit('reconnecting');
+      expect(warn.mock.calls.filter(([m]) => /Keeping previously loaded TLS files/.test(String(m)))).toHaveLength(1);
+
+      writeFile('client.key', pairB.key);
+      client.emit('reconnecting');
+      expect(log).toHaveBeenCalledWith('TLS files on disk are usable again');
+      expect(certOf(client)).toBe(pairB.cert);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it('keeps the previously loaded material when the rotated file is unreadable', () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: 'db.example.com',
+      port: 6379,
+      tls: true,
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    const client = adapter.getClient();
+    fs.rmSync(path.join(certDir, 'client.crt'));
+    client.emit('reconnecting');
+    expect(certOf(client)).toBe(pairA.cert);
+  });
+
+  it('gives up on ACL WHOAMI after the deadline instead of hanging connect()', async () => {
+    jest.useFakeTimers();
+    const adapter = Object.create(UnifiedDatabaseAdapter.prototype) as UnifiedDatabaseAdapter;
+    const call = jest.fn(() => new Promise<never>(() => undefined));
+    (adapter as unknown as { _client: { call: typeof call } })._client = { call };
+    const probe = (adapter as unknown as { probeAuthenticatedUser(): Promise<string | undefined> }).probeAuthenticatedUser;
+
+    const pending = probe.call(adapter);
+    jest.advanceTimersByTime(WHOAMI_TIMEOUT_MS + 1);
+    await expect(pending).resolves.toBeUndefined();
+  });
+});
+
+describe('UnifiedDatabaseAdapter — deferred TLS setup and single WHOAMI per connect', () => {
+  const CERT = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
+  const KEY = '-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n';
+  const originalDir = process.env.BETTERDB_TLS_CERT_DIR;
+  let certDir: string;
+
+  beforeEach(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adapter-late-mount-'));
+    process.env.BETTERDB_TLS_CERT_DIR = certDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+    if (originalDir === undefined) delete process.env.BETTERDB_TLS_CERT_DIR;
+    else process.env.BETTERDB_TLS_CERT_DIR = originalDir;
+  });
+
+  it('recovers when the certificate files appear after construction (late-mounted secret)', async () => {
+    const adapter = new UnifiedDatabaseAdapter({
+      host: '127.0.0.1',
+      port: 1,
+      tls: true,
+      authMode: 'certificate',
+      tlsConfig: { source: 'file', certPath: 'client.crt', keyPath: 'client.key' },
+    });
+    // Files missing: the deferred error surfaces on connect, every time.
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+    await expect(adapter.connect()).rejects.toThrow(/Client certificate file 'client.crt' not found/);
+
+    fs.writeFileSync(path.join(certDir, 'client.crt'), CERT);
+    fs.writeFileSync(path.join(certDir, 'client.key'), KEY);
+
+    // Now the material loads and the dial proceeds (and fails on the dead port instead).
+    let message = '';
+    try {
+      await adapter.connect();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).not.toMatch(/not found/);
+    // The failed dial discards the client, so inspect the loaded material directly.
+    const material = (adapter as unknown as { tlsMaterial: { cert?: Buffer | string } }).tlsMaterial;
+    expect(material.cert?.toString()).toBe(CERT);
+    await adapter.disconnect().catch(() => undefined);
+  });
+
+  it('keeps a permanent configuration error permanent', async () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, tls: true, authMode: 'certificate' });
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+    await expect(adapter.connect()).rejects.toThrow(/client certificate and private key/);
+  });
+
+  it('does not probe WHOAMI on the initial ready (doConnect owns that), only on later reconnects', () => {
+    const adapter = new UnifiedDatabaseAdapter({ host: '127.0.0.1', port: 1, username: 'default', password: '' });
+    const probe = jest
+      .spyOn(adapter as unknown as { probeAuthenticatedUser: () => Promise<string | undefined> }, 'probeAuthenticatedUser')
+      .mockResolvedValue('app');
+    const client = adapter.getClient();
+
+    client.emit('ready');
+    expect(probe).not.toHaveBeenCalled();
+
+    client.emit('ready');
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 });

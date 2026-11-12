@@ -48,9 +48,24 @@ opens. Surface findings:
   hosted instances stay quiet.
 - **ACL banner** — when the connection user is missing `+monitor`, an
   `ACL SETUSER` snippet is rendered with a copy-to-clipboard button.
-- **Health gate** — memory pressure, recent OOM events, replication lag,
-  and active failover. The gate only blocks anomaly-triggered and
-  scheduled captures; manual sessions surface the report as a warning.
+- **Health gate** — memory pressure, recent OOM events, active failover,
+  an unhealthy replica link, and replication lag. A link is unhealthy
+  when a primary's replica is not online or has stopped acking, or when
+  a replica's own link to its primary is down, syncing or stale. This
+  means a normal resync also blocks until it finishes. Lag starts as the
+  gap between the primary offset and each replica's last ack. A gap
+  under the limit is reported as is and needs no wait. A gap at or above
+  the limit may only be writes in flight, so the gate polls for up to
+  2.5 s until that replica acks again and compares the new ack with the
+  primary offset from the same read. A replica that drops or never acks
+  keeps its first gap. Lag or link state with nothing to measure, such
+  as lag on a replica with no replicas of its own, or that can't be
+  read, shows as n/a and does not block. This panel doesn't wait for
+  that ack, so it shows a gap at or above the limit with "Replica may
+  be behind", and only a triggered or scheduled capture confirms it.
+  The gate only blocks
+  anomaly-triggered and scheduled captures; manual sessions surface the
+  report as a warning.
 - **Throughput estimate** — projected lines and bytes for the requested
   duration based on the live ops/sec.
 
@@ -65,6 +80,9 @@ anomaly recurs on a connection.
 - Auto-clears 24 hours after creation if it never matches.
 - If the connection already has an active capture when the trigger
   fires, the trigger queues and re-tries on the next poll.
+- If the gate can't be read or the connection is away, for example
+  while an agent reconnects, the trigger also queues and re-tries until
+  it expires.
 - Health-gate denial moves the trigger to `skipped` with the gate's
   reason recorded; a `monitor.session.skipped` webhook fires.
 - A successful match dispatches a `monitor.session.started` event;
@@ -86,6 +104,22 @@ expression.
 `POST /api/monitor/schedules`, `GET /api/monitor/schedules`,
 `DELETE /api/monitor/schedules/:id`. Disabled rows older than the
 retention cutoff are pruned by the data-retention sweep.
+
+## Top keys of a capture
+
+The cross-reference result also carries `topKeys`: the 10 keys with the
+most commands in the capture, each with its command count and its share
+of the commands that have a key. It does not depend on the baseline. The
+session page shows it as **Top keys in this capture**.
+
+The first argument of a command counts as its key. `MGET a b c` counts
+`a` only, an `EVAL` counts its script text, and a command without a key,
+such as `CLUSTER NODES`, counts its first word.
+
+On a cluster, a capture runs on one node: the one picked in the start
+dialog, or `targetNodeId` in `POST /api/monitor/sessions`. To find the
+keys behind a hot shard, start it on the hot primary; see
+[`hot_shard`](anomaly-detection.md#hot_shard).
 
 ## Capture-vs-capture diff (Pro+)
 
@@ -152,3 +186,6 @@ demo host).
 | `MONITOR_PROVIDER_OVERRIDE` | off | Test-only override for the pre-flight provider detector |
 | `MONITOR_RECENT_OOM_WINDOW_MS` | 5 min | Health-gate window for recent OOM-correlated anomalies |
 | `MONITOR_RECENT_FAILOVER_WINDOW_MS` | 2 min | Health-gate window for replication-role changes |
+| `MONITOR_MEMORY_PCT_THRESHOLD` | 85 | Health-gate limit on `used_memory` as a percentage of `maxmemory` |
+| `MONITOR_REPLICATION_LAG_BYTES` | 10 MB | Health-gate limit on how far the furthest-behind replica's acked offset is from the primary offset |
+| `MONITOR_REPLICA_IO_STALE_SEC` | 30 s | Health-gate limit on `master_last_io_seconds_ago` on a replica and on each replica's `lag` on a primary; a link is unhealthy when the value is strictly greater, so keep this comfortably above `repl-ping-replica-period` |

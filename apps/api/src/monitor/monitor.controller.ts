@@ -107,7 +107,7 @@ export class MonitorController {
     if (!connectionId) {
       throw new BadRequestException('connectionId query parameter is required');
     }
-    return this.healthGateService.evaluate(connectionId);
+    return this.healthGateService.evaluateAdvisory(connectionId);
   }
 
   /**

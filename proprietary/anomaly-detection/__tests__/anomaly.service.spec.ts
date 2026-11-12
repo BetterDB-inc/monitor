@@ -1,6 +1,20 @@
+import { TOPOLOGY_TARGET_LIMIT, type TopologyTarget } from '../topology-targets';
+import { randomUUID } from 'crypto';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
+import { RESHARD_MARKER_STALL_MS } from '../reshard-pressure-detector';
+import { RESYNC_ESCALATION_WINDOW_MS } from '../recovery-amplification-detector';
 import { AnomalyService } from '../anomaly.service';
+import { IncidentTimelineBuilder, incidentIdFor, incidentStartOf, signalKey } from '../incident-timeline';
+import { ReplicaSlotAnomaly, replicaSlotSignature } from '../replica-slot-state-detector';
+import { MetricBuffer } from '../metric-buffer';
+import * as sequenceRules from '../sequence-rules';
+import {
+  OUTBOX_MAX_AGE_MS,
+  OUTBOX_MAX_ENTRIES,
+  OUTBOX_RETRY_BASE_MS,
+} from '../anomaly-persistence-outbox';
+import type { ReplicationStreamSample } from '../replication-stream';
 import { MetricsParser } from '@app/database/parsers/metrics.parser';
 import { PrometheusService } from '@app/prometheus/prometheus.service';
 import { SettingsService } from '@app/settings/settings.service';
@@ -10,17 +24,36 @@ import { ConnectionRegistry } from '@app/connections/connection-registry.service
 import { ConnectionContext } from '@app/common/services/multi-connection-poller';
 import { DatabasePort } from '@app/common/interfaces/database-port.interface';
 import { ClusterNode, SentinelNodeInfo } from '@app/common/types/metrics.types';
+import type { NodeSlotStats } from '@app/cluster/shard-load';
+import { ShardLoadService } from '@app/cluster/shard-load.service';
 import { nodeAclDigest, clusterKeyFromNodes } from '../acl-drift-detector';
+import { RETRY_AMP_LATENCY_VERDICT_TTL_MS } from '../retry-amplification-detector';
+import { NODE_ATTRIBUTION_UNAVAILABLE } from '../retry-amplification-attribution';
+import {
+  RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
+  RETRY_AMP_MAX_CAPTURE_ROWS,
+} from '../retry-amplification-attribution';
+import {
+  DIVERGENCE_HISTORY_QUERY_WINDOWS,
+  DIVERGENCE_PERSIST_BACKLOG,
+  OPEN_EVENT_PAGE_SIZE,
+} from '../replication-divergence-detector';
 import {
   MetricType,
   METRICS_HANDLED_OUTSIDE_EXTRACTOR,
   AnomalySeverity,
   AnomalyType,
   AnomalyPattern,
+  ANOMALY_WEBHOOK_SINK,
+  AnomalyEvent,
 } from '../types';
 import { AppSettings, WEBHOOK_EVENTS_PRO_SERVICE, WebhookEventType } from '@betterdb/shared';
+import { AnomalySavedBus } from '@app/common/services/anomaly-saved-bus';
+import { ClientListCache } from '@app/common/services/client-list-cache';
 import { DETECTOR_DEFAULTS } from '@app/anomaly/anomaly.types';
 import { OtelEventDispatcherService } from '@app/otel-telemetry/otel-event-dispatcher.service';
+import { MemoryAdapter } from '@app/storage/adapters/memory.adapter';
+import { summarizeClientCaptures } from '@app/storage/adapters/client-analytics-stats';
 import { ExternalMetricsStore } from '@app/external-metrics/external-metrics-store';
 import { ExternalMetricsAdapter } from '@app/external-metrics/external-metrics.adapter';
 
@@ -31,9 +64,24 @@ describe('AnomalyService', () => {
   let storage: Record<string, jest.Mock>;
   let prometheusService: Record<string, jest.Mock>;
   let webhookEventsProService: Record<string, jest.Mock>;
+  let anomalyWebhookSink: { dispatchAnomalyWebhook: jest.Mock; dispatchSequenceWebhook: jest.Mock };
+  let anomalySavedBus: AnomalySavedBus;
+  let clientListCache: ClientListCache;
   let otelEvents: { dispatch: jest.Mock };
   let dbClient: jest.Mocked<Partial<DatabasePort>>;
   let mockCtx: ConnectionContext;
+
+  const divergenceHistory = () =>
+    service.getReplicationDivergenceHistory('conn-1', 0, Number.MAX_SAFE_INTEGER);
+
+  const STRING_EVENT_ID =
+    /-(failover|promotion|cluster-state|persistence|dup-primary|stuck-replica|orphaned-slots|hostname-staleness|replica-slot-state)-|^config-drift-/;
+
+  afterEach(() => {
+    if (jest.isMockFunction(Date.now)) (Date.now as jest.Mock).mockRestore();
+    const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id as string);
+    expect(ids.filter((id) => STRING_EVENT_ID.test(id))).toEqual([]);
+  });
 
   beforeEach(async () => {
     slowLogAnalytics = {
@@ -46,10 +94,19 @@ describe('AnomalyService', () => {
 
     storage = {
       saveAnomalyEvent: jest.fn().mockResolvedValue(undefined),
+      saveReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
+      pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
+      getReplicationDivergenceWindows: jest.fn().mockResolvedValue([]),
       saveCorrelatedGroup: jest.fn().mockResolvedValue(undefined),
+      getClientCaptureSummary: jest.fn().mockResolvedValue({ captures: [], connections: [], truncated: false }),
+      getClientCaptureRowCounts: jest.fn().mockResolvedValue([]),
       getAnomalyEvents: jest.fn().mockResolvedValue([]),
       getCorrelatedGroups: jest.fn().mockResolvedValue([]),
+      getCorrelatedGroupMembers: jest.fn().mockResolvedValue([]),
+      saveIncidentBoundaries: jest.fn().mockResolvedValue(0),
+      getIncidentBoundaries: jest.fn().mockResolvedValue([]),
       resolveAnomaly: jest.fn().mockResolvedValue(true),
+      resolveOpenAnomaly: jest.fn().mockResolvedValue(true),
       getAclEntries: jest.fn().mockResolvedValue([]),
       initialize: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined),
@@ -59,11 +116,23 @@ describe('AnomalyService', () => {
     prometheusService = {
       incrementAnomalyEvent: jest.fn(),
       incrementCorrelatedGroup: jest.fn(),
-      updateAnomalySummary: jest.fn(),
+      updateAnomalySummaries: jest.fn(),
       updateAnomalyBufferStats: jest.fn(),
       updateReplBufferPressure: jest.fn(),
+      updateReplicationSignals: jest.fn(),
+      updateRetrySignals: jest.fn(),
+      clearRetrySignals: jest.fn(),
+      clearNodeSignals: jest.fn(),
+      updateActiveIncidents: jest.fn(),
+      updateFanoutCoverage: jest.fn(),
     };
 
+    anomalyWebhookSink = {
+      dispatchAnomalyWebhook: jest.fn().mockResolvedValue(undefined),
+      dispatchSequenceWebhook: jest.fn().mockResolvedValue(undefined),
+    };
+    anomalySavedBus = new AnomalySavedBus();
+    clientListCache = new ClientListCache();
     webhookEventsProService = {
       isEnabled: jest.fn().mockReturnValue(true),
       dispatchFailoverStarted: jest.fn().mockResolvedValue(undefined),
@@ -72,10 +141,12 @@ describe('AnomalyService', () => {
       dispatchAnomalyDetected: jest.fn().mockResolvedValue(undefined),
       dispatchSlowlogThreshold: jest.fn().mockResolvedValue(undefined),
       dispatchReplicationLag: jest.fn().mockResolvedValue(undefined),
+      endReplicationStall: jest.fn(),
       dispatchLatencySpike: jest.fn().mockResolvedValue(undefined),
       dispatchConnectionSpike: jest.fn().mockResolvedValue(undefined),
       dispatchMetricForecastLimit: jest.fn().mockResolvedValue(undefined),
       dispatchDataLossDetected: jest.fn().mockResolvedValue(undefined),
+      dispatchRetryAmplificationDetected: jest.fn().mockResolvedValue(undefined),
     };
 
     otelEvents = { dispatch: jest.fn() };
@@ -118,6 +189,12 @@ describe('AnomalyService', () => {
           useValue: {
             list: jest.fn().mockReturnValue([]),
             get: jest.fn(),
+            getConfig: jest.fn().mockReturnValue(null),
+            getDefaultId: jest.fn().mockReturnValue(null),
+            isAutoRegistered: jest.fn().mockReturnValue(false),
+            listMembers: jest.fn().mockReturnValue([]),
+            sentinelDataNodeCredentials: jest.fn().mockReturnValue(null),
+            findIdByHostPort: jest.fn().mockReturnValue(null),
           },
         },
         { provide: 'STORAGE_CLIENT', useValue: storage },
@@ -151,6 +228,9 @@ describe('AnomalyService', () => {
         { provide: SlowLogAnalyticsService, useValue: slowLogAnalytics },
         { provide: CommandLogAnalyticsService, useValue: commandLogAnalytics },
         { provide: WEBHOOK_EVENTS_PRO_SERVICE, useValue: webhookEventsProService },
+        { provide: ANOMALY_WEBHOOK_SINK, useValue: anomalyWebhookSink },
+        { provide: AnomalySavedBus, useValue: anomalySavedBus },
+        { provide: ClientListCache, useValue: clientListCache },
         { provide: OtelEventDispatcherService, useValue: otelEvents },
       ],
     }).compile();
@@ -196,6 +276,58 @@ describe('AnomalyService', () => {
       expect(storage.getAnomalyEvents).toHaveBeenCalledWith(
         expect.objectContaining({ metricType: 'command_p99', connectionId: 'c1' }),
       );
+    });
+
+    it('reads back the trigger of a stored retry amplification event', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        {
+          id: 'retry-1',
+          timestamp: Date.now() - 60_000,
+          metricType: 'retry_amplification',
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 3,
+          baseline: 1,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 2,
+          message: 'retries',
+          retryTrigger: 'churn',
+          resolved: false,
+          connectionId: 'c1',
+        },
+      ]);
+
+      const [event] = await service.getRecentAnomalies(
+        Date.now() - 120_000,
+        undefined,
+        undefined,
+        MetricType.RETRY_AMPLIFICATION,
+        10,
+        'c1',
+      );
+
+      expect(event.retryTrigger).toBe('churn');
+    });
+
+    it('stores the trigger of a retry amplification event', () => {
+      const stored = (service as any).toStoredAnomalyEvent({
+        id: 'retry-1',
+        timestamp: Date.now(),
+        metricType: MetricType.RETRY_AMPLIFICATION,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 3,
+        baseline: 1,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 2,
+        message: 'retries',
+        retryTrigger: 'churn',
+        resolved: false,
+      });
+
+      expect(stored.retryTrigger).toBe('churn');
     });
 
     it('unions storage-only events with cached events on unfiltered recent reads', async () => {
@@ -492,6 +624,49 @@ describe('AnomalyService', () => {
       expect(failoverEvents[0].message).toContain('master to replica');
     });
 
+    const withRole = (role: string) =>
+      jest.fn().mockResolvedValue({
+        server: { role },
+        replication: { role, master_replid: 'replid-1', master_repl_offset: '100' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000', allocator_frag_ratio: '1.0' },
+        stats: {
+          instantaneous_ops_per_sec: '100',
+          instantaneous_input_kbps: '50',
+          instantaneous_output_kbps: '30',
+          evicted_keys: '0',
+          keyspace_misses: '5',
+          rejected_connections: '0',
+          acl_access_denied_auth: '0',
+        },
+      });
+
+    it('does not report a failover when a master becomes an active-replica', async () => {
+      await poll();
+      dbClient.getInfoParsed = withRole('active-replica');
+      await poll();
+
+      const failoverEvents = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
+      expect(failoverEvents).toHaveLength(0);
+    });
+
+    it('does not report a promotion when an active-replica becomes a master', async () => {
+      dbClient.getInfoParsed = withRole('replica');
+      await poll();
+      dbClient.getInfoParsed = withRole('active-replica');
+      await poll();
+      expect((service as any).prevReplSnapshot.has('conn-1')).toBe(false);
+      dbClient.getInfoParsed = withRole('master');
+      await poll();
+
+      const failoverEvents = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.REPLICATION_ROLE);
+      expect(failoverEvents).toHaveLength(0);
+    });
+
     it('detects master→slave (legacy naming)', async () => {
       await poll(); // master
 
@@ -687,10 +862,12 @@ describe('AnomalyService', () => {
     });
 
     it('records utilization delta on second poll', async () => {
-      jest.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000);
+      let now = 1000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
 
       mockInfoWithCpu('10.0', '20.0');
       await poll();
+      now = 2000;
       mockInfoWithCpu('10.5', '20.5');
       await poll();
 
@@ -1327,6 +1504,55 @@ describe('AnomalyService', () => {
       expect(a1.resolved).toBe(false);
     });
 
+    it('keeps a malformed id out of the outbox while storage is down', async () => {
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await service.resolveAnomaly('not-a-uuid')).toBe(false);
+
+      expect((service as any).persistenceOutbox.has('not-a-uuid')).toBe(false);
+    });
+
+    it('keeps an id Postgres rejects as malformed out of the outbox', async () => {
+      const invalidText = Object.assign(new Error('invalid input syntax for type uuid'), {
+        code: '22P02',
+      });
+      storage.resolveAnomaly.mockRejectedValue(invalidText);
+      (service as any).recentAnomalies.push({ id: 'cached', resolved: false, persisted: true });
+
+      expect(await service.resolveAnomaly('cached')).toBe(false);
+
+      expect((service as any).persistenceOutbox.has('cached')).toBe(false);
+    });
+
+    it('keeps an operator-supplied uncached id out of the outbox', async () => {
+      const id = '6f1c2f0e-3f6b-4a53-9b4e-0d8a4f6f2a11';
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await service.resolveAnomaly(id)).toBe(false);
+
+      expect((service as any).persistenceOutbox.has(id)).toBe(false);
+    });
+
+    it('queues an uncached string id a detector closes through a storage outage', async () => {
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+
+      expect(await (service as any).resolveAnomalyOutcome('failover:1')).toBe('retry');
+
+      expect((service as any).persistenceOutbox.has('failover:1')).toBe(true);
+    });
+
+    it('keeps retrying a queued id through a later outage', async () => {
+      const cached = { id: 'cached', resolved: false, persisted: true };
+      (service as any).recentAnomalies.push(cached);
+      storage.resolveAnomaly.mockRejectedValue(new Error('db down'));
+      await service.resolveAnomaly('cached');
+
+      (service as any).recentAnomalies.pop();
+      await service.resolveAnomaly('cached');
+
+      expect((service as any).persistenceOutbox.has('cached')).toBe(true);
+    });
+
     // Deterministic string-id events (failover/promotion/cluster/persistence/
     // dup-primary) can't be stored on Postgres (UUID PK), so saveAnomalyEvent
     // throws in addAnomaly and they stay memory-only. Resolution must still work
@@ -1341,13 +1567,10 @@ describe('AnomalyService', () => {
       expect(storage.resolveAnomaly).not.toHaveBeenCalled();
     });
 
-    it('addAnomaly leaves an event memory-only when the store rejects its id, and it stays dismissable', async () => {
-      // Simulate Postgres rejecting the non-UUID id.
-      storage.saveAnomalyEvent.mockRejectedValueOnce(
-        new Error('invalid input syntax for type uuid'),
-      );
+    it('addAnomaly leaves an event memory-only when the store rejects it, and it stays dismissable', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
       const event = {
-        id: 'conn-persistence-error',
+        id: 'unsaved-event',
         metricType: 'persistence',
         anomalyType: 'state',
         severity: 'warning',
@@ -1360,7 +1583,7 @@ describe('AnomalyService', () => {
 
       // resolveAnomaly falls back to the in-memory flip.
       storage.resolveAnomaly.mockClear();
-      expect(await service.resolveAnomaly('conn-persistence-error')).toBe(true);
+      expect(await service.resolveAnomaly('unsaved-event')).toBe(true);
       expect(event.resolved).toBe(true);
       expect(storage.resolveAnomaly).not.toHaveBeenCalled();
     });
@@ -1516,6 +1739,2011 @@ describe('AnomalyService', () => {
   });
 
   // ─── Cluster State Webhook Dispatch ──────────────────────────────────────
+
+  describe('hot shard', () => {
+    const BASE = 1_700_000_000_000;
+    const IDS = ['a0000000', 'b0000000', 'c0000000'];
+    const ADDRS = ['10.0.0.1:6379', '10.0.0.2:6379', '10.0.0.3:6379'];
+    const STEP_MS = 15_000;
+    const HOT = [900_000, 100_000, 100_000];
+    const EVEN = [300_000, 310_000, 290_000];
+    const FLAT = [100_000, 100_000, 100_000];
+    let clock: number;
+    let shardLoad: ShardLoadService;
+    let counters: Map<number, number>;
+    let bytesOut: Map<number, number>;
+    let owners: number[][];
+    let migrating: boolean;
+    let ctx: ConnectionContext;
+
+    function clusterNodes() {
+      return IDS.map((id, i) => ({
+        id,
+        address: `${ADDRS[i]}@16379`,
+        flags: i === 0 ? ['myself', 'master'] : ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        migratingSlots: i === 0 && migrating ? [{ slot: 1, targetNodeId: IDS[1] }] : [],
+      }));
+    }
+
+    function reading(): NodeSlotStats[] {
+      return owners.map((slots, shard) => ({
+        nodeId: IDS[shard],
+        address: ADDRS[shard],
+        stats: Object.fromEntries(
+          slots.map((slot) => [
+            slot,
+            {
+              key_count: 10,
+              cpu_usec: counters.get(slot) ?? 0,
+              network_bytes_in: 0,
+              network_bytes_out: bytesOut.get(slot) ?? 0,
+            },
+          ]),
+        ),
+      }));
+    }
+
+    async function step(cpuPerSecond: number[], times = 1): Promise<void> {
+      for (let n = 0; n < times; n += 1) {
+        clock += STEP_MS;
+        cpuPerSecond.forEach((rate, shard) => {
+          const slots = owners[shard];
+          slots.forEach((slot, i) => {
+            const part = slots.length === 1 ? 1 : i === 0 ? 0.75 : 0.25 / (slots.length - 1);
+            counters.set(slot, (counters.get(slot) ?? 0) + (rate * part * STEP_MS) / 1000);
+          });
+        });
+        shardLoad.record('conn-a', reading(), clock);
+        await poll(ctx);
+      }
+    }
+
+    async function idle(ms: number): Promise<void> {
+      clock += ms;
+      await poll(ctx);
+    }
+
+    const hotEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.HOT_SHARD);
+
+    beforeEach(() => {
+      clock = BASE;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
+      shardLoad = new ShardLoadService();
+      (service as any).shardLoad = shardLoad;
+      counters = new Map();
+      bytesOut = new Map();
+      owners = [
+        [0, 1],
+        [10, 11],
+        [20, 21],
+      ];
+      migrating = false;
+      const info = {
+        server: { redis_version: '8.0.0' },
+        replication: { role: 'master' },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { instantaneous_ops_per_sec: '6000', cluster_enabled: '1' },
+      };
+      ctx = {
+        ...mockCtx,
+        connectionId: 'conn-a',
+        connectionName: 'cluster',
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(info),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn().mockImplementation(async () => clusterNodes()),
+        },
+      } as unknown as ConnectionContext;
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('raises one event for a shard that stays hot for a minute', async () => {
+      await step(HOT, 5);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+      await idle(1_000);
+      await step(HOT, 3);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0]).toMatchObject({
+        metricType: MetricType.HOT_SHARD,
+        severity: AnomalySeverity.WARNING,
+        connectionId: 'conn-a',
+        dedupeKey: 'hot_shard:a0000000',
+        value: 9,
+        threshold: 2,
+        resolved: false,
+        message:
+          "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+          'Top slots by CPU: 0 (75% of the shard), 1 (25%).',
+      });
+      expect(hotEvents()[0].nodeAddr).toBeUndefined();
+    });
+
+    it('stamps the address of a hot primary that is not the node the connection points at', async () => {
+      await step([100_000, 900_000, 100_000], 6);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0]).toMatchObject({
+        nodeAddr: ADDRS[1],
+        dedupeKey: 'hot_shard:b0000000',
+      });
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dedupeKey: 'hot_shard:b0000000',
+          sourceHost: '10.0.0.2',
+          sourcePort: 6379,
+        }),
+      );
+    });
+
+    it('raises nothing for an evenly loaded cluster', async () => {
+      await step(EVEN, 12);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('raises nothing for a shard that sends far more bytes than the others on even CPU', async () => {
+      for (let n = 0; n < 12; n += 1) {
+        bytesOut.set(0, (bytesOut.get(0) ?? 0) + (64 * 1024 * 1024 * STEP_MS) / 1000);
+        await step(EVEN);
+      }
+
+      expect(shardLoad.getLatest('conn-a')?.shards[0]).toMatchObject({
+        networkBytesOutPerSecond: 64 * 1024 * 1024,
+        networkShare: 1,
+      });
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('flags one loaded shard in an otherwise idle cluster with a finite value', async () => {
+      await step([900_000, 0, 0], 6);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].value).toBe(18);
+      expect(hotEvents()[0].message).toContain(
+        'CPU 0.90 cores against a near-idle cluster median',
+      );
+      expect(JSON.stringify(service.getHotShards('conn-a'))).not.toMatch(/null|NaN|Infinity/);
+    });
+
+    it('reports the open hot shards with their load and top slots', async () => {
+      await step(HOT, 6);
+
+      expect(service.getHotShards('conn-a')).toEqual([
+        {
+          shardId: 'a0000000',
+          nodeAddr: ADDRS[0],
+          slotCount: 2,
+          since: BASE + 2 * STEP_MS,
+          sampledAt: BASE + 6 * STEP_MS,
+          cpu: { perSecond: 900_000, share: expect.closeTo(9 / 11), median: 100_000, ratio: 9 },
+          network: { perSecond: 0, share: 0, median: 0 },
+          topSlots: [
+            {
+              slot: 0,
+              cpuUsecPerSecond: 675_000,
+              networkBytesPerSecond: 0,
+              keyCount: 10,
+              shareOfShard: 0.75,
+            },
+            {
+              slot: 1,
+              cpuUsecPerSecond: 225_000,
+              networkBytesPerSecond: 0,
+              keyCount: 10,
+              shareOfShard: 0.25,
+            },
+          ],
+          topKeys: [],
+          keySource: 'unavailable',
+          keyNote: 'the monitor does not connect to the cluster nodes directly',
+          keysSampled: 0,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          eventId: hotEvents()[0].id,
+          captureAvailable: false,
+        },
+      ]);
+      expect(service.getHotShards('conn-other')).toEqual([]);
+    });
+
+    it('keeps the event open between the release and the raise factor, then resolves it', async () => {
+      await step(HOT, 6);
+      await step([170_000, 100_000, 100_000], 25);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')[0].cpu.ratio).toBeCloseTo(1.7, 2);
+
+      await step([140_000, 100_000, 100_000], 25);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('starts the minute over after a slot changes owner', async () => {
+      await step(HOT, 4);
+      owners = [[0, 1], [10], [20, 21, 11]];
+      await step(HOT, 3);
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event through a sample that is still settling', async () => {
+      await step(HOT, 6);
+      for (const slot of owners[0]) counters.set(slot, 0);
+      await step(FLAT);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await step(FLAT);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('holds back while a reshard is in progress', async () => {
+      migrating = true;
+      await step(HOT, 8);
+
+      expect(hotEvents()).toEqual([]);
+
+      migrating = false;
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event through a reshard', async () => {
+      await step(HOT, 6);
+      migrating = true;
+      await step(EVEN, 12);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      migrating = false;
+      await step(EVEN);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('waits out an atomic slot migration, asking only when it is about to raise', async () => {
+      const checkSlotMigrations = jest
+        .fn()
+        .mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 5);
+
+      expect(checkSlotMigrations).not.toHaveBeenCalled();
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(checkSlotMigrations).toHaveBeenCalledWith('conn-a');
+      expect(hotEvents()).toEqual([]);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+    });
+
+    it('holds a new event back while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: false });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 12);
+
+      expect(hotEvents()).toEqual([]);
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 5);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('keeps an open event while it cannot tell whether a slot is migrating', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: false });
+
+      await step(HOT, 8);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await step(FLAT, 25);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+    });
+
+    it('reports the top slots of the sample it judged, not of one that arrived while it waited', async () => {
+      const checkSlotMigrations = jest.fn().mockImplementation(async () => {
+        counters.set(1, (counters.get(1) ?? 0) + 90_000_000);
+        shardLoad.record('conn-a', reading(), clock + 5_000);
+        return { migrations: [], complete: true };
+      });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+
+      await step(HOT, 6);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(1);
+      expect(hotEvents()[0].message).toContain('Top slots by CPU: 0 (75% of the shard), 1 (25%).');
+      expect(service.getHotShards('conn-a')[0]).toMatchObject({
+        sampledAt: BASE + 6 * STEP_MS,
+        topSlots: [
+          { slot: 0, shareOfShard: 0.75 },
+          { slot: 1, shareOfShard: 0.25 },
+        ],
+      });
+    });
+
+    it('closes an open event after five minutes without a topology read', async () => {
+      await step(HOT, 6);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await idle(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+
+      await idle(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('judges the latest sample again once the topology can be read', async () => {
+      await step(HOT, 4);
+      (ctx.client.getClusterNodes as jest.Mock).mockRejectedValue(new Error('CLUSTERDOWN'));
+      await step(HOT, 4);
+
+      expect(hotEvents()).toEqual([]);
+
+      (ctx.client.getClusterNodes as jest.Mock).mockImplementation(async () => clusterNodes());
+      await idle(1_000);
+
+      expect(hotEvents()).toHaveLength(1);
+    });
+
+    it('closes an open event after five minutes without a shard load sample', async () => {
+      await step(HOT, 6);
+      await idle(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      await idle(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('closes an open event after five minutes of polls that fail at INFO', async () => {
+      await step(HOT, 6);
+      (ctx.client.getInfoParsed as jest.Mock).mockRejectedValue(new Error('INFO did not answer'));
+      const failedPoll = async (ms: number) => {
+        clock += ms;
+        await expect(poll(ctx)).rejects.toThrow('INFO did not answer');
+      };
+      await failedPoll(240_000);
+
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      await failedPoll(90_000);
+
+      expect(hotEvents()[0].resolved).toBe(true);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('asks about migrations before it replaces an event that was resolved by hand', async () => {
+      const checkSlotMigrations = jest.fn().mockResolvedValue({ migrations: [], complete: true });
+      (service as any).clusterMetrics = { checkSlotMigrations };
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+      checkSlotMigrations.mockClear();
+      checkSlotMigrations.mockResolvedValue({ migrations: [{ slot: 5 }], complete: true });
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(1);
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+
+      checkSlotMigrations.mockResolvedValue({ migrations: [], complete: true });
+      await step(HOT, 4);
+
+      expect(hotEvents()).toHaveLength(1);
+
+      await step(HOT);
+
+      expect(checkSlotMigrations).toHaveBeenCalledTimes(2);
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+    });
+
+    it('replaces an event resolved by hand at once when no slot is migrating', async () => {
+      await step(HOT, 6);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(HOT);
+
+      expect(hotEvents()).toHaveLength(2);
+      expect(hotEvents().map((event) => event.resolved)).toEqual([false, true]);
+    });
+
+    it('drops an event resolved by hand from the hot shard list at once', async () => {
+      await step(HOT, 6);
+      expect(service.getHotShards('conn-a')).toHaveLength(1);
+
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('does not replace an event resolved by hand below the raise factor', async () => {
+      const warm = [170_000, 100_000, 100_000];
+      await step(HOT, 6);
+      await step(warm, 25);
+      expect(hotEvents()[0].resolved).toBe(false);
+      expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+
+      await step(warm, 2);
+
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('does not replace an event resolved by hand while the sample is being judged', async () => {
+      const warm = [170_000, 100_000, 100_000];
+      await step(HOT, 6);
+      await step(warm, 25);
+      const [event] = hotEvents();
+      expect(event.resolved).toBe(false);
+      jest.spyOn(service as any, 'refreshHotShardKeys').mockImplementationOnce(async () => {
+        await service.resolveAnomaly(event.id);
+      });
+
+      await step(warm, 3);
+
+      expect(event.resolved).toBe(true);
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('judges a sample with its own top slots when a later one arrives meanwhile', async () => {
+      await step(HOT, 6);
+      const slots = () => service.getHotShards('conn-a')[0].topSlots.map((slot) => slot.slot);
+      expect(slots()).toEqual([0, 1]);
+      jest.spyOn(service as any, 'forgetResolvedHotShards').mockImplementationOnce(async () => {
+        counters.set(1, (counters.get(1) ?? 0) + 1_000_000_000);
+        shardLoad.record('conn-a', reading(), clock + 1_000);
+      });
+
+      await step(HOT);
+
+      expect(slots()).toEqual([0, 1]);
+
+      await idle(STEP_MS);
+
+      expect(slots()).toEqual([1, 0]);
+      expect(service.getHotShards('conn-a')[0].sampledAt).toBe(BASE + 7 * STEP_MS + 1_000);
+    });
+
+    it('raises nothing while the shard load is not measured', async () => {
+      for (let n = 0; n < 30; n += 1) await idle(STEP_MS);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('does not count a stalled sample again toward the minute', async () => {
+      await step(HOT, 3);
+      for (let n = 0; n < 12; n += 1) await idle(STEP_MS);
+
+      expect(hotEvents()).toEqual([]);
+    });
+
+    it('adopts its open event after a restart instead of raising a second one', async () => {
+      storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+        metricType === MetricType.HOT_SHARD && !offset
+          ? [
+              {
+                id: 'stored-1',
+                metricType: MetricType.HOT_SHARD,
+                dedupeKey: 'hot_shard:a0000000',
+                nodeAddr: ADDRS[0],
+                timestamp: BASE - 120_000,
+                resolved: false,
+              },
+              {
+                id: 'stored-0',
+                metricType: MetricType.HOT_SHARD,
+                dedupeKey: 'hot_shard:a0000000',
+                nodeAddr: ADDRS[0],
+                timestamp: BASE - 900_000,
+                resolved: false,
+              },
+            ]
+          : [],
+      );
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+
+      await step(HOT, 8);
+
+      expect(hotEvents()).toEqual([]);
+      expect(service.getHotShards('conn-a')).toEqual([
+        expect.objectContaining({ shardId: 'a0000000', since: BASE - 120_000 }),
+      ]);
+      expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('stored-1', expect.anything());
+      expect((service as any).persistenceOutbox.resolvedAt('stored-0')).toEqual(expect.any(Number));
+      expect((service as any).persistenceOutbox.resolvedAt('stored-1')).toBeUndefined();
+
+      await step(EVEN, 12);
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('stored-1', expect.any(Number));
+    });
+
+    describe('hot keys', () => {
+      type KeysBySlot = Record<number, Array<[string, number | Error]>>;
+      const NO_LFU = new Error(
+        'ERR An LFU maxmemory policy is not selected, access frequency not tracked.',
+      );
+      const RAISED =
+        "Hot shard a0000000 at 10.0.0.1:6379: CPU 9.0x the cluster median (82% of the cluster's slot CPU) for 60s. " +
+        'Top slots by CPU: 0 (75% of the shard), 1 (25%).';
+      const capture = (reason: string) =>
+        `${RAISED} Key names are not available (${reason}); a capture on this primary can show them.`;
+      let keys: KeysBySlot;
+
+      function hotNode() {
+        const freqOf = (name: Buffer): [Error | null, unknown] => {
+          const found = Object.values(keys)
+            .flat()
+            .find(([key]) => key === name.toString());
+          const freq = found?.[1];
+          return freq instanceof Error ? [freq, null] : [null, freq ?? null];
+        };
+        return {
+          callBuffer: jest.fn(async (_cluster: string, _sub: string, slot: number, count: number) =>
+            (keys[slot] ?? []).slice(0, count).map(([name]) => Buffer.from(name)),
+          ),
+          pipeline: jest.fn(() => {
+            const queued: Buffer[] = [];
+            return {
+              call(_object: string, _freq: string, name: Buffer) {
+                queued.push(name);
+                return this;
+              },
+              exec: async () => queued.map(freqOf),
+            };
+          }),
+        };
+      }
+
+      function dial(client: unknown) {
+        const discovery = {
+          getNodeConnection: jest.fn().mockResolvedValue(client),
+          evictNodeClient: jest.fn(),
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+        };
+        (service as any).clusterDiscovery = discovery;
+        return discovery;
+      }
+
+      const unavailableWarnings = (warn: jest.SpyInstance) =>
+        warn.mock.calls.filter(([line]) => String(line).startsWith('Hot keys are not available'));
+
+      beforeEach(() => {
+        keys = {
+          0: [
+            ['user:1', 40],
+            ['user:42', 255],
+          ],
+          1: [['cart:{9}', 201]],
+        };
+      });
+
+      it('names the hot keys in the message, the webhook and the detail', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toBe(
+          `${RAISED} Hot keys: "user:42" (freq 255), "cart:{9}" (freq 201), "user:1" (freq 40).`,
+        );
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            dedupeKey: 'hot_shard:a0000000',
+            message: expect.stringContaining('Hot keys: "user:42" (freq 255)'),
+          }),
+        );
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          eventId: hotEvents()[0].id,
+          captureAvailable: false,
+        });
+        expect(hotEvents()[0].message).not.toContain('capture');
+        expect(discovery.getNodeConnection).toHaveBeenCalledWith('a0000000', 'conn-a');
+        expect(client.callBuffer.mock.calls).toEqual([
+          ['CLUSTER', 'GETKEYSINSLOT', 0, 500],
+          ['CLUSTER', 'GETKEYSINSLOT', 1, 500],
+        ]);
+      });
+
+      it('writes a hostile key name into the message as one harmless line', async () => {
+        keys = { 0: [['<!channel>\n"x"', 255]] };
+        dial(hotNode());
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(
+          `${RAISED} Hot keys: "<!channel>\\x0a\\"x\\"" (freq 255).`,
+        );
+        expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('<!channel>\n"x"');
+      });
+
+      it('reads the keys once, right before the raise, and on no other poll', async () => {
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 5);
+
+        expect(client.callBuffer).not.toHaveBeenCalled();
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+
+        await step(HOT, 10);
+        await idle(1_000);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+      });
+
+      it('reads no keys for an evenly loaded cluster', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(EVEN, 30);
+
+        expect(discovery.getNodeConnection).not.toHaveBeenCalledWith('a0000000', 'conn-a');
+        expect(client.callBuffer).not.toHaveBeenCalled();
+      });
+
+      it('refreshes the keys of an open event at most every five minutes', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        keys = { 0: [['later', 99]] };
+
+        await step(HOT, 19);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(2);
+        expect(service.getHotShards('conn-a')[0].topKeys[0].key).toBe('user:42');
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keysSampledAt: BASE + 26 * STEP_MS,
+          keysSampled: 1,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toContain('"user:42"');
+      });
+
+      it('reads the keys again for the replacement of an event resolved by hand', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        expect(await service.resolveAnomaly(hotEvents()[0].id)).toBe(true);
+        keys = { 0: [['later', 99]] };
+
+        await step(HOT);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(hotEvents()).toHaveLength(2);
+        expect(hotEvents()[0].message).toContain('Hot keys: "later" (freq 99).');
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keysSampled: 1,
+          keysSampledAt: BASE + 7 * STEP_MS,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+      });
+
+      it('keeps the last key names when a refresh fails, and reads again five minutes later', async () => {
+        const client = hotNode();
+        const discovery = dial(client);
+        const dials = () =>
+          discovery.getNodeConnection.mock.calls.filter(([nodeId]) => nodeId === 'a0000000').length;
+        await step(HOT, 6);
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 20);
+
+        expect(dials()).toBe(2);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          keyNote:
+            'the last read gave no names (reading the keys from the hot primary failed: ' +
+            'ECONNREFUSED); these are from an earlier read',
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+
+        await step(HOT, 19);
+
+        expect(dials()).toBe(2);
+
+        discovery.getNodeConnection.mockResolvedValue(client);
+        keys = { 0: [['later', 99]] };
+        await step(HOT);
+
+        expect(dials()).toBe(3);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 1,
+          keysSampledAt: BASE + 46 * STEP_MS,
+          topKeys: [{ key: 'later', slot: 0, freq: 99 }],
+        });
+        expect(service.getHotShards('conn-a')[0]).not.toHaveProperty('keyNote');
+      });
+
+      it('keeps the last key names when every name of a refresh was skipped', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        keys = {
+          0: [['user:42', new Error('MOVED 0 10.0.0.2:6379')]],
+          1: [['cart:{9}', new Error('ASK 1 10.0.0.2:6379')]],
+        };
+
+        await step(HOT, 20);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          keySource: 'lfu',
+          keysSampled: 3,
+          keysSampledAt: BASE + 6 * STEP_MS,
+          keyNote: 'the last read gave no names; these are from an earlier read',
+          topKeys: [
+            { key: 'user:42', slot: 0, freq: 255 },
+            { key: 'cart:{9}', slot: 1, freq: 201 },
+            { key: 'user:1', slot: 0, freq: 40 },
+          ],
+        });
+
+        await step(HOT, 19);
+
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+
+      it('reads the keys of the top slots by CPU when another slot carries the bytes', async () => {
+        owners[0] = [0, 1, 2, 3, 4];
+        const client = hotNode();
+        dial(client);
+
+        for (let n = 0; n < 6; n += 1) {
+          bytesOut.set(4, (bytesOut.get(4) ?? 0) + (64 * 1024 * 1024 * STEP_MS) / 1000);
+          for (const slot of [1, 2]) counters.set(slot, (counters.get(slot) ?? 0) + 150_000);
+          await step(HOT);
+        }
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(client.callBuffer.mock.calls.map(([, , slot]) => slot)).toEqual([0, 1, 2]);
+      });
+
+      it('raises without key names when the node has no LFU policy, and says so once', async () => {
+        const warn = jest.spyOn((service as any).logger, 'warn');
+        keys = { 0: [['user:42', NO_LFU]], 1: [['cart:{9}', NO_LFU]] };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 46);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(hotEvents()[0].message).toBe(capture('no LFU policy'));
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({ message: capture('no LFU policy') }),
+        );
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          eventId: hotEvents()[0].id,
+          captureAvailable: true,
+          keySource: 'unavailable',
+          keyNote: 'maxmemory-policy is not an LFU policy, so the node keeps no access frequency',
+          keysSampled: 0,
+          topKeys: [],
+        });
+        expect(client.callBuffer).toHaveBeenCalledTimes(3);
+        expect(unavailableWarnings(warn)).toEqual([
+          [
+            'Hot keys are not available for cluster: maxmemory-policy is not an LFU policy, ' +
+              'so the node keeps no access frequency',
+          ],
+        ]);
+      });
+
+      it('raises without key names when the monitoring user may not list them', async () => {
+        const client = hotNode();
+        client.callBuffer.mockRejectedValue(
+          new Error("NOPERM User monitor has no permissions to run the 'cluster|getkeysinslot' command"),
+        );
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(capture('no permission'));
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
+          keySource: 'unavailable',
+          keyNote: 'the monitoring user may not run CLUSTER GETKEYSINSLOT',
+        });
+      });
+
+      it('gives up on a hot primary that does not answer and drops its client', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const client = hotNode();
+          client.callBuffer.mockReturnValue(new Promise(() => undefined));
+          const discovery = dial(client);
+
+          await step(HOT, 6);
+
+          expect(hotEvents()[0].message).toBe(capture('the hot primary did not answer'));
+          expect(service.getHotShards('conn-a')[0]).toMatchObject({
+            captureAvailable: true,
+            keySource: 'unavailable',
+            keyNote: 'reading the keys from the hot primary timed out',
+          });
+          expect(discovery.evictNodeClient).toHaveBeenCalledWith(client);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
+      it('does not start reading on a connection that arrives after it gave up', async () => {
+        const budget = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const client = hotNode();
+          const discovery = dial(client);
+          let connect!: (connected: unknown) => void;
+          discovery.getNodeConnection.mockReturnValue(
+            new Promise((resolve) => {
+              connect = resolve;
+            }),
+          );
+
+          await step(HOT, 6);
+          connect(client);
+          await new Promise((resolve) => setImmediate(resolve));
+
+          expect(hotEvents()[0].message).toBe(capture('the hot primary did not answer'));
+          expect(service.getHotShards('conn-a')[0].keyNote).toBe(
+            'reading the keys from the hot primary timed out',
+          );
+          expect(client.callBuffer).not.toHaveBeenCalled();
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = budget;
+        }
+      });
+
+      it('raises without key names when the hot primary cannot be reached', async () => {
+        const discovery = dial(hotNode());
+        discovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(capture('the read from the hot primary failed'));
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: ECONNREFUSED',
+        });
+        expect(discovery.evictNodeClient).not.toHaveBeenCalled();
+      });
+
+      it('says why the names are missing when the hot primary refuses every key', async () => {
+        const down = new Error('CLUSTERDOWN Hash slot not served');
+        keys = { 0: [['user:42', down]], 1: [['cart:{9}', down]] };
+        const discovery = dial(hotNode());
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(capture('the read from the hot primary failed'));
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: true,
+          keySource: 'unavailable',
+          keyNote: 'reading the keys from the hot primary failed: CLUSTERDOWN Hash slot not served',
+          keysSampled: 0,
+          topKeys: [],
+        });
+        expect(discovery.evictNodeClient).not.toHaveBeenCalled();
+      });
+
+      it('reads the keys of several hot shards at the same time', async () => {
+        IDS.push('d0000000', 'e0000000');
+        ADDRS.push('10.0.0.4:6379', '10.0.0.5:6379');
+        owners = [
+          [0, 1],
+          [10, 11],
+          [20, 21],
+          [30, 31],
+          [40, 41],
+        ];
+        keys = { 0: [['user:42', 255]], 10: [['cart:{9}', 201]] };
+        try {
+          const waitsForTheOther = () => {
+            const client = hotNode();
+            const answer = client.callBuffer.getMockImplementation()!;
+            let ask!: () => void;
+            const asked = new Promise<void>((resolve) => {
+              ask = resolve;
+            });
+            return { client, answer, ask, asked };
+          };
+          const first = waitsForTheOther();
+          const second = waitsForTheOther();
+          first.client.callBuffer.mockImplementation(async (...args) => {
+            first.ask();
+            await second.asked;
+            return first.answer(...args);
+          });
+          second.client.callBuffer.mockImplementation(async (...args) => {
+            second.ask();
+            await first.asked;
+            return second.answer(...args);
+          });
+          const discovery = dial(first.client);
+          discovery.getNodeConnection.mockImplementation(async (nodeId: string) =>
+            nodeId === 'a0000000' ? first.client : second.client,
+          );
+
+          await step([900_000, 900_000, 100_000, 100_000, 100_000], 6);
+
+          const read = service
+            .getHotShards('conn-a')
+            .map(({ shardId, keySource, topKeys }) => [shardId, keySource, topKeys[0]?.key])
+            .sort();
+          expect(read).toEqual([
+            ['a0000000', 'lfu', 'user:42'],
+            ['b0000000', 'lfu', 'cart:{9}'],
+          ]);
+        } finally {
+          IDS.length = 3;
+          ADDRS.length = 3;
+        }
+      });
+
+      it('reads no keys while a slot migration delays the raise', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest
+            .fn()
+            .mockResolvedValue({ migrations: [{ slot: 5 }], complete: true }),
+        };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 8);
+
+        expect(hotEvents()).toEqual([]);
+        expect(client.callBuffer).not.toHaveBeenCalled();
+      });
+
+      it('reads the keys of the top slots of the sample it judged', async () => {
+        (service as any).clusterMetrics = {
+          checkSlotMigrations: jest.fn().mockImplementation(async () => {
+            counters.set(1, (counters.get(1) ?? 0) + 90_000_000);
+            shardLoad.record('conn-a', reading(), clock + 5_000);
+            return { migrations: [], complete: true };
+          }),
+        };
+        const client = hotNode();
+        dial(client);
+
+        await step(HOT, 6);
+
+        expect(shardLoad.getTopSlots('conn-a', IDS[0], 1)[0].slot).toBe(1);
+        expect(client.callBuffer.mock.calls.map(([, , slot]) => slot)).toEqual([0, 1]);
+      });
+
+      it('does not dial the nodes of a connection it reaches through an agent', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({ host: 'agent' });
+        const client = hotNode();
+        const discovery = dial(client);
+
+        await step(HOT, 6);
+
+        expect(hotEvents()[0].message).toBe(RAISED);
+        expect(discovery.getNodeConnection).not.toHaveBeenCalled();
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: false,
+          keySource: 'unavailable',
+          keyNote: 'the monitor does not connect to the cluster nodes directly',
+        });
+      });
+
+      it('stops offering a capture once a later read finds the keys', async () => {
+        keys = { 0: [['user:42', NO_LFU]] };
+        dial(hotNode());
+        await step(HOT, 6);
+
+        expect(service.getHotShards('conn-a')[0].captureAvailable).toBe(true);
+
+        keys = { 0: [['user:42', 255]] };
+        await step(HOT, 20);
+
+        expect(service.getHotShards('conn-a')[0]).toMatchObject({
+          captureAvailable: false,
+          keySource: 'lfu',
+        });
+      });
+
+      it('reports the id of the open event while the shard stays hot', async () => {
+        keys = { 0: [['user:42', NO_LFU]] };
+        dial(hotNode());
+        await step(HOT, 6);
+        const raised = hotEvents()[0].id;
+
+        await step(HOT, 4);
+
+        expect(hotEvents()).toHaveLength(1);
+        expect(service.getHotShards('conn-a').map((shard) => shard.eventId)).toEqual([raised]);
+      });
+
+      it('drops the keys when the event resolves and reads them again on the next raise', async () => {
+        const client = hotNode();
+        dial(client);
+        await step(HOT, 6);
+        await step(FLAT, 25);
+
+        expect(hotEvents()[0].resolved).toBe(true);
+        expect((service as any).hotShardKeys.has('conn-a')).toBe(false);
+
+        keys = { 0: [['second', 7]] };
+        await step(HOT, 12);
+
+        expect(hotEvents()).toHaveLength(2);
+        expect(hotEvents().find((e) => !e.resolved)!.message).toContain(
+          'Hot keys: "second" (freq 7).',
+        );
+        expect(client.callBuffer).toHaveBeenCalledTimes(4);
+      });
+    });
+
+    it('forgets a removed connection', async () => {
+      await step(HOT, 6);
+
+      (service as any).onConnectionRemoved('conn-a');
+
+      expect(service.getHotShards('conn-a')).toEqual([]);
+      for (const state of [
+        'hotShardFirstSeen',
+        'activeHotShards',
+        'hotShardEventIds',
+        'hotShardSampleAt',
+        'hotShardJudgedAt',
+        'hotShardDetails',
+        'hotShardSince',
+        'hotShardKeys',
+        'hotKeyNoteLogged',
+      ]) {
+        expect((service as any)[state].has('conn-a')).toBe(false);
+      }
+    });
+  });
+
+  describe('reshard pressure', () => {
+    const BASE = 1_700_000_000_000;
+    const IDS = ['a', 'b', 'c'];
+    let clock: number;
+
+    function shardNodes(self: string, migrating: boolean) {
+      return IDS.map((id) => ({
+        id: `${id}0000000`,
+        address: `10.0.0.${id.charCodeAt(0)}:6379@16379`,
+        flags: id === self ? ['myself', 'master'] : ['master'],
+        master: '-',
+        pingSent: 0,
+        pongReceived: 0,
+        configEpoch: 1,
+        linkState: 'connected',
+        slots: [],
+        migratingSlots: id === self && migrating ? [{ slot: 1, targetNodeId: 'b0000000' }] : [],
+      }));
+    }
+
+    function shardCtx(id: string, ops: number, migrating: boolean, role = 'master') {
+      const info = {
+        server: { redis_version: '8.0.0' },
+        replication: { role },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: { used_memory: '1000000' },
+        stats: { instantaneous_ops_per_sec: String(ops), cluster_enabled: '1' },
+      };
+      return {
+        ...mockCtx,
+        connectionId: `conn-${id}`,
+        connectionName: id,
+        client: {
+          ...dbClient,
+          getInfoParsed: jest.fn().mockResolvedValue(info),
+          getClusterInfo: jest.fn().mockResolvedValue({ cluster_state: 'ok' }),
+          getClusterNodes: jest.fn().mockResolvedValue(shardNodes(id, migrating)),
+        },
+      } as unknown as ConnectionContext;
+    }
+
+    async function pollCluster(aOps: number, migrating: boolean): Promise<void> {
+      clock += 1000;
+      await poll(shardCtx('a', aOps, migrating));
+      await poll(shardCtx('b', 6000, false));
+      await poll(shardCtx('c', 6000, false));
+    }
+
+    const skewEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.RESHARD_SHARD_SKEW);
+
+    beforeEach(() => {
+      clock = BASE;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('keeps the last write P99 of a shard while it reads a new one', async () => {
+      await pollCluster(6000, true);
+      (service as any).reshardSnapshot.get('conn-a').writeP99Us = 5000;
+      clock += 1000;
+      let finishRead!: (rows: unknown[]) => void;
+      const reading = new Promise<void>((started) => {
+        storage.getLatencyStatsHistory = jest.fn(() => {
+          started();
+          return new Promise((resolve) => {
+            finishRead = resolve;
+          });
+        });
+      });
+
+      const polling = poll(shardCtx('a', 6000, true));
+      await reading;
+
+      expect((service as any).reshardSnapshot.get('conn-a').writeP99Us).toBe(5000);
+
+      finishRead([]);
+      await polling;
+    });
+
+    it('correlates shards added as separate connections', async () => {
+      await pollCluster(6000, false);
+
+      expect((service as any).correlationScopeOf('conn-b')).toBe(
+        (service as any).correlationScopeOf('conn-a'),
+      );
+      expect((service as any).scopeConnectionIds('conn-a').sort()).toEqual([
+        'conn-a',
+        'conn-b',
+        'conn-c',
+      ]);
+    });
+
+    it('puts a separately added shard in the scope of a discovered topology', async () => {
+      await pollCluster(6000, false);
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'conn-b' ? { id, membership: { seedId: 'conn-a' } } : { id },
+      );
+      registry.listMembers.mockImplementation((seedId: string) =>
+        seedId === 'conn-a' ? [{ id: 'conn-b' }] : [],
+      );
+
+      expect((service as any).correlationScopeOf('conn-c')).toBe('conn-a');
+      expect((service as any).correlationScopeOf('conn-a')).toBe('conn-a');
+      expect((service as any).scopeConnectionIds('conn-c').sort()).toEqual([
+        'conn-a',
+        'conn-b',
+        'conn-c',
+      ]);
+    });
+
+    it('keeps the scope when a node fails over mid-incident', async () => {
+      await pollCluster(6000, false);
+      const before = (service as any).correlationScopeOf('conn-a');
+      const ctx = shardCtx('a', 6000, false) as any;
+      ctx.client.getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          shardNodes('a', false).map((node) =>
+            node.id.startsWith('c') ? { ...node, flags: ['master', 'fail'] } : node,
+          ),
+        );
+
+      await poll(ctx);
+      await poll(shardCtx('b', 6000, false));
+
+      expect((service as any).correlationScopeOf('conn-a')).toBe(before);
+      expect((service as any).correlationScopeOf('conn-b')).toBe(before);
+      expect((service as any).correlationScopeOf('conn-c')).toBe(before);
+    });
+
+    it('forgets the node keys once no connection holds the cluster', async () => {
+      await pollCluster(6000, false);
+
+      ['conn-a', 'conn-b', 'conn-c'].forEach((id) => (service as any).onConnectionRemoved(id));
+
+      expect((service as any).clusterKeyByNode.size).toBe(0);
+    });
+
+    it('resolves the peers of a scope without a registry scan per peer', async () => {
+      const registry = (service as any).connectionRegistry;
+      for (let i = 0; i < 100; i += 1) {
+        (service as any).connectionClusterKeys.set(`solo-${i}`, `cluster:${i}`);
+      }
+      (service as any).connectionClusterKeys.set('conn-a', 'cluster:shared');
+      (service as any).connectionClusterKeys.set('conn-b', 'cluster:shared');
+      registry.listMembers.mockClear();
+
+      const peers = (service as any).scopeConnectionIds('conn-a');
+
+      expect(peers.sort()).toEqual(['conn-a', 'conn-b']);
+      expect(registry.listMembers.mock.calls.length).toBeLessThan(10);
+    });
+
+    it('leaves the scope of a removed connection', async () => {
+      await pollCluster(6000, false);
+
+      (service as any).onConnectionRemoved('conn-b');
+
+      expect((service as any).correlationScopeOf('conn-b')).toBe('conn-b');
+      expect((service as any).scopeConnectionIds('conn-a')).not.toContain('conn-b');
+    });
+
+    it('judges skew while one view flags a node as failing', async () => {
+      await pollCluster(18_000, true);
+      for (let i = 0; i < 3; i += 1) {
+        clock += 1000;
+        const flagged = shardCtx('a', 18_000, true);
+        (flagged.client.getClusterNodes as jest.Mock).mockResolvedValue(
+          shardNodes('a', true).map((node) =>
+            node.id === 'c0000000' ? { ...node, flags: ['master', 'fail?'] } : node,
+          ),
+        );
+        await poll(flagged);
+        await poll(shardCtx('b', 6000, false));
+        await poll(shardCtx('c', 6000, false));
+      }
+
+      expect(skewEvents()).toHaveLength(1);
+    });
+
+    it('alerts once when a shard stays above the cluster median during a reshard', async () => {
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+      expect(skewEvents()).toHaveLength(0);
+
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(skewEvents()[0]).toMatchObject({
+        connectionId: 'conn-a',
+        severity: AnomalySeverity.WARNING,
+        value: 3,
+      });
+      expect(skewEvents()[0].message).toContain('a0000000');
+      expect(skewEvents()[0].message).toContain('(source)');
+    });
+
+    it('leaves the event unmarked without a write P99 deviation', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+      expect(skewEvents()[0].syntheticPattern).toBeUndefined();
+    });
+
+    it('marks the event as reshard pressure when the source write P99 deviates', async () => {
+      storage.getLatencyStatsHistory = jest.fn(async ({ connectionId }) => [
+        { command: 'set', p99Us: connectionId === 'conn-a' ? 9000 : 1000, capturedAt: BASE },
+      ]);
+
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      expect(skewEvents()[0].syntheticPattern).toBe(AnomalyPattern.RESHARD_PRESSURE);
+    });
+
+    it('stays quiet when the same skew has no reshard behind it', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, false);
+
+      expect(skewEvents()).toHaveLength(0);
+      expect(storage.getLatencyStatsHistory).not.toHaveBeenCalled();
+    });
+
+    it('stays quiet during a reshard under light load', async () => {
+      for (let i = 0; i < 4; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 400, true));
+        await poll(shardCtx('b', 100, false));
+        await poll(shardCtx('c', 100, false));
+      }
+
+      expect(skewEvents()).toHaveLength(0);
+    });
+
+    it('resolves the event once the reshard window closes', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(18_000, false);
+      await pollCluster(18_000, false);
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(18_000, false);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('closes the window when the marker set has not changed for thirty minutes', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      clock += RESHARD_MARKER_STALL_MS;
+      await pollCluster(18_000, true);
+      await pollCluster(18_000, true);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('keeps the window open while the marker set keeps changing', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 2; i <= 4; i += 1) {
+        clock += RESHARD_MARKER_STALL_MS - 2000;
+        const ctx = shardCtx('a', 18_000, true);
+        const [nodeA, ...others] = shardNodes('a', true);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue([
+            { ...nodeA, migratingSlots: [{ slot: i, targetNodeId: 'b0000000' }] },
+            ...others,
+          ]);
+        clock += 1000;
+        await poll(ctx);
+        await poll(shardCtx('b', 6000, false));
+        await poll(shardCtx('c', 6000, false));
+      }
+
+      expect(skewEvents()[0].resolved).toBe(false);
+    });
+
+    it('keeps the alert open while too few primaries are visible to judge it', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 7; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 18_000, true));
+      }
+
+      expect(skewEvents()[0].resolved).toBe(false);
+    });
+
+    it('does not resolve an alert because primaries stayed unmonitored', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 60; i += 1) {
+        clock += 1000;
+        await poll(shardCtx('a', 18_000, true));
+      }
+      expect(skewEvents()[0].resolved).toBe(false);
+
+      await pollCluster(6000, false);
+      await pollCluster(6000, false);
+      await pollCluster(6000, false);
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    it('resolves the alert when the cluster itself shrank below a judgeable size', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      for (let i = 0; i < 12; i += 1) {
+        clock += 1000;
+        const ctx = shardCtx('a', 18_000, true);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue(shardNodes('a', true).slice(0, 2));
+        await poll(ctx);
+      }
+
+      expect(skewEvents()[0].resolved).toBe(true);
+    });
+
+    describe('with only the seed registered', () => {
+      function reshardNode(id: string, ops: number, marker = '', p99?: number) {
+        const nodeId = `${id}0000000`;
+        const info = [
+          '# Replication',
+          'role:master',
+          'connected_slaves:0',
+          '# Memory',
+          'used_memory:1000000',
+          '# Stats',
+          `instantaneous_ops_per_sec:${ops}`,
+        ].join('\r\n');
+        const nodesReply = `${nodeId} 10.0.0.${id.charCodeAt(0)}:6379@16379 myself,master - 0 0 1 connected ${marker}`;
+        const latency =
+          p99 === undefined
+            ? ''
+            : ['# Latencystats', `latency_percentiles_usec_set:p50=10.000,p99=${p99}.000,p99.9=${p99 + 10_000}.000`].join(
+                '\r\n',
+              );
+        return {
+          info: jest.fn(async (section?: string) => (section === 'latencystats' ? latency : info)),
+          call: jest.fn().mockResolvedValue(nodesReply),
+        };
+      }
+
+      function discover(clients: Record<string, ReturnType<typeof reshardNode>>) {
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          releaseConnection: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn(async (nodeId: string) => clients[nodeId]),
+        };
+      }
+
+      async function pollSeed(times: number, aOps: number, migrating: boolean) {
+        for (let i = 0; i < times; i += 1) {
+          clock += 1000;
+          await poll(shardCtx('a', aOps, migrating));
+        }
+      }
+
+      it('judges the seed against primaries it reads itself', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 18_000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({ connectionId: 'conn-a', value: 3 });
+        expect(skewEvents()[0].nodeAddr).toBeUndefined();
+        expect(skewEvents()[0].message).toContain('a0000000');
+      });
+
+      it('alerts on a hot shard that is not registered', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({
+          connectionId: 'conn-a',
+          nodeAddr: '10.0.0.98:6379',
+          value: 3,
+        });
+        expect(skewEvents()[0].message).toContain('b0000000 at 10.0.0.98:6379 (target)');
+        expect(skewEvents()[0].syntheticPattern).toBeUndefined();
+      });
+
+      it('sees a reshard that only an unregistered primary is part of', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1->-c0000000]'),
+          c0000000: reshardNode('c', 6000, '[1-<-b0000000]'),
+        });
+
+        await pollSeed(6, 6000, false);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({ nodeAddr: '10.0.0.98:6379' });
+        expect(skewEvents()[0].message).toContain('(source)');
+      });
+
+      it('keeps the alert of a reshard on unregistered primaries while their node reads fail', async () => {
+        const b = reshardNode('b', 18_000, '[1->-c0000000]');
+        const c = reshardNode('c', 6000, '[1-<-b0000000]');
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(6, 6000, false);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        b.call.mockRejectedValue(new Error('read failed'));
+        c.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(4, 6000, false);
+
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
+      it('does not judge a primary on its last reading once its node reads fail', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        const c = reshardNode('c', 6000);
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(1, 6000, true);
+
+        b.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(5, 6000, true);
+
+        expect(skewEvents()).toHaveLength(0);
+      });
+
+      it('marks reshard pressure on a non-seed shard from its own write latency', async () => {
+        storage.getLatencyStatsHistory = jest.fn(async () => [{ command: 'set', p99Us: 1000, capturedAt: BASE }]);
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]', 50_000),
+          c0000000: reshardNode('c', 6000, '', 1000),
+        });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0]).toMatchObject({
+          nodeAddr: '10.0.0.98:6379',
+          syntheticPattern: AnomalyPattern.RESHARD_PRESSURE,
+        });
+      });
+
+      it('reads node latencystats at most every 30s', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        for (let i = 0; i < 6; i += 1) {
+          clock += 10_000;
+          await poll(shardCtx('a', 6000, false));
+        }
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(2);
+      });
+
+      it('keeps a node without latencystats in the reshard view', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({
+          shardId: 'b0000000',
+          writeP99Us: null,
+        });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('keeps a node whose latencystats read fails in the reshard view', async () => {
+        const b = reshardNode('b', 6000);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+        expect((service as any).topologyBackoff.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('keeps the last write P99 when a refresh fails and retries on the next poll', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 30_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: 1000 });
+
+        clock += 1000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect(b.info.mock.calls.filter(([section]) => section === 'latencystats')).toHaveLength(3);
+      });
+
+      it('stops using a node write P99 once it is older than the lookback window', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        const plain = await b.info('replication');
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') throw new Error('NOPERM');
+          return plain;
+        });
+
+        clock += 121_000;
+        await poll(shardCtx('a', 6000, false));
+
+        expect((service as any).reshardSnapshot.get('conn-a@10.0.0.98:6379')).toMatchObject({ writeP99Us: null });
+      });
+
+      it('does not cache a node write P99 when that node INFO read fails', async () => {
+        const b = reshardNode('b', 6000, '', 1000);
+        b.info.mockImplementation(async (section?: string) => {
+          if (section === 'latencystats') return '# Latencystats\r\nlatency_percentiles_usec_set:p50=10.000,p99=1000.000';
+          throw new Error('LOADING');
+        });
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000, '', 1000) });
+
+        await pollSeed(1, 6000, false);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('forgets a node write latency when the node leaves', async () => {
+        discover({ b0000000: reshardNode('b', 6000, '', 1000), c0000000: reshardNode('c', 6000, '', 1000) });
+        await pollSeed(1, 6000, false);
+        expect((service as any).reshardWriteP99.get('conn-a@10.0.0.98:6379')).toMatchObject({ value: 1000 });
+
+        const ctx = shardCtx('a', 6000, false);
+        (ctx.client as any).getClusterNodes.mockResolvedValue(
+          shardNodes('a', false).filter((n) => n.id !== 'b0000000'),
+        );
+        clock += 1000;
+        await poll(ctx);
+
+        expect((service as any).reshardWriteP99.has('conn-a@10.0.0.98:6379')).toBe(false);
+      });
+
+      it('sends the alert of an unregistered primary with that primary as its source', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+          expect.objectContaining({
+            metricType: MetricType.RESHARD_SHARD_SKEW,
+            nodeAddr: '10.0.0.98:6379',
+            sourceHost: '10.0.0.98',
+            sourcePort: 6379,
+          }),
+        );
+      });
+
+      it('reads a bystander primary less often while no reshard runs', async () => {
+        const b = reshardNode('b', 6000);
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 6000, false);
+
+        expect(b.info.mock.calls.filter(([section]) => section !== 'latencystats')).toHaveLength(6 * 5);
+        expect(b.call.mock.calls.length).toBeLessThan(6);
+      });
+
+      it('resolves the alert of an unreadable primary once its last reading is past the stall limit', async () => {
+        const b = reshardNode('b', 18_000, '[1->-c0000000]');
+        const c = reshardNode('c', 6000, '[1-<-b0000000]');
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(6, 6000, false);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        b.call.mockRejectedValue(new Error('read failed'));
+        c.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(2, 6000, false);
+        clock += 31 * 60_000;
+        await pollSeed(2, 6000, false);
+
+        expect(skewEvents()[0].resolved).toBe(true);
+      });
+
+      it('does not carry migration history over to a new node at the same address', () => {
+        const key = 'conn-a@10.0.0.98:6379';
+        (service as any).reshardSnapshot.set(key, {
+          shardId: 'old00000',
+          markerSignature: 'm',
+          markerChangedAt: 1,
+          lastMarkerAt: 2,
+        });
+        const node = { id: 'new00000', flags: ['master'], migratingSlots: [], importingSlots: [] };
+
+        const snapshot = (service as any).reshardShardSnapshot(key, 'cluster', node, {}, null, 10_000);
+
+        expect(snapshot.lastMarkerAt).toBeNull();
+      });
+
+      it('resolves the alert when the reshard ends while a bystander read fails', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        const c = reshardNode('c', 6000);
+        discover({ b0000000: b, c0000000: c });
+        await pollSeed(6, 6000, true);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        b.call.mockResolvedValue('b0000000 10.0.0.98:6379@16379 myself,master - 0 0 1 connected');
+        c.call.mockRejectedValue(new Error('read failed'));
+        await pollSeed(4, 6000, false);
+
+        expect(skewEvents()[0].resolved).toBe(true);
+      });
+
+      it('keeps the alert of a reshard on unregistered primaries once they are flagged failed', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1->-c0000000]'),
+          c0000000: reshardNode('c', 6000, '[1-<-b0000000]'),
+        });
+        await pollSeed(6, 6000, false);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        for (let i = 0; i < 4; i += 1) {
+          clock += 1000;
+          const ctx = shardCtx('a', 6000, false);
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(
+            shardNodes('a', false).map((node) =>
+              node.id === 'a0000000' ? node : { ...node, flags: ['master', 'fail'] },
+            ),
+          );
+          await poll(ctx);
+        }
+
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
+      it('keeps the snapshot and alert of a primary that fails but stays in the topology', async () => {
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+        await pollSeed(6, 6000, true);
+        expect(skewEvents()[0].resolved).toBe(false);
+
+        for (let i = 0; i < 3; i += 1) {
+          clock += 1000;
+          const ctx = shardCtx('a', 6000, true);
+          (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue(
+            shardNodes('a', true).map((node) =>
+              node.id === 'b0000000' ? { ...node, flags: ['master', 'fail'] } : node,
+            ),
+          );
+          await poll(ctx);
+        }
+
+        expect([...(service as any).reshardSnapshot.keys()]).toContain('conn-a@10.0.0.98:6379');
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
+      it('forgets the primaries it read once the seed is removed', async () => {
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+        await pollSeed(2, 6000, true);
+        expect((service as any).reshardSnapshot.size).toBe(3);
+
+        (service as any).onConnectionRemoved('conn-a');
+
+        expect((service as any).reshardSnapshot.size).toBe(0);
+      });
+
+      const storedSkew = (id: string, nodeAddr: string) => ({
+        id,
+        timestamp: BASE - 60_000,
+        metricType: MetricType.RESHARD_SHARD_SKEW,
+        connectionId: 'conn-a',
+        nodeAddr,
+        resolved: false,
+      });
+      const resolvedIds = () => (storage.resolveAnomaly as jest.Mock).mock.calls.map(([id]) => id);
+      const storeOpen = (rows: ReturnType<typeof storedSkew>[]) => {
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        storage.getAnomalyEvents = jest.fn(async ({ metricType, resolved }) =>
+          resolved === false && metricType === MetricType.RESHARD_SHARD_SKEW ? rows : [],
+        );
+      };
+
+      it('keeps the open alert of an unregistered shard across a restart', async () => {
+        storeOpen([storedSkew('node-b-1', '10.0.0.98:6379')]);
+        discover({
+          b0000000: reshardNode('b', 18_000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(6, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(skewEvents()).toHaveLength(0);
+        expect(resolvedIds()).not.toContain('node-b-1');
+        expect((service as any).reshardSkewEventIds.get('conn-a').get('reshard_skew:b0000000')).toBe(
+          'node-b-1',
+        );
+      });
+
+      it('keeps the open alert of the seed shard across a restart before its peers are read', async () => {
+        storeOpen([storedSkew('seed-1', undefined as unknown as string)]);
+        discover({
+          b0000000: reshardNode('b', 6000, '[1-<-a0000000]'),
+          c0000000: reshardNode('c', 6000),
+        });
+
+        await pollSeed(1, 18_000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(resolvedIds()).not.toContain('seed-1');
+        expect((service as any).reshardSkewEventIds.get('conn-a').get('reshard_skew:a0000000')).toBe('seed-1');
+      });
+
+      it('closes the open alert of a shard that is no longer read after a restart', async () => {
+        storeOpen([storedSkew('gone-1', '10.0.0.200:6379')]);
+        discover({ b0000000: reshardNode('b', 6000), c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(2, 6000, true);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(resolvedIds()).toContain('gone-1');
+      });
+
+      it('keeps the alert of a shard whose topology stops answering', async () => {
+        const nodeD = {
+          ...shardNodes('a', true)[2],
+          id: 'd0000000',
+          address: '10.0.0.100:6379@16379',
+        };
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        discover({
+          b0000000: b,
+          c0000000: reshardNode('c', 6000),
+          d0000000: reshardNode('d', 6000),
+        });
+        const pollWithD = async (times: number) => {
+          for (let i = 0; i < times; i += 1) {
+            clock += 1000;
+            const ctx = shardCtx('a', 6000, true);
+            (ctx.client.getClusterNodes as jest.Mock).mockResolvedValue([
+              ...shardNodes('a', true),
+              nodeD,
+            ]);
+            await poll(ctx);
+          }
+        };
+        await pollWithD(6);
+        expect(skewEvents()).toHaveLength(1);
+
+        b.call.mockRejectedValue(new Error('timed out'));
+        await pollWithD(10);
+
+        expect(skewEvents()).toHaveLength(1);
+        expect(skewEvents()[0].resolved).toBe(false);
+      });
+
+      it('leaves a primary unjudged when its own topology cannot be read', async () => {
+        const b = reshardNode('b', 18_000, '[1-<-a0000000]');
+        b.call.mockRejectedValue(new Error('NOPERM'));
+        discover({ b0000000: b, c0000000: reshardNode('c', 6000) });
+
+        await pollSeed(6, 6000, true);
+
+        expect(skewEvents()).toHaveLength(0);
+        expect([...(service as any).reshardSnapshot.keys()]).not.toContain('conn-a@10.0.0.98:6379');
+      });
+    });
+
+    it('keeps one open alert when a node joins during the reshard', async () => {
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      const joined = (id: string, ops: number, migrating: boolean) => {
+        const ctx = shardCtx(id, ops, migrating);
+        (ctx.client as any).getClusterNodes = jest
+          .fn()
+          .mockResolvedValue([
+            ...shardNodes(id, migrating),
+            { ...shardNodes(id, false)[0], id: 'd0000000', flags: ['master'] },
+          ]);
+        return ctx;
+      };
+      for (let i = 0; i < 4; i += 1) {
+        clock += 1000;
+        await poll(joined('a', 18_000, true));
+        await poll(joined('b', 6000, false));
+        await poll(joined('c', 6000, false));
+      }
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(skewEvents()[0].resolved).toBe(false);
+    });
+
+    it('rereads the stored write P99 on a slower cadence than the poll', async () => {
+      storage.getLatencyStatsHistory = jest.fn().mockResolvedValue([
+        { command: 'set', p99Us: 900, capturedAt: BASE },
+        { command: 'get', p99Us: 50_000, capturedAt: BASE },
+      ]);
+
+      await pollCluster(6000, true);
+      await pollCluster(6000, true);
+
+      expect(storage.getLatencyStatsHistory).toHaveBeenCalledTimes(3);
+      expect((service as any).reshardSnapshot.get('conn-a').writeP99Us).toBe(900);
+    });
+
+    it('judges the other metrics when the write P99 read fails', async () => {
+      storage.getLatencyStatsHistory = jest.fn().mockRejectedValue(new Error('down'));
+
+      for (let i = 0; i < 4; i += 1) await pollCluster(18_000, true);
+
+      expect(skewEvents()).toHaveLength(1);
+      expect(storage.getLatencyStatsHistory).toHaveBeenCalledTimes(3);
+    });
+
+    it('drops a node from the comparison once it stops being a primary', async () => {
+      await pollCluster(18_000, true);
+      expect((service as any).reshardSnapshot.has('conn-b')).toBe(true);
+
+      const demoted = shardCtx('b', 6000, false);
+      (demoted.client as any).getClusterNodes = jest
+        .fn()
+        .mockResolvedValue(
+          shardNodes('b', false).map((n) =>
+            n.id === 'b0000000' ? { ...n, flags: ['myself', 'slave'], master: 'a0000000' } : n,
+          ),
+        );
+      await poll(demoted);
+
+      expect((service as any).reshardSnapshot.has('conn-b')).toBe(false);
+    });
+
+    it('clears its state when a connection is removed', async () => {
+      await pollCluster(18_000, true);
+
+      (service as any).onConnectionRemoved('conn-a');
+
+      expect((service as any).reshardSnapshot.has('conn-a')).toBe(false);
+      expect((service as any).reshardWriteP99.has('conn-a')).toBe(false);
+    });
+  });
 
   describe('cluster state webhook dispatch', () => {
     it('dispatches cluster.failover webhook on ok→fail transition', async () => {
@@ -2197,6 +4425,94 @@ describe('AnomalyService', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('keeps one event for an unsaved conflict that has left the ring', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (service as any).recentAnomalies = [];
+
+      await poll();
+
+      const ids = new Set(storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id));
+      expect(ids.size).toBe(1);
+      expect((service as any).persistenceOutbox.size).toBe(1);
+    });
+
+    it('raises the conflict again when the outbox drops its unsaved event', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      await poll();
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      const [first] = conflicts();
+      expect(conflicts()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = conflicts();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('raises a conflict again when its drop lands while a later conflict saves', async () => {
+      const secondConflict = ['nodeXXXXXXXX', 'nodeYYYYYYYY'].map((id, i) => ({
+        ...splitBrainNodes[0],
+        id,
+        address: `10.0.0.${i + 8}:6379@16379`,
+        flags: ['master'],
+        slots: [[5461, 10922]],
+      }));
+      const raisedFor = (id: string) =>
+        service
+          .getRecentEvents()
+          .filter(
+            (e) =>
+              e.metricType === MetricType.CLUSTER_TOPOLOGY && e.message.includes(id.slice(0, 8)),
+          );
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue([
+        ...splitBrainNodes,
+        ...secondConflict,
+      ]);
+      storage.saveAnomalyEvent.mockImplementationOnce(() => {
+        (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        return Promise.reject(new Error('storage down'));
+      });
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      expect(raisedFor('nodeAAAAAAAA')).toHaveLength(2);
+      expect(raisedFor('nodeXXXXXXXX')).toHaveLength(1);
+    });
+
+    it('stays quiet when an older conflict is dropped after a newer one was saved', async () => {
+      const conflicts = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.CLUSTER_TOPOLOGY);
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(splitBrainNodes);
+      await poll();
+      expect(conflicts()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll();
+
+      expect(conflicts()).toHaveLength(2);
+    });
+
     it('dedupes a persistent conflict to a single alert across polls', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(splitBrainNodes);
       await poll();
@@ -2558,6 +4874,87 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('IMPORTING');
     });
 
+    it('raises the state again when the outbox drops its unsaved event', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      now += 31_000;
+      await poll();
+      const [first] = slotEvents();
+      expect(slotEvents()).toHaveLength(1);
+
+      now += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = slotEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('raises a finding again after a drop on a gate that tracks no event ids', async () => {
+      const buildEvent = jest.fn(() => ({
+        id: randomUUID(),
+        timestamp: now,
+        metricType: MetricType.CLUSTER_TOPOLOGY,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'finding',
+        resolved: false,
+        connectionId: 'conn-1',
+      }));
+      const gate = {
+        ctx: { connectionId: 'conn-1', connectionName: 'c', client: dbClient, host: 'h', port: 1 },
+        findings: ['finding'],
+        signatureOf: (finding: string) => finding,
+        firstSeenByConn: new Map(),
+        activeByConn: new Map(),
+        minPersistMs: 0,
+        buildEvent,
+      };
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+      expect(buildEvent).toHaveBeenCalledTimes(1);
+
+      now += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+
+      expect(buildEvent).toHaveBeenCalledTimes(2);
+    });
+
+    it('stores the signature on a UUID event so a restart can track it again', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll();
+
+      const [saved] = (storage.saveAnomalyEvent as jest.Mock).mock.calls
+        .map(([event]: any[]) => event)
+        .filter((event) => event.metricType === MetricType.REPLICA_SLOT_STATE);
+      const [signature] = [...(service as any).replicaSlotEventIds.get(mockCtx.connectionId).keys()];
+      expect(saved.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(saved.dedupeKey).toBe(signature);
+      expect(saved.replicaAddr).toBe('10.0.0.2:6380');
+
+      (service as any).replicaSlotEventIds.clear();
+      (service as any).adoptReplicaSlotEvents(mockCtx.connectionId, [saved]);
+
+      expect([...(service as any).replicaSlotEventIds.get(mockCtx.connectionId)]).toEqual([
+        [signature, saved.id],
+      ]);
+    });
+
     it('suppresses the alert when CLUSTER SHARDS reports the node is a master (mid-promotion)', async () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(shardsRepBIsMaster);
@@ -2648,10 +5045,32 @@ describe('AnomalyService', () => {
       await poll();
       expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(1);
 
-      // Next poll retries; resolution now succeeds → event resolves, banner clears.
+      // The outbox retries; resolution now succeeds → event resolves, banner clears.
+      now += 5_000;
+      await (service as any).drainPersistenceOutbox();
+      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
+    });
+
+    it('leaves a queued auto-resolve to the outbox instead of retrying on every poll', async () => {
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue(badReplicaNodes);
+      dbClient.getClusterShards = jest.fn().mockResolvedValue(shards);
+      await poll();
+      now += 31_000;
+      await poll();
+      const fired = slotEvents().filter((e) => !e.resolved);
+      expect(fired).toHaveLength(1);
+
+      storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+      (dbClient.getClusterNodes as jest.Mock).mockResolvedValue(healthyNodes);
       now += 5_000;
       await poll();
-      expect(slotEvents().filter((e) => !e.resolved)).toHaveLength(0);
+      const callsAfterQueue = storage.resolveAnomaly.mock.calls.length;
+      expect((service as any).persistenceOutbox.has(fired[0].id)).toBe(true);
+
+      now += 5_000;
+      await poll();
+
+      expect(storage.resolveAnomaly.mock.calls.length).toBe(callsAfterQueue);
     });
 
     it('stops retrying auto-resolution once the event is gone from both cache and storage', async () => {
@@ -2767,7 +5186,7 @@ describe('AnomalyService', () => {
         'aaaaaaaa 10.0.0.1:6379@16379 master - 0 0 1 connected 0-8191\n' +
         'bbbbbbbb 10.0.0.2:6380@16380 myself,master - 0 0 2 connected 8192-16383';
       const nodeClient = { call: jest.fn().mockResolvedValue(selfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -2814,7 +5233,7 @@ describe('AnomalyService', () => {
         },
       ]);
       const getNodeConnection = jest.fn().mockResolvedValue({ call: jest.fn() });
-      (service as any).clusterDiscovery = { getNodeConnection };
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
 
       await poll();
       now += 31_000;
@@ -2868,7 +5287,7 @@ describe('AnomalyService', () => {
         'bbbbbbbb 10.0.0.2:6380@16380 myself,slave aaaaaaaa 0 0 1 connected [42-<-aaaaaaaa]';
       const nodeClient = { call: jest.fn().mockResolvedValue(replicaSelfView) };
       const getNodeConnection = jest.fn().mockResolvedValue(nodeClient);
-      (service as any).clusterDiscovery = { getNodeConnection };
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
 
       await poll();
       expect(slotEvents()).toHaveLength(0); // within grace
@@ -2923,7 +5342,7 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
       const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -2949,7 +5368,7 @@ describe('AnomalyService', () => {
       dbClient.getClusterNodes = jest.fn().mockResolvedValue(stuckPrimaryView);
       dbClient.getClusterShards = jest.fn().mockResolvedValue(stuckShards);
       const nodeClient = { call: jest.fn().mockResolvedValue(stuckReplicaSelfView) };
-      (service as any).clusterDiscovery = {
+      (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
         getNodeConnection: jest.fn().mockResolvedValue(nodeClient),
       };
 
@@ -3013,7 +5432,7 @@ describe('AnomalyService', () => {
     ];
 
     const ownedSlotStats = {
-      '50': { key_count: 400, expires_count: 0, total_reads: 0, total_writes: 0 },
+      '50': { key_count: 400 },
     };
 
     let now: number;
@@ -3127,7 +5546,7 @@ describe('AnomalyService', () => {
       // DBSIZE removes the positive bias — a single pre-read would leave a
       // 100-key surplus every poll and confirm a leak on a healthy cache.
       dbClient.getClusterSlotStats = jest.fn().mockResolvedValue({
-        '50': { key_count: 900, expires_count: 0, total_reads: 0, total_writes: 0 },
+        '50': { key_count: 900 },
       });
       const bracketed = [1_000, 850];
       let readIndex = 0;
@@ -3166,24 +5585,6 @@ describe('AnomalyService', () => {
     });
   });
 
-  describe('raceWithTimeout', () => {
-    it('rejects when the wrapped promise does not settle within the timeout', async () => {
-      const svc = service as unknown as {
-        raceWithTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T>;
-      };
-      await expect(
-        svc.raceWithTimeout(new Promise(() => {}), 5, 'CLUSTER NODES timed out'),
-      ).rejects.toThrow('CLUSTER NODES timed out');
-    });
-
-    it('resolves with the value when the promise settles first', async () => {
-      const svc = service as unknown as {
-        raceWithTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T>;
-      };
-      await expect(svc.raceWithTimeout(Promise.resolve('ok'), 10_000, 'boom')).resolves.toBe('ok');
-    });
-  });
-
   // ─── Connection limits (valkey-io/valkey#3918) ─────────────────────────────
   describe('rejected_connections unbundled from ACL_DENIED', () => {
     const infoWith = (rejected: string, aclDenied: string) => ({
@@ -3213,6 +5614,2528 @@ describe('AnomalyService', () => {
       expect(buffers.get(MetricType.REJECTED_CONNECTIONS).getLatest()).toBe(8);
       // ACL_DENIED must NOT include rejected connections (would be 57 if bundled).
       expect(buffers.get(MetricType.ACL_DENIED).getLatest()).toBe(7);
+    });
+  });
+
+  describe('connection churn', () => {
+    function runChurn(
+      steps: Array<{
+        connectsPerSec: number;
+        clients: number;
+        counterReset?: boolean;
+        ops?: number;
+      }>,
+    ) {
+      const buffers = new Map();
+      const detectors = new Map();
+      const recorded: any[] = [];
+      jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+        recorded.push(a);
+      });
+      let total = 1_000;
+      let ts = 1_000_000;
+      return (async () => {
+        await (service as any).detectConnectionChurn(
+          mockCtx,
+          { total_connections_received: String(total), connected_clients: '100' },
+          buffers,
+          detectors,
+          ts,
+        );
+        for (const step of steps) {
+          ts += 1_000;
+          total = step.counterReset ? 0 : total + step.connectsPerSec;
+          await (service as any).detectConnectionChurn(
+            mockCtx,
+            {
+              total_connections_received: String(total),
+              connected_clients: String(step.clients),
+              ...(step.ops === undefined ? {} : { instantaneous_ops_per_sec: String(step.ops) }),
+            },
+            buffers,
+            detectors,
+            ts,
+          );
+        }
+        return { recorded, buffers };
+      })();
+    }
+
+    it('drops the churn sample when the INFO counters go missing', async () => {
+      await runChurn([{ connectsPerSec: 20, clients: 100 }]);
+      expect(service.getConnectionChurnSample('conn-1')?.connectsPerSec).toBe(20);
+
+      await (service as any).detectConnectionChurn(mockCtx, {}, new Map(), new Map(), 1_002_000);
+
+      expect(service.getConnectionChurnSample('conn-1')).toBeUndefined();
+    });
+
+    const baseline = Array.from({ length: 40 }, (_, i) => ({
+      connectsPerSec: 20 + (i % 3),
+      clients: 100,
+    }));
+
+    it('alerts when the connect rate spikes while connected_clients stays flat', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 101 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].metricType).toBe(MetricType.CONNECTION_CHURN);
+      expect(recorded[0].connectionId).toBe('conn-1');
+      expect(recorded[0].message).toContain('connected_clients does not grow (now 100)');
+    });
+
+    it('does not alert when per-request clients follow a traffic surge', async () => {
+      const opsBaseline = baseline.map((step) => ({ ...step, ops: step.connectsPerSec * 50 }));
+      const { recorded } = await runChurn([
+        ...opsBaseline,
+        { connectsPerSec: 400, clients: 101, ops: 20_000 },
+        { connectsPerSec: 420, clients: 100, ops: 21_000 },
+        { connectsPerSec: 410, clients: 100, ops: 20_500 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('alerts when connects outpace a flat request rate', async () => {
+      const opsBaseline = baseline.map((step) => ({ ...step, ops: step.connectsPerSec * 50 }));
+      const { recorded } = await runChurn([
+        ...opsBaseline,
+        { connectsPerSec: 400, clients: 101, ops: 1_050 },
+        { connectsPerSec: 420, clients: 100, ops: 1_050 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].value).toBe(420);
+    });
+
+    it('does not alert when the spike comes with a population jump', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 160 },
+        { connectsPerSec: 420, clients: 220 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('does not alert on two flat-population spikes separated by normal polls', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 21, clients: 100 },
+        { connectsPerSec: 20, clients: 100 },
+        { connectsPerSec: 22, clients: 100 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('does not alert on a pool that grows steadily, whatever the pace per poll', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 500 },
+        { connectsPerSec: 420, clients: 920 },
+        { connectsPerSec: 410, clients: 1_330 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('alerts on a reconnect storm right after the pool stepped to a new size', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 200, clients: 300 },
+        { connectsPerSec: 400, clients: 300 },
+        { connectsPerSec: 420, clients: 300 },
+        { connectsPerSec: 410, clients: 300 },
+      ]);
+
+      expect(recorded).toHaveLength(1);
+    });
+
+    it('does not alert on two flat spikes separated by a counter reset', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 0, clients: 100, counterReset: true },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('does not alert on two flat spikes separated by a gated sample', async () => {
+      const { recorded } = await runChurn([
+        ...baseline,
+        { connectsPerSec: 400, clients: 100 },
+        { connectsPerSec: 5, clients: 100 },
+        { connectsPerSec: 420, clients: 100 },
+      ]);
+
+      expect(recorded).toHaveLength(0);
+    });
+
+    it('feeds the per-second rate, not the lifetime counter', async () => {
+      const { buffers } = await runChurn([{ connectsPerSec: 30, clients: 100 }]);
+
+      expect(buffers.get(MetricType.CONNECTION_CHURN).getLatest()).toBe(30);
+    });
+  });
+
+  describe('retry amplification', () => {
+    const growingClients = () => {
+      let reads = 0;
+      return jest.fn().mockImplementation(async () => {
+        reads += 1;
+        const checkout = 10_000 + 600 * reads + 60_000 * Math.max(0, reads - 13);
+        return [
+          { id: '1', addr: '10.0.0.1:1', name: 'checkout', user: 'default', age: 1000, 'tot-cmds': String(checkout) },
+          { id: '2', addr: '10.0.0.2:1', name: 'reports', user: 'default', age: 1000, 'tot-cmds': String(10_000 + 600 * reads) },
+        ];
+      });
+    };
+
+    let captureClients: (() => Promise<any[]>) | null;
+    beforeEach(() => {
+      captureClients = null;
+      storage.getClientCaptureSummary = jest.fn().mockResolvedValue(summarizeClientCaptures([]));
+    });
+
+    type Identity = { name: string; user: string; ip: string };
+    // Stored rows of `count` connections of one identity opened at `openedAt`,
+    // each listed by the captures at `firstCapturedAt` and `lastCapturedAt`.
+    // Their ids are not numeric, so they have no bearing on the id growth.
+    const opened = (
+      identity: Identity,
+      count: number,
+      openedAt: number,
+      firstCapturedAt: number,
+      lastCapturedAt = firstCapturedAt,
+    ) =>
+      Array.from({ length: count }, (_, i) => ({
+        clientId: `${identity.name || identity.ip}-${openedAt}-${i}`,
+        addr: `${identity.ip}:${40_000 + i}`,
+        ...identity,
+      })).flatMap((connection) =>
+        [...new Set([firstCapturedAt, lastCapturedAt])].map((capturedAt) => ({
+          ...connection,
+          capturedAt,
+          age: (capturedAt - openedAt) / 1000,
+        })),
+      );
+    // A row of a numeric client id at one capture, for the id growth.
+    const numbered = (identity: Identity, clientId: number, age: number, capturedAt: number) => ({
+      ...identity,
+      clientId: String(clientId),
+      addr: `${identity.ip}:${50_000 + clientId}`,
+      age,
+      capturedAt,
+    });
+    // A long-lived connection listed by the newest capture, so the episode has one.
+    const pooled = (identity: Identity, capturedAt: number) =>
+      opened(identity, 1, 0, capturedAt - 100_000, capturedAt);
+
+    const episodeOnly = (groups: unknown[]) =>
+      jest.fn().mockImplementation(async (_id: string, start: number) =>
+        start >= 1_000_000 + 12 * 60_000 - 1_000 ? groups : [],
+      );
+
+    async function runRetry(
+      opts: {
+        p99Once?: boolean;
+        noP99?: boolean;
+        noErrors?: boolean;
+        coolWindows?: number;
+        realEmit?: boolean;
+        cpuEvent?: Record<string, unknown>;
+        saturated?: (window: number) => boolean;
+        windows?: number;
+        runId?: string;
+        nodeAddr?: string;
+      } = {},
+    ) {
+      const recorded: any[] = [];
+      const ctx = opts.nodeAddr
+        ? { ...mockCtx, host: opts.nodeAddr.split(':')[0], port: Number(opts.nodeAddr.split(':')[1]) }
+        : mockCtx;
+      if (!opts.realEmit) {
+        jest.spyOn(service as any, 'addAnomaly').mockImplementation(async (a: any) => {
+          a.persisted = true;
+          recorded.push(a);
+        });
+      }
+      let ts = 1_000_000;
+      let commands = 1_000_000;
+      let errors = 0;
+      const errorsCaught: unknown[] = [];
+      for (let w = 0; w < (opts.windows ?? 18) + (opts.coolWindows ?? 0); w++) {
+        const hot = w >= 12 && w < 18;
+        const factor = hot ? 1.5 + (w - 12) * 0.1 : 1;
+        if (captureClients) clientListCache.record('conn-1', await captureClients(), ts);
+        if (hot && !opts.noP99 && (!opts.p99Once || w === 12)) {
+          (service as any).addRecentAnomaly({
+            id: `p99-${w}`,
+            timestamp: ts + 5_000,
+            metricType: MetricType.COMMAND_P99,
+            connectionId: 'conn-1',
+            resolved: false,
+          });
+        }
+        if (hot && opts.cpuEvent) {
+          (service as any).addRecentAnomaly({
+            id: `cpu-${w}`,
+            timestamp: ts + 5_000,
+            metricType: MetricType.CPU_UTILIZATION,
+            connectionId: 'conn-1',
+            resolved: false,
+            ...opts.cpuEvent,
+          });
+        }
+        if (opts.saturated) {
+          (service as any).loadSaturationState.set('conn-1', {
+            ackedLevel: opts.saturated(w) ? 'critical' : 'none',
+          });
+        }
+        for (let i = 0; i < 60; i++) {
+          commands += 1000 * factor;
+          errors += hot && !opts.noErrors ? (factor - 1) * 10 : 0.1;
+          try {
+            await (service as any).detectRetryAmplification(
+              {
+                ...(opts.runId ? { run_id: opts.runId } : {}),
+                instantaneous_ops_per_sec: String(1000 * factor),
+                connected_clients: '100',
+                total_commands_processed: String(Math.round(commands)),
+                total_error_replies: String(Math.round(errors)),
+              },
+              ctx,
+              ts,
+              opts.nodeAddr,
+            );
+          } catch (e) {
+            errorsCaught.push(e);
+          }
+          ts += 1_000;
+        }
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      return { recorded, errorsCaught, ts };
+    }
+
+    it('emits one warning with the trigger and related metrics', async () => {
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].metricType).toBe(MetricType.RETRY_AMPLIFICATION);
+      expect(recorded[0].severity).toBe(AnomalySeverity.WARNING);
+      expect(recorded[0].connectionId).toBe('conn-1');
+      expect(recorded[0].threshold).toBe(1.3);
+      expect(recorded[0].value).toBeGreaterThanOrEqual(1.3);
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
+      expect(recorded[0].message).toContain('Trigger: a latency regression (COMMAND_P99).');
+      expect(recorded[0].retryTrigger).toBe('latency');
+    });
+
+    describe('on a node reached through the seed', () => {
+      const NODE = '10.0.1.5:6379';
+
+      it('scopes the event and the webhook to the node', async () => {
+        captureClients = growingClients();
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+        await runRetry({ realEmit: true, nodeAddr: NODE });
+        const [event] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+        expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, retryTrigger: 'errors' });
+        expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+          expect.objectContaining({
+            connectionId: 'conn-1',
+            instance: { host: '10.0.1.5', port: 6379 },
+            topContributors: null,
+          }),
+        );
+        expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      });
+
+      it('says client names are unavailable on a fan-out node', async () => {
+        captureClients = growingClients();
+
+        await runRetry({ realEmit: true, nodeAddr: NODE });
+        const [event] = service
+          .getRecentEvents()
+          .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+        expect(event.message.endsWith(NODE_ATTRIBUTION_UNAVAILABLE)).toBe(true);
+        expect(event.message).not.toContain('Client attribution unavailable.');
+        expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+          expect.objectContaining({ topContributors: null }),
+        );
+      });
+
+      it('judges the node without the seed latency or saturation', async () => {
+        const { recorded } = await runRetry({ nodeAddr: NODE, saturated: () => true });
+
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0]).toMatchObject({
+          nodeAddr: NODE,
+          severity: AnomalySeverity.WARNING,
+          retryTrigger: 'errors',
+        });
+      });
+
+      it('takes the node reconnect rate from its own INFO', () => {
+        const nodeConnectsPerSec = (at: number, total: string) =>
+          (service as any).nodeConnectsPerSec(
+            `conn-1@${NODE}`,
+            { total_connections_received: total, connected_clients: '100' },
+            at,
+          );
+
+        expect(nodeConnectsPerSec(1_000_000, '1000')).toBeNull();
+        expect(nodeConnectsPerSec(1_010_000, '1500')).toBe(50);
+      });
+
+      it('lists node state in the status', async () => {
+        await runRetry({ nodeAddr: NODE });
+
+        expect(service.getRetryAmplificationStatus('conn-1').nodes).toEqual([
+          expect.objectContaining({ node: NODE, classification: 'amplifying', level: 'warning' }),
+        ]);
+      });
+
+      it('keeps node state apart from the seed', async () => {
+        await runRetry({ nodeAddr: NODE });
+
+        expect((service as any).retryAmplificationState.has(`conn-1@${NODE}`)).toBe(true);
+        expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
+      });
+
+      it('alerts on the node and the seed separately', async () => {
+        const { recorded: onNode } = await runRetry({ nodeAddr: NODE });
+        const { recorded: onSeed } = await runRetry();
+
+        expect(onNode.map((e) => e.nodeAddr)).toEqual([NODE]);
+        expect(onSeed.filter((e) => e.nodeAddr === undefined)).toHaveLength(1);
+      });
+
+      it('forgets a node that leaves the topology', async () => {
+        await runRetry({ nodeAddr: NODE, windows: 2 });
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
+
+        await (service as any).detectTopologyAnomalies(mockCtx, { targets: [], members: new Set() });
+
+        expect((service as any).retryAmplificationState.has(`conn-1@${NODE}`)).toBe(false);
+      });
+    });
+
+    it('dispatches retry_amplification.detected with the finding and contributors', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry({ realEmit: true });
+      const recorded = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warning',
+          trigger: 'latency',
+          pattern: 'rising',
+          loadRatio: recorded[0].value,
+          message: recorded[0].message,
+          topContributors: [expect.objectContaining({ key: 'checkout', keyKind: 'name' })],
+          connectionId: 'conn-1',
+        }),
+      );
+    });
+
+    it('still records the anomaly when the webhook dispatch rejects', async () => {
+      webhookEventsProService.dispatchRetryAmplificationDetected.mockRejectedValueOnce(
+        new Error('dispatcher down'),
+      );
+
+      const { errorsCaught } = await runRetry({ realEmit: true });
+
+      expect(
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+      ).toHaveLength(1);
+      expect(errorsCaught).toHaveLength(0);
+    });
+
+    it('reports detector status and contributors per connection', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
+        expect.objectContaining({ armed: false, classification: 'none', topContributors: null }),
+      );
+
+      await runRetry();
+
+      expect(service.getRetryAmplificationStatus('conn-1')).toEqual(
+        expect.objectContaining({
+          armed: true,
+          classification: 'amplifying',
+          level: 'warning',
+          lastEpisode: null,
+          topContributors: [expect.objectContaining({ key: 'checkout', keyKind: 'name' })],
+        }),
+      );
+    });
+
+    it('keeps an earlier P99 regression as stress for the following windows', async () => {
+      const { recorded } = await runRetry({ p99Once: true });
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toContain('load is rising with stress');
+      expect(recorded[0].relatedMetrics).toEqual([MetricType.COMMAND_P99, MetricType.ERROR_REPLIES]);
+    });
+
+    it('re-arms the level when the outbox drops the event', async () => {
+      const { recorded } = await runRetry();
+      const [, , onDrop] = (service as any).addAnomaly.mock.calls.find(
+        ([event]: [any]) => event.id === recorded[0].id,
+      );
+
+      onDrop();
+
+      expect((service as any).retryAmplificationState.get('conn-1').ackedLevel).toBe('none');
+    });
+
+    it('keeps the level when an older event is dropped after a newer one was saved', async () => {
+      const { recorded } = await runRetry();
+      const addAnomaly = (service as any).addAnomaly as jest.SpyInstance;
+      const [, , onDrop] = addAnomaly.mock.calls.find(
+        ([event]: [any]) => event.id === recorded[0].id,
+      );
+      const level = (service as any).retryAmplificationState.get('conn-1').ackedLevel;
+      addAnomaly.mockRestore();
+
+      await (service as any).addLatchedAnomaly(
+        { ...recorded[0], id: 'newer' },
+        mockCtx,
+        'conn-1',
+        jest.fn(),
+      );
+      onDrop();
+
+      expect(level).not.toBe('none');
+      expect((service as any).retryAmplificationState.get('conn-1').ackedLevel).toBe(level);
+    });
+
+    it('keeps a P99 regression as stress past the hold while the latency guard reports it degraded', async () => {
+      (service as any).recentAnomalies.push({
+        id: 'old-p99',
+        timestamp: 1_000_000 - 60 * 60_000,
+        metricType: MetricType.COMMAND_P99,
+        connectionId: 'conn-1',
+        resolved: false,
+      });
+      service.reportLatencyDegraded('conn-1', true);
+
+      await runRetry({ noP99: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').classification).toBe('candidate');
+    });
+
+    it('stops counting a held P99 regression once the latency guard reports recovery', async () => {
+      service.reportLatencyDegraded('conn-1', false);
+
+      await runRetry({ p99Once: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').windows).toBeLessThanOrEqual(1);
+    });
+
+    it('forgets a degraded verdict the latency guard stopped refreshing', async () => {
+      const reportedAt = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockReturnValue(reportedAt);
+      service.reportLatencyDegraded('conn-1', true);
+      (Date.now as jest.Mock).mockReturnValue(reportedAt + RETRY_AMP_LATENCY_VERDICT_TTL_MS + 1);
+
+      await runRetry({ noP99: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').windows).toBe(0);
+    });
+
+    it('falls back to the held event once a healthy verdict goes stale', async () => {
+      const reportedAt = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockReturnValue(reportedAt);
+      service.reportLatencyDegraded('conn-1', false);
+      (Date.now as jest.Mock).mockReturnValue(reportedAt + RETRY_AMP_LATENCY_VERDICT_TTL_MS + 1);
+
+      await runRetry({ p99Once: true, noErrors: true });
+
+      expect(service.getRetryAmplificationStatus('conn-1').classification).toBe('candidate');
+    });
+
+    it('ignores a load saturation event once the saturation detector has re-armed', async () => {
+      (service as any).recentAnomalies.push({
+        id: 'load-sat',
+        timestamp: 1_700_000,
+        metricType: MetricType.LOAD_SATURATION,
+        connectionId: 'conn-1',
+        resolved: false,
+      });
+      jest.spyOn(service as any, 'detectLoadSaturation').mockResolvedValue(undefined);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('follows a change to the anomaly poll interval', async () => {
+      const info = {
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      };
+      await (service as any).detectRetryAmplification(info, mockCtx, 1_000_000);
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(20_000);
+      await (service as any).detectRetryAmplification(info, mockCtx, 1_020_000);
+
+      expect((service as any).retryAmplificationState.get('conn-1').maxPollGapMs).toBe(60_000);
+    });
+
+    it('reports critical while load saturation is still active', async () => {
+      (service as any).loadSaturationState.set('conn-1', {
+        ackedLevel: 'warning',
+        lastLevel: 'warning',
+        consecutive: 0,
+      });
+      jest.spyOn(service as any, 'detectLoadSaturation').mockResolvedValue(undefined);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(recorded[0].relatedMetrics).toContain(MetricType.LOAD_SATURATION);
+    });
+
+    it('keeps reporting the contributors of the last episode once it closes', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry({ coolWindows: 3 });
+
+      const status = service.getRetryAmplificationStatus('conn-1');
+      expect(status.lastEpisode).not.toBeNull();
+      expect(status.topContributors).toEqual([expect.objectContaining({ key: 'checkout' })]);
+    });
+
+    it('drops the contributors once a newer episode replaces the last one', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry({ coolWindows: 3 });
+      const state = (service as any).retryAmplificationState.get('conn-1');
+      state.lastEpisode = { ...state.lastEpisode, startedAt: state.lastEpisode.startedAt + 60_000 };
+
+      expect(service.getRetryAmplificationStatus('conn-1').topContributors).toBeNull();
+    });
+
+    it('names the clients whose command rate grew from CLIENT LIST tot-cmds', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      // The baseline's client readings come from the capture summary.
+      expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'checkout', keyKind: 'name' }),
+      ]);
+    });
+
+    it('does not hold the poll while attribution reads storage', async () => {
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      storage.getClientCaptureSummary = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+      const { recorded } = await runRetry();
+
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledTimes(1);
+      expect(recorded).toHaveLength(0);
+    });
+
+    describe('when the capture read fails', () => {
+      // A client whose command rate grew fivefold during the episode.
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'storm', keyKind: 'name', addr: '10.0.0.1:1', totalCommands }]]),
+      });
+      const history = [reading(520_000, 0), reading(580_000, 600), reading(700_000, 6_600)];
+      const attribute = () =>
+        (service as any).attributeRetryAmplification(mockCtx, history, 600_000, 780_000);
+
+      beforeEach(() => {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      });
+
+      it('still ranks by command rate after a rejected read', async () => {
+        storage.getClientCaptureSummary = jest.fn().mockRejectedValue(new Error('slow'));
+
+        expect(await attribute()).toEqual([
+          expect.objectContaining({ key: 'storm', newConnections: 0, connections: 0 }),
+        ]);
+      });
+
+      it('still ranks by command rate after a read that hangs', async () => {
+        jest.useFakeTimers();
+        try {
+          storage.getClientCaptureSummary = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+          const attribution = attribute();
+          await jest.advanceTimersByTimeAsync(5_000);
+
+          await expect(attribution).resolves.toEqual([expect.objectContaining({ key: 'storm' })]);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+    });
+
+    describe('when the client snapshot read fails', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const attribute = () =>
+        (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
+
+      beforeEach(() => {
+        storage.getClientCaptureSummary = jest.fn().mockResolvedValue(
+          summarizeClientCaptures([
+            // Captured in the baseline too, so it has client readings.
+            ...pooled(worker, 590_000),
+            ...pooled(worker, 780_000),
+            ...opened(worker, 60, 650_000, 680_000, 780_000),
+          ]),
+        );
+      });
+
+      it('still ranks reconnects after a rejected read', async () => {
+        storage.getClientSnapshots = jest.fn().mockRejectedValue(new Error('slow'));
+
+        expect(await attribute()).toEqual([
+          expect.objectContaining({ key: 'worker', newConnections: 60 }),
+        ]);
+      });
+
+      it('still ranks reconnects after a read that hangs', async () => {
+        jest.useFakeTimers();
+        try {
+          storage.getClientSnapshots = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+          const attribution = attribute();
+          await jest.advanceTimersByTimeAsync(5_000);
+
+          await expect(attribution).resolves.toEqual([
+            expect.objectContaining({ key: 'worker', newConnections: 60 }),
+          ]);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+    });
+
+    it('leaves command growth out when the pre-episode readings fall in the previous episode', async () => {
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'storm', keyKind: 'name', totalCommands }]]),
+      });
+      const history = [reading(500_000, 0), reading(560_000, 60_000), reading(660_000, 120_000)];
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        history,
+        600_000,
+        660_000,
+        580_000,
+      );
+
+      expect(ranked).toBeNull();
+    });
+
+    describe('when the previous episode leaves no clean readings', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'storm', keyKind: 'name', totalCommands }]]),
+      });
+      const history = [reading(500_000, 0), reading(560_000, 60_000), reading(660_000, 120_000)];
+      const attribute = (reconnects: number) => {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([
+          { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 660_000 },
+        ]);
+        storage.getClientCaptureSummary = jest
+          .fn()
+          .mockResolvedValue(summarizeClientCaptures([
+            // Captured in the baseline left after the previous episode.
+            ...pooled(worker, 590_000),
+            ...pooled(worker, 660_000),
+            ...opened(worker, reconnects, 650_000, 660_000),
+          ]));
+        return (service as any).attributeRetryAmplification(
+          mockCtx,
+          history,
+          600_000,
+          660_000,
+          569_999,
+        );
+      };
+
+      it('reports attribution as unavailable rather than that no client stood out', async () => {
+        expect(await attribute(0)).toBeNull();
+      });
+
+      it('still names a client that reconnected during the episode', async () => {
+        expect(await attribute(60)).toEqual([
+          expect.objectContaining({ key: 'worker', newConnections: 60 }),
+        ]);
+      });
+    });
+
+    it('gives up on an attribution read that hangs', async () => {
+      jest.useFakeTimers();
+      try {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+        storage.getClientCaptureSummary = jest.fn().mockReturnValue(new Promise(() => undefined));
+
+        const attribution = (service as any).attributeRetryAmplification(
+          mockCtx,
+          [],
+          1,
+          2,
+        );
+        await jest.advanceTimersByTimeAsync(5_000);
+
+        await expect(attribution).resolves.toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('keeps command growth on a finding raised by a restart', async () => {
+      captureClients = growingClients();
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      const { recorded, ts } = await runRetry({ windows: 15, runId: 'run-a' });
+      expect(recorded).toHaveLength(0);
+
+      await (service as any).detectRetryAmplification(
+        {
+          run_id: 'run-b',
+          instantaneous_ops_per_sec: '100',
+          connected_clients: '100',
+          total_commands_processed: '1',
+          total_error_replies: '0',
+        },
+        mockCtx,
+        ts,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toMatch(/Top clients: name checkout \(cmds [\d.]+×\)\.$/);
+    });
+
+    it('trims the event index without rebuilding it when the ring is full', () => {
+      const add = (id: string, connectionId: string) =>
+        (service as any).addRecentAnomaly({ id, connectionId });
+      for (let i = 0; i < 1000; i++) add(`a-${i}`, i === 0 ? 'only-old' : 'conn-1');
+      const rebuild = jest.spyOn(service as any, 'keepRecentAnomalies');
+
+      add('newest', 'conn-1');
+      add('newest-2', 'conn-1');
+
+      expect(rebuild).not.toHaveBeenCalled();
+      const ids = (service as any).recentAnomalies.map((a: any) => a.id);
+      expect(ids).toHaveLength(1000);
+      expect(ids[0]).toBe('a-2');
+      expect((service as any).recentEventsOf('conn-1').map((a: any) => a.id)).toEqual(ids);
+      expect((service as any).recentAnomaliesByConnection.has('only-old')).toBe(false);
+    });
+
+    it('forgets the report chain of a removed connection', () => {
+      (service as any).retryAmplificationReports.set('conn-1', new Promise(() => undefined));
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).retryAmplificationReports.has('conn-1')).toBe(false);
+    });
+
+    describe('client command counts', () => {
+      const info = (runId?: string) => ({
+        ...(runId ? { run_id: runId } : {}),
+        instantaneous_ops_per_sec: '1000',
+        connected_clients: '100',
+        total_commands_processed: '1000',
+        total_error_replies: '0',
+      });
+      const clients = [{ id: '1', addr: '10.0.0.1:1', name: 'api', 'tot-cmds': '5' }];
+      const poll = (ts: number, runId?: string) =>
+        (service as any).detectRetryAmplification(info(runId), mockCtx, ts);
+      const taken = () =>
+        (service as any).retryAmplificationClients
+          .get('conn-1')
+          .snapshots.map((snapshot: any) => snapshot.takenAt);
+
+      it('reads them from the client capture without its own CLIENT LIST', async () => {
+        dbClient.getClients = jest.fn();
+        clientListCache.record('conn-1', clients as any, 1_000_000);
+
+        await poll(1_000_500);
+
+        expect(dbClient.getClients).not.toHaveBeenCalled();
+        expect(taken()).toEqual([1_000_000]);
+      });
+
+      it('takes one snapshot per capture', async () => {
+        clientListCache.record('conn-1', clients as any, 1_000_000);
+        await poll(1_001_000);
+        await poll(1_002_000);
+        clientListCache.record('conn-1', clients as any, 1_060_000);
+        await poll(1_061_000);
+
+        expect(taken()).toEqual([1_000_000, 1_060_000]);
+      });
+
+      it('drops snapshots from before a restart', async () => {
+        clientListCache.record('conn-1', clients as any, 1_000_000);
+        await poll(1_001_000, 'run-a');
+
+        await poll(1_002_000, 'run-b');
+        expect(taken()).toEqual([]);
+
+        clientListCache.record('conn-1', clients as any, 1_060_000);
+        await poll(1_061_000, 'run-b');
+        expect(taken()).toEqual([1_060_000]);
+      });
+
+      it('picks up command counts that appear after an upgrade', async () => {
+        clientListCache.record('conn-1', [{ id: '1', addr: '10.0.0.1:1' }] as any, 1_000_000);
+        await poll(1_001_000);
+        expect(taken()).toEqual([]);
+
+        clientListCache.record('conn-1', clients as any, 1_060_000);
+        await poll(1_061_000);
+        expect(taken()).toEqual([1_060_000]);
+      });
+
+      it('leaves replication links out of the counts', async () => {
+        const replica = { id: '2', addr: '10.0.0.2:1', flags: 'S', 'tot-cmds': '9' };
+        clientListCache.record('conn-1', [...clients, replica] as any, 1_000_000);
+
+        await poll(1_001_000);
+
+        const [snapshot] = (service as any).retryAmplificationClients.get('conn-1').snapshots;
+        expect([...snapshot.clients.keys()]).toEqual(['1']);
+      });
+    });
+
+    it('does not send a warning after the critical of the same episode', async () => {
+      const saved: any[] = [];
+      jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (e: any) => {
+        saved.push(e);
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+      const state = jest
+        .requireActual('../retry-amplification-detector')
+        .createRetryAmplificationState();
+      (service as any).retryAmplificationState.set('conn-1', state);
+      const report = (level: string) =>
+        (service as any).reportRetryAmplification({
+          ctx: mockCtx,
+          key: 'conn-1',
+          state,
+          finding: { level, trigger: 'latency', windows: 2, loadRatio: 2, message: 'm' },
+          clientSnapshots: [],
+          attributionStart: 1_000,
+          closedAt: undefined,
+          timestamp: 2_000,
+          rearm: () => undefined,
+        });
+      await report('warning');
+      await report('critical');
+      const hooks = (service as any).anomalySaveHooks;
+
+      hooks.get(saved[1])();
+      hooks.get(saved[0])();
+
+      const dispatch = webhookEventsProService.dispatchRetryAmplificationDetected;
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ level: 'critical' }));
+    });
+
+    it('compares reconnects with the span before the episode, read together with it', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 590_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          ...opened(worker, 20, 500_000, 530_000, 780_000),
+          ...opened(worker, 25, 700_000, 720_000, 780_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(mockCtx, [], 600_000, 780_000);
+
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
+      // 25 reconnects during the episode against 20 in the span before it.
+      expect(ranked).toBeNull();
+    });
+
+    it('starts the reconnect baseline after the previous episode and scales it to the full span', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          // Opened in the previous episode: not part of the baseline.
+          ...opened(worker, 40, 450_000, 480_000, 780_000),
+          ...opened(worker, 20, 550_000, 580_000, 780_000),
+          ...opened(worker, 50, 650_000, 680_000, 780_000),
+        ]));
+
+      const reading = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([['1', { key: 'steady', keyKind: 'name', totalCommands }]]),
+      });
+      const steady = [reading(520_000, 0), reading(580_000, 60_000), reading(700_000, 180_000)];
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        steady,
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
+      expect(ranked).toEqual([]);
+    });
+
+    it('does not count connections opened in the previous episode in the baseline or the episode', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          // Opened in the previous episode, first captured after it.
+          ...opened(worker, 50, 505_000, 520_000, 780_000),
+          // Opened in the previous episode, first captured during this one.
+          ...opened(worker, 5, 505_001, 650_000, 780_000),
+          ...opened(worker, 60, 650_000, 680_000, 780_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      // 60 reconnects against a baseline of 0, not the 50 storm connections scaled to 100.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 60 })]);
+    });
+
+    describe('when the reconnect baseline cannot be trusted', () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      const snapshotRow = { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 };
+
+      beforeEach(() => {
+        storage.getClientCaptureSummary = jest
+          .fn()
+          .mockResolvedValue(summarizeClientCaptures([...pooled(worker, 780_000), ...opened(worker, 50, 650_000, 680_000, 780_000)]));
+      });
+
+      it('does not scale a baseline cut to a sliver after the previous episode', async () => {
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([snapshotRow]);
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          [],
+          600_000,
+          780_000,
+          594_999,
+        );
+
+        expect(ranked).toBeNull();
+      });
+
+      it('does not compare with a baseline that has no client readings', async () => {
+        storage.getClientSnapshots = jest
+          .fn()
+          .mockImplementation(async ({ endTime }: { endTime: number }) =>
+            endTime < 600_000 ? [] : [snapshotRow],
+          );
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          [],
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toBeNull();
+      });
+    });
+
+    it('reports attribution as unavailable when command rates are unknown and no reconnects stand out', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([...pooled(worker, 780_000), ...opened(worker, 1, 650_000, 680_000, 780_000)]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+      );
+
+      expect(ranked).toBeNull();
+    });
+
+    it('counts the id growth since the last capture before a cut baseline', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          ...opened(worker, 1, 650_000, 680_000, 780_000),
+          // The highest ids at three captures, the first one before the cut;
+          // the growth is counted from the last one before the episode.
+          numbered(worker, 100, 500, 505_000),
+          numbered(worker, 100, 585, 590_000),
+          numbered(worker, 130, 1, 650_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      // 50 s of the 60 s between 590 s and 650 s are in the episode: 25 of the 30 ids.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 25 })]);
+    });
+
+    it('still names a reconnecting client above the scaled baseline', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          ...opened(worker, 20, 550_000, 580_000, 780_000),
+          ...opened(worker, 60, 650_000, 680_000, 780_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+        509_999,
+      );
+
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 60 })]);
+    });
+
+    it('scores a fast retrier from the id growth between captures', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 1, capturedAt: 780_000 },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockResolvedValue(summarizeClientCaptures([
+          ...pooled(worker, 780_000),
+          ...opened(worker, 1, 650_000, 680_000, 780_000),
+          numbered(worker, 100, 500, 590_000),
+          numbered(worker, 130, 1, 650_000),
+        ]));
+
+      const ranked = await (service as any).attributeRetryAmplification(
+        mockCtx,
+        [],
+        600_000,
+        780_000,
+      );
+
+      expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 420_000, 780_000, {
+        skipFrom: 600_000,
+        skipTo: 600_000,
+        maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+      });
+      // 50 s of the 60 s between 590 s and 650 s are in the episode: 25 of the 30 ids.
+      expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 25 })]);
+    });
+
+    it('reports a connection on its own recent events', () => {
+      const event = (id: string, connectionId: string) => ({ id, connectionId, timestamp: 1 });
+      (service as any).addRecentAnomaly(event('a', 'conn-1'));
+      (service as any).addRecentAnomaly(event('b', 'conn-2'));
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['a']);
+
+      (service as any).addRecentAnomaly(event('c', 'conn-1'));
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['a', 'c']);
+
+      (service as any).keepRecentAnomalies((e: any) => e.id === 'c');
+      expect((service as any).recentEventsOf('conn-1').map((e: any) => e.id)).toEqual(['c']);
+      expect((service as any).recentEventsOf('conn-2')).toEqual([]);
+    });
+
+    it('names a reconnecting client with its growth against the pre-episode rate', async () => {
+      let reads = 0;
+      captureClients = jest.fn().mockImplementation(async () => {
+        reads += 1;
+        const pooled = { addr: '10.0.0.1:1', name: 'storm', user: 'default', age: 1000 };
+        return reads <= 13
+          ? // The age grows with the 60 s between reads, as on a server.
+            [{ ...pooled, id: '1', age: 1000 + 60 * reads, 'tot-cmds': String(600 * reads) }]
+          : [{ ...pooled, id: String(100 + reads), age: 1, 'tot-cmds': String(6000 * (reads - 13)) }];
+      });
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      await runRetry();
+
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'storm', commandRateGrowth: 10 }),
+      ]);
+    });
+
+    it('counts the connections of the newest capture from the same read as the reconnects', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      storage.getClientSnapshots = jest.fn().mockImplementation(async ({ endTime }) => [
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 2, capturedAt: endTime },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockImplementation(async (_id: string, since: number, until: number) => summarizeClientCaptures([
+          // Captured at the start of the span, so the baseline has client readings.
+          ...pooled(worker, since + 100_000),
+          ...pooled(worker, until),
+          // Three reconnects during the episode, two of them gone by the newest capture.
+          ...opened(worker, 2, until - 2_000, until - 1_000),
+          ...opened(worker, 1, until - 500, until),
+        ]));
+
+      await runRetry();
+
+      expect(storage.getClientSnapshots).not.toHaveBeenCalled();
+      expect(service.getRetryAmplificationContributors('conn-1')).toEqual([
+        expect.objectContaining({ key: 'worker', connections: 2, newConnections: 3 }),
+      ]);
+    });
+
+    it('falls back to reconnects from stored snapshots without tot-cmds', async () => {
+      const worker = { name: 'worker', user: 'default', ip: '10.0.0.1' };
+      dbClient.getClients = jest.fn().mockResolvedValue([
+        { id: '1', addr: '10.0.0.1:1', ...worker, age: 3 },
+      ]);
+      storage.getClientSnapshots = jest.fn().mockImplementation(async ({ endTime }) => [
+        { clientId: 'a', addr: '10.0.0.1:1', ...worker, age: 2, capturedAt: endTime },
+      ]);
+      storage.getClientCaptureSummary = jest
+        .fn()
+        .mockImplementation(async (_id: string, since: number, until: number) => summarizeClientCaptures([
+          // Captured at the start of the span, so the baseline has client readings.
+          ...pooled(worker, since + 100_000),
+          ...pooled(worker, until),
+          ...opened(worker, 3, until - 1_000, until),
+        ]));
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Top clients: name worker (3 reconnects).');
+    });
+
+    // A stored client_snapshots row of conn-1.
+    const stored = (
+      clientId: string,
+      addr: string,
+      name: string,
+      age: number,
+      capturedAt: number,
+      flags = 'N',
+    ) => ({
+      id: 0,
+      clientId,
+      addr,
+      name,
+      user: 'default',
+      db: 0,
+      cmd: 'get',
+      age,
+      idle: 0,
+      flags,
+      sub: 0,
+      psub: 0,
+      qbuf: 0,
+      qbufFree: 0,
+      obl: 0,
+      oll: 0,
+      omem: 0,
+      capturedAt,
+      sourceHost: 'h',
+      sourcePort: 1,
+      connectionId: 'conn-1',
+    });
+
+    describe('with stored captures', () => {
+      // A steady client, so command rates are known and the ranking is a list.
+      const steady = (takenAt: number, totalCommands: number) => ({
+        takenAt,
+        clients: new Map([
+          ['50', { key: 'steady', keyKind: 'name', addr: '10.0.0.3:1', totalCommands }],
+        ]),
+      });
+      const readings = [steady(520_000, 0), steady(580_000, 60_000), steady(700_000, 180_000)];
+      let history: MemoryAdapter;
+
+      beforeEach(() => {
+        history = new MemoryAdapter();
+        storage.getClientSnapshots = jest.fn((options) => history.getClientSnapshots(options));
+        storage.getClientCaptureSummary = jest.fn(
+          (...args: Parameters<MemoryAdapter['getClientCaptureSummary']>) =>
+            history.getClientCaptureSummary(...args),
+        );
+        storage.getClientCaptureRowCounts = jest.fn((...args: unknown[]) =>
+          (history as any).getClientCaptureRowCounts(...args),
+        );
+      });
+
+      it('keeps one identity for a client that set its name after the baseline captured it', async () => {
+        const storm = (id: number, name: string, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
+        // Five connections opened in the baseline, listed before CLIENT SETNAME ran.
+        await history.saveClientSnapshot(
+          [1, 2, 3, 4, 5].map((id) => storm(id, '', 0, 590_000)),
+          'conn-1',
+        );
+        // During the episode they carry their name and six more open.
+        await history.saveClientSnapshot(
+          [
+            ...[1, 2, 3, 4, 5].map((id) => storm(id, 'storm', 60, 650_000)),
+            ...[6, 7, 8, 9, 10, 11].map((id) => storm(id, 'storm', 0, 650_000)),
+          ],
+          'conn-1',
+        );
+        await history.saveClientSnapshot(
+          [
+            ...[1, 2, 3, 4, 5].map((id) => storm(id, 'storm', 190, 780_000)),
+            ...[6, 7, 8, 9, 10, 11].map((id) => storm(id, 'storm', 130, 780_000)),
+          ],
+          'conn-1',
+        );
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        // Six reconnects against five in the baseline is steady churn, not a
+        // client that stands out; under two identities it would be six against none.
+        expect(ranked).toEqual([]);
+      });
+
+      it('counts the reconnects that reuse ids on a Unix socket after a server restart', async () => {
+        const worker = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), '/run/valkey.sock:0', 'worker', age, capturedAt);
+        // Ids 12-14 on the socket, open for an hour before the episode.
+        for (const capturedAt of [530_000, 590_000]) {
+          await history.saveClientSnapshot(
+            [12, 13, 14].map((id) => worker(id, (capturedAt - 530_000) / 1000 + 3_600, capturedAt)),
+            'conn-1',
+          );
+        }
+        // The server restarted at 630 s and the workers reconnected under the same ids.
+        for (const capturedAt of [650_000, 710_000]) {
+          await history.saveClientSnapshot(
+            [12, 13, 14].map((id) => worker(id, (capturedAt - 630_000) / 1000, capturedAt)),
+            'conn-1',
+          );
+        }
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toEqual([expect.objectContaining({ key: 'worker', newConnections: 3 })]);
+      });
+
+      it('compares reconnects by opening time when the last baseline capture is close to the episode', async () => {
+        // 60 s polls, the last baseline capture 55 s before a 60 s episode, and
+        // a pool that opens one connection a second and keeps it.
+        const pool = (capturedAt: number) =>
+          Array.from({ length: (capturedAt - 480_000) / 1000 + 1 }, (_, i) =>
+            stored(String(480 + i), `10.0.0.7:${480 + i}`, 'pool', (capturedAt - 480_000) / 1000 - i, capturedAt),
+          );
+        await history.saveClientSnapshot(pool(545_000), 'conn-1');
+        await history.saveClientSnapshot(pool(605_000), 'conn-1');
+        const steadyReadings = [steady(520_000, 0), steady(580_000, 60_000), steady(640_000, 120_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          steadyReadings,
+          600_000,
+          660_000,
+        );
+
+        // Split by first capture it would be 60 reconnects against 6.
+        expect(ranked).toEqual([]);
+      });
+
+      it('does not rank a steady pool when a capture interval straddles the episode start', async () => {
+        // 60 s polls at 550 s and 610 s around an episode from 600 s, and a pool
+        // that opens one connection a second (ids 1 apart) and closes it after
+        // 20 s, so every capture lists only connections opened since the last.
+        const pool = (capturedAt: number) =>
+          Array.from({ length: 20 }, (_, i) => {
+            const id = capturedAt / 1000 - i;
+            return stored(String(id), `10.0.0.7:${id}`, 'pool', i, capturedAt);
+          });
+        await history.saveClientSnapshot(pool(550_000), 'conn-1');
+        await history.saveClientSnapshot(pool(610_000), 'conn-1');
+        const steadyReadings = [steady(520_000, 0), steady(580_000, 60_000), steady(640_000, 120_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          steadyReadings,
+          600_000,
+          660_000,
+        );
+
+        // The 60 ids between the captures are 50 s of baseline and 10 s of
+        // episode; credited whole to the episode they read as 60 reconnects
+        // against a baseline of 20.
+        expect(ranked).toEqual([]);
+      });
+
+      it('reports that no client stood out when the newest capture lists only the monitor', async () => {
+        const monitor = (capturedAt: number) => stored('9', '10.0.0.9:1', 'BetterDB-Monitor', 1_000, capturedAt);
+        const storm = (id: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', 10, capturedAt);
+        await history.saveClientSnapshot([monitor(500_000), storm(1, 500_000)], 'conn-1');
+        // Every storm client is mid-reconnect at both captures of the episode.
+        await history.saveClientSnapshot([monitor(650_000)], 'conn-1');
+        await history.saveClientSnapshot([monitor(700_000)], 'conn-1');
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        // Zero application connections is a known count, not "unavailable".
+        expect(ranked).toEqual([]);
+      });
+
+      it('reads the newest 30 minutes of a long episode and as long a span before it', async () => {
+        const episodeStart = 10_000_000;
+        const until = episodeStart + 2 * 60 * 60_000;
+        const recentStart = until - RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS;
+        const storm = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', age, capturedAt);
+        const pool = (capturedAt: number) =>
+          stored('1', '10.0.0.3:1', 'pool', (capturedAt - 1_000_000) / 1000, capturedAt);
+        await history.saveClientSnapshot([pool(9_000_000)], 'conn-1');
+        // Forty storm connections opened and listed in the part of the episode
+        // that is skipped, five in its newest 30 minutes.
+        await history.saveClientSnapshot(
+          [pool(12_000_000), ...Array.from({ length: 40 }, (_, i) => storm(100 + i, 1, 12_000_000))],
+          'conn-1',
+        );
+        await history.saveClientSnapshot(
+          [pool(16_000_000), ...Array.from({ length: 5 }, (_, i) => storm(200 + i, 1, 16_000_000))],
+          'conn-1',
+        );
+        const longReadings = [
+          steady(episodeStart - 120_000, 0),
+          steady(episodeStart - 60_000, 60_000),
+          steady(until - 100_000, 60_000 + (until - 100_000 - (episodeStart - 60_000))),
+        ];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          longReadings,
+          episodeStart,
+          until,
+        );
+
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledWith(
+          'conn-1',
+          episodeStart - RETRY_AMP_MAX_ATTRIBUTION_SPAN_MS,
+          until,
+          { skipFrom: episodeStart, skipTo: recentStart, maxRows: RETRY_AMP_MAX_CAPTURE_ROWS },
+        );
+        expect(ranked).toEqual([expect.objectContaining({ key: 'storm', newConnections: 5 })]);
+      });
+
+      // Each stored row stands for `rows` rows of a large instance, so the row
+      // cap is RETRY_AMP_MAX_CAPTURE_ROWS / rows stored rows.
+      const scaleRows = (rows: number) => {
+        storage.getClientCaptureSummary = jest.fn(
+          (connectionId: string, since: number, until: number, bounds: { maxRows: number }) =>
+            history.getClientCaptureSummary(connectionId, since, until, {
+              ...bounds,
+              maxRows: bounds.maxRows / rows,
+            } as any),
+        );
+        storage.getClientCaptureRowCounts = jest.fn(async (...args: unknown[]) =>
+          ((await (history as any).getClientCaptureRowCounts(...args)) as { rows: number }[]).map(
+            (count) => ({ ...count, rows: count.rows * rows }),
+          ),
+        );
+      };
+
+      it('ranks reconnects over the newest span that fits when the captures exceed the row cap', async () => {
+        const pool = (capturedAt: number) =>
+          stored('1', '10.0.0.3:9', 'pool', (capturedAt - 300_000) / 1000, capturedAt);
+        const storm = (id: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'storm', 1, capturedAt);
+        for (const capturedAt of [450_000, 510_000, 570_000]) {
+          await history.saveClientSnapshot([pool(capturedAt)], 'conn-1');
+        }
+        // Four new storm connections at every capture of the episode.
+        for (const capturedAt of [630_000, 690_000, 750_000]) {
+          const ids = [0, 1, 2, 3].map((i) => capturedAt / 1000 + i);
+          await history.saveClientSnapshot(
+            [pool(capturedAt), ...ids.map((id) => storm(id, capturedAt))],
+            'conn-1',
+          );
+        }
+        // 18 rows over a cap of 10: the newest capture on each side fits (6
+        // rows), the next one on each side (90 s before the episode and before
+        // its end) would make 12.
+        scaleRows(RETRY_AMP_MAX_CAPTURE_ROWS / 10);
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+        const saved: any[] = [];
+        jest.spyOn(service as any, 'addLatchedAnomaly').mockImplementation(async (event: any) => {
+          saved.push(event);
+        });
+        const state = jest
+          .requireActual('../retry-amplification-detector')
+          .createRetryAmplificationState();
+        (service as any).retryAmplificationState.set('conn-1', state);
+        const report = () =>
+          (service as any).reportRetryAmplification({
+            ctx: mockCtx,
+            key: 'conn-1',
+            state,
+            finding: { level: 'warning', trigger: 'churn', windows: 2, loadRatio: 2, message: 'm' },
+            clientSnapshots: readings,
+            attributionStart: 600_000,
+            closedAt: undefined,
+            timestamp: 780_000,
+            rearm: () => undefined,
+          });
+
+        await report();
+        await report();
+
+        expect(storage.getClientCaptureSummary).toHaveBeenLastCalledWith('conn-1', 510_001, 780_000, {
+          skipFrom: 600_000,
+          skipTo: 690_001,
+          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+        });
+        // The storm's four connections of the newest capture against none in the
+        // baseline's newest capture.
+        expect(saved[0].message).toBe(
+          'm Top clients: name storm (4 reconnects). Reconnects ranked over the newest 1 min only.',
+        );
+        const capped = warn.mock.calls.filter(([message]) => /exceed .* rows/.test(String(message)));
+        expect(capped).toEqual([[expect.stringContaining('newest 1 min')]]);
+      });
+
+      it('ranks by command rate only when not even the newest minute fits the row cap', async () => {
+        const worker = (id: number, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, 'worker', age, capturedAt);
+        await history.saveClientSnapshot([worker(1, 600, 590_000)], 'conn-1');
+        await history.saveClientSnapshot(
+          [worker(1, 760, 750_000), ...[2, 3, 4, 5].map((id) => worker(id, 1, 750_000))],
+          'conn-1',
+        );
+        // A cap of 5 rows; the newest minute of the episode and the minute
+        // before it hold 6.
+        scaleRows(RETRY_AMP_MAX_CAPTURE_ROWS / 5);
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        // Four reconnects against none would rank with the six rows read; past
+        // the cap the reconnects are unknown and the steady rate alone does not
+        // stand out.
+        expect(ranked).toBeNull();
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('reconnects not ranked'));
+      });
+
+      it('ranks the rate and the reconnects of one connection under the name its newest stored capture gives it', async () => {
+        const worker = (id: number, name: string, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
+        await history.saveClientSnapshot([worker(7, '', 190, 590_000)], 'conn-1');
+        // A capture the readings skipped: id 7 has run CLIENT SETNAME, and four
+        // more worker connections opened.
+        await history.saveClientSnapshot(
+          [worker(7, 'worker', 360, 760_000), ...[8, 9, 10, 11].map((id) => worker(id, 'worker', 1, 760_000))],
+          'conn-1',
+        );
+        // The readings list id 7 unnamed, by its IP; 1,000/s before, 5,000/s during.
+        const reading = (takenAt: number, totalCommands: number) => ({
+          takenAt,
+          clients: new Map([
+            ['7', { key: '10.0.0.5', keyKind: 'ip', addr: '10.0.0.5:4007', openedAt: 400_000, totalCommands }],
+          ]),
+        });
+        const unnamed = [reading(520_000, 0), reading(580_000, 60_000), reading(700_000, 660_000)];
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          unnamed,
+          600_000,
+          780_000,
+        );
+
+        expect(ranked).toEqual([
+          { key: 'worker', keyKind: 'name', commandRateGrowth: 5, newConnections: 4, connections: 5 },
+        ]);
+      });
+
+      it('keeps the monitor and its key-scan clients out without crediting their ids to the application', async () => {
+        const app = (id: number, name: string, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.5:${4000 + id}`, name, age, capturedAt);
+        const own = (id: number, name: string, age: number, capturedAt: number) =>
+          stored(String(id), `10.0.0.9:${id}`, name, age, capturedAt);
+        await history.saveClientSnapshot(
+          [app(100, 'pool', 500, 590_000), own(101, 'BetterDB-Monitor', 100, 590_000)],
+          'conn-1',
+        );
+        // The monitor reconnected three times (ids 102-104) and runs three
+        // key-scan clients (105-107); one application client connected (108).
+        await history.saveClientSnapshot(
+          [
+            app(100, 'pool', 560, 650_000),
+            own(104, 'BetterDB-Monitor', 10, 650_000),
+            ...[105, 106, 107].map((id) => own(id, 'BetterDB-Monitor-keyscan', 5, 650_000)),
+            app(108, 'api', 1, 650_000),
+          ],
+          'conn-1',
+        );
+
+        const ranked = await (service as any).attributeRetryAmplification(
+          mockCtx,
+          readings,
+          600_000,
+          780_000,
+        );
+
+        // The key-scan clients would rank as three reconnects, and the
+        // application would take all seven ids without the monitor's rows;
+        // its share is two.
+        expect(ranked).toEqual([]);
+      });
+    });
+
+    it('counts early reconnects next to a later capture of older clients', async () => {
+      const history = new MemoryAdapter();
+      const row = (clientId: string, name: string, age: number, capturedAt: number) =>
+        stored(clientId, `10.0.0.1:${clientId}`, name, age, capturedAt);
+      // Seeded from the episode the service attributes, before it reads storage.
+      const attribute = (service as any).attributeRetryAmplification.bind(service);
+      let seeded = false;
+      jest
+        .spyOn(service as any, 'attributeRetryAmplification')
+        .mockImplementation(async (ctx, snapshots, episodeStart, until, ...rest) => {
+          if (!seeded) {
+            seeded = true;
+            const start = episodeStart as number;
+            await history.saveClientSnapshot([row('pool-0', 'pool', 999_000, start - 1)], 'conn-1');
+            await history.saveClientSnapshot(
+              ['early-1', 'early-2', 'early-3'].map((id) => row(id, 'retrier', 0, start)),
+              'conn-1',
+            );
+            const pool = Array.from({ length: 5 }, (_, i) =>
+              row(`pool-${i}`, 'pool', 1_000_000, until as number),
+            );
+            await history.saveClientSnapshot(pool, 'conn-1');
+          }
+          return attribute(ctx, snapshots, episodeStart, until, ...rest);
+        });
+      storage.getClientSnapshots = jest.fn((options) => history.getClientSnapshots(options));
+      storage.getClientCaptureSummary = jest.fn(
+        (...args: Parameters<MemoryAdapter['getClientCaptureSummary']>) =>
+          history.getClientCaptureSummary(...args),
+      );
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Top clients: name retrier (3 reconnects).');
+    });
+
+    it('still emits when both attribution sources fail', async () => {
+      storage.getClientSnapshots = jest.fn().mockRejectedValue(new Error('db down'));
+
+      const { recorded } = await runRetry();
+
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].message).toContain('Client attribution unavailable.');
+      expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
+    });
+
+    it('reports attribution as unavailable when no client data was read', async () => {
+      storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+
+      const { recorded } = await runRetry();
+
+      expect(recorded[0].message).toContain('Client attribution unavailable.');
+    });
+
+    it('saves a finding from the outbox when its first write fails', async () => {
+      const retryWrites = () =>
+        storage.saveAnomalyEvent.mock.calls.filter(
+          ([e]: [any]) => e.metricType === MetricType.RETRY_AMPLIFICATION,
+        ).length;
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('storage down'))
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+      await (service as any).drainPersistenceOutbox();
+
+      expect(retryWrites()).toBe(2);
+    });
+
+    it('keeps the first timestamp, metrics and resolution of an unsaved event', async () => {
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('storage down'))
+        .mockResolvedValue('id');
+      await runRetry({ realEmit: true });
+      const [event] = service
+        .getRecentEvents()
+        .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+      const firstSeen = event.timestamp;
+      event.relatedMetrics = [MetricType.LOAD_SATURATION];
+      await service.resolveAnomaly(event.id);
+
+      await (service as any).drainPersistenceOutbox();
+
+      const [, saved] = storage.saveAnomalyEvent.mock.calls.map(([e]: [any]) => e);
+      expect(saved).toMatchObject({
+        id: event.id,
+        timestamp: firstSeen,
+        relatedMetrics: [MetricType.LOAD_SATURATION],
+        resolved: true,
+      });
+      expect(saved.durationMs).toBe(saved.resolvedAt - firstSeen);
+    });
+
+    describe('finding closed by a poll gap', () => {
+      const emitAfterGap = async () => {
+        const { createRetryAmplificationState } = jest.requireActual(
+          '../retry-amplification-detector',
+        );
+        const state = createRetryAmplificationState();
+        state.pending = {
+          level: 'critical',
+          trigger: 'latency',
+          windows: 3,
+          loadRatio: 2,
+          correlation: 0.9,
+          pattern: 'rising',
+          message: 'storm',
+          timestamp: 500_000,
+        };
+        state.lastEpisode = {
+          classification: 'amplifying',
+          level: 'critical',
+          trigger: 'latency',
+          windows: 3,
+          startedAt: 320_000,
+          endedAt: 500_000,
+        };
+        (service as any).retryAmplificationState.set('conn-1', state);
+        storage.getClientSnapshots = jest.fn().mockResolvedValue([]);
+        storage.getClientCaptureSummary = jest.fn().mockResolvedValue(summarizeClientCaptures([]));
+        const info = {
+          instantaneous_ops_per_sec: '1000',
+          connected_clients: '100',
+          total_commands_processed: '1000000',
+          total_error_replies: '0',
+        };
+        await (service as any).detectRetryAmplification(info, mockCtx, 900_000);
+        await new Promise((resolve) => setImmediate(resolve));
+        return { state, info };
+      };
+
+      it('attributes it to the episode, not the time after the gap', async () => {
+        await emitAfterGap();
+
+        expect(storage.getClientCaptureSummary).toHaveBeenCalledWith('conn-1', 140_000, 500_000, {
+          skipFrom: 320_000,
+          skipTo: 320_000,
+          maxRows: RETRY_AMP_MAX_CAPTURE_ROWS,
+        });
+      });
+
+      it('dates the event at the end of the episode', async () => {
+        await emitAfterGap();
+
+        const event = service
+          .getRecentEvents()
+          .find((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+        expect(event?.timestamp).toBe(500_000);
+        expect(event?.severity).toBe(AnomalySeverity.CRITICAL);
+      });
+
+      it('fires once', async () => {
+        const { info } = await emitAfterGap();
+
+        await (service as any).detectRetryAmplification(info, mockCtx, 901_000);
+        await (service as any).detectRetryAmplification(info, mockCtx, 1_000_000);
+
+        expect(
+          service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+      });
+    });
+
+    describe('load saturation saves', () => {
+      const info = (busy: number) => ({
+        instantaneous_eventloop_duration_usec: String(busy * 10),
+        instantaneous_eventloop_cycles_per_sec: '1000',
+        instantaneous_ops_per_sec: '1000',
+      });
+      const ctx = { connectionId: 'conn-1', connectionName: 'c', host: 'h', port: 6379 };
+      const poll = async (busy: number, timestamp: number) =>
+        (service as any).detectLoadSaturation(info(busy), ctx, timestamp, null);
+      const polls = async (busy: number, from: number, count: number) => {
+        for (let i = 0; i < count; i++) await poll(busy, from + i * 1_000);
+      };
+      const loadEvents = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.LOAD_SATURATION);
+      const loadCounts = () =>
+        prometheusService.incrementAnomalyEvent.mock.calls.filter(
+          ([, metric]: unknown[]) => metric === MetricType.LOAD_SATURATION,
+        );
+      const saves = () => storage.saveAnomalyEvent.mock.calls.map(([e]: [any]) => e);
+
+      it('stops after a save goes through', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+
+        await polls(90, 0, 10);
+
+        expect(saves()).toHaveLength(1);
+      });
+
+      it('retries a failed save under one event', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 125);
+        await (service as any).drainPersistenceOutbox();
+        jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_RETRY_BASE_MS);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(saves()).toHaveLength(3);
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(1);
+        expect(loadEvents()).toHaveLength(1);
+        expect(loadCounts()).toHaveLength(1);
+      });
+
+      it('saves from the outbox and then stays quiet', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+        await (service as any).drainPersistenceOutbox();
+        await polls(90, 70_000, 70);
+
+        expect(saves()).toHaveLength(2);
+        expect((loadEvents()[0] as any).persisted).toBe(true);
+      });
+
+      it('keeps the first timestamp and carries the resolution', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(50_000);
+
+        await polls(90, 0, 40);
+        const [{ id, timestamp }] = loadEvents();
+        await service.resolveAnomaly(id);
+        await (service as any).drainPersistenceOutbox();
+        clock.mockRestore();
+
+        expect(saves()).toHaveLength(2);
+        expect(saves()[1]).toMatchObject({ id, timestamp, resolved: true, resolvedAt: 50_000 });
+      });
+
+      it('sends an escalation straight away and counts it', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 3);
+        await polls(99, 3_000, 3);
+
+        expect(saves()).toHaveLength(2);
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(2);
+        expect(saves()[1].severity).toBe(AnomalySeverity.CRITICAL);
+        expect(loadEvents()).toHaveLength(2);
+        expect(loadCounts().map(([severity]: unknown[]) => severity)).toEqual([
+          AnomalySeverity.WARNING,
+          AnomalySeverity.CRITICAL,
+        ]);
+      });
+
+      it('resolves the saved retry through its correlated group', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            (service as any).recentGroups = [{ correlationId: 'grp', anomalies: loadEvents() }];
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(await service.resolveGroup('grp')).toBe(true);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(loadEvents()[0].id, expect.any(Number));
+      });
+
+      it('does not reopen an attempt resolved in memory', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            loadEvents()[0].resolved = true;
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await polls(90, 0, 70);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(loadEvents()[0]).toMatchObject({ resolved: true, persisted: true });
+      });
+
+      it('forgets an unsaved event when the load drops', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await polls(90, 0, 3);
+        await poll(10, 3_000);
+        await polls(90, 4_000, 3);
+
+        expect(new Set(saves().map((e: any) => e.id)).size).toBe(2);
+      });
+
+      it('counts as active saturation while its save is failing', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        await polls(90, 0, 3);
+
+        const { recorded } = await runRetry();
+
+        expect(recorded[0].severity).toBe(AnomalySeverity.CRITICAL);
+      });
+    });
+
+    describe('saturation falling back and returning', () => {
+      const webhookLevels = () =>
+        webhookEventsProService.dispatchRetryAmplificationDetected.mock.calls.map(
+          ([payload]: [any]) => payload.level,
+        );
+      const flapping = (w: number) => w === 14 || w >= 16;
+
+      it('sends a second webhook when a critical falls back and returns', async () => {
+        await runRetry({ realEmit: true, saturated: flapping });
+
+        expect(webhookLevels()).toEqual(['critical', 'critical']);
+      });
+    });
+
+    describe('failed saves', () => {
+      const retryEvents = () =>
+        service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+
+      it('keeps one event in the active feed while the save keeps failing', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await runRetry({ realEmit: true });
+        await (service as any).drainPersistenceOutbox();
+
+        const saves = storage.saveAnomalyEvent.mock.calls
+          .map(([e]: [any]) => e)
+          .filter((e: any) => e.metricType === MetricType.RETRY_AMPLIFICATION);
+        expect(saves.length).toBeGreaterThan(1);
+        expect(new Set(saves.map((e: any) => e.id)).size).toBe(1);
+        expect(retryEvents()).toHaveLength(1);
+      });
+
+      it('leaves one saved event when a retry goes through', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+        await (service as any).drainPersistenceOutbox();
+
+        expect(retryEvents()).toHaveLength(1);
+        expect((retryEvents()[0] as any).persisted).toBe(true);
+      });
+
+      it('hands correlation one event for the finding', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockRejectedValueOnce(new Error('storage down'))
+          .mockResolvedValue('id');
+        await runRetry({ realEmit: true });
+        const correlate = jest.spyOn((service as any).correlator, 'correlate').mockReturnValue([]);
+
+        await (service as any).correlateAnomalies();
+
+        const passed = correlate.mock.calls[0][0] as any[];
+        expect(
+          passed.filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+      });
+
+      it('counts the event once however many saves it takes', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+        const counted = (mock: jest.Mock, metric: unknown) =>
+          mock.mock.calls.filter((args) => JSON.stringify(args).includes(String(metric)));
+
+        await runRetry({ realEmit: true });
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.calls.length).toBeGreaterThan(1);
+        expect(
+          counted(prometheusService.incrementAnomalyEvent, MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+        expect(counted(otelEvents.dispatch, MetricType.RETRY_AMPLIFICATION)).toHaveLength(1);
+      });
+
+      it('resolves the saved retry through its correlated group', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            (service as any).recentGroups = [{ correlationId: 'grp', anomalies: retryEvents() }];
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+        await (service as any).drainPersistenceOutbox();
+
+        expect(await service.resolveGroup('grp')).toBe(true);
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(retryEvents()[0].id, expect.any(Number));
+      });
+
+      it('does not reopen an attempt resolved in memory', async () => {
+        storage.saveAnomalyEvent = jest
+          .fn()
+          .mockImplementationOnce(async () => {
+            retryEvents()[0].resolved = true;
+            throw new Error('storage down');
+          })
+          .mockResolvedValue('id');
+
+        await runRetry({ realEmit: true });
+        await (service as any).drainPersistenceOutbox();
+
+        expect(retryEvents()[0]).toMatchObject({ resolved: true, persisted: true });
+      });
+
+      it('treats a rise to critical as its own event', async () => {
+        storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+        await runRetry({ realEmit: true, saturated: (w) => w >= 16 });
+
+        const severities = prometheusService.incrementAnomalyEvent.mock.calls
+          .filter(([, metric]: unknown[]) => metric === MetricType.RETRY_AMPLIFICATION)
+          .map(([severity]: unknown[]) => severity);
+        expect(severities).toEqual([AnomalySeverity.WARNING, AnomalySeverity.CRITICAL]);
+        expect(retryEvents()).toHaveLength(2);
+      });
+    });
+
+    it('holds the webhook until the save goes through', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+      await runRetry({ realEmit: true });
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
+
+      storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+      await (service as any).drainPersistenceOutbox();
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends one webhook however many saves it takes', async () => {
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('storage down'))
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+      await (service as any).drainPersistenceOutbox();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no webhook for a finding the outbox dropped', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+
+      await runRetry({ realEmit: true });
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+      await (service as any).drainPersistenceOutbox();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
+    });
+
+    it('sends one webhook when a dropped finding is raised again', async () => {
+      storage.saveAnomalyEvent = jest.fn().mockRejectedValue(new Error('storage down'));
+      const dropOnce = (w: number) => {
+        if (w === 16) {
+          (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+          storage.saveAnomalyEvent = jest.fn().mockResolvedValue('id');
+        }
+        return false;
+      };
+
+      await runRetry({ realEmit: true, saturated: dropOnce });
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends no webhook for a finding resolved before its save went through', async () => {
+      storage.saveAnomalyEvent = jest
+        .fn()
+        .mockImplementationOnce(async () => {
+          service
+            .getRecentEvents()
+            .filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION)[0].resolved = true;
+          throw new Error('storage down');
+        })
+        .mockResolvedValue('id');
+
+      await runRetry({ realEmit: true });
+      await (service as any).drainPersistenceOutbox();
+
+      expect(webhookEventsProService.dispatchRetryAmplificationDetected).not.toHaveBeenCalled();
+    });
+
+    it('ignores a relative CPU move, even a critical one', async () => {
+      const { recorded } = await runRetry({
+        cpuEvent: { severity: AnomalySeverity.CRITICAL, anomalyType: AnomalyType.DROP },
+      });
+
+      expect(recorded.map((e) => e.severity)).toEqual([AnomalySeverity.WARNING]);
+    });
+
+    it('escalates on control-plane saturation', async () => {
+      const { recorded } = await runRetry({
+        cpuEvent: {
+          severity: AnomalySeverity.CRITICAL,
+          syntheticPattern: AnomalyPattern.CONTROL_PLANE_SATURATION,
+        },
+      });
+
+      expect(recorded.at(-1).severity).toBe(AnomalySeverity.CRITICAL);
+    });
+
+    it('drops the per-connection state when the connection is removed', async () => {
+      await runRetry();
+      expect((service as any).retryAmplificationState.has('conn-1')).toBe(true);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).retryAmplificationState.has('conn-1')).toBe(false);
+      expect((service as any).retryAmplificationClients.has('conn-1')).toBe(false);
+      expect(service.getRetryAmplificationContributors('conn-1')).toBeNull();
+    });
+  });
+
+  describe('error replies delta detection', () => {
+    const infoWith = (totalErrors: string, errorstats?: Record<string, { count: number }>) => ({
+      server: { role: 'master' },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1' },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        total_error_replies: totalErrors,
+      },
+      ...(errorstats ? { errorstats } : {}),
+    });
+    const errorEvents = () =>
+      service.getRecentEvents().filter((e) => e.metricType === MetricType.ERROR_REPLIES);
+    const errorBuffer = () => {
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      return buffers.get(MetricType.ERROR_REPLIES);
+    };
+
+    it('keeps a burst on a quiet instance at warning until the critical threshold', async () => {
+      let total = 1000;
+      const step = async (delta: number) => {
+        total += delta;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      };
+      for (let i = 0; i < 40; i++) await step(i % 2);
+
+      await step(30);
+      await step(30);
+
+      expect(errorEvents()).toHaveLength(1);
+      expect(errorEvents()[0].zScore).toBeGreaterThan(3);
+      expect(errorEvents()[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('feeds the per-second rate, not the lifetime counter', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('512'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(12);
+    });
+
+    it('does not create the buffer when total_error_replies is absent', async () => {
+      await poll();
+      const buffers: Map<MetricType, any> = (service as any).buffers.get('conn-1');
+      expect(buffers.has(MetricType.ERROR_REPLIES)).toBe(false);
+    });
+
+    it('applies threshold overrides from settings, including to a running detector', async () => {
+      const step = async (total: string) => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(total));
+        await poll();
+      };
+      await step('100');
+      await step('110');
+      const detector = (service as any).detectors.get('conn-1').get(MetricType.ERROR_REPLIES);
+      expect(detector.getConfig()).toMatchObject({ warningThreshold: 200, criticalThreshold: 2000 });
+
+      service.reloadDetectorConfig({ error_replies: { warningAbsolute: 50 } });
+
+      expect(detector.getConfig()).toMatchObject({ warningThreshold: 50, criticalThreshold: 2000 });
+    });
+
+    it('keeps the same rate when the poll interval changes', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(5000);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      now += 5000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('600'));
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorBuffer().getLatest()).toBe(100);
+    });
+
+    it('scales the delta to a rate when polling resumes after a gap', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      now += 10 * (service as any).getIntervalMs();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5100'));
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorBuffer().getLatest()).toBe(500);
+    });
+
+    it('keeps the errorstat baseline when a poll after a gap has no errorstats', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        now += interval;
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      now += 10 * interval;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types over 12 polls: TIMEOUT +6000');
+    });
+
+    it('keeps the errorstat baseline across a poll without errorstats', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      let timeouts = 1000;
+      const withStats = () => infoWith(String(total), { errorstat_TIMEOUT: { count: timeouts } });
+      for (let i = 0; i < 31; i++) {
+        now += interval;
+        total += 2;
+        timeouts += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+        await poll();
+      }
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      now += interval;
+      total += 3000;
+      timeouts += 3000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(withStats());
+      await poll();
+      (Date.now as jest.Mock).mockRestore();
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].message).toContain('top error types over 2 polls: TIMEOUT +6000');
+    });
+
+    it('leaves the breakdown unlabelled when it covers one poll', async () => {
+      let now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const interval = (service as any).getIntervalMs();
+      let total = 1000;
+      const step = (add: number) => {
+        now += interval;
+        total += add;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+          infoWith(String(total), { errorstat_TIMEOUT: { count: total } }),
+        );
+        return poll();
+      };
+      for (let i = 0; i < 31; i++) await step(2);
+      await step(3000);
+      await step(3000);
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(errorEvents()[0].message).toContain('top error types: TIMEOUT +3000');
+    });
+
+    it('absorbs a counter reset on restart', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('900'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('3'));
+      await poll();
+
+      expect(errorBuffer().getLatest()).toBe(0);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('stays quiet when a zero-error instance sees a couple of errors', async () => {
+      let total = 1000;
+      for (let i = 0; i < 31; i++) {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      for (let i = 0; i < 3; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      expect(errorBuffer().getLatest()).toBe(1);
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('fires on an error burst and names the top error types', async () => {
+      let total = 1000;
+      const stats = { ERR: 900, TIMEOUT: 100, BUSY: 0 };
+      const snapshot = () =>
+        infoWith(String(total), {
+          errorstat_ERR: { count: stats.ERR },
+          errorstat_TIMEOUT: { count: stats.TIMEOUT },
+          errorstat_BUSY: { count: stats.BUSY },
+        });
+      for (let i = 0; i < 31; i++) {
+        total += 2;
+        stats.ERR += 2;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+      expect(errorEvents()).toHaveLength(0);
+
+      for (let i = 0; i < 2; i++) {
+        total += 3000;
+        stats.TIMEOUT += 2000;
+        stats.BUSY += 900;
+        stats.ERR += 100;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(snapshot());
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].severity).toBe(AnomalySeverity.CRITICAL);
+      expect(events[0].connectionId).toBe('conn-1');
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].message).toContain('above threshold. Value: 3000, Threshold: 2000 ');
+      expect(events[0].message).toContain('top error types: TIMEOUT +2000, BUSY +900, ERR +100');
+    });
+
+    it('labels a steady rate over the absolute threshold as a spike without a z-score trigger', async () => {
+      let total = 0;
+      for (let i = 0; i < 32; i++) {
+        total += 300;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+
+      const events = errorEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].zScore).toBeLessThan(3);
+      expect(events[0].threshold).toBe(200);
+      expect(events[0].anomalyType).toBe(AnomalyType.SPIKE);
+      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
+    });
+
+    it('starts a new baseline after a poll without total_error_replies', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...infoWith('0'),
+        stats: { ...infoWith('0').stats, total_error_replies: undefined },
+      });
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5000'));
+      await poll();
+      expect(errorBuffer()).toBeUndefined();
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('5010'));
+      await poll();
+      expect(errorBuffer().getLatest()).toBe(10);
+    });
+
+    it('takes no sample until a previous reading exists', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('500'));
+      await poll();
+
+      expect(errorBuffer()).toBeUndefined();
+    });
+
+    it('does not sample when the counter reappears mid-run', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('100'));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('110'));
+      await poll();
+      const samples = errorBuffer().getSampleCount();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...infoWith('0'),
+        stats: { ...infoWith('0').stats, total_error_replies: undefined },
+      });
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith('120'));
+      await poll();
+
+      expect(errorBuffer().getSampleCount()).toBe(samples);
+    });
+
+    it('needs two consecutive hot polls before firing', async () => {
+      let total = 0;
+      for (let i = 0; i < 31; i++) {
+        total += 1;
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+        await poll();
+      }
+      total += 5000;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+      total += 1;
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(String(total)));
+      await poll();
+
+      expect(errorEvents()).toHaveLength(0);
+    });
+
+    it('clears its counters when the connection is removed', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(
+        infoWith('10', { errorstat_ERR: { count: 10 } }),
+      );
+      await poll();
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).lastErrorReplies.has('conn-1')).toBe(false);
+      expect((service as any).lastErrorstatCounts.has('conn-1')).toBe(false);
     });
   });
 
@@ -3310,6 +8233,114 @@ describe('AnomalyService', () => {
     const satEvents = () =>
       service.getRecentEvents().filter((e) => e.metricType === MetricType.CLIENT_SATURATION);
 
+    describe('rows left open by an earlier run', () => {
+      beforeEach(() => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+      });
+
+      const openRows = (rows: Record<string, string[]>) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
+        );
+      const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id);
+      const pollAt = async (connected: number) => {
+        (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(connected));
+        await poll();
+      };
+
+      it('resolves the row on the first poll below the threshold', async () => {
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+      });
+
+      it('keeps the row with no new alert while the node stays saturated', async () => {
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+
+        await pollAt(85);
+        expect(resolvedIds()).toEqual([]);
+        expect(satEvents()).toEqual([]);
+
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+      });
+
+      it('waits between reads while storage stays down', async () => {
+        let now = Date.now();
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+        await pollAt(50);
+        const reads = storage.getAnomalyEvents.mock.calls.length;
+
+        await pollAt(50);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads);
+
+        now += 60_000;
+        await pollAt(50);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads * 2);
+      });
+
+      it('caps the wait between reads and clears it once a read succeeds', async () => {
+        let now = Date.now();
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+        for (let i = 0; i < 12; i += 1) {
+          await pollAt(50);
+          now += 120_000;
+        }
+        const retry = [...(service as any).openEventsRetry.values()][0];
+        expect(retry.delayMs).toBe(60_000);
+
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+        expect((service as any).openEventsRetry.size).toBe(0);
+      });
+
+      it('retries a failed read after the wait, then reads no more', async () => {
+        storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+        await pollAt(50);
+        expect(resolvedIds()).toEqual([]);
+
+        (service as any).openEventsRetry.clear();
+        openRows({ [MetricType.CLIENT_SATURATION]: ['old-1'] });
+        await pollAt(50);
+        const reads = storage.getAnomalyEvents.mock.calls.length;
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual(['old-1']);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(reads);
+      });
+
+      it('does not track an event raised before a failed read twice', async () => {
+        storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+        await pollAt(85);
+        const [raised] = satEvents();
+
+        (service as any).openEventsRetry.clear();
+        openRows({ [MetricType.CLIENT_SATURATION]: [raised.id] });
+        await pollAt(85);
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual([raised.id]);
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        const id = '11111111-1111-4111-8111-111111111111';
+        openRows({ [MetricType.CLIENT_SATURATION]: [id] });
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await pollAt(50);
+        await pollAt(50);
+
+        expect(resolvedIds()).toEqual([id, id]);
+      });
+    });
+
     it('does not alert below the warning threshold', async () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(70));
       await poll();
@@ -3354,6 +8385,57 @@ describe('AnomalyService', () => {
       (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(9999, null));
       await expect(poll()).resolves.not.toThrow();
       expect(satEvents()).toHaveLength(0);
+    });
+
+    it('resolves every open event once saturation falls below the warning threshold', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll();
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(79));
+      await poll();
+
+      expect(satEvents().map((e) => e.resolved)).toEqual([true, true]);
+      expect(satEvents().every((e) => typeof e.resolvedAt === 'number')).toBe(true);
+    });
+
+    it('keeps events open on a drop from critical to warning', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(97));
+      await poll();
+
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+
+      expect(satEvents().map((e) => e.resolved)).toEqual([false]);
+    });
+
+    it('retries a resolve that storage rejected', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(50));
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await poll();
+      expect(satEvents().map((e) => e.resolved)).toEqual([false]);
+
+      await poll();
+      expect(satEvents().map((e) => e.resolved)).toEqual([true]);
+    });
+
+    it('closes open saturation and backlog events when the connection is removed', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(85));
+      await poll();
+      const [event] = satEvents();
+      const connectionId = event.connectionId as string;
+      (service as any).backlogCoverageEventIds.set(connectionId, 'backlog-event');
+
+      (service as any).onConnectionRemoved(connectionId);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, expect.any(Number));
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('backlog-event', expect.any(Number));
+      expect(satEvents().map((e) => e.resolved)).toEqual([true]);
     });
 
     it('re-alerts on the next poll when the escalation emit fails (level not advanced on failure)', async () => {
@@ -3444,6 +8526,65 @@ describe('AnomalyService', () => {
       // Attributed to a real member of the drifting group, not whichever
       // connection's poll happened to run the scan.
       expect(['conn-a', 'conn-b']).toContain(events[0].connectionId);
+    });
+
+    it('compares config across KeyDB active-replica peers', async () => {
+      const ctxA = makeCtx('conn-a', {
+        role: 'active-replica',
+        replid: 'replid-x',
+        config: { maxmemory: '1000000' },
+      });
+      const ctxB = makeCtx('conn-b', {
+        role: 'active-replica',
+        replid: 'replid-x',
+        config: { maxmemory: '2000000' },
+      });
+
+      await poll(ctxA);
+      await poll(ctxB);
+
+      expect(driftEvents()).toHaveLength(1);
+    });
+
+    it('raises the drift again when the outbox drops its unsaved event', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const ctxB = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll(ctxA);
+      await poll(ctxB);
+      await poll(ctxA);
+      const [first] = driftEvents();
+      expect(driftEvents()).toHaveLength(1);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      (Date.now as jest.Mock).mockRestore();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll(ctxA);
+
+      const raised = driftEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('stays quiet when an older drift is dropped after a newer one was saved', async () => {
+      const ctxA = makeCtx('conn-a', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      const drifted = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '2000000' } });
+      const aligned = makeCtx('conn-b', { replid: 'replid-x', config: { maxmemory: '1000000' } });
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll(ctxA);
+      await poll(drifted);
+      expireConfigRecheck('conn-b');
+      await poll(aligned);
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      expireConfigRecheck('conn-b');
+      await poll(drifted);
+      expect(driftEvents()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll(ctxA);
+
+      expect(driftEvents()).toHaveLength(2);
     });
 
     it('does not alert when only one node of a group is monitored', async () => {
@@ -4172,6 +9313,142 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('flapping');
     });
 
+    describe('flapping events', () => {
+      let term: number;
+      const elect = async () => {
+        now += 1000;
+        term += 1;
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: String(term) }),
+        );
+        await poll();
+      };
+      const flap = async () => {
+        await elect();
+        await elect();
+        await elect();
+      };
+      const quiet = async (ms: number) => {
+        now += ms;
+        await poll();
+      };
+      const resolvedTimes = (id: string) =>
+        storage.resolveAnomaly.mock.calls.filter(([resolved]: [string]) => resolved === id).length;
+
+      beforeEach(async () => {
+        term = 1;
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
+          raftInfo({ cluster_raft_current_term: '1' }),
+        );
+        await poll();
+      });
+
+      it('closes once a full window passes with no new election', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        await quiet(59_000);
+        expect(resolvedTimes(id)).toBe(0);
+
+        await quiet(1_000);
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('stays open when an election lands inside the window', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        await quiet(30_000);
+        await elect();
+        await quiet(40_000);
+        expect(resolvedTimes(id)).toBe(0);
+
+        await quiet(20_000);
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('keeps both events and restarts the clock on a second flap', async () => {
+        await flap();
+        await quiet(30_000);
+        await flap();
+        const [first, second] = raftEvents();
+
+        await quiet(40_000);
+        expect(resolvedTimes(first.id)).toBe(0);
+
+        await quiet(20_000);
+        expect(resolvedTimes(first.id)).toBe(1);
+        expect(resolvedTimes(second.id)).toBe(1);
+      });
+
+      it('retries a resolve that storage rejected', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await quiet(60_000);
+        expect(resolvedTimes(id)).toBe(1);
+
+        await quiet(1_000);
+        expect(resolvedTimes(id)).toBe(2);
+      });
+
+      it('closes an adopted row a window after adoption', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        const row = (id: string, severity: AnomalySeverity) => ({
+          id,
+          severity,
+          timestamp: now - 60 * 60_000,
+        });
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }: any) =>
+          metricType === MetricType.RAFT_HEALTH && !offset
+            ? [row('old-flap', AnomalySeverity.WARNING)]
+            : [],
+        );
+
+        await quiet(1_000);
+        await quiet(59_000);
+        expect(resolvedTimes('old-flap')).toBe(0);
+
+        await quiet(1_000);
+        expect(resolvedTimes('old-flap')).toBe(1);
+      });
+
+      it('leaves an adopted outage to the quorum path', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }: any) =>
+          metricType === MetricType.RAFT_HEALTH && !offset
+            ? [{ id: 'old-outage', severity: AnomalySeverity.CRITICAL, timestamp: now }]
+            : [],
+        );
+
+        await quiet(1_000);
+
+        expect((service as any).raftFlappingEventIds.has('conn-1')).toBe(false);
+      });
+
+      it('closes a tracked event on removal when storage reads fail', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+        storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(resolvedTimes(id)).toBe(1);
+      });
+
+      it('closes when the connection leaves Raft', async () => {
+        await flap();
+        const [{ id }] = raftEvents();
+
+        (dbClient.getClusterInfo as jest.Mock).mockResolvedValue({ cluster_state: 'ok' });
+        await quiet(1_000);
+
+        expect(resolvedTimes(id)).toBe(1);
+      });
+    });
+
     it('does not treat a single healthy failover (one term bump) as churn', async () => {
       (dbClient.getClusterInfo as jest.Mock).mockResolvedValue(
         raftInfo({ cluster_raft_current_term: '1' }),
@@ -4352,6 +9629,398 @@ describe('AnomalyService', () => {
 
   // ─── Replication output-buffer pressure (valkey#3963) ──────────────────────
 
+  describe('saved anomaly webhooks', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'saved-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('announces an event once its first save lands', async () => {
+      const event = anomaly();
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+
+      await (service as any).persistAnomaly(event, mockCtx);
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ id: event.id, connectionId: 'conn-1' }),
+      );
+    });
+
+    it('does not announce an event resolved before its save landed', async () => {
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+
+      await (service as any).persistAnomaly({ ...anomaly(), resolved: true }, mockCtx);
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('does not announce an event saved too long after it happened', async () => {
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+      const event = { ...anomaly(), timestamp: Date.now() - 2 * 60 * 60 * 1000 };
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands an event to the webhook sink when a bus listener throws', async () => {
+      anomalySavedBus.subscribe(() => {
+        throw new Error('listener failed');
+      });
+      const after = jest.fn();
+      anomalySavedBus.subscribe(after);
+
+      await expect((service as any).persistAnomaly(anomaly(), mockCtx)).resolves.toBeUndefined();
+
+      expect(after).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('announces an event handed over by another producer', () => {
+      const listener = jest.fn();
+      anomalySavedBus.subscribe(listener);
+
+      service.ingestExternalAnomaly(anomaly());
+
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands an event over once its first save lands', async () => {
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'saved-1' }),
+      );
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the outbox when the first save fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing for a save the outbox drops', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+    });
+
+    it('hands an event over once when two saves overlap', async () => {
+      let finishFirst: () => void = () => undefined;
+      storage.saveAnomalyEvent.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (finishFirst = resolve)),
+      );
+      const event = anomaly();
+
+      const first = (service as any).persistAnomaly(event, mockCtx);
+      const second = (service as any).persistAnomaly(event, mockCtx);
+      await new Promise((resolve) => setImmediate(resolve));
+      finishFirst();
+      await Promise.all([first, second]);
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(2);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('still saves after an overlapping save fails', async () => {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      const event = anomaly();
+
+      const first = (service as any).persistAnomaly(event, mockCtx);
+      const second = (service as any).persistAnomaly(event, mockCtx);
+
+      await expect(first).rejects.toThrow('storage down');
+      await expect(second).resolves.toBeUndefined();
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+      expect((service as any).saveTails.size).toBe(0);
+    });
+
+    it('sends the webhook for an event closed before its first save', async () => {
+      const event = { ...anomaly(), resolved: true, resolvedAt: Date.now() };
+
+      await (service as any).persistAnomaly(event, mockCtx);
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes an open event once the outbox gives up on its save', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect(event.resolved).toBe(true);
+      expect(event.resolvedAt).toBeDefined();
+    });
+
+    it('leaves an evicted save open while it may still be closed', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      const event = anomaly();
+      await (service as any).addAnomaly(event, mockCtx);
+      for (let i = 1; i <= OUTBOX_MAX_ENTRIES; i++) {
+        (service as any).persistenceOutbox.enqueueResolve(`r-${i}`, 1, 1);
+      }
+
+      expect(event.resolved).toBe(false);
+    });
+
+    it('sends no recovery for an alert that was never announced', async () => {
+      const recovered = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      await (service as any).resolveReplicationDivergence(
+        { replicas: new Map([['10.0.0.2:6379', { announced: false, windows: [] }]]) },
+        { kind: 'recovered', addr: '10.0.0.2:6379', eventId: 'saved-1', gapBytes: 0 },
+        mockCtx,
+        Date.now(),
+      );
+
+      expect(recovered).not.toHaveBeenCalled();
+    });
+
+    it('sends a recovery for an alert that was announced', async () => {
+      const recovered = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationRecovered = recovered;
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+
+      await (service as any).resolveReplicationDivergence(
+        { replicas: new Map([['10.0.0.2:6379', { announced: true, windows: [] }]]) },
+        { kind: 'recovered', addr: '10.0.0.2:6379', eventId: 'saved-1', gapBytes: 0 },
+        mockCtx,
+        Date.now(),
+      );
+
+      expect(recovered).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the save when the webhook fails', async () => {
+      anomalyWebhookSink.dispatchAnomalyWebhook.mockRejectedValueOnce(new Error('webhook down'));
+
+      await expect((service as any).addAnomaly(anomaly(), mockCtx)).resolves.toBeUndefined();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+    });
+  });
+
+  describe('resolves of a row storage no longer has', () => {
+    const cached = (id: string): AnomalyEvent => ({
+      id,
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+      persisted: true,
+    });
+
+    it('stops retrying and forgets the cached event after the age limit', async () => {
+      (service as any).recentAnomalies.push(cached('pruned-1'));
+      storage.resolveAnomaly.mockResolvedValue(false);
+
+      await expect((service as any).resolveAnomalyOutcome('pruned-1')).resolves.toBe('retry');
+      expect((service as any).persistenceOutbox.size).toBe(1);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+      await expect((service as any).resolveAnomalyOutcome('pruned-1')).resolves.toBe('gone');
+    });
+
+    it('keeps retrying through a storage outage', async () => {
+      (service as any).recentAnomalies.push(cached('outage-1'));
+      storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+
+      await (service as any).resolveAnomalyOutcome('outage-1');
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+
+      expect((service as any).persistenceOutbox.has('outage-1')).toBe(true);
+    });
+
+    describe('draining the outbox', () => {
+      const queueSave = (id: string) =>
+        (service as any).persistenceOutbox.enqueueSave(
+          { ...cached(id), connectionId: 'conn-1', persisted: false },
+          undefined,
+          Date.now(),
+        );
+
+      it('stops the pass at the first storage failure', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        queueSave('first');
+        queueSave('second');
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+        expect((service as any).persistenceOutbox.size).toBe(2);
+      });
+
+      it('stops the pass when a resolve cannot reach storage', async () => {
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        (service as any).persistenceOutbox.enqueueResolve('first', 100, Date.now());
+        (service as any).persistenceOutbox.enqueueResolve('second', 100, Date.now());
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(1);
+      });
+
+      it('reaches the next entry past a failed one on the following pass', async () => {
+        storage.saveAnomalyEvent.mockImplementation(async (event: { id: string }) => {
+          if (event.id === 'first') throw new Error('rejected row');
+        });
+        queueSave('first');
+        queueSave('second');
+
+        await (service as any).drainPersistenceOutbox();
+        await (service as any).drainPersistenceOutbox();
+
+        expect((service as any).persistenceOutbox.has('second')).toBe(false);
+      });
+
+      it('carries on past a resolve whose row is missing', async () => {
+        (service as any).recentAnomalies.push(cached('missing'));
+        storage.resolveAnomaly.mockResolvedValue(false);
+        (service as any).persistenceOutbox.enqueueResolve('missing', 100, Date.now());
+        (service as any).persistenceOutbox.enqueueResolve('next', 100, Date.now());
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+      });
+    });
+  });
+
+  describe('sweeping removed connections', () => {
+    it('reads a connection once per pass even when a close is dropped', async () => {
+      const read = jest
+        .spyOn(service as any, 'readOpenEvents')
+        .mockResolvedValue([{ id: 'open-1' }]);
+      jest
+        .spyOn(service as any, 'resolveAnomalyOutcome')
+        .mockImplementation(async (_id: unknown, onDrop: unknown) => {
+          (onDrop as () => void)();
+          return 'retry';
+        });
+      (service as any).removedConnectionSweeps.set('gone-conn', [MetricType.REPLICATION_DIVERGENCE]);
+
+      await (service as any).sweepRemovedConnections();
+
+      expect(read).toHaveBeenCalledTimes(1);
+      expect((service as any).removedConnectionSweeps.has('gone-conn')).toBe(true);
+    });
+  });
+
+  describe('close callbacks across a save', () => {
+    const anomaly = (): AnomalyEvent => ({
+      id: 'closing-1',
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 2,
+      baseline: 1,
+      zScore: 4,
+      stdDev: 1,
+      threshold: 3,
+      message: 'spike',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+    const outbox = () => (service as any).persistenceOutbox;
+    const evictFirst = () => {
+      for (let i = 1; i <= OUTBOX_MAX_ENTRIES; i++) outbox().enqueueResolve(`r-${i}`, 1, 1);
+    };
+
+    it('moves the callback to the resolve when a close lands during the retried save', async () => {
+      const onCloseDrop = jest.fn();
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly(), mockCtx);
+      storage.saveAnomalyEvent.mockImplementationOnce(async () => {
+        await (service as any).resolveAnomalyOutcome('closing-1', onCloseDrop);
+      });
+
+      await (service as any).drainPersistenceOutbox();
+      expect(outbox().resolvedAt('closing-1')).toEqual(expect.any(Number));
+      evictFirst();
+
+      expect(outbox().has('closing-1')).toBe(false);
+      expect(onCloseDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the close when a user dismissal follows a detector close', async () => {
+      const onCloseDrop = jest.fn();
+      const event = { ...anomaly(), persisted: true };
+      (service as any).recentAnomalies.push(event);
+      outbox().enqueueRewrite(event, Date.now());
+      storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+
+      await (service as any).resolveAnomalyOutcome('closing-1', onCloseDrop);
+      await service.resolveAnomaly('closing-1');
+      evictFirst();
+
+      expect(onCloseDrop).toHaveBeenCalledTimes(1);
+    });
+
+    it('writes the close of a stored event left in the outbox as a plain save', async () => {
+      const event = { ...anomaly(), persisted: true };
+      (service as any).recentAnomalies.push(event);
+      outbox().enqueueSave(event, mockCtx, Date.now());
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      await service.resolveAnomaly('closing-1');
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect(storage.saveAnomalyEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'closing-1', resolved: true }),
+        'conn-1',
+      );
+      expect(outbox().has('closing-1')).toBe(false);
+    });
+  });
+
   describe('COB pressure detection', () => {
     const MB = 1024 * 1024;
     const HARD = 256 * MB;
@@ -4449,6 +10118,55 @@ describe('AnomalyService', () => {
       const critical = cobEvents().filter((e) => e.severity === AnomalySeverity.CRITICAL);
       expect(critical).toHaveLength(1);
       expect(critical[0].message).toContain('resync');
+      expect(critical[0].values).toBeUndefined();
+    });
+
+    it('sizes the replica hard limit at twice the observed buffer', async () => {
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(HARD * 0.7));
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica hard',
+          current: 256,
+          target: 359,
+          unit: 'MB',
+        },
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 359,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('sizes the replica soft limit at twice the observed buffer', async () => {
+      const omem = 64 * MB * 0.7;
+      (dbClient.getClients as jest.Mock).mockResolvedValue(replicaClient(omem));
+      await poll();
+      now += 61_000;
+      await poll();
+      expect(cobEvents()[0].values).toEqual([
+        {
+          setting: 'client-output-buffer-limit replica soft',
+          current: 64,
+          target: 90,
+          unit: 'MB',
+        },
+      ]);
+    });
+
+    it('keeps the fixed text when CLIENT LIST is unavailable and only the aggregate is known', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replicatedInfo(),
+        memory: { used_memory: '1000000', mem_clients_slaves: String(HARD * 0.7) },
+      });
+      (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+      await poll();
+      const [event] = cobEvents();
+      expect(event.message).toContain('mem_clients_slaves aggregate');
+      expect(event.message).toContain('Raise the limit or reduce the write burst.');
+      expect(event.values).toBeUndefined();
     });
 
     it('updates the per-replica Prometheus ratio gauge each poll', async () => {
@@ -4465,7 +10183,7 @@ describe('AnomalyService', () => {
         replication: { connected_slaves: '0', sync_full: '0' },
       });
       await poll();
-      expect(dbClient.getClients).not.toHaveBeenCalled();
+      expect(dbClient.getClients).not.toHaveBeenCalledWith({ type: 'replica' });
       expect(dbClient.getConfigValue).not.toHaveBeenCalled();
       expect(cobEvents()).toHaveLength(0);
     });
@@ -4621,6 +10339,28 @@ describe('AnomalyService', () => {
       expect(saturationEvents()).toHaveLength(1);
     });
 
+    it('does not corroborate from a fan-out node event', async () => {
+      await pollSaturated(4);
+      (service as any).recentAnomalies.push({
+        id: 'node-cob-event',
+        timestamp: now - 5_000,
+        metricType: MetricType.REPL_BUFFER_PRESSURE,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.CRITICAL,
+        value: 0,
+        baseline: 1,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'node output buffer',
+        resolved: false,
+        connectionId: 'conn-1',
+        nodeAddr: '10.0.0.2:6379',
+      });
+      await pollSaturated(1);
+      expect(saturationEvents()).toHaveLength(0);
+    });
+
     it('re-arms after CPU recovery and fires again on a new episode', async () => {
       await pollSaturated(5);
       await pollSaturated(1, '1');
@@ -4652,6 +10392,31 @@ describe('AnomalyService', () => {
       (service as any).onConnectionRemoved('conn-1');
       expect((service as any).controlPlaneState.has('conn-1')).toBe(false);
       expect((service as any).cpSatLastConnectedSlaves.has('conn-1')).toBe(false);
+    });
+  });
+
+  describe('registered primary replication ids', () => {
+    const primaryInfo = (role: string) => ({
+      server: { role },
+      clients: { connected_clients: '10', blocked_clients: '0' },
+      memory: { used_memory: '1000000' },
+      replication: { role, master_replid: 'c'.repeat(40), master_repl_offset: '100' },
+      stats: { instantaneous_ops_per_sec: '100' },
+    });
+
+    it('records the replication id of a registered primary and forgets it on removal', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('master'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.get('conn-1')).toMatchObject({ replid: 'c'.repeat(40) });
+
+      (service as any).onConnectionRemoved('conn-1');
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
+    });
+
+    it('does not record a registered replica', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(primaryInfo('slave'));
+      await poll();
+      expect((service as any).registeredPrimaryReplids.has('conn-1')).toBe(false);
     });
   });
 
@@ -5077,24 +10842,51 @@ describe('AnomalyService', () => {
       expect(events[0].severity).toBe(AnomalySeverity.WARNING);
     });
 
-    it('retries the advisory on the next poll when the storage write fails', async () => {
+    it('saves the same advisory from the outbox when the storage write fails', async () => {
       storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
 
       await pollWith({ connected_clients: '100', rejected_connections: '10' });
       await pollWith({ connected_clients: '120', rejected_connections: '25' });
 
-      // The event reached the in-memory ring but was never persisted, so the
-      // hysteresis must not have advanced.
-      expect(storage.saveAnomalyEvent).toHaveBeenCalled();
-      const first = lockoutEvents();
-      expect(first).toHaveLength(1);
-      expect(first[0].persisted).not.toBe(true);
+      const [event] = lockoutEvents();
+      expect(event.persisted).not.toBe(true);
 
       await pollWith({ connected_clients: '130', rejected_connections: '25' });
+      await (service as any).drainPersistenceOutbox();
 
-      const retried = lockoutEvents();
-      expect(retried).toHaveLength(2);
-      expect(retried.some((e) => e.persisted === true)).toBe(true);
+      expect(lockoutEvents()).toHaveLength(1);
+      expect(event.persisted).toBe(true);
+    });
+
+    it('raises the advisory again when the outbox drops its unsaved event', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+      const [first] = lockoutEvents();
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollWith({ connected_clients: '120', rejected_connections: '25' });
+
+      const raised = lockoutEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('stays quiet when an older advisory is dropped after a newer one was saved', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await pollWith({ connected_clients: '100', rejected_connections: '10' });
+      await pollWith({ connected_clients: '100', rejected_connections: '25' });
+      await pollWith({ connected_clients: '100', rejected_connections: '25' });
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollWith({ connected_clients: '100', rejected_connections: '40' });
+      expect(lockoutEvents()).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await pollWith({ connected_clients: '100', rejected_connections: '40' });
+
+      expect(lockoutEvents()).toHaveLength(2);
     });
 
     it('describes a refusal-only WARNING as refusals, not as sustained saturation', async () => {
@@ -5316,6 +11108,18 @@ describe('AnomalyService', () => {
       });
     };
 
+    it('keeps the ACL snapshot of an active-replica', async () => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+        ...replInfo(),
+        server: { role: 'active-replica' },
+        replication: { role: 'active-replica', master_replid: 'shared-replid' },
+      });
+
+      await poll();
+
+      expect((service as any).aclSnapshot.has('conn-1')).toBe(true);
+    });
+
     /** Seed a second connection's slice of the shared snapshot. */
     function seedPeer(connectionId: string, lines: string[], replid = 'shared-replid'): void {
       const { digest, userDigests } = nodeAclDigest(lines);
@@ -5361,62 +11165,54 @@ describe('AnomalyService', () => {
       expect(events[0].message).toContain('4355');
     });
 
-    it('re-alerts the drift on the next poll when the emit fails', async () => {
-      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
-      const addAnomaly = jest
-        .spyOn(service as any, 'addAnomaly')
-        .mockRejectedValueOnce(new Error('storage down'));
-
-      await expect(poll()).resolves.not.toThrow();
-      expect(addAnomaly).toHaveBeenCalledTimes(1);
-      expect(driftEvents()).toEqual([]);
-
-      // The failed emit must NOT leave the signature marked active, or this
-      // security alert stays suppressed until the drift clears and recurs.
-      addAnomaly.mockRestore();
-      await poll();
-
-      const events = driftEvents();
-      expect(events).toHaveLength(1);
-      expect(events[0].severity).toBe(AnomalySeverity.WARNING);
-    });
-
-    it('re-alerts the drift when the storage write fails, not just when the emit throws', async () => {
-      // The production failure mode: addAnomaly CATCHES the storage error and
-      // resolves, leaving `persisted` unset. A rejection-only release would never
-      // fire here, so the drift would stay suppressed until it cleared and recurred.
+    it('saves the same drift from the outbox when the storage write fails', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
       storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
 
       await expect(poll()).resolves.not.toThrow();
-      const first = driftEvents();
-      expect(first).toHaveLength(1);
-      expect(first[0].persisted).not.toBe(true);
+      const [event] = driftEvents();
+      expect(event.persisted).not.toBe(true);
 
       await poll();
+      await (service as any).drainPersistenceOutbox();
 
-      const events = driftEvents();
-      expect(events).toHaveLength(2);
-      expect(events.some((e) => e.persisted === true)).toBe(true);
+      expect(driftEvents()).toHaveLength(1);
+      expect(event.persisted).toBe(true);
     });
 
-    it('still emits the rest of the batch when one drift emit fails', async () => {
-      // Two groups drift in the same poll. The first emit throws; the second must
-      // still be delivered, and the failed one must re-alert on the next poll.
+    it('raises the drift again when the outbox drops its unsaved event', async () => {
       seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
-      seedPeer('conn-other-a', [DEFAULT_LINE], 'second-replid');
-      seedPeer('conn-other-b', [DEFAULT_LINE, APP_LINE_WIDER], 'second-replid');
-
-      const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
-      addAnomaly.mockRejectedValueOnce(new Error('storage down'));
-
-      await expect(poll()).resolves.not.toThrow();
-      expect(addAnomaly).toHaveBeenCalledTimes(2);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      await poll();
+      const [first] = driftEvents();
       expect(driftEvents()).toHaveLength(1);
 
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await (service as any).drainPersistenceOutbox();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await poll();
+
+      const raised = driftEvents();
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    });
+
+    it('stays quiet when an older drift is dropped after a newer one was saved', async () => {
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      await poll();
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE]);
+      await poll();
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      seedPeer('conn-peer', [DEFAULT_LINE, APP_LINE_WIDER]);
       await poll();
       expect(driftEvents()).toHaveLength(2);
-      addAnomaly.mockRestore();
+
+      (service as any).persistenceOutbox.due(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+      await poll();
+
+      expect(driftEvents()).toHaveLength(2);
     });
 
     it('never puts rule material into the event', async () => {
@@ -5731,6 +11527,16 @@ describe('AnomalyService', () => {
       await poll();
     }
 
+    it('records the replica addresses Sentinel reports, and drops them when the probe fails', async () => {
+      await poll();
+      expect([...(service as any).sentinelReplicaAddrs.get('conn-1')]).toEqual(['valkey-1.valkey-headless:6379']);
+
+      (dbClient.getSentinelMasters as jest.Mock).mockRejectedValue(new Error('down'));
+      now += 61_000;
+      await poll();
+      expect((service as any).sentinelReplicaAddrs.has('conn-1')).toBe(false);
+    });
+
     it('emits a WARNING once an IP-for-hostname entry persists past the gate', async () => {
       (dbClient.getSentinelReplicas as jest.Mock).mockResolvedValue([
         healthyReplica,
@@ -5898,12 +11704,626 @@ describe('AnomalyService', () => {
     });
   });
 
+  describe('external anomaly ingest', () => {
+    const p99Event = () => ({
+      id: 'p99-1',
+      timestamp: Date.now(),
+      metricType: MetricType.COMMAND_P99,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 6000,
+      baseline: 2000,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 3,
+      message: 'P99 regression',
+      resolved: false,
+      connectionId: 'conn-1',
+    });
+
+    it('adds the event to the correlator input without re-persisting it', () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      const recent = (service as any).recentAnomalies;
+      expect(recent).toHaveLength(1);
+      expect(recent[0]).toEqual(expect.objectContaining({ id: 'p99-1', persisted: true }));
+      expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+    });
+
+    it('counts the event once in Prometheus and OTLP under its connection', () => {
+      const event = p99Event();
+      service.ingestExternalAnomaly(event);
+      service.ingestExternalAnomaly(event);
+
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledTimes(1);
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledWith(
+        event.severity,
+        event.metricType,
+        event.anomalyType,
+        'conn-1',
+      );
+      expect(otelEvents.dispatch).toHaveBeenCalledTimes(1);
+      expect(otelEvents.dispatch).toHaveBeenCalledWith(
+        WebhookEventType.ANOMALY_DETECTED,
+        expect.objectContaining({ metricType: event.metricType }),
+        'conn-1',
+      );
+    });
+
+    it('stamps an external event with a sequence and scope before it is saved', () => {
+      const first: AnomalyEvent = p99Event();
+      const second: AnomalyEvent = { ...p99Event(), id: 'p99-2' };
+      service.stampExternalAnomaly(first);
+      service.stampExternalAnomaly(second);
+
+      expect(first.scopeId).toBe('conn-1');
+      expect(typeof first.eventSequence).toBe('number');
+      expect(second.eventSequence).toBeGreaterThan(first.eventSequence!);
+    });
+
+    it('keeps the stamped sequence when the event is ingested', () => {
+      const event: AnomalyEvent = p99Event();
+      service.stampExternalAnomaly(event);
+      const stamped = event.eventSequence;
+      service.ingestExternalAnomaly(event);
+
+      expect((service as any).recentAnomalies[0].eventSequence).toBe(stamped);
+    });
+
+    it('sequences an ingested event that was never stamped', () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      expect(typeof (service as any).recentAnomalies[0].eventSequence).toBe('number');
+    });
+
+    it('ignores the same event delivered twice', () => {
+      service.ingestExternalAnomaly(p99Event());
+      service.ingestExternalAnomaly(p99Event());
+
+      expect((service as any).recentAnomalies).toHaveLength(1);
+    });
+
+    it('correlates the ingested event and saves it under its own id', async () => {
+      service.ingestExternalAnomaly(p99Event());
+
+      await (service as any).correlateAnomalies();
+
+      const saved = (storage.saveAnomalyEvent as jest.Mock).mock.calls.map(([e]: any[]) => e.id);
+      expect(saved).toEqual(['p99-1']);
+      expect((service as any).recentAnomalies[0].correlationId).toBeDefined();
+    });
+  });
+
+  describe('correlation scope', () => {
+    describe('Sentinel master groups', () => {
+      const member = (id: string, group: string) => ({
+        id,
+        membership: { seedId: 'seed-1', group },
+      });
+
+      beforeEach(() => {
+        const registry = (service as any).connectionRegistry;
+        const members = [member('a-1', 'orders'), member('a-2', 'orders'), member('b-1', 'carts')];
+        registry.getConfig.mockImplementation(
+          (id: string) => members.find((m) => m.id === id) ?? { id },
+        );
+        registry.listMembers.mockReturnValue(members);
+      });
+
+      it('scopes members of one seed by their group', () => {
+        expect((service as any).correlationScopeOf('a-1')).toBe(
+          (service as any).correlationScopeOf('a-2'),
+        );
+        expect((service as any).correlationScopeOf('a-1')).not.toBe(
+          (service as any).correlationScopeOf('b-1'),
+        );
+      });
+
+      it('lists only the siblings of the same group', () => {
+        expect((service as any).scopeConnectionIds('a-1')).toEqual(['a-1', 'a-2']);
+      });
+    });
+
+    it('builds the cluster seeds once per correlation tick', async () => {
+      const keys = (service as any).connectionClusterKeys;
+      keys.set('conn-1', 'cluster:a');
+      keys.set('conn-2', 'cluster:a');
+      (service as any).connectionRegistry.listMembers.mockReturnValue([]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        ...['conn-1', 'conn-2', 'conn-1'].map((connectionId, i) => ({
+          id: `evt-${i}`,
+          connectionId,
+          timestamp: now - 1000 + i,
+          metricType: MetricType.CONNECTIONS,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          resolved: false,
+        })),
+      );
+      const seeds = jest.spyOn(service as any, 'seedsByClusterKey');
+
+      await (service as any).correlationTick();
+
+      expect(seeds).toHaveBeenCalledTimes(1);
+    });
+
+    it('groups cluster members under their seed connection', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) =>
+        id === 'node-2' ? { id, membership: { seedId: 'seed-1' } } : { id },
+      );
+
+      expect((service as any).correlationScopeOf('node-2')).toBe('seed-1');
+      expect((service as any).correlationScopeOf('standalone')).toBe('standalone');
+      expect((service as any).correlationScopeOf(undefined)).toBe('');
+    });
+
+    it('keeps a different cluster in its own correlated group', () => {
+      (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({
+        id,
+        membership: { seedId: id.startsWith('a-') ? 'seed-a' : 'seed-b' },
+      }));
+      const base = 1_000_000;
+      const event = (id: string, connectionId: string, timestamp: number) => ({
+        id,
+        timestamp,
+        metricType: MetricType.CONNECTIONS,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        stdDev: 0,
+        zScore: 0,
+        threshold: 0,
+        message: '',
+        resolved: false,
+        connectionId,
+      });
+
+      const groups = (service as any).correlator.correlate([
+        event('1', 'a-node-1', base),
+        event('2', 'a-node-2', base + 1000),
+        event('3', 'b-node-1', base + 2000),
+      ]);
+
+      expect(groups.map((g: { anomalies: unknown[] }) => g.anomalies.length)).toEqual([2, 1]);
+    });
+  });
+
+  describe('correlated groups across a topology', () => {
+    const member = (id: string, connectionId: string) => ({
+      id,
+      timestamp: 1_000_000,
+      metricType: 'connections',
+      anomalyType: 'spike',
+      severity: 'warning',
+      value: 1,
+      baseline: 0,
+      stdDev: 0,
+      zScore: 0,
+      threshold: 0,
+      message: '',
+      resolved: false,
+      correlationId: 'grp-1',
+      connectionId,
+    });
+
+    beforeEach(() => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed-1' ? { id } : { id, membership: { seedId: 'seed-1' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'node-1' }, { id: 'node-2' }]);
+    });
+
+    it('saves each member anomaly under its own connection', async () => {
+      (service as any).recentAnomalies.push(
+        { ...member('a', 'node-1'), correlationId: undefined, metricType: MetricType.CONNECTIONS },
+        {
+          ...member('b', 'node-2'),
+          correlationId: undefined,
+          metricType: MetricType.CONNECTIONS,
+          timestamp: 1_001_000,
+        },
+      );
+
+      await (service as any).correlateAnomalies();
+
+      const saved = (storage.saveAnomalyEvent as jest.Mock).mock.calls.map(
+        ([e, conn]: any[]) => `${e.id}@${conn}`,
+      );
+      expect(saved).toEqual(['a@node-1', 'b@node-2']);
+    });
+
+    it('rebuilds a group by its correlation id rather than the newest page of events', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([
+        storedGroup('grp-own', 1_000_000, { connectionId: 'node-2' }),
+      ]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(['grp-own'], [], 1000, 1000);
+    });
+
+    it('finds a pattern-filtered sibling group behind newer groups of other patterns', async () => {
+      storage.getCorrelatedGroups.mockImplementation(async ({ pattern }: any) =>
+        pattern === AnomalyPattern.MEMORY_PRESSURE
+          ? [storedGroup('grp-1', 1_000_000, { connectionId: 'node-1' })]
+          : [],
+      );
+      storage.getCorrelatedGroupMembers.mockResolvedValue([member('b', 'node-2')]);
+
+      const groups = await service.getRecentCorrelatedGroups(
+        1,
+        undefined,
+        AnomalyPattern.MEMORY_PRESSURE,
+        50,
+        'node-2',
+      );
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
+    it('orders a rebuilt group by time then id', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([storedGroup('grp-1', 1_000_000)]);
+      storage.getCorrelatedGroupMembers.mockResolvedValue([
+        { ...member('z', 'node-2'), timestamp: 1_000_000 },
+        { ...member('b', 'node-2'), timestamp: 2_000_000 },
+        { ...member('a', 'node-2'), timestamp: 1_000_000 },
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(
+        1,
+        undefined,
+        undefined,
+        50,
+        'node-2',
+      );
+
+      expect(group.anomalies.map((a) => a.id)).toEqual(['a', 'z', 'b']);
+    });
+
+    it('caps the member rows read for a page of groups', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue(
+        Array.from({ length: 500 }, (_, i) => ({
+          correlationId: `grp-${i}`,
+          timestamp: 1_000_000 + i,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        })),
+      );
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 500, 'node-2');
+
+      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(
+        expect.any(Array),
+        [],
+        1000,
+        10_000,
+      );
+    });
+
+    it('flags groups whose member rows hit the cap', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([
+        {
+          correlationId: 'grp-1',
+          timestamp: 1_000_000,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        },
+      ]);
+      const member = {
+        id: 'm',
+        timestamp: 1_000_000,
+        metricType: 'memory_used',
+        anomalyType: 'spike',
+        severity: 'warning',
+        correlationId: 'grp-1',
+      };
+      storage.getCorrelatedGroupMembers.mockImplementation(
+        async (_ids: string[], _anomalyIds: string[], _perGroup: number, maxRows: number) =>
+          Array.from({ length: maxRows }, (_, i) => ({ ...member, id: `m-${i}` })),
+      );
+
+      const [group] = await service.getRecentCorrelatedGroups(1, undefined, undefined, 1, 'node-2');
+
+      expect(group.truncated).toBe(true);
+    });
+
+    it('reads every group of an over-full query and flags only the capped one', async () => {
+      const group = (correlationId: string, timestamp: number) => ({
+        correlationId,
+        timestamp,
+        pattern: 'unknown',
+        severity: 'warning',
+        metricTypes: [],
+        connectionId: 'node-2',
+      });
+      storage.getCorrelatedGroups.mockResolvedValue([
+        group('busy', 2_000_000),
+        group('quiet', 1_000_000),
+      ]);
+      const rows = (correlationId: string, count: number) =>
+        Array.from({ length: count }, (_, i) => ({
+          id: `${correlationId}-${i}`,
+          timestamp: 1_000_000,
+          metricType: 'memory_used',
+          anomalyType: 'spike',
+          severity: 'warning',
+          correlationId,
+        }));
+      storage.getCorrelatedGroupMembers.mockImplementation(
+        async (correlationIds: string[], _ids: string[], _perGroup: number, maxRows: number) =>
+          [...rows('busy', 5_000), ...rows('quiet', 2)]
+            .filter((row) => correlationIds.includes(row.correlationId))
+            .slice(0, maxRows),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 2, 'node-2');
+      const byId = new Map(groups.map((g) => [g.correlationId, g]));
+
+      expect(byId.get('busy')?.truncated).toBe(true);
+      expect(byId.get('quiet')?.truncated).toBeUndefined();
+      expect(byId.get('quiet')?.anomalies).toHaveLength(2);
+    });
+
+    it('stops at the total row budget and flags the groups it could not read', async () => {
+      const ids = Array.from({ length: 12 }, (_, i) => `grp-${i}`);
+      storage.getCorrelatedGroups.mockResolvedValue(
+        ids.map((correlationId, i) => ({
+          correlationId,
+          timestamp: 1_000_000 + i,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        })),
+      );
+      storage.getCorrelatedGroupMembers.mockImplementation(
+        async (correlationIds: string[], _ids: string[], _perGroup: number, maxRows: number) =>
+          correlationIds
+            .flatMap((correlationId: string) =>
+              Array.from({ length: 999 }, (_, i) => ({
+                id: `${correlationId}-${i}`,
+                timestamp: 1_000_000,
+                metricType: 'memory_used',
+                anomalyType: 'spike',
+                severity: 'warning',
+                correlationId,
+              })),
+            )
+            .slice(0, maxRows),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 12, 'node-2');
+
+      const rows = groups.reduce((sum, group) => sum + group.anomalies.length, 0);
+      expect(rows).toBe(10_000);
+      expect(groups.filter((group) => group.anomalies.length === 0)).toHaveLength(1);
+      expect(groups.filter((group) => group.truncated)).toHaveLength(2);
+    });
+
+    it('does not flag groups read in full', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([
+        {
+          correlationId: 'grp-1',
+          timestamp: 1_000_000,
+          pattern: 'unknown',
+          severity: 'warning',
+          metricTypes: [],
+          connectionId: 'node-2',
+        },
+      ]);
+      const [group] = await service.getRecentCorrelatedGroups(1, undefined, undefined, 1, 'node-2');
+
+      expect(group.truncated).toBeUndefined();
+    });
+
+    const storedGroup = (correlationId: string, timestamp: number, over = {}) => ({
+      correlationId,
+      timestamp,
+      pattern: 'memory_pressure',
+      severity: 'warning',
+      diagnosis: '',
+      recommendations: [],
+      anomalyCount: 2,
+      metricTypes: [],
+      connectionId: 'node-1',
+      ...over,
+    });
+
+    it('keeps in-memory values when a stored group is read back', async () => {
+      const values = [{ setting: 'repl-backlog-size', current: 1, target: 3, unit: 'MB' }];
+      (service as any).recentGroups.push({
+        correlationId: 'grp-1',
+        timestamp: 1_000_000,
+        pattern: 'memory_pressure',
+        severity: 'warning',
+        diagnosis: 'cached',
+        recommendations: ['cached'],
+        anomalies: [],
+        values,
+      });
+      storage.getCorrelatedGroups.mockResolvedValue([
+        storedGroup('grp-1', 1_000_000, { diagnosis: 'stored', recommendations: ['stored'] }),
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(1);
+
+      expect(group.diagnosis).toBe('stored');
+      expect(group.recommendations).toEqual(['stored']);
+      expect(group.values).toEqual(values);
+    });
+
+    it('reads groups and members in one query each, whatever the group count', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue(
+        Array.from({ length: 50 }, (_, i) => storedGroup(`grp-${i}`, 1_000_000 + i)),
+      );
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(1);
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ involvingConnectionId: 'node-2', limit: 50 }),
+      );
+      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledTimes(1);
+      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
+    });
+
+    it('returns every member of a group larger than a default page', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([storedGroup('grp-1', 1_000_000)]);
+      storage.getCorrelatedGroupMembers.mockResolvedValue(
+        Array.from({ length: 150 }, (_, i) => member(`m-${i}`, 'node-2')),
+      );
+
+      const [group] = await service.getRecentCorrelatedGroups(
+        1,
+        undefined,
+        undefined,
+        50,
+        'node-2',
+      );
+
+      expect(group.anomalies).toHaveLength(150);
+    });
+
+    it('keeps a member whose connection has left the topology', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([storedGroup('grp-1', 1_000_000)]);
+      storage.getCorrelatedGroupMembers.mockResolvedValue([
+        { ...member('gone', 'removed-node'), timestamp: 999_000 },
+        member('b', 'node-2'),
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(
+        1,
+        undefined,
+        undefined,
+        50,
+        'node-2',
+      );
+
+      expect(group.anomalies.map((a) => a.connectionId)).toEqual(['removed-node', 'node-2']);
+    });
+
+    it('splits members between the groups they belong to', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([
+        storedGroup('grp-2', 2_000_000),
+        storedGroup('grp-1', 1_000_000),
+      ]);
+      storage.getCorrelatedGroupMembers.mockResolvedValue([
+        member('a', 'node-2'),
+        { ...member('b', 'node-2'), correlationId: 'grp-2' },
+      ]);
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 50, 'node-2');
+
+      expect(groups.map((g) => [g.correlationId, g.anomalies.map((a) => a.id)])).toEqual([
+        ['grp-2', ['b']],
+        ['grp-1', ['a']],
+      ]);
+    });
+
+    it('caps the groups read from storage', async () => {
+      storage.getCorrelatedGroups.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, 1_000_000, 'node-2');
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ involvingConnectionId: 'node-2', limit: 1000 }),
+      );
+    });
+
+    it.each([
+      ['a negative limit', -1, 1],
+      ['a zero limit', 0, 1],
+      ['a fractional limit', 2.9, 2],
+      ['a NaN limit', NaN, 50],
+      ['an infinite limit', Infinity, 50],
+    ])('reads a bounded number of groups for %s', async (_case, limit, expected) => {
+      storage.getCorrelatedGroups.mockResolvedValue([]);
+
+      await service.getRecentCorrelatedGroups(1, undefined, undefined, limit, 'node-2');
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledWith(
+        expect.objectContaining({ involvingConnectionId: 'node-2', limit: expected }),
+      );
+    });
+
+    it('applies the same limit bounds to cached groups', async () => {
+      (service as any).recentGroups.push({ ...storedGroup('grp-1', 1_000_000), anomalies: [] });
+
+      const groups = await service.getRecentCorrelatedGroups(
+        undefined,
+        undefined,
+        undefined,
+        NaN,
+      );
+
+      expect(groups.map((g) => g.correlationId)).toEqual(['grp-1']);
+    });
+
+    it('reads the members of a long result in chunks', async () => {
+      const stored = Array.from({ length: 501 }, (_, i) =>
+        storedGroup(`grp-${i}`, 2_000_000 - i * 1_000, { connectionId: 'node-2' }),
+      );
+      storage.getCorrelatedGroups.mockImplementation(async ({ patterns }: any) =>
+        patterns ? [] : stored,
+      );
+      storage.getCorrelatedGroupMembers.mockImplementation(async (correlationIds: string[]) =>
+        correlationIds.map((correlationId) => ({
+          ...member(`m-${correlationId}`, 'node-2'),
+          correlationId,
+        })),
+      );
+
+      const groups = await service.getRecentCorrelatedGroups(1, undefined, undefined, 501, 'node-2');
+
+      const reads = (storage.getCorrelatedGroupMembers as jest.Mock).mock.calls;
+      expect(reads.map(([ids]: any[]) => ids.length)).toEqual([500, 1]);
+      expect(groups.every((g) => g.anomalies.length === 1)).toBe(true);
+    });
+  });
+
+  describe('events read from storage', () => {
+    it('keeps resolvedAt', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([
+        {
+          id: 'a',
+          timestamp: 1_000,
+          metricType: MetricType.MEMORY_USED,
+          anomalyType: 'spike',
+          severity: 'warning',
+          value: 1,
+          baseline: 1,
+          stdDev: 0,
+          zScore: 0,
+          threshold: 1,
+          message: '',
+          resolved: true,
+          resolvedAt: 2_000,
+        },
+      ]);
+
+      const [event] = await service.getRecentAnomalies(1, 3_000);
+
+      expect(event.resolvedAt).toBe(2_000);
+    });
+  });
+
   describe('prometheus correlated group summary', () => {
-    function groups(count: number, severity: AnomalySeverity, timestamp: number) {
+    function groups(
+      count: number,
+      severity: AnomalySeverity,
+      timestamp: number,
+      anomalies: AnomalyEvent[] = [],
+    ) {
       return Array.from({ length: count }, (_, i) => ({
         correlationId: `grp-${severity}-${timestamp}-${i}`,
         timestamp,
-        anomalies: [],
+        anomalies,
         pattern: AnomalyPattern.TRAFFIC_BURST,
         diagnosis: '',
         recommendations: [],
@@ -5911,11 +12331,59 @@ describe('AnomalyService', () => {
       }));
     }
 
+    function lastSummaries(): Map<string, unknown> {
+      const { calls } = prometheusService.updateAnomalySummaries.mock;
+      return calls[calls.length - 1][0];
+    }
+
+    function summaryFor(connectionId: string) {
+      return lastSummaries().get(connectionId);
+    }
+
+    function publishedIds(): string[] {
+      return [...lastSummaries().keys()].sort();
+    }
+
+    function polled(...connectionIds: string[]) {
+      jest.spyOn(service as any, 'getPolledConnectionIds').mockReturnValue(new Set(connectionIds));
+    }
+
     async function correlate(newGroups: ReturnType<typeof groups>) {
       (service as any).recentAnomalies = [{ resolved: false }];
       jest.spyOn((service as any).correlator, 'correlate').mockReturnValueOnce(newGroups);
       await (service as any).correlateAnomalies();
     }
+
+    function recent(...events: AnomalyEvent[]) {
+      (service as any).recentAnomalies = [];
+      (service as any).recentAnomaliesByConnection = new Map();
+      (service as any).summaryAnomalies = new Map();
+      (service as any).summaryEventCount = 0;
+      for (const event of events) (service as any).addRecentAnomaly(event);
+    }
+
+    function anomaly(
+      connectionId: string | undefined,
+      severity: AnomalySeverity,
+      resolved = false,
+    ): AnomalyEvent {
+      return {
+        id: `evt-${connectionId}-${severity}-${Math.random()}`,
+        timestamp: Date.now(),
+        metricType: MetricType.MEMORY_USED,
+        severity,
+        resolved,
+        connectionId,
+      } as AnomalyEvent;
+    }
+
+    const emptySummary = {
+      bySeverity: {},
+      byMetric: {},
+      unresolvedBySeverity: {},
+      byPattern: {},
+      groupsBySeverity: {},
+    };
 
     it('counts every group from the last hour, beyond the recent-groups cap', async () => {
       const now = Date.now();
@@ -5927,12 +12395,298 @@ describe('AnomalyService', () => {
 
       await (service as any).updatePrometheusSummary();
 
-      expect(prometheusService.updateAnomalySummary).toHaveBeenCalledWith(
+      expect(summaryFor('')).toEqual(
         expect.objectContaining({
           byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 140 },
-          groupsBySeverity: { info: 0, warning: 110, critical: 30 },
+          groupsBySeverity: { warning: 110, critical: 30 },
         }),
       );
+    });
+
+    it('publishes one summary per connection', async () => {
+      polled('conn-1', 'conn-2');
+      const now = Date.now();
+      await correlate([
+        ...groups(1, AnomalySeverity.CRITICAL, now, [anomaly('conn-1', AnomalySeverity.CRITICAL)]),
+        ...groups(1, AnomalySeverity.WARNING, now, [anomaly('conn-2', AnomalySeverity.WARNING)]),
+      ]);
+      recent(
+        anomaly('conn-1', AnomalySeverity.CRITICAL),
+        anomaly('conn-1', AnomalySeverity.WARNING, true),
+        anomaly('conn-2', AnomalySeverity.INFO),
+        anomaly(undefined, AnomalySeverity.WARNING),
+      );
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual(['', 'conn-1', 'conn-2']);
+      expect(summaryFor('conn-1')).toEqual({
+        bySeverity: { warning: 1, critical: 1 },
+        byMetric: { [MetricType.MEMORY_USED]: 2 },
+        unresolvedBySeverity: { critical: 1 },
+        byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 1 },
+        groupsBySeverity: { critical: 1 },
+      });
+      expect(summaryFor('conn-2')).toEqual({
+        bySeverity: { info: 1 },
+        byMetric: { [MetricType.MEMORY_USED]: 1 },
+        unresolvedBySeverity: { info: 1 },
+        byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 1 },
+        groupsBySeverity: { warning: 1 },
+      });
+      expect(summaryFor('')).toEqual({
+        ...emptySummary,
+        bySeverity: { warning: 1 },
+        byMetric: { [MetricType.MEMORY_USED]: 1 },
+        unresolvedBySeverity: { warning: 1 },
+      });
+    });
+
+    it('counts a group spanning several connections once, under its first member', async () => {
+      polled('conn-1', 'conn-2');
+      await correlate(
+        groups(1, AnomalySeverity.WARNING, Date.now(), [
+          anomaly('conn-1', AnomalySeverity.WARNING),
+          anomaly('conn-2', AnomalySeverity.WARNING),
+        ]),
+      );
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(prometheusService.incrementCorrelatedGroup.mock.calls).toEqual([
+        [AnomalyPattern.TRAFFIC_BURST, AnomalySeverity.WARNING, 'conn-1'],
+      ]);
+      expect(summaryFor('conn-1')).toEqual(
+        expect.objectContaining({ byPattern: { [AnomalyPattern.TRAFFIC_BURST]: 1 } }),
+      );
+      expect(summaryFor('conn-2')).toEqual(expect.objectContaining({ byPattern: {} }));
+    });
+
+    it('labels the anomaly counter with the connection the gauges use', async () => {
+      const ctx = { connectionId: 'conn-1' } as ConnectionContext;
+      const withContext = anomaly(undefined, AnomalySeverity.CRITICAL);
+      const withoutContext = anomaly('conn-2', AnomalySeverity.CRITICAL);
+      jest.spyOn(service as any, 'persistAnomaly').mockResolvedValue(undefined);
+      polled();
+
+      await (service as any).addAnomaly(withContext, ctx);
+      await (service as any).addAnomaly(withoutContext);
+      await (service as any).updatePrometheusSummary();
+
+      expect(prometheusService.incrementAnomalyEvent.mock.calls.map((c: unknown[]) => c[3])).toEqual([
+        'conn-1',
+        'conn-2',
+      ]);
+      expect(publishedIds()).toEqual(['conn-1', 'conn-2']);
+    });
+
+    it('publishes an empty summary for every polled user-added connection without events', async () => {
+      polled('conn-1', 'conn-2');
+      recent(anomaly('conn-1', AnomalySeverity.CRITICAL));
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual(['conn-1', 'conn-2']);
+      expect(summaryFor('conn-1')).toEqual({
+        ...emptySummary,
+        bySeverity: { critical: 1 },
+        byMetric: { [MetricType.MEMORY_USED]: 1 },
+        unresolvedBySeverity: { critical: 1 },
+      });
+      expect(summaryFor('conn-2')).toEqual(emptySummary);
+    });
+
+    it('publishes no zero summary for an auto-registered node or an unpolled connection', async () => {
+      polled('seed', 'node-1');
+      (service as any).connectionRegistry.isAutoRegistered.mockImplementation(
+        (id: string) => id === 'node-1' || id === 'node-2',
+      );
+      recent(anomaly('node-2', AnomalySeverity.WARNING));
+
+      await (service as any).updatePrometheusSummary();
+
+      // node-2 is auto-registered too, but it has an event in the window.
+      expect(publishedIds()).toEqual(['node-2', 'seed']);
+    });
+
+    it('keeps the anomalies of a connection that stopped being polled', async () => {
+      // Unresolved anomalies raised just before an outage stay visible while
+      // the connection is down, instead of resolving its alerts.
+      polled('conn-1', 'conn-2');
+      recent(anomaly('conn-2', AnomalySeverity.CRITICAL));
+      await (service as any).updatePrometheusSummary();
+
+      polled('conn-1');
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual(['conn-1', 'conn-2']);
+      expect(summaryFor('conn-2')).toEqual(
+        expect.objectContaining({ unresolvedBySeverity: { critical: 1 } }),
+      );
+
+      recent();
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual(['conn-1']);
+    });
+
+    it('keeps a quiet connection counted when a noisy one fills the recent-events buffer', async () => {
+      polled('conn-1');
+      const quiet = anomaly('conn-2', AnomalySeverity.CRITICAL);
+      const max = (service as any).maxRecentEvents;
+      recent(quiet, ...Array.from({ length: max }, () => anomaly('conn-1', AnomalySeverity.INFO)));
+
+      expect((service as any).recentAnomalies).not.toContain(quiet);
+      await (service as any).updatePrometheusSummary();
+
+      expect(summaryFor('conn-2')).toEqual(
+        expect.objectContaining({ unresolvedBySeverity: { critical: 1 } }),
+      );
+      expect(summaryFor('conn-1')).toEqual(expect.objectContaining({ bySeverity: { info: max } }));
+    });
+
+    it('caps the summary window in total by trimming the connection with the most events', () => {
+      (service as any).maxSummaryEvents = 5;
+      const quiet = anomaly('conn-2', AnomalySeverity.CRITICAL);
+      recent(quiet, ...Array.from({ length: 10 }, () => anomaly('conn-1', AnomalySeverity.INFO)));
+
+      const windows: Map<string, AnomalyEvent[]> = (service as any).summaryAnomalies;
+      expect(windows.get('conn-2')).toEqual([quiet]);
+      expect(windows.get('conn-1')).toHaveLength(4);
+      expect((service as any).summaryEventCount).toBe(5);
+    });
+
+    it('drops expired anomalies of a connection when it records a new one', () => {
+      const old = { ...anomaly('conn-1', AnomalySeverity.WARNING), timestamp: Date.now() - 2 * 3600000 };
+      const fresh = anomaly('conn-1', AnomalySeverity.WARNING);
+      recent(old, fresh);
+
+      expect((service as any).summaryAnomalies.get('conn-1')).toEqual([fresh]);
+      expect((service as any).summaryEventCount).toBe(1);
+    });
+
+    it('drops anomalies older than an hour from the summary', async () => {
+      polled();
+      const old = { ...anomaly('conn-1', AnomalySeverity.WARNING), timestamp: Date.now() - 2 * 3600000 };
+      recent(old);
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual([]);
+      expect((service as any).summaryAnomalies.size).toBe(0);
+      expect((service as any).summaryEventCount).toBe(0);
+    });
+
+    it('stops publishing connection-less events once they age out', async () => {
+      polled();
+      recent(anomaly(undefined, AnomalySeverity.WARNING));
+      await (service as any).updatePrometheusSummary();
+      expect(publishedIds()).toEqual(['']);
+
+      recent();
+      await (service as any).updatePrometheusSummary();
+
+      expect(publishedIds()).toEqual([]);
+    });
+
+    it('publishes only the default connection buffer stats, and only while it is polled', async () => {
+      (service as any).connectionRegistry.getDefaultId.mockReturnValue('conn-1');
+      const stats = jest.spyOn(service, 'getBufferStats').mockReturnValue([
+        { metricType: MetricType.MEMORY_USED, mean: 1, stdDev: 0, isReady: true, connectionId: 'conn-1' },
+      ] as any);
+      polled('conn-1');
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(stats).toHaveBeenCalledWith('conn-1');
+      expect(prometheusService.updateAnomalyBufferStats).toHaveBeenLastCalledWith(
+        [{ metricType: MetricType.MEMORY_USED, mean: 1, stdDev: 0, ready: true }],
+        'conn-1',
+      );
+
+      polled();
+      await (service as any).updatePrometheusSummary();
+
+      expect(prometheusService.updateAnomalyBufferStats).toHaveBeenLastCalledWith([], null);
+    });
+
+    it('passes every open incident with its connections and patterns', async () => {
+      const timeline = (
+        connectionIds: string[],
+        matchedPatterns: AnomalyPattern[],
+        status: string,
+      ) => ({ connectionIds, matchedPatterns, recovery: { status } });
+      const timelines = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+        timeline(['conn-1', 'conn-2'], [AnomalyPattern.RETRY_STORM, AnomalyPattern.MEMORY_PRESSURE], 'active'),
+        timeline(['conn-1'], [], 'recovering'),
+        timeline([], [], 'degraded'),
+        timeline(['conn-1'], [AnomalyPattern.RETRY_STORM], 'recovered'),
+        timeline(['conn-2'], [], 'unknown'),
+      ] as any);
+
+      await (service as any).updatePrometheusSummary();
+
+      expect(timelines).toHaveBeenCalledWith(undefined, expect.any(Number), undefined, Number.MAX_SAFE_INTEGER);
+      expect(prometheusService.updateActiveIncidents).toHaveBeenCalledWith([
+        {
+          connectionIds: ['conn-1', 'conn-2'],
+          patterns: [AnomalyPattern.RETRY_STORM, AnomalyPattern.MEMORY_PRESSURE],
+          status: 'active',
+        },
+        { connectionIds: ['conn-1'], patterns: [], status: 'recovering' },
+        { connectionIds: [], patterns: [], status: 'degraded' },
+      ]);
+    });
+
+    it('still publishes the summary when incidents cannot be read', async () => {
+      polled('conn-1');
+      recent(anomaly('conn-1', AnomalySeverity.CRITICAL));
+      jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+
+      await expect((service as any).updatePrometheusSummary()).resolves.toBeUndefined();
+
+      expect(summaryFor('conn-1')).toEqual(expect.objectContaining({ bySeverity: { critical: 1 } }));
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+    });
+
+    it('clears incident gauges only after three failed refreshes in a row', async () => {
+      const read = jest.spyOn(service, 'getIncidentTimelines').mockRejectedValue(new Error('storage down'));
+
+      await (service as any).updatePrometheusSummary();
+      await (service as any).updatePrometheusSummary();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+
+      await (service as any).updatePrometheusSummary();
+      expect(prometheusService.updateActiveIncidents).toHaveBeenCalledWith([]);
+
+      read.mockResolvedValue([]);
+      await (service as any).updatePrometheusSummary();
+      (prometheusService.updateActiveIncidents as jest.Mock).mockClear();
+      read.mockRejectedValue(new Error('storage down'));
+      await (service as any).updatePrometheusSummary();
+      expect(prometheusService.updateActiveIncidents).not.toHaveBeenCalled();
+    });
+
+    it('keeps reading back to the oldest open incident', async () => {
+      const now = Date.now();
+      const oldEvent = now - 3 * 3600_000;
+      const read = jest.spyOn(service, 'getIncidentTimelines').mockResolvedValue([
+        {
+          lastEventAt: oldEvent,
+          recovery: { status: 'degraded' },
+          matchedPatterns: [],
+          connectionIds: ['conn-1'],
+        } as any,
+      ]);
+
+      await (service as any).updatePrometheusSummary();
+      await (service as any).updatePrometheusSummary();
+
+      expect(read.mock.calls[0][1]).toBeLessThanOrEqual(now - 30 * 24 * 3600_000 + 1000);
+      expect(read.mock.calls[1][1]).toBe(oldEvent);
+      expect(prometheusService.updateActiveIncidents).toHaveBeenLastCalledWith([
+        { connectionIds: ['conn-1'], patterns: [], status: 'degraded' },
+      ]);
     });
   });
 
@@ -6020,6 +12774,53 @@ describe('AnomalyService', () => {
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
       await poll(mockCtx);
       for (const spy of spies) expect(spy).toHaveBeenCalled();
+    });
+
+    describe('retry amplification on pushed samples', () => {
+      const sample = (i: number, load = 1, connects = 0.2) => {
+        commands += 15 * 100 * 10 * load;
+        connections += 15 * connects;
+        return [
+          ...with_(base(i), 'instantaneous_ops_per_sec', String(1000 * load)),
+          ['stats', 'total_commands_processed', String(Math.round(commands))],
+          ['stats', 'total_connections_received', String(Math.round(connections))],
+        ].map(([s, f, v]): [string, string, string] =>
+          f === 'connected_clients' ? [s, f, '100'] : [s, f, v],
+        );
+      };
+      let commands: number;
+      let connections: number;
+
+      beforeEach(() => {
+        commands = 1_000_000;
+        connections = 1_000;
+      });
+
+      it('arms at the exporter cadence', async () => {
+        for (let i = 0; i < 60; i++) {
+          push(sample(i));
+          await poll(externalCtx);
+        }
+
+        expect(service.getRetryAmplificationStatus('ext-1').armed).toBe(true);
+      });
+
+      it('finds a storm from load and churn without calling CLIENT LIST', async () => {
+        const unsupported = jest.spyOn(ExternalMetricsAdapter.prototype as any, 'unsupported');
+        for (let i = 0; i < 60; i++) {
+          push(sample(i));
+          await poll(externalCtx);
+        }
+        for (let i = 0; i < 28; i++) {
+          push(sample(60 + i, 1.5 + i * 0.05, 5 + i));
+          await poll(externalCtx);
+        }
+
+        expect(
+          service.getRecentEvents().filter((e) => e.metricType === MetricType.RETRY_AMPLIFICATION),
+        ).toHaveLength(1);
+        expect(unsupported).not.toHaveBeenCalled();
+      });
     });
 
     it('never calls an unsupported adapter method, including across a role flip', async () => {
@@ -6147,7 +12948,7 @@ describe('AnomalyService', () => {
           AnomalyService,
           {
             provide: ConnectionRegistry,
-            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn() },
+            useValue: { list: jest.fn().mockReturnValue([]), get: jest.fn(), getConfig: jest.fn() },
           },
           { provide: 'STORAGE_CLIENT', useValue: storage },
           {
@@ -6218,6 +13019,10062 @@ describe('AnomalyService', () => {
       expect(liveDetector(MetricType.CONNECTIONS).getConfig().warningZScore).toBe(
         DETECTOR_DEFAULTS.connections.warningZScore,
       );
+    });
+  });
+
+  describe('incident timelines', () => {
+    const MIN = 60_000;
+    const anomaly = (overrides: Partial<AnomalyEvent> = {}): AnomalyEvent => ({
+      id: `evt-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: Date.now(),
+      metricType: MetricType.CONNECTIONS,
+      anomalyType: AnomalyType.SPIKE,
+      severity: AnomalySeverity.WARNING,
+      value: 1,
+      baseline: 0,
+      stdDev: 0,
+      zScore: 4,
+      threshold: 3,
+      message: 'm',
+      resolved: false,
+      connectionId: 'conn-1',
+      ...overrides,
+    });
+    const rule = {
+      pattern: AnomalyPattern.MEMORY_PRESSURE,
+      steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED]],
+      maxSpanMs: 10 * MIN,
+      diagnosis: 'Connections led to memory growth',
+      recommendations: ['Check clients'],
+    };
+
+    describe('sequence alert', () => {
+      const useRules = (...rules: unknown[]) => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => rules as any,
+        );
+      };
+      const matched = (now: number) => {
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+      };
+
+      it('alerts once for a sequence match across ticks', async () => {
+        const now = Date.now();
+        matched(now);
+
+        await (service as any).tickIncidentTimelines(now);
+        await (service as any).tickIncidentTimelines(now + 1000);
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+        const [group] = anomalyWebhookSink.dispatchSequenceWebhook.mock.calls[0];
+        expect(group.pattern).toBe(AnomalyPattern.MEMORY_PRESSURE);
+        expect(group.anomalies.map((a: AnomalyEvent) => a.id)).toEqual(['a', 'b']);
+        expect(group.correlationId).toBe(
+          storage.saveCorrelatedGroup.mock.calls[0][0].correlationId,
+        );
+      });
+
+      it('alerts only once the sequence group is stored', async () => {
+        const now = Date.now();
+        matched(now);
+        storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('db down'));
+
+        await (service as any).tickIncidentTimelines(now);
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+
+        await (service as any).tickIncidentTimelines(now + 1000);
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not alert again for a sequence group stored before a restart', async () => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+        const now = Date.now();
+        matched(now);
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 2 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 2,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(
+          (service as any).recentAnomalies.map((m: AnomalyEvent) => ({
+            ...m,
+            anomalyType: 'spike',
+          })),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+      });
+
+      it('does not alert again once the first event of a stored group ages out', async () => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+        const now = Date.now();
+        useRules(rule);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 6 * MIN }),
+          anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 6 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 2,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(
+          (service as any).recentAnomalies.map((m: AnomalyEvent) => ({
+            ...m,
+            anomalyType: 'spike',
+          })),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+        await (service as any).tickIncidentTimelines(now + 54 * MIN + 1000);
+
+        expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).not.toHaveBeenCalled();
+      });
+
+      it('alerts again when a more severe sequence replaces the first', async () => {
+        const escalated = {
+          pattern: AnomalyPattern.CONNECTION_LEAK,
+          steps: [[MetricType.CONNECTIONS], [MetricType.MEMORY_USED], [MetricType.OPS_PER_SEC]],
+          supersedes: [rule.pattern],
+          maxSpanMs: 10 * MIN,
+          diagnosis: 'Escalated',
+          recommendations: [],
+        };
+        useRules(rule, escalated);
+        const now = Date.now();
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: now - 3 * MIN }),
+          anomaly({ id: 'b', timestamp: now - 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        await (service as any).tickIncidentTimelines(now - MIN);
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'c', timestamp: now - MIN / 2, metricType: MetricType.OPS_PER_SEC }),
+        );
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(
+          anomalyWebhookSink.dispatchSequenceWebhook.mock.calls.map(
+            ([group]: [{ pattern: string }]) => group.pattern,
+          ),
+        ).toEqual([rule.pattern, escalated.pattern]);
+      });
+
+      it('keeps the sequence group when its alert fails', async () => {
+        const now = Date.now();
+        matched(now);
+        anomalyWebhookSink.dispatchSequenceWebhook.mockRejectedValue(new Error('webhook down'));
+
+        await expect((service as any).tickIncidentTimelines(now)).resolves.toBeUndefined();
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+        expect(service.getRecentGroups()).toHaveLength(1);
+      });
+
+      it('does not wait for the alert before finishing the tick', async () => {
+        const now = Date.now();
+        matched(now);
+        anomalyWebhookSink.dispatchSequenceWebhook.mockReturnValue(new Promise(() => {}));
+
+        await expect((service as any).tickIncidentTimelines(now)).resolves.toBeUndefined();
+        expect(anomalyWebhookSink.dispatchSequenceWebhook).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('emits one correlated group per sequence match across ticks', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pattern: AnomalyPattern.MEMORY_PRESSURE,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+        }),
+        'conn-1',
+      );
+      expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
+      const groups = (service as any).recentGroups;
+      expect(groups).toHaveLength(1);
+      expect(groups[0].anomalies.map((a: any) => a.id)).toEqual(['a', 'b']);
+      expect((service as any).liveIncidents[0].matchedPatterns).toEqual([
+        AnomalyPattern.MEMORY_PRESSURE,
+      ]);
+    });
+
+    describe('matches sharing an optional event', () => {
+      const withOptional = { ...rule, optionalMetrics: [MetricType.EVICTED_KEYS] };
+      const live = (now: number) => [
+        anomaly({ id: 'a', timestamp: now - 6 * MIN }),
+        anomaly({ id: 'b', timestamp: now - 5 * MIN, metricType: MetricType.MEMORY_USED }),
+        anomaly({ id: 'opt', timestamp: now - 4.5 * MIN, metricType: MetricType.EVICTED_KEYS }),
+        anomaly({ id: 'c', timestamp: now - 4 * MIN }),
+        anomaly({ id: 'd', timestamp: now - 3 * MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+
+      beforeEach(() => {
+        jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([withOptional]);
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+          withOptional,
+        ]);
+      });
+
+      it('emits a group for each match', async () => {
+        const now = Date.now();
+        (service as any).recentAnomalies.push(...live(now));
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup.mock.calls.map(([g]: any[]) => g.anomalyIds)).toEqual([
+          ['a', 'b', 'opt'],
+          ['c', 'd', 'opt'],
+        ]);
+      });
+
+      it('emits the second match after a restart that stored only the first', async () => {
+        const now = Date.now();
+        const members = live(now);
+        storage.getCorrelatedGroups.mockResolvedValue([
+          {
+            correlationId: 'grp-before-restart',
+            timestamp: now - 6 * MIN,
+            pattern: rule.pattern,
+            severity: 'warning',
+            diagnosis: rule.diagnosis,
+            recommendations: [],
+            anomalyCount: 3,
+            metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED, MetricType.EVICTED_KEYS],
+            connectionId: 'conn-1',
+            anomalyIds: ['a', 'b', 'opt'],
+          },
+        ]);
+        storage.getAnomalyEvents.mockResolvedValue(members.map((m) => ({ ...m, anomalyType: 'spike' })));
+        (service as any).recentAnomalies.push(...members);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup.mock.calls.map(([g]: any[]) => g.anomalyIds)).toEqual([
+          ['c', 'd', 'opt'],
+        ]);
+      });
+    });
+
+    it('does not re-emit a sequence group stored before a restart', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      const members = [
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+      storage.getCorrelatedGroups.mockResolvedValue([
+        {
+          correlationId: 'grp-before-restart',
+          timestamp: now - 2 * MIN,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+          anomalyIds: ['a', 'b'],
+        },
+      ]);
+      storage.getAnomalyEvents.mockResolvedValue(
+        members.map((m) => ({ ...m, anomalyType: 'spike' })),
+      );
+      (service as any).recentAnomalies.push(...members);
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+    });
+
+    it('retries the sequence dedupe seed after storage fails, without re-emitting', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      const members = [
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+      storage.getCorrelatedGroups.mockRejectedValueOnce(new Error('db down')).mockResolvedValue([
+        {
+          correlationId: 'grp-before-restart',
+          timestamp: now - 2 * MIN,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+          anomalyIds: ['a', 'b'],
+        },
+      ]);
+      storage.getAnomalyEvents.mockResolvedValue(
+        members.map((m) => ({ ...m, anomalyType: 'spike' })),
+      );
+      (service as any).recentAnomalies.push(...members);
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 30_000);
+
+      expect(storage.getCorrelatedGroups).toHaveBeenCalledTimes(2);
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+      expect((service as any).liveIncidents).toHaveLength(1);
+    });
+
+    it('seeds the sequence dedupe by pattern so busy correlators cannot crowd it out', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      const members = [
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+      const stored = [
+        {
+          correlationId: 'grp-before-restart',
+          timestamp: now - 2 * MIN,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+          anomalyIds: ['a', 'b'],
+        },
+      ];
+      storage.getCorrelatedGroups.mockImplementation(async ({ pattern }: { pattern?: string }) =>
+        pattern === rule.pattern ? stored : [],
+      );
+      storage.getAnomalyEvents.mockResolvedValue(
+        members.map((m) => ({ ...m, anomalyType: 'spike' })),
+      );
+      (service as any).recentAnomalies.push(...members);
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+    });
+
+    it('backs off a failing dedupe seed', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      storage.getCorrelatedGroups.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+      const scans = () => storage.getCorrelatedGroups.mock.calls.length;
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5_000);
+      expect(scans()).toBe(1);
+
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      expect(scans()).toBe(2);
+
+      await (service as any).tickIncidentTimelines(now + 85_000);
+      expect(scans()).toBe(2);
+
+      await (service as any).tickIncidentTimelines(now + 90_000);
+      expect(scans()).toBe(3);
+    });
+
+    it('backs off a failing boundary seed', async () => {
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5_000);
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(1);
+
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(2);
+    });
+
+    it('caps the wait between seed attempts', async () => {
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('db down'));
+      const now = Date.now();
+      const attempts = 6;
+      let at = now;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        await (service as any).tickIncidentTimelines(at);
+        at += 5 * MIN;
+      }
+
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(attempts);
+    });
+
+    it('emits sequence groups unseeded once the dedupe seed keeps failing', async () => {
+      jest.spyOn(sequenceRules, 'getSequenceRules').mockReturnValue([rule]);
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      const members = [
+        anomaly({ id: 'a', timestamp: now - 2 * MIN }),
+        anomaly({ id: 'b', timestamp: now - MIN, metricType: MetricType.MEMORY_USED }),
+      ];
+      storage.getCorrelatedGroups.mockRejectedValue(new Error('db down'));
+      const giveUpAt = now + 60 * MIN;
+      (service as any).recentAnomalies.push(...members);
+
+      for (let i = 0; i < 4; i++) await (service as any).tickIncidentTimelines(now + i * 1000);
+      expect(storage.saveCorrelatedGroup).not.toHaveBeenCalled();
+
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'c', timestamp: giveUpAt - 2 * MIN }),
+        anomaly({ id: 'd', timestamp: giveUpAt - MIN, metricType: MetricType.MEMORY_USED }),
+      );
+      await (service as any).tickIncidentTimelines(giveUpAt);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+    });
+
+    it('reaches degraded for a buffered signal that never came back in band', async () => {
+      const now = Date.now();
+      const start = now - 11 * MIN;
+      const fill = (from: number) => {
+        const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
+        for (let ts = from; ts <= from + 4 * MIN; ts += 1000) buffer.addSample(900, ts);
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
+      };
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: start,
+          metricType: MetricType.CONNECTIONS,
+          baseline: 10,
+          stdDev: 1,
+        }),
+      );
+
+      fill(start - MIN);
+      await (service as any).tickIncidentTimelines(start + 3 * MIN);
+      fill(start + 3 * MIN);
+      await (service as any).tickIncidentTimelines(start + 7 * MIN);
+      fill(start + 7 * MIN);
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'degraded',
+          openSignals: [MetricType.CONNECTIONS],
+          unknownSignals: [],
+        }),
+      );
+    });
+
+    it('reports a one-shot state event as unknown rather than degraded', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.REPLICATION_ROLE }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          openSignals: [],
+          unknownSignals: [MetricType.REPLICATION_ROLE],
+        }),
+      );
+    });
+
+    it('reports a quiet upgrade regression as unknown because nothing can re-fire it', async () => {
+      const now = Date.now();
+      (service as any).buffers.set('conn-1', new Map());
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          kind: 'upgrade_regression',
+          message: 'Sustained P99 latency degradation after upgrade 8.0.0 -> 9.0.0: GET 2x.',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          unknownSignals: [MetricType.COMMAND_P99],
+        }),
+      );
+    });
+
+    describe('P99 alerts on more than one command', () => {
+      const p99 = (timestamp: number, command: string) =>
+        anomaly({
+          timestamp,
+          metricType: MetricType.COMMAND_P99,
+          commands: [command],
+          kind: 'sustained_degradation',
+          message: 'P99 is 5x its baseline.',
+        });
+
+      it('does not hold an incident open on a later alert for another command', async () => {
+        const now = Date.now();
+        (service as any).buffers.set('conn-1', new Map());
+        (service as any).recentAnomalies.push(
+          p99(now - 40 * MIN, 'GET'),
+          p99(now - 36 * MIN, 'SET'),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery.status).toBe('recovered');
+      });
+
+      it('keeps an incident open while the same command alerts again', async () => {
+        const now = Date.now();
+        (service as any).buffers.set('conn-1', new Map());
+        (service as any).recentAnomalies.push(
+          p99(now - 40 * MIN, 'GET'),
+          p99(now - 36 * MIN, 'GET'),
+        );
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect((service as any).liveIncidents[0].recovery.status).toBe('degraded');
+      });
+    });
+
+    it('reports a quiet regression as unknown once its connection is gone', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery.status).toBe('unknown');
+    });
+
+    it('recovers a quiet P99 regression but keeps an unresolved state signal open', async () => {
+      const now = Date.now();
+      (service as any).buffers.set('conn-1', new Map());
+      (service as any).recentAnomalies.push(
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.COMMAND_P99,
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
+        }),
+        anomaly({
+          timestamp: now - 40 * MIN,
+          metricType: MetricType.RAFT_HEALTH,
+          connectionId: 'conn-2',
+        }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      const byConn = Object.fromEntries(
+        (service as any).liveIncidents.map((t: any) => [t.scope, t.recovery]),
+      );
+      expect(byConn['conn-1'].status).toBe('recovered');
+      expect(byConn['conn-2']).toEqual(
+        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.RAFT_HEALTH] }),
+      );
+    });
+
+    it('keeps an unresolved client saturation event open', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 40 * MIN, metricType: MetricType.CLIENT_SATURATION }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery).toEqual(
+        expect.objectContaining({ status: 'degraded', openSignals: [MetricType.CLIENT_SATURATION] }),
+      );
+    });
+
+    it('does not call a P99 regression recovered inside its re-fire cooldown', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ timestamp: now - 15 * MIN, metricType: MetricType.COMMAND_P99 }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].recovery).toEqual(
+        expect.objectContaining({
+          status: 'unknown',
+          unknownSignals: [MetricType.COMMAND_P99],
+          recoveredAt: null,
+        }),
+      );
+    });
+
+    it('splits history where the live view stored its boundaries', async () => {
+      const t = Date.now() - 20 * MIN;
+      const rows = ['a', 'b'].map((id, i) => ({
+        ...anomaly({ id, timestamp: t + i * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t, anomalyId: 'a' },
+        { scopeId: 'conn-1', startedAt: t + MIN, anomalyId: 'b' },
+      ]);
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('keeps a live incident on its stored start once its first events age out', async () => {
+      const now = Date.now();
+      const startedAt = now - 62 * MIN;
+      storage.getIncidentBoundaries.mockImplementation(async ({ startTime }: any) =>
+        startedAt >= startTime
+          ? [{ scopeId: 'conn-1', startedAt, anomalyId: 'z-gone' }]
+          : [],
+      );
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'tail', timestamp: now - 59 * MIN }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      const [incident] = (service as any).liveIncidents;
+      expect(incidentStartOf(incident.incidentId)).toBe(startedAt);
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
+    it('gives history and live one id when a stored start outlived its event', async () => {
+      const t = Date.now() - 2 * MIN;
+      const rows = [
+        { ...anomaly({ id: 'a-sibling', timestamp: t }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'b-tail', timestamp: t + MIN }), anomalyType: 'spike' },
+      ];
+      const stored = [{ scopeId: 'conn-1', startedAt: t, anomalyId: 'z-gone' }];
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockResolvedValue(stored);
+
+      const history = await service.getIncidentTimelines('conn-1');
+      (service as any).incidentEvents.set('conn-1', [
+        anomaly({ id: 'a-sibling', timestamp: t }),
+        anomaly({ id: 'b-tail', timestamp: t + MIN }),
+      ]);
+      (service as any).incidentsDirty = true;
+      await (service as any).tickIncidentTimelines(Date.now());
+
+      expect(history.map((i) => i.incidentId)).toEqual([incidentIdFor('conn-1', 'z-gone', t)]);
+      expect((service as any).liveIncidents.map((i: any) => i.incidentId)).toEqual(
+        history.map((i) => i.incidentId),
+      );
+    });
+
+    it('splits history at boundaries stored under an earlier cluster key', async () => {
+      const t = Date.now() - 20 * MIN;
+      const rows = ['a', 'b'].map((id, i) => ({
+        ...anomaly({ id, timestamp: t + i * MIN, scopeId: 'cluster:old' }),
+        anomalyType: 'spike',
+      }));
+      const older = [
+        { scopeId: 'cluster:old', startedAt: t, anomalyId: 'a' },
+        { scopeId: 'cluster:old', startedAt: t + MIN, anomalyId: 'b' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : rows,
+      );
+      storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) =>
+        scopeIds?.includes('cluster:old') ? older : [],
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['b'], ['a']]);
+    });
+
+    it('keeps the history when the earlier cluster key boundaries cannot be read', async () => {
+      const t = Date.now() - 20 * MIN;
+      const row = {
+        ...anomaly({ id: 'a', timestamp: t, scopeId: 'cluster:old' }),
+        anomalyType: 'spike',
+      };
+      storage.getAnomalyEvents.mockImplementation(async ({ order }: any) =>
+        order === 'asc' ? [] : [row],
+      );
+      storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) => {
+        if (scopeIds?.includes('cluster:old')) throw new Error('down');
+        return [];
+      });
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents).toHaveLength(1);
+    });
+
+    it('anchors the default window on endTime', async () => {
+      const end = Date.now() - 3 * 24 * 60 * MIN;
+      storage.getAnomalyEvents.mockResolvedValue([
+        { ...anomaly({ timestamp: end - 60 * MIN }), id: 'then' },
+      ]);
+
+      const incidents = await service.getIncidentTimelines('conn-1', undefined, end);
+
+      expect(incidents.map((i) => i.entries[0].anomalyId)).toEqual(['then']);
+    });
+
+    it('widens the history read back to a stored start before the window', async () => {
+      const t = Date.now() - 2 * 60 * MIN;
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t - 80 * MIN, anomalyId: 'head' },
+      ]);
+
+      await service.getIncidentTimelines('conn-1', t);
+
+      const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
+      expect(startTime).toBe(t - 80 * MIN);
+    });
+
+    it('remembers on a live boundary every step its incident has held', async () => {
+      const now = Date.now();
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(
+        anomaly({ id: 'first', timestamp: now - 2 * MIN, metricType: MetricType.MEMORY_USED }),
+        ctx,
+      );
+      await (service as any).addAnomaly(
+        anomaly({
+          id: 'step',
+          timestamp: now - MIN,
+          metricType: MetricType.CONNECTIONS,
+          anomalyType: AnomalyType.DROP,
+        }),
+        ctx,
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveBoundaries).toEqual([
+        expect.objectContaining({
+          anomalyId: 'first',
+          members: expect.arrayContaining([
+            {
+              metricType: MetricType.MEMORY_USED,
+              anomalyType: AnomalyType.SPIKE,
+              connectionId: 'conn-1',
+              timestamp: now - 2 * MIN,
+            },
+            {
+              metricType: MetricType.CONNECTIONS,
+              anomalyType: AnomalyType.DROP,
+              connectionId: 'conn-1',
+              timestamp: now - MIN,
+            },
+          ]),
+        }),
+      ]);
+    });
+
+    it('stores each live incident start once and keeps it across a restart', async () => {
+      const now = Date.now();
+      const event = anomaly({ id: 'live', timestamp: now - MIN });
+      await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledWith([
+        { scopeId: 'conn-1', startedAt: now - MIN, anomalyId: 'live' },
+      ]);
+
+      (service as any).incidentBoundarySeed = null;
+      (service as any).liveBoundaries = [];
+      (service as any).incidentEvents.clear();
+      (service as any).recentAnomalies = [];
+      await (service as any).addAnomaly(anomaly({ id: 'tail', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: now - MIN, anomalyId: 'live' },
+      ]);
+
+      await (service as any).tickIncidentTimelines(now + 2000);
+
+      expect((service as any).liveIncidents[0].startedAt).toBe(now - MIN);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(1);
+    });
+
+    it('stamps events of one poll in the order they were raised', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'z-first', timestamp: now }), ctx);
+      await (service as any).addAnomaly(anomaly({ id: 'a-second', timestamp: now }), ctx);
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents[0].entries.map((e: any) => e.anomalyId)).toEqual([
+        'z-first',
+        'a-second',
+      ]);
+      const saved = storage.saveAnomalyEvent.mock.calls.map(([e]: any[]) => e.eventSequence);
+      expect(saved[0]).toBeLessThan(saved[1]);
+    });
+
+    it('reads the event order back from storage', () => {
+      const row = { ...anomaly({ id: 'stored' }), anomalyType: 'spike', eventSequence: 7 };
+
+      expect((service as any).storedToAnomalyEvent(row).eventSequence).toBe(7);
+      expect(
+        (service as any).storedToAnomalyEvent({ ...row, commands: ['get'] }).commands,
+      ).toEqual(['get']);
+    });
+
+    it('resumes an incident across a restart from its stored events', async () => {
+      const now = Date.now();
+      const rows = [6, 4, 2].map((ago) => ({
+        ...anomaly({ id: `stored-${ago}`, timestamp: now - ago * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockResolvedValue(rows);
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: now - 6 * MIN, anomalyId: 'stored-6' },
+      ]);
+      await (service as any).addAnomaly(anomaly({ id: 'tail', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect((service as any).liveIncidents).toHaveLength(1);
+      expect((service as any).liveIncidents[0].startedAt).toBe(now - 6 * MIN);
+      expect((service as any).liveIncidents[0].entries).toHaveLength(4);
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
+    it('retries the restart seed when the stored events cannot be read', async () => {
+      const now = Date.now();
+      storage.getAnomalyEvents.mockRejectedValueOnce(new Error('down'));
+      const row = { ...anomaly({ id: 'stored', timestamp: now - MIN }), anomalyType: 'spike' };
+
+      await (service as any).tickIncidentTimelines(now);
+      storage.getAnomalyEvents.mockResolvedValue([row]);
+      await (service as any).tickIncidentTimelines(now + 30_000);
+
+      expect((service as any).liveIncidents.map((i: any) => i.entries[0].anomalyId)).toEqual([
+        'stored',
+      ]);
+    });
+
+    it('keeps the live view when boundaries cannot be read or saved', async () => {
+      const now = Date.now();
+      storage.getIncidentBoundaries.mockRejectedValue(new Error('down'));
+      storage.saveIncidentBoundaries.mockRejectedValue(new Error('down'));
+      await (service as any).addAnomaly(anomaly({ id: 'live', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+
+      await (service as any).tickIncidentTimelines(now);
+      storage.getIncidentBoundaries.mockResolvedValue([]);
+      await (service as any).tickIncidentTimelines(now + 30_000);
+      await (service as any).tickIncidentTimelines(now + 31_000);
+
+      expect((service as any).liveIncidents).toHaveLength(1);
+      expect(storage.saveIncidentBoundaries).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not walk the live events on a tick where nothing changed', async () => {
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'one', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      await (service as any).tickIncidentTimelines(now);
+      const walk = jest.spyOn((service as any).incidentEvents, 'values');
+
+      await (service as any).tickIncidentTimelines(now + 5000);
+
+      expect(walk).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds on the next tick when a connection is removed', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'one', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      await (service as any).tickIncidentTimelines(now);
+
+      (service as any).onConnectionRemoved('conn-1');
+      await (service as any).tickIncidentTimelines(now + 5000);
+
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
+    it('finds a remembered event without walking every connection', async () => {
+      await (service as any).addAnomaly(anomaly({ id: 'one' }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+      const walk = jest.spyOn((service as any).incidentEvents, 'values');
+
+      expect((service as any).findIncidentEvent('one')?.id).toBe('one');
+      expect(walk).not.toHaveBeenCalled();
+    });
+
+    it('forgets a repeated signal once the per connection window is full', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'oldest' }), ctx);
+      for (let i = 0; i < 200; i += 1) {
+        await (service as any).addAnomaly(anomaly({ id: `next-${i}` }), ctx);
+      }
+
+      expect((service as any).findIncidentEvent('oldest')?.id).toBe('oldest');
+      expect((service as any).findIncidentEvent('next-0')).toBeUndefined();
+      expect((service as any).findIncidentEvent('next-199')?.id).toBe('next-199');
+    });
+
+    it('reads history behind more boundaries than a call can take as arguments', async () => {
+      const startedAt = Date.now() - 60_000;
+      storage.getIncidentBoundaries.mockResolvedValue(
+        Array.from({ length: 200_000 }, (_, i) => ({
+          scopeId: 'conn-1',
+          startedAt: startedAt + i,
+          anomalyId: `a-${i}`,
+        })),
+      );
+
+      await expect(service.getIncidentTimelines('conn-1', startedAt)).resolves.toEqual([]);
+    });
+
+    it('forgets a node once it leaves the cluster', () => {
+      const node = (id: string) => ({ id, address: `${id}:6379` }) as ClusterNode;
+      (service as any).rememberClusterKey('conn-1', [node('a'), node('b')]);
+      (service as any).rememberClusterKey('conn-1', [node('b'), node('c')]);
+
+      expect([...(service as any).clusterKeyByNode.keys()].sort()).toEqual(['b', 'c']);
+    });
+
+    it('keeps a node that another connection still sees', () => {
+      const node = (id: string) => ({ id, address: `${id}:6379` }) as ClusterNode;
+      (service as any).rememberClusterKey('conn-1', [node('a'), node('b'), node('c')]);
+      (service as any).rememberClusterKey('conn-2', [node('a'), node('b'), node('c')]);
+      const clusterKey = (service as any).connectionClusterKeys.get('conn-1');
+
+      (service as any).rememberClusterKey('conn-1', [node('a')]);
+      (service as any).rememberClusterKey('conn-3', [node('c'), node('d')]);
+
+      expect((service as any).connectionClusterKeys.get('conn-3')).toBe(clusterKey);
+    });
+
+    it('still runs the poll when CLUSTER NODES hangs on the first read', async () => {
+      (service as any).infoTimeoutMs = 5;
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        stats: { cluster_enabled: '1' },
+      });
+      dbClient.getClusterNodes = jest
+        .fn()
+        .mockReturnValueOnce(new Promise(() => undefined))
+        .mockResolvedValue([]);
+      const adopt = jest.spyOn(service as any, 'adoptOpenEvents').mockResolvedValue(undefined);
+
+      await (service as any).pollConnection(mockCtx);
+
+      expect(adopt).toHaveBeenCalledTimes(1);
+    });
+
+    it('knows the cluster before anything in a first poll is stamped', async () => {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        stats: { cluster_enabled: '1' },
+      });
+      dbClient.getClusterNodes = jest.fn().mockResolvedValue([
+        { id: 'a', flags: ['master'], master: '-', slots: [], address: 'a:6379' },
+        { id: 'b', flags: ['master'], master: '-', slots: [], address: 'b:6379' },
+      ]);
+      let known: string | undefined;
+      jest.spyOn(service as any, 'adoptOpenEvents').mockImplementation(async () => {
+        known = (service as any).connectionClusterKeys.get('conn-1');
+      });
+
+      await (service as any).pollConnection(mockCtx);
+
+      expect(known).toEqual(expect.any(String));
+    });
+
+    it('keeps cleared events for the incident they belong to', async () => {
+      await (service as any).addAnomaly(
+        anomaly({ id: 'closed', connectionId: 'conn-2', resolved: true }),
+        { connectionId: 'conn-2', host: 'h', port: 6379 },
+      );
+
+      service.clearResolved();
+
+      expect((service as any).findIncidentEvent('closed')).toBeDefined();
+      expect((service as any).recentAnomalies).toEqual([]);
+    });
+
+    it('forgets the events of a removed connection', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'gone', connectionId: 'conn-1' }), ctx);
+
+      (service as any).onConnectionRemoved('conn-1');
+
+      expect((service as any).findIncidentEvent('gone')).toBeUndefined();
+    });
+
+    it('does not rebuild timelines on a tick where nothing changed', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      await (service as any).addAnomaly(anomaly({ id: 'one', timestamp: now }), {
+        connectionId: 'conn-1',
+        host: 'h',
+        port: 6379,
+      });
+
+      await (service as any).tickIncidentTimelines(now + 1000);
+      await (service as any).tickIncidentTimelines(now + 6000);
+      expect(build).toHaveBeenCalledTimes(1);
+
+      await (service as any).tickIncidentTimelines(now + 60_000);
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
+    it('rebuilds when a new event arrives on one connection', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      await (service as any).addAnomaly(anomaly({ id: 'a', timestamp: now - MIN }), ctx);
+      await (service as any).tickIncidentTimelines(now);
+
+      await (service as any).addAnomaly(anomaly({ id: 'c', timestamp: now }), ctx);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
+    it('rebuilds as soon as an event resolves', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      const now = Date.now();
+      const event = anomaly({ id: 'one', timestamp: now });
+      await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      await service.resolveAnomaly('one');
+      await (service as any).tickIncidentTimelines(now + 6000);
+
+      expect(build).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips a tick while the previous one is still running', async () => {
+      const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+      let release!: (seeded: boolean) => void;
+      (service as any).sequenceDedupeSeed = new Promise<boolean>((resolve) => (release = resolve));
+      const first = (service as any).correlationTick();
+      const second = (service as any).correlationTick();
+      release(true);
+      await Promise.all([first, second]);
+
+      expect(build).toHaveBeenCalledTimes(1);
+    });
+
+    it('counts a retried event once in the incident buffer', async () => {
+      const ctx = { connectionId: 'conn-1', host: 'h', port: 6379 };
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(anomaly({ id: 'first', timestamp: Date.now() }), ctx);
+
+      await (service as any).drainPersistenceOutbox();
+
+      expect((service as any).incidentEvents.get('conn-1').map((e: any) => e.id)).toEqual(['first']);
+    });
+
+    it('keeps a removed member in its incident through the stored scope', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : id === 'gone' ? undefined : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }]);
+      const t = Date.now() - 30 * MIN;
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [
+              { ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike', scopeId: 'seed' },
+              {
+                ...anomaly({ id: 'g1', timestamp: t + 1000, connectionId: 'gone' }),
+                anomalyType: 'spike',
+                scopeId: 'seed',
+              },
+            ],
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].entries.map((e) => e.anomalyId)).toEqual(['c1', 'g1']);
+    });
+
+    it('stores new events under the scope of their connection', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      const event = anomaly({ id: 'stamped', timestamp: Date.now() });
+
+      await (service as any).addAnomaly(event, { connectionId: 'conn-1', host: 'h', port: 6379 });
+
+      expect(storage.saveAnomalyEvent.mock.calls.at(-1)[0]).toMatchObject({
+        id: 'stamped',
+        scopeId: 'seed',
+      });
+    });
+
+    it('builds history across every member of the topology and keeps resolvedAt', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'node-2' }]);
+      const t = Date.now() - 30 * MIN;
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [
+              { ...anomaly({ id: 'c1', timestamp: t }), anomalyType: 'spike' },
+              {
+                ...anomaly({ id: 'n2', timestamp: t + 1000, connectionId: 'node-2' }),
+                anomalyType: 'spike',
+                resolved: true,
+                resolvedAt: t + 5 * MIN,
+              },
+            ],
+      );
+
+      const [incident] = await service.getIncidentTimelines('conn-1');
+
+      const queried = storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => q.scope);
+      expect(queried).toEqual([
+        { id: 'seed', connectionIds: expect.arrayContaining(['conn-1', 'seed', 'node-2']) },
+      ]);
+      expect(incident.scope).toBe('seed');
+      expect(incident.entries.map((e) => e.anomalyId)).toEqual(['c1', 'n2']);
+      expect(incident.entries[1].recoveredAt).toBe(t + 5 * MIN);
+      await expect(service.getIncidentTimeline(incident.incidentId, 'conn-1')).resolves.toEqual(
+        incident,
+      );
+    });
+
+    it('retries a sequence group whose save failed without listing it twice', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+      storage.saveCorrelatedGroup.mockRejectedValueOnce(new Error('db down'));
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 1000);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(2);
+      expect(service.getRecentGroups()).toHaveLength(1);
+    });
+
+    it('keeps the first resolution time when a cached event resolves again', async () => {
+      const event = { ...anomaly({ id: 'twice' }), persisted: true };
+      (service as any).recentAnomalies.push(event);
+
+      await service.resolveAnomaly('twice');
+      const first = event.resolvedAt!;
+      const later = jest.spyOn(Date, 'now').mockReturnValue(first + MIN);
+      await service.resolveAnomaly('twice');
+      later.mockRestore();
+
+      expect(event.resolvedAt).toBe(first);
+    });
+
+    it('does not emit a second group when the first step ages out and a later one rematches', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'late', timestamp: now - 54 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+      await (service as any).tickIncidentTimelines(now + 5.5 * MIN);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+    });
+
+    describe('recovery probe', () => {
+      const probe = () => (service as any).incidentRecoveryProbe;
+      const T = 1_700_000_000_000;
+      const baseline = (start: number): Array<[number, number]> =>
+        Array.from({ length: 30 }, (_, i) => [start + i * 1000, 10 + (i % 2)]);
+      const outOfBand = (start: number, seconds = 30): Array<[number, number]> =>
+        Array.from({ length: seconds }, (_, i) => [start + i * 1000, 900]);
+      let newestSample = T;
+      const withBuffer = (samples: Array<[number, number]>) => {
+        const buffer = new MetricBuffer(MetricType.CONNECTIONS, 300, 2);
+        samples.forEach(([ts, value]) => buffer.addSample(value, ts));
+        newestSample = samples[samples.length - 1][0];
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTIONS, buffer]]));
+      };
+
+      const signal = (overrides = {}) => ({
+        connectionId: 'conn-1',
+        metricType: MetricType.CONNECTIONS,
+        since: T,
+        until: null,
+        baseline: 10,
+        stdDev: 1,
+        now: newestSample + 1000,
+        ...overrides,
+      });
+
+      it('answers a history read without keeping what it observed', () => {
+        withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+        const history = (service as any).incidentHistoryProbe;
+
+        expect(history(signal())).toBe(T + 2 * MIN);
+        expect(history(signal({ until: null }))).toBe(T + 2 * MIN);
+
+        expect((service as any).observedRecoveries.size).toBe(0);
+        expect((service as any).observedOpenThrough.size).toBe(0);
+      });
+
+      it('leaves an open event out of the shared memory on a history read', () => {
+        withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 900], [T + 2.5 * MIN, 900]]);
+        const history = (service as any).incidentHistoryProbe;
+
+        history(signal({ until: null, now: T + 2.5 * MIN }));
+
+        expect((service as any).observedOpenThrough.size).toBe(0);
+      });
+
+      it('recovers a signal with no baseline once it falls under its threshold', () => {
+        withBuffer([
+          ...outOfBand(T - 30_000),
+          [T + MIN, 950],
+          [T + 2 * MIN, 95],
+          [T + 2.5 * MIN, 40],
+        ]);
+
+        expect(probe()(signal({ baseline: 0, stdDev: 0, threshold: 90 }))).toBe(T + 2.5 * MIN);
+      });
+
+      it('recovers at the first sample back in band after the settle time', () => {
+        withBuffer([
+          ...baseline(T - 30_000),
+          [T + MIN, 500],
+          [T + 2 * MIN, 10],
+          [T + 3 * MIN, 600],
+        ]);
+
+        expect(probe()(signal())).toBe(T + 2 * MIN);
+      });
+
+      describe('after the buffer slides past the settle time', () => {
+        it('keeps a recovery it already observed', () => {
+          withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+          expect(probe()(signal())).toBe(T + 2 * MIN);
+
+          withBuffer(baseline(T + 60 * MIN));
+
+          expect(probe()(signal())).toBe(T + 2 * MIN);
+        });
+
+        it('ignores an observed recovery that a later firing bounds out', () => {
+          withBuffer([...baseline(T - 30_000), [T + 2 * MIN, 10]]);
+          probe()(signal());
+
+          withBuffer(baseline(T + 60 * MIN));
+
+          expect(probe()(signal({ until: T + 2 * MIN }))).toBeUndefined();
+        });
+
+        it('stays open while observation of the out-of-band signal is unbroken', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          expect(probe()(signal())).toBeNull();
+
+          withBuffer(outOfBand(T + 100_000, 200));
+          expect(probe()(signal())).toBeNull();
+
+          withBuffer(outOfBand(T + 250_000, 200));
+
+          expect(probe()(signal())).toBeNull();
+        });
+
+        it('recovers when unbroken observation finds the signal back in band', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          probe()(signal());
+
+          withBuffer([...outOfBand(T + 100_000, 100), [T + 200_000, 10]]);
+
+          expect(probe()(signal())).toBe(T + 200_000);
+        });
+
+        it('does not know once the buffer has moved past what was observed', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          probe()(signal());
+
+          withBuffer(outOfBand(T + 8 * MIN));
+
+          expect(probe()(signal())).toBeUndefined();
+        });
+
+        it('does not keep a re-fired signal open from its own watermark', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          probe()(signal());
+
+          withBuffer(outOfBand(T + 100_000, 200));
+
+          expect(probe()(signal({ until: T + 30 * MIN }))).toBeUndefined();
+        });
+
+        it('does not know once polling stalls and the buffer freezes', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          expect(probe()(signal())).toBeNull();
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBeUndefined();
+        });
+
+        it('does not know when the buffer froze before the first probe', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBeUndefined();
+        });
+
+        it('allows a couple of late polls before calling a sample stale', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+
+          expect(probe()(signal({ now: newestSample + 3000 }))).toBeNull();
+        });
+
+        it('stays open when polling resumed out of band after a hole', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal({ now: T + 400_000 + 1000 }))).toBeNull();
+        });
+
+        it('stays open when a hole opens after what was observed', () => {
+          withBuffer(outOfBand(T - 30_000, 200));
+          probe()(signal());
+
+          withBuffer([...outOfBand(T + 100_000, 100), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal({ now: T + 400_000 + 1000 }))).toBeNull();
+        });
+
+        it('does not know whether a re-fired signal recovered inside a hole', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), ...outOfBand(T + 400_000)]);
+
+          expect(probe()(signal({ until: T + 410_000 }))).toBeUndefined();
+        });
+
+        it('still recovers at an in-band sample after a hole', () => {
+          withBuffer([...outOfBand(T - 30_000, 200), [T + 400_000, 10]]);
+
+          expect(probe()(signal())).toBe(T + 400_000);
+        });
+
+        it('still recovers at an in-band sample in a frozen buffer', () => {
+          withBuffer([...outOfBand(T - 30_000, 100), [T + 70_000, 10]]);
+
+          expect(probe()(signal({ now: T + 10 * MIN }))).toBe(T + 70_000);
+        });
+      });
+
+      it('stays open while no sample after the settle time is back in band', () => {
+        withBuffer(outOfBand(T - 30_000, 200));
+
+        expect(probe()(signal())).toBeNull();
+      });
+
+      it('judges against the pre-incident baseline, not a rolling one that drifted up', () => {
+        withBuffer(Array.from({ length: 200 }, (_, i) => [T + i * 1000, 500 + (i % 2)]));
+
+        expect(probe()(signal())).toBeNull();
+      });
+
+      it('judges a flat pre-incident baseline by the baseline, not a rolling z-score', () => {
+        withBuffer(Array.from({ length: 200 }, (_, i) => [T + i * 1000, 500]));
+
+        expect(probe()(signal({ stdDev: 0 }))).toBeNull();
+      });
+
+      it('recovers a flat pre-incident baseline once the value is back on it', () => {
+        withBuffer([
+          ...Array.from({ length: 30 }, (_, i): [number, number] => [T + i * 1000, 500]),
+          [T + 2 * MIN, 10],
+        ]);
+
+        expect(probe()(signal({ stdDev: 0 }))).toBe(T + 2 * MIN);
+      });
+
+      it('ignores samples after the signal fired again', () => {
+        withBuffer([...outOfBand(T - 30_000, 150), [T + 3 * MIN, 10]]);
+
+        expect(probe()(signal({ until: T + 2 * MIN }))).toBeNull();
+      });
+
+      it('keeps a sustained signal open when the next firing follows straight on', () => {
+        withBuffer(outOfBand(T - 30_000, 60));
+
+        expect(probe()(signal({ until: T + 30_000 }))).toBeNull();
+      });
+
+      it('does not know whether an old signal recovered before it fired again', () => {
+        withBuffer([...baseline(T + 60 * MIN), [T + 61 * MIN, 900]]);
+
+        expect(probe()(signal({ until: T + 30 * MIN }))).toBeUndefined();
+      });
+
+      it('does not know when an old signal recovered once the buffer moved past it', () => {
+        withBuffer([[T + 60 * MIN, 900], ...baseline(T + 61 * MIN)]);
+
+        expect(probe()(signal())).toBeUndefined();
+      });
+
+      it('does not know whether a signal recovered without its buffer', () => {
+        expect(probe()(signal({ connectionId: 'gone' }))).toBeUndefined();
+      });
+
+      it('does not know whether a lazily buffered signal recovered once its buffer moved past it', () => {
+        const buffer = new MetricBuffer(MetricType.CONNECTION_CHURN, 300, 2);
+        baseline(T + 60 * MIN).forEach(([ts, value]) => buffer.addSample(value, ts));
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTION_CHURN, buffer]]));
+
+        expect(probe()(signal({ metricType: MetricType.CONNECTION_CHURN }))).toBeUndefined();
+      });
+
+      it('keeps a self-resolving state signal with no buffer open', () => {
+        expect(
+          probe()(signal({ connectionId: 'gone', metricType: MetricType.RAFT_HEALTH })),
+        ).toBeNull();
+      });
+
+      it.each([
+        MetricType.REPLICATION_ROLE,
+        MetricType.CLUSTER_STATE,
+        MetricType.CONNECTION_CHURN,
+        MetricType.REJECTED_CONNECTIONS,
+        MetricType.EVICTED_CLIENTS,
+        MetricType.SLOWLOG_LAST_ID,
+      ])('reports %s as unknown when nothing tracks its recovery', (metricType) => {
+        expect(probe()(signal({ connectionId: 'gone', metricType }))).toBeUndefined();
+      });
+
+      it('reports a re-fired signal as unknown once its buffer has slid past it', () => {
+        const buffer = new MetricBuffer(MetricType.CONNECTION_CHURN, 300, 2);
+        baseline(T + 60 * MIN).forEach(([ts, value]) => buffer.addSample(value, ts));
+        (service as any).buffers.set('conn-1', new Map([[MetricType.CONNECTION_CHURN, buffer]]));
+
+        expect(
+          probe()(signal({ metricType: MetricType.CONNECTION_CHURN, until: T + 30_000 })),
+        ).toBeUndefined();
+      });
+
+      it('keeps a signal open only when something can resolve it', () => {
+        const stateMetrics = [...METRICS_HANDLED_OUTSIDE_EXTRACTOR].filter(
+          (m) => m !== MetricType.COMMAND_P99,
+        );
+        const open = stateMetrics.filter(
+          (metricType) => probe()(signal({ connectionId: 'gone', metricType })) === null,
+        );
+
+        expect(open.sort()).toEqual(
+          [
+            MetricType.RAFT_HEALTH,
+            MetricType.RESHARD_SHARD_SKEW,
+            MetricType.HOT_SHARD,
+            MetricType.REPLICA_SLOT_STATE,
+            MetricType.REPLICATION_DIVERGENCE,
+            MetricType.BACKLOG_COVERAGE_RISK,
+            MetricType.CLIENT_SATURATION,
+            MetricType.RESYNC_ESCALATION,
+          ].sort(),
+        );
+        for (const metricType of stateMetrics.filter((m) => !open.includes(m))) {
+          expect(probe()(signal({ connectionId: 'gone', metricType }))).toBeUndefined();
+        }
+      });
+
+      it('keeps a point-in-time signal open when it re-fired before settling', () => {
+        expect(
+          probe()(
+            signal({
+              connectionId: 'gone',
+              metricType: MetricType.COMMAND_P99,
+              until: T + 30_000,
+            }),
+          ),
+        ).toBeNull();
+      });
+
+      it('keeps a point-in-time signal open when it re-fired on the cooldown', () => {
+        expect(
+          probe()(
+            signal({
+              connectionId: 'gone',
+              metricType: MetricType.COMMAND_P99,
+              until: T + 30 * MIN,
+            }),
+          ),
+        ).toBeNull();
+      });
+
+      it('leaves a point-in-time signal unknown until its cooldown has passed', () => {
+        (service as any).buffers.set('conn-1', new Map());
+        const p99 = {
+          metricType: MetricType.COMMAND_P99,
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
+        };
+
+        expect(probe()(signal({ ...p99, now: T + 15 * MIN }))).toBeUndefined();
+        expect(probe()(signal({ ...p99, now: T + 31 * MIN - 1 }))).toBeUndefined();
+      });
+
+      it('does not quiet-recover an upgrade regression whose message reads as sustained', () => {
+        (service as any).buffers.set('conn-1', new Map());
+
+        expect(
+          probe()(
+            signal({
+              metricType: MetricType.COMMAND_P99,
+              kind: 'upgrade_regression',
+              message: 'Sustained P99 latency degradation: GET 2x.',
+              now: T + 31 * MIN,
+            }),
+          ),
+        ).toBeUndefined();
+      });
+
+      it('recovers a point-in-time signal once the cooldown passes without a re-fire', () => {
+        (service as any).buffers.set('conn-1', new Map());
+        const p99 = {
+          metricType: MetricType.COMMAND_P99,
+          kind: 'sustained_degradation',
+          message: 'GET P99 doubled.',
+        };
+
+        expect(probe()(signal({ ...p99, now: T + 31 * MIN }))).toBe(T + 31 * MIN);
+        expect(probe()(signal({ ...p99, until: T + 40 * MIN, now: T + 41 * MIN }))).toBe(
+          T + 31 * MIN,
+        );
+      });
+    });
+
+    it('reads the next firing with one ascending query', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const first = { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' };
+      const later = { ...anomaly({ id: 'later', timestamp: t + 2 * 60 * MIN }), anomalyType: 'spike' };
+      storage.getAnomalyEvents.mockImplementation(async ({ order, startTime, endTime }: any) => {
+        if (order === 'asc') return [later];
+        return startTime <= t && (!endTime || t <= endTime) ? [first] : [];
+      });
+
+      const [listed] = await service.getIncidentTimelines('conn-1', t);
+      storage.getAnomalyEvents.mockClear();
+
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      const ascending = storage.getAnomalyEvents.mock.calls.filter(
+        ([options]: any[]) => options.order === 'asc',
+      );
+      expect(ascending).toHaveLength(1);
+      expect(ascending[0][0]).toMatchObject({ limit: 1, metricType: MetricType.CONNECTIONS });
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(['first']);
+    });
+
+    it('pages incident history by cursor, not offset', async () => {
+      const t = Date.now() - 60 * MIN;
+      const rows = Array.from({ length: 7500 }, (_, i) => ({
+        ...anomaly({ id: `e-${String(i).padStart(4, '0')}`, timestamp: t + i }),
+        anomalyType: 'spike',
+      })).reverse();
+      storage.getAnomalyEvents.mockImplementation(async ({ after, offset, limit }: any) => {
+        expect(offset).toBeUndefined();
+        const start = after ? rows.findIndex((r) => r.id === after.id) + 1 : 0;
+        return rows.slice(start, start + limit);
+      });
+
+      const [incident] = await service.getIncidentTimelines('conn-1', t, undefined, 1);
+
+      expect(incident.entries).toHaveLength(7500);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+    });
+
+    it('clamps the incident lookback to thirty days', async () => {
+      storage.getAnomalyEvents.mockResolvedValue([]);
+      const now = Date.now();
+
+      await service.getIncidentTimelines('conn-1', now - 365 * 24 * 60 * MIN);
+
+      const [{ startTime }] = storage.getAnomalyEvents.mock.calls[0];
+      expect(startTime).toBeGreaterThanOrEqual(now - 30 * 24 * 60 * MIN - 60 * MIN - 1000);
+    });
+
+    it('finds an incident that a long chain split off at the max span', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = Array.from({ length: 36 }, (_, i) => ({
+        ...anomaly({ id: `chain-${String(i).padStart(2, '0')}`, timestamp: t + i * MIN }),
+        anomalyType: 'spike',
+      }));
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      const listed = await service.getIncidentTimelines('conn-1', t);
+      const tail = listed.find((i) => i.startedAt > t)!;
+
+      const detail = await service.getIncidentTimeline(tail.incidentId, 'conn-1');
+
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(tail.entries.map((e) => e.anomalyId));
+    });
+
+    it('finds a late entry on an incident whose stored start follows it', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = [
+        { ...anomaly({ id: 'late', timestamp: t - 10_000 }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'start', timestamp: t }), anomalyType: 'spike' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 'conn-1', startedAt: t, anomalyId: 'start' },
+      ]);
+      const [listed] = await service.getIncidentTimelines('conn-1', t - MIN);
+
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(detail?.startedAt).toBe(t - 10_000);
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(['late', 'start']);
+    });
+
+    it('does not store a boundary for a late entry', async () => {
+      const t = Date.now();
+      const scoped = { scopeId: 'conn-1', startedAt: t, anomalyId: 'start' };
+      (service as any).liveBoundaries = [scoped];
+      (service as any).liveIncidents = [
+        {
+          incidentId: incidentIdFor('conn-1', 'start', t),
+          scope: 'conn-1',
+          startedAt: t - 10_000,
+          entries: [{ anomalyId: 'late' }],
+        },
+      ];
+
+      await (service as any).storeIncidentBoundaries(t);
+
+      expect(storage.saveIncidentBoundaries).not.toHaveBeenCalled();
+    });
+
+    it('bounds an incident detail lookup by the next firing past its window', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const stored = [
+        { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' },
+        { ...anomaly({ id: 'again', timestamp: t + 90 * MIN }), anomalyType: 'spike' },
+      ];
+      storage.getAnomalyEvents.mockImplementation(async ({ startTime, endTime }: any) =>
+        stored.filter(
+          (e) => (!startTime || e.timestamp >= startTime) && (!endTime || e.timestamp <= endTime),
+        ),
+      );
+      const probe = jest.fn().mockReturnValue(null);
+      (service as any).incidentHistoryProbe = probe;
+      const [, listed] = await service.getIncidentTimelines('conn-1', t);
+
+      probe.mockClear();
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(detail?.incidentId).toBe(listed.incidentId);
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: t, until: t + 90 * MIN }),
+      );
+    });
+
+    const pagedStorage = (rows: any[]) => {
+      const newestFirst = [...rows].sort(
+        (a, b) => b.timestamp - a.timestamp || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
+      );
+      storage.getAnomalyEvents.mockImplementation(
+        async ({ startTime, endTime, limit = 100, order, after, nodeAddr, commands }: any) => {
+          const matching = newestFirst.filter(
+            (e) =>
+              (!startTime || e.timestamp >= startTime) &&
+              (!endTime || e.timestamp <= endTime) &&
+              (nodeAddr === undefined || (e.nodeAddr ?? '') === (nodeAddr ?? '')) &&
+              (commands === undefined ||
+                JSON.stringify(e.commands ?? []) === JSON.stringify(commands)),
+          );
+          const ordered = order === 'asc' ? matching.reverse() : matching;
+          const start = after ? ordered.findIndex((e) => e.id === after.id) + 1 : 0;
+          return ordered.slice(start, start + limit);
+        },
+      );
+    };
+
+    const lookups = () =>
+      storage.getAnomalyEvents.mock.calls
+        .map(([q]: any[]) => q)
+        .filter((q: any) => q.order === 'asc');
+
+    it('keeps an incident whole when it straddles the thousand-row boundary', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      pagedStorage(
+        Array.from({ length: 1500 }, (_, i) => ({
+          ...anomaly({ id: `event-${i}`, timestamp: t + i * 1000 }),
+          anomalyType: 'spike',
+        })),
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1', t);
+
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].startedAt).toBe(t);
+      await expect(service.getIncidentTimeline(incidents[0].incidentId, 'conn-1')).resolves.toEqual(
+        incidents[0],
+      );
+    });
+
+    it('counts a row once when equal timestamps repeat it across pages', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const row = (id: number) => ({
+        ...anomaly({ id: `event-${id}`, timestamp: t }),
+        anomalyType: 'spike',
+      });
+      storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
+        after ? [row(4999), row(5000)] : Array.from({ length: 5000 }, (_, i) => row(i)),
+      );
+
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+
+      expect(events.map((e: AnomalyEvent) => e.id)).toHaveLength(5001);
+      expect(new Set(events.map((e: AnomalyEvent) => e.id)).size).toBe(5001);
+    });
+
+    it('warns and stops paging at the scan cap', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation();
+      const pageStart = (after?: { id: string }) =>
+        after ? Number(after.id.split('-').pop()) + 1 : 0;
+      storage.getAnomalyEvents.mockImplementation(async ({ after }: any) =>
+        Array.from({ length: 5000 }, (_, i) => ({
+          ...anomaly({ id: `event-${pageStart(after) + i}`, timestamp: t }),
+          anomalyType: 'spike',
+        })),
+      );
+
+      const events = await (service as any).loadIncidentEvents('conn-1', t, undefined);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(10);
+      expect(events).toHaveLength(50_000);
+      expect(warn).toHaveBeenCalledWith('Incident history for conn-1 stopped at 50000 events');
+    });
+
+    it('binds the next firing to the earliest of many later events', async () => {
+      const t = Date.now() - 6 * 60 * MIN;
+      pagedStorage([
+        { ...anomaly({ id: 'first', timestamp: t }), anomalyType: 'spike' },
+        ...Array.from({ length: 1500 }, (_, i) => ({
+          ...anomaly({ id: `later-${i}`, timestamp: t + 90 * MIN + i * 1000 }),
+          anomalyType: 'spike',
+        })),
+      ]);
+      const probe = jest.fn().mockReturnValue(null);
+      (service as any).incidentHistoryProbe = probe;
+      const listed = await service.getIncidentTimelines('conn-1', t);
+      const first = listed.find((i) => i.startedAt === t)!;
+
+      probe.mockClear();
+      await service.getIncidentTimeline(first.incidentId, 'conn-1');
+
+      expect(probe).toHaveBeenCalledWith(
+        expect.objectContaining({ since: t, until: t + 90 * MIN }),
+      );
+    });
+
+    it('only lists incidents that reach into the requested window', async () => {
+      const from = Date.now() - 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'before', timestamp: from - 20 * MIN }),
+        anomaly({ id: 'straddle', timestamp: from - 90_000 }),
+        anomaly({ id: 'tail', timestamp: from + 1000 }),
+      );
+
+      const incidents = await service.getIncidentTimelines('conn-1', from);
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        ['straddle', 'tail'],
+      ]);
+    });
+
+    it('reads sequence group members from their stored ids', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      storage.getCorrelatedGroups.mockResolvedValue([
+        {
+          correlationId: 'grp-seq',
+          timestamp: t,
+          pattern: rule.pattern,
+          severity: 'warning',
+          diagnosis: rule.diagnosis,
+          recommendations: [],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+          connectionId: 'conn-1',
+          anomalyIds: ['c', 'm'],
+        },
+      ]);
+      storage.getCorrelatedGroupMembers.mockResolvedValue([
+        { ...anomaly({ id: 'c', timestamp: t }), anomalyType: 'spike' },
+        {
+          ...anomaly({ id: 'noise', timestamp: t + MIN, metricType: MetricType.CPU_UTILIZATION }),
+          anomalyType: 'spike',
+        },
+        {
+          ...anomaly({
+            id: 'm',
+            timestamp: t + 2 * MIN,
+            metricType: MetricType.MEMORY_USED,
+            connectionId: 'node-2',
+          }),
+          anomalyType: 'spike',
+        },
+      ]);
+
+      const [group] = await service.getRecentCorrelatedGroups(
+        t - MIN,
+        undefined,
+        undefined,
+        50,
+        'conn-1',
+      );
+
+      expect(group.anomalies.map((a) => a.id)).toEqual(['c', 'm']);
+      expect(storage.getCorrelatedGroupMembers).toHaveBeenCalledWith(
+        ['grp-seq'],
+        ['c', 'm'],
+        1000,
+        1000,
+      );
+    });
+
+    describe('during a fleet-wide event storm', () => {
+      const storm = (now: number) => {
+        for (let i = 0; i < 1100; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `storm-${i}`,
+              timestamp: now - 50 * MIN,
+              metricType: MetricType.CPU_UTILIZATION,
+              connectionId: 'storm',
+            }),
+          );
+        }
+      };
+
+      it('still matches a sequence whose steps left the shared event list', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storm(now);
+        expect((service as any).recentAnomalies.some((a: any) => a.id === 'early')).toBe(false);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', 'mem'] }),
+          'conn-1',
+        );
+      });
+
+      it('bounds the buffer per connection', async () => {
+        storm(Date.now());
+
+        expect((service as any).incidentEvents.get('storm')).toHaveLength(200);
+      });
+
+      it('keeps the first event of each signal when one signal repeats past the cap', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 52 * MIN, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept.slice(0, 2)).toEqual(['early', 'mem']);
+        expect(kept[2]).toBe('mem-52');
+        storm(now);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', 'mem'] }),
+          'conn-1',
+        );
+      });
+
+      it('matches a sequence through a repeat kept after the cap evicts earlier repeats', async () => {
+        (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder(
+          {},
+          undefined,
+          () => [rule],
+        );
+        const now = Date.now();
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'mem', timestamp: now - 57 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 52 * MIN, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        storm(now);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+          expect.objectContaining({ anomalyIds: ['early', expect.stringMatching(/^mem-/)] }),
+          'conn-1',
+        );
+      });
+
+      it('keeps an arriving repeat once the buffer holds only distinct signals', () => {
+        const now = Date.now();
+        for (let i = 0; i < 200; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: now - 50 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+        service.ingestExternalAnomaly(
+          anomaly({
+            id: 'repeat',
+            timestamp: now - 40 * MIN,
+            metricType: MetricType.COMMAND_P99,
+            commands: ['cmd-5'],
+          }),
+        );
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept[0]).toBe('p99-1');
+        expect(kept.at(-1)).toBe('repeat');
+      });
+
+      it('drops the oldest event before a repeat when no signal repeats in between', () => {
+        const now = Date.now();
+        const p99 = (id: string, offset: number, command: string) =>
+          service.ingestExternalAnomaly(
+            anomaly({
+              id,
+              timestamp: now - 50 * MIN + offset,
+              metricType: MetricType.COMMAND_P99,
+              commands: [command],
+            }),
+          );
+        for (let i = 0; i < 199; i += 1) p99(`p99-${i}`, i, `cmd-${i}`);
+        p99('repeat-0', 300, 'cmd-0');
+        p99('repeat-1', 301, 'cmd-1');
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept.slice(0, 2)).toEqual(['p99-1', 'p99-2']);
+        expect(kept).toContain('repeat-0');
+        expect(kept.at(-1)).toBe('repeat-1');
+      });
+
+      it('keeps one incident for a signal repeating longer than the gap past the cap', async () => {
+        const now = Date.now();
+        const start = now - 20 * MIN;
+        for (let i = 0; i < 400; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        storm(now);
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept[0]).toBe('mem-0');
+        expect(kept[1]).toBe('mem-201');
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents).toHaveLength(1);
+        expect(incidents[0].startedAt).toBe(start);
+      });
+
+      it('keeps the earlier dropped span when a later overflow opens another', async () => {
+        const now = Date.now();
+        const start = now - 40 * MIN;
+        for (let i = 0; i < 400; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        const later = start + 10 * MIN;
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: later + i * 1000,
+              metricType: MetricType.COMMAND_P99,
+              commands: ['GET'],
+            }),
+          );
+        }
+        storm(now);
+        expect((service as any).incidentEventsDroppedSpans.get('conn-1')).toHaveLength(2);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents.map((i: any) => i.startedAt)).toEqual([start, later]);
+      });
+
+      it('moves the drop watermark only when the oldest event is evicted', () => {
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'short', timestamp: now - 50 * MIN }));
+        for (let i = 0; i < 250; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: now - 30 * MIN + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept[0]).toBe('short');
+        expect((service as any).incidentEventsDroppedThrough.has('conn-1')).toBe(false);
+        expect((service as any).incidentEventsById.has('mem-1')).toBe(false);
+      });
+
+      it('passes the dropped spans to history builds', async () => {
+        const build = jest.spyOn((service as any).incidentTimelineBuilder, 'build');
+
+        await service.getIncidentTimelines('conn-1');
+
+        expect(build.mock.calls[0][6]).toBe((service as any).incidentEventsDroppedSpans);
+      });
+
+      it('splits incidents across a quiet gap that the dropped span does not cover', async () => {
+        const now = Date.now();
+        const start = now - 40 * MIN;
+        for (let i = 0; i < 300; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({ id: `mem-${i}`, timestamp: start + i * 1000, metricType: MetricType.MEMORY_USED }),
+          );
+        }
+        service.ingestExternalAnomaly(
+          anomaly({ id: 'late', timestamp: start + 299_000 + 10 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storm(now);
+
+        await (service as any).tickIncidentTimelines(now);
+
+        const incidents = (service as any).liveIncidents.filter((i: any) => i.scope === 'conn-1');
+        expect(incidents).toHaveLength(2);
+      });
+
+      it('drops events older than the live window before evicting live ones', () => {
+        const now = Date.now();
+        for (let i = 0; i < 200; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `old-${i}`,
+              timestamp: now - 3 * 60 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+        service.ingestExternalAnomaly(anomaly({ id: 'fresh', timestamp: now }));
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toEqual(['fresh']);
+        expect((service as any).incidentEventsDroppedThrough.get('conn-1')).toBe(now - 3 * 60 * MIN + 199);
+        expect((service as any).incidentEventsDroppedSpans.has('conn-1')).toBe(false);
+      });
+
+      it('keeps the buffer in timestamp order when events arrive out of order', () => {
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'late', timestamp: now - MIN }));
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 3 * MIN }));
+        service.ingestExternalAnomaly(anomaly({ id: 'middle', timestamp: now - 2 * MIN }));
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toEqual(['early', 'middle', 'late']);
+      });
+
+      it('drops the oldest event and records it when every signal is distinct', () => {
+        const now = Date.now();
+        for (let i = 0; i < 201; i += 1) {
+          service.ingestExternalAnomaly(
+            anomaly({
+              id: `p99-${i}`,
+              timestamp: now - 50 * MIN + i,
+              metricType: MetricType.COMMAND_P99,
+              commands: [`cmd-${i}`],
+            }),
+          );
+        }
+
+        const kept = (service as any).incidentEvents.get('conn-1').map((e: any) => e.id);
+        expect(kept).toHaveLength(200);
+        expect(kept[0]).toBe('p99-1');
+        expect((service as any).incidentEventsDroppedThrough.get('conn-1')).toBe(now - 50 * MIN);
+      });
+
+      it('resolves an event that only the incident buffer still holds', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(true);
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        storm(now);
+
+        await (service as any).resolveAnomalyOutcome('early');
+
+        expect((service as any).incidentEvents.get('conn-1')[0].resolved).toBe(true);
+      });
+
+      it('closes a buffered event that storage no longer holds', async () => {
+        storage.resolveAnomaly = jest.fn().mockResolvedValue(false);
+        const now = Date.now();
+        service.ingestExternalAnomaly(anomaly({ id: 'early', timestamp: now - 55 * MIN }));
+        storm(now);
+
+        const outcome = await (service as any).resolveAnomalyOutcome('early');
+
+        expect(outcome).toBe('gone');
+        expect((service as any).incidentEvents.get('conn-1')[0].resolved).toBe(true);
+      });
+    });
+
+    it('stores the ids of a sequence group with the group', async () => {
+      (service as any).incidentTimelineBuilder = new IncidentTimelineBuilder({}, undefined, () => [
+        rule,
+      ]);
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'early', timestamp: now - 55 * MIN }),
+        anomaly({ id: 'mem', timestamp: now - 53 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      await (service as any).tickIncidentTimelines(now);
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          anomalyIds: ['early', 'mem'],
+          anomalyCount: 2,
+          metricTypes: [MetricType.CONNECTIONS, MetricType.MEMORY_USED],
+        }),
+        'conn-1',
+      );
+    });
+
+    it('keeps an incident that crosses the end of the range', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'before', timestamp: now - 26 * MIN }),
+        anomaly({ id: 'after', timestamp: now - 24 * MIN, metricType: MetricType.MEMORY_USED }),
+      );
+
+      const incidents = await service.getIncidentTimelines(
+        'conn-1',
+        now - 60 * MIN,
+        now - 25 * MIN,
+      );
+
+      expect(incidents.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([
+        ['before', 'after'],
+      ]);
+    });
+
+    describe('one window for the list and the detail page', () => {
+      let now: number;
+      let end: number;
+
+      beforeEach(() => {
+        now = Date.now();
+        end = now - 24 * 60 * MIN;
+        jest.spyOn(Date, 'now').mockImplementation(() => now);
+        (service as any).incidentHistoryProbe = ({ until }: any) => until ?? null;
+      });
+
+      const expectDetailToMatchList = async (connectionId?: string, from?: number, to?: number) => {
+        const listed = await service.getIncidentTimelines(
+          connectionId,
+          from,
+          to,
+          Number.MAX_SAFE_INTEGER,
+        );
+        for (const incident of listed) {
+          expect(await service.getIncidentTimeline(incident.incidentId, connectionId)).toEqual(
+            incident,
+          );
+        }
+        return listed;
+      };
+      const seedEveryMinute = (prefix: string, count: number, first: number) => {
+        for (let i = 0; i < count; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `${prefix}-${i}`, timestamp: first + i * MIN }),
+          );
+        }
+      };
+      const storeBoundaries = (boundaries: any[]) =>
+        storage.getIncidentBoundaries.mockImplementation(
+          async ({ scopeIds, startTime, endTime }: any) =>
+            boundaries.filter(
+              (b) =>
+                (!scopeIds || scopeIds.includes(b.scopeId)) &&
+                b.startedAt >= startTime &&
+                (endTime === undefined || b.startedAt <= endTime),
+            ),
+        );
+      const eventReads = () =>
+        storage.getAnomalyEvents.mock.calls
+          .map(([q]: any[]) => q)
+          .filter((q: any) => q.order !== 'asc');
+
+      it('lists an incident whole when it runs past the range end on an adopted start', async () => {
+        seedEveryMinute('tail', 56, end - MIN);
+        storeBoundaries([{ scopeId: 'conn-1', startedAt: end + 24 * MIN, anomalyId: 'tail-25' }]);
+
+        const [incident] = await expectDetailToMatchList('conn-1', end - 60 * MIN, end);
+
+        expect(incident.entries).toHaveLength(56);
+      });
+
+      it('lists an incident whole when it starts well before the range on an adopted start', async () => {
+        const from = end - 60 * MIN;
+        seedEveryMinute('lead', 55, from - 50 * MIN);
+        storeBoundaries([{ scopeId: 'conn-1', startedAt: from - 25 * MIN, anomalyId: 'lead-25' }]);
+
+        const listed = await expectDetailToMatchList('conn-1', from, end);
+
+        const incident = listed.find((i) => i.entries.some((e) => e.anomalyId === 'lead-25'))!;
+        expect(incident.startedAt).toBe(from - 50 * MIN);
+      });
+
+      it('opens an incident of an earlier scope with the entries before its stored start', async () => {
+        const t = now - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'late', timestamp: t - 10_000, scopeId: 's-old' }),
+          anomaly({ id: 'start', timestamp: t, scopeId: 's-old' }),
+        );
+        storage.getIncidentBoundaries.mockImplementation(async ({ scopeIds }: any) =>
+          scopeIds?.includes('s-old') ? [{ scopeId: 's-old', startedAt: t, anomalyId: 'start' }] : [],
+        );
+
+        const [incident] = await expectDetailToMatchList('conn-1', t - MIN);
+
+        expect(incident.entries.map((e) => e.anomalyId)).toEqual(['late', 'start']);
+      });
+
+      it('loads a past range in one read, two incident spans either side', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(eventReads()).toEqual([
+          expect.objectContaining({ startTime: end - 120 * MIN, endTime: end + 60 * MIN }),
+        ]);
+      });
+
+      it('treats a range that ends less than two spans ago as open-ended', async () => {
+        (service as any).recentAnomalies.push(anomaly({ id: 'open', timestamp: now - 50 * MIN }));
+
+        await service.getIncidentTimelines('conn-1', now - 120 * MIN, now - 45 * MIN);
+
+        expect(eventReads().map((q: any) => q.endTime)).toEqual([undefined]);
+        expect(lookups()).toEqual([]);
+      });
+
+      it('opens an incident with no stored start from its anchor', async () => {
+        const t = now - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'older', timestamp: t - 10 * MIN }),
+          anomaly({ id: 'solo', timestamp: t }),
+        );
+
+        const listed = await expectDetailToMatchList('conn-1', t - 20 * MIN);
+
+        expect(listed.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['solo'], ['older']]);
+      });
+
+      it('looks up the next firing of a signal that last fired before the range start', async () => {
+        const from = end - 60 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'mem', timestamp: from - 90_000, metricType: MetricType.MEMORY_USED }),
+          anomaly({ id: 'conn', timestamp: from + 10_000 }),
+        );
+        const again = {
+          ...anomaly({
+            id: 'mem-again',
+            timestamp: end + 5 * 60 * MIN,
+            metricType: MetricType.MEMORY_USED,
+          }),
+          anomalyType: 'spike',
+        };
+        storage.getAnomalyEvents.mockImplementation(async (q: any) =>
+          q.order === 'asc' && q.metricType === MetricType.MEMORY_USED ? [again] : [],
+        );
+
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        const listed = await service.getIncidentTimelines('conn-1', from, end);
+
+        const bounds = recovery.mock.calls
+          .filter(([event]: any[]) => event.id === 'mem')
+          .map((call: any[]) => call[2]);
+        recovery.mockRestore();
+        expect(listed).toHaveLength(1);
+        expect(bounds).toContain(again.timestamp);
+        await expectDetailToMatchList('conn-1', from, end);
+      });
+
+      it('does not look up a signal that fires again inside the window', async () => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: end - 10 * MIN }),
+          anomaly({ id: 'again', timestamp: end + 20 * MIN }),
+        );
+
+        const listed = await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(listed.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['a']]);
+        expect(lookups()).toEqual([]);
+      });
+
+      it('only looks up signals of the incidents it returns', async () => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'c1', timestamp: end - 50 * MIN, connectionId: 'conn-1' }),
+          anomaly({ id: 'c2', timestamp: end - 30 * MIN, connectionId: 'conn-2' }),
+          anomaly({ id: 'c3', timestamp: end - 10 * MIN, connectionId: 'conn-3' }),
+        );
+
+        const listed = await service.getIncidentTimelines(undefined, end - 60 * MIN, end, 1);
+
+        expect(listed.map((i) => i.entries.map((e) => e.anomalyId))).toEqual([['c3']]);
+        expect(lookups().map((q: any) => q.connectionId)).toEqual(['conn-3']);
+      });
+
+      it('treats a failed lookup as no later firing in both views', async () => {
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: end - 10 * MIN }));
+        storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+          if (q.order === 'asc') throw new Error('down');
+          return [];
+        });
+
+        const [incident] = await expectDetailToMatchList('conn-1', end - 60 * MIN, end);
+        const before = lookups().length;
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(incident.entries.map((e) => e.anomalyId)).toEqual(['a']);
+        expect(lookups().length).toBe(before + 1);
+      });
+    });
+
+    it('opens an incident split at max span when another scope has an earlier boundary', async () => {
+      const now = Date.now();
+      const t0 = now - 4 * 60 * MIN;
+      for (let i = 0; i <= 25; i++) {
+        (service as any).recentAnomalies.push(
+          anomaly({
+            id: `s2-${i}`,
+            timestamp: t0 + i * 2 * MIN,
+            connectionId: 'conn-2',
+            scopeId: 's2',
+          }),
+        );
+      }
+      const [later] = (await service.getIncidentTimelines(undefined, t0 - MIN)).filter(
+        (t) => t.scope === 's2',
+      );
+      expect(later.startedAt).toBeGreaterThan(t0);
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 's1-a', timestamp: later.startedAt - 20 * MIN, scopeId: 's1' }),
+      );
+      storage.getIncidentBoundaries.mockResolvedValue([
+        { scopeId: 's1', startedAt: later.startedAt - 20 * MIN, anomalyId: 's1-a' },
+      ]);
+
+      const incident = await service.getIncidentTimeline(later.incidentId);
+
+      expect(incident?.incidentId).toBe(later.incidentId);
+    });
+
+    it('skips later firings when opening an incident whose window has not ended', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: now - 2 * MIN }));
+      const [listed] = await service.getIncidentTimelines('conn-1');
+
+      const incident = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(incident?.incidentId).toBe(listed.incidentId);
+      expect(lookups()).toEqual([]);
+    });
+
+    it('skips later firings of resolved signals when opening a past incident', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'a', timestamp: t, resolved: true, resolvedAt: t + MIN }),
+      );
+      const [listed] = await service.getIncidentTimelines('conn-1', t - MIN);
+
+      await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(lookups()).toEqual([]);
+    });
+
+    it('keeps the previous boundary of an anchored scope when opening an incident', async () => {
+      const t = Date.now() - 3 * 60 * MIN;
+      for (let i = 0; i <= 40; i++) {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: `e-${i}`, timestamp: t - 40 * MIN + i * MIN }),
+        );
+      }
+      storage.getIncidentBoundaries.mockImplementation(async ({ startTime }: any) =>
+        [
+          { scopeId: 'conn-1', startedAt: t - 40 * MIN, anomalyId: 'e-0' },
+          { scopeId: 'conn-1', startedAt: t, anomalyId: 'e-40' },
+        ].filter((b, i, all) => b.startedAt >= startTime || all[i + 1]?.startedAt >= startTime),
+      );
+      const listed = (await service.getIncidentTimelines('conn-1', t - 50 * MIN)).find((i) =>
+        i.entries.some((e) => e.anomalyId === 'e-40'),
+      )!;
+
+      const detail = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(detail?.startedAt).toBe(listed.startedAt);
+      expect(detail?.entries.map((e) => e.anomalyId)).toEqual(
+        listed.entries.map((e) => e.anomalyId),
+      );
+    });
+
+    it('looks up the next firing of open signals after a past range load ends', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      (service as any).recentAnomalies.push(anomaly({ id: 'old', timestamp: end - 10 * MIN }));
+
+      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+      expect(lookups()).toEqual([
+        expect.objectContaining({
+          connectionId: 'conn-1',
+          metricType: MetricType.CONNECTIONS,
+          startTime: end + 60 * MIN + 1,
+        }),
+      ]);
+    });
+
+    it('looks up later firings per node of a cluster connection', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({ id: 'node-a', timestamp: end - 20 * MIN, nodeAddr: '10.0.0.1:6379' }),
+        anomaly({
+          id: 'node-b',
+          timestamp: end - 10 * MIN,
+          nodeAddr: '10.0.0.2:6379',
+          resolved: true,
+          resolvedAt: end - 5 * MIN,
+        }),
+      );
+
+      await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+      expect(lookups().map((q: any) => q.nodeAddr)).toEqual(['10.0.0.1:6379']);
+    });
+
+    it('returns the next firing of the same node and caches it', async () => {
+      const after = Date.now() - 24 * 60 * MIN;
+      const signal = anomaly({ id: 'a', timestamp: after - MIN, nodeAddr: '10.0.0.1:6379' });
+      const other = { ...anomaly({ id: 'b', timestamp: after + MIN, nodeAddr: '10.0.0.2:6379' }), anomalyType: 'spike' };
+      const same = { ...anomaly({ id: 'c', timestamp: after + 2 * MIN, nodeAddr: '10.0.0.1:6379' }), anomalyType: 'spike' };
+      pagedStorage([other, same]);
+
+      const first = await (service as any).nextFiring(signal, after);
+      storage.getAnomalyEvents.mockClear();
+      const again = await (service as any).nextFiring(signal, after);
+
+      expect(first?.id).toBe('c');
+      expect(again?.id).toBe('c');
+      expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
+    });
+
+    describe('next-firing lookup', () => {
+      const after = Date.now() - 24 * 60 * MIN;
+      const nextFiring = (signal: AnomalyEvent): Promise<AnomalyEvent | null> =>
+        (service as any).nextFiring(signal, after);
+      const queries = () => storage.getAnomalyEvents.mock.calls.map(([q]: any[]) => q);
+      const row = (id: string, timestamp: number, nodeAddr?: string) => ({
+        ...anomaly({ id, timestamp, nodeAddr }),
+        anomalyType: 'spike',
+      });
+      const freezeClock = () => {
+        const clock = { now: Date.now() };
+        jest.spyOn(Date, 'now').mockImplementation(() => clock.now);
+        return clock;
+      };
+
+      it('reads the next firing as one row of the same signal', async () => {
+        await nextFiring(anomaly({ id: 'a', timestamp: after - MIN, nodeAddr: '10.0.0.1:6379' }));
+
+        expect(queries()).toEqual([
+          {
+            startTime: after + 1,
+            metricType: MetricType.CONNECTIONS,
+            connectionId: 'conn-1',
+            nodeAddr: '10.0.0.1:6379',
+            order: 'asc',
+            limit: 1,
+          },
+        ]);
+      });
+
+      it.each([undefined, ''])(
+        'asks for events without a node address when the signal has %p',
+        async (nodeAddr) => {
+          await nextFiring(anomaly({ id: 'a', timestamp: after - MIN, nodeAddr }));
+
+          const [query] = queries();
+          expect(query.nodeAddr).toBeNull();
+          expect(query).not.toHaveProperty('commands');
+        },
+      );
+
+      it('filters the next firing of a point-in-time signal by its commands', async () => {
+        const p99 = (commands?: string[]) =>
+          anomaly({
+            id: 'a',
+            timestamp: after - MIN,
+            metricType: MetricType.COMMAND_P99,
+            commands,
+          });
+
+        await nextFiring(p99(['GET', 'SET']));
+        await nextFiring(p99());
+
+        expect(queries().map((q: any) => q.commands)).toEqual([['GET', 'SET'], []]);
+      });
+
+      it('finds the next firing behind many events of another node', async () => {
+        pagedStorage([
+          ...Array.from({ length: 600 }, (_, i) =>
+            row(`other-${String(i).padStart(3, '0')}`, after + 1 + i, '10.0.0.2:6379'),
+          ),
+          row('same', after + 10 * MIN, '10.0.0.1:6379'),
+        ]);
+
+        const found = await nextFiring(
+          anomaly({ id: 'a', timestamp: after - MIN, nodeAddr: '10.0.0.1:6379' }),
+        );
+
+        expect(found?.id).toBe('same');
+      });
+
+      it('looks a found firing up again after five minutes', async () => {
+        const clock = freezeClock();
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        storage.getAnomalyEvents
+          .mockResolvedValueOnce([row('c', after + MIN)])
+          .mockResolvedValueOnce([row('d', after + MIN)]);
+
+        const first = await nextFiring(signal);
+        clock.now += 5 * MIN + 1;
+        const second = await nextFiring(signal);
+
+        expect([first?.id, second?.id]).toEqual(['c', 'd']);
+      });
+
+      it('serves a miss from the cache for five minutes', async () => {
+        const clock = freezeClock();
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+
+        await nextFiring(signal);
+        clock.now += 2 * MIN;
+        await nextFiring(signal);
+        const withinTtl = storage.getAnomalyEvents.mock.calls.length;
+        clock.now += 3 * MIN + 1;
+        await nextFiring(signal);
+
+        expect(withinTtl).toBe(1);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      });
+
+      it('forgets cached firings when resolved anomalies are cleared', async () => {
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+
+        await nextFiring(signal);
+        service.clearResolved();
+        await nextFiring(signal);
+
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('skips resolved and unscoped signals when looking up later firings', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      (service as any).recentAnomalies.push(
+        anomaly({
+          id: 'done',
+          timestamp: end - 10 * MIN,
+          resolved: true,
+          resolvedAt: end - 5 * MIN,
+        }),
+        anomaly({ id: 'loose', timestamp: end - 8 * MIN, connectionId: undefined }),
+      );
+
+      const incidents = await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+      expect(incidents.flatMap((i) => i.entries.map((e) => e.anomalyId)).sort()).toEqual([
+        'done',
+        'loose',
+      ]);
+      expect(lookups()).toEqual([]);
+    });
+
+    it('looks up at most five later firings at a time', async () => {
+      const now = Date.now();
+      const end = now - 24 * 60 * MIN;
+      for (let i = 0; i < 20; i++) {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+        );
+      }
+      let inFlight = 0;
+      let peak = 0;
+      storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+        if (q.order !== 'asc') return [];
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight--;
+        return [];
+      });
+
+      await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+      expect(lookups()).toHaveLength(20);
+      expect(peak).toBe(5);
+    });
+
+    describe('when a later-firing lookup fails', () => {
+      const end = Date.now() - 24 * 60 * MIN;
+      const failingLookup = (q: any) =>
+        q.order === 'asc' && q.metricType === MetricType.CONNECTIONS;
+      let warn: jest.SpyInstance;
+
+      beforeEach(() => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'conn', timestamp: end - 10 * MIN }),
+          anomaly({ id: 'mem', timestamp: end - 9 * MIN, metricType: MetricType.MEMORY_USED }),
+        );
+        storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+          if (failingLookup(q)) throw new Error('pool exhausted');
+          return [];
+        });
+        warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+      });
+
+      it('still lists the incidents, treating the failed lookup as a miss', async () => {
+        const incidents = await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const entries = incidents.flatMap((i) => i.entries);
+        const state = (id: string) => entries.find((e) => e.anomalyId === id)?.recoveryState;
+        expect(entries.map((e) => e.anomalyId)).toEqual(['conn', 'mem']);
+        expect(state('conn')).toBe('unknown');
+        expect(state('conn')).toBe(state('mem'));
+      });
+
+      it('warns once per load with the number of failed lookups', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('1 signal');
+        expect(warn.mock.calls[0][0]).toContain('pool exhausted');
+      });
+
+      it('retries the failed lookup on the next load but not the cached miss', async () => {
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+        storage.getAnomalyEvents.mockClear();
+
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const lookups = storage.getAnomalyEvents.mock.calls
+          .map(([q]: any[]) => q)
+          .filter((q: any) => q.order === 'asc');
+        expect(lookups.map((q: any) => q.metricType)).toEqual([MetricType.CONNECTIONS]);
+      });
+
+      it('still bounds recovery of the failed signal by its live later firing', async () => {
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'conn-later', timestamp: end + 40 * MIN }),
+        );
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        const call = recovery.mock.calls.find(([event]: any[]) => event.id === 'conn');
+        expect(call?.[2]).toBe(end + 40 * MIN);
+      });
+
+      it('keeps incidents read only from storage', async () => {
+        const stored = { ...anomaly({ id: 'stored', timestamp: end - 8 * MIN }), anomalyType: 'spike' };
+        storage.getAnomalyEvents.mockImplementation(async (q: any) => {
+          if (failingLookup(q)) throw new Error('pool exhausted');
+          if (q.order === 'asc') return [];
+          return stored.timestamp >= q.startTime && stored.timestamp <= q.endTime ? [stored] : [];
+        });
+
+        const incidents = await service.getIncidentTimelines('conn-1', end - 60 * MIN, end);
+
+        expect(incidents.flatMap((i) => i.entries.map((e) => e.anomalyId))).toContain('stored');
+      });
+    });
+
+    describe('when later-firing lookups hang', () => {
+      afterEach(() => jest.useRealTimers());
+
+      it('stops looking up once the time budget is spent', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        for (let i = 0; i < 20; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+        storage.getAnomalyEvents.mockImplementation((q: any) =>
+          q.order === 'asc' ? new Promise(() => undefined) : Promise.resolve([]),
+        );
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const debug = jest
+          .spyOn((service as any).logger, 'debug')
+          .mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        const incidents = await listed;
+
+        expect(incidents.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(lookups()).toHaveLength(5);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('5 signals');
+        expect(warn.mock.calls[0][0]).toContain('lookup budget exhausted');
+        expect(debug.mock.calls.map(([m]) => m)).toContainEqual(
+          expect.stringContaining('Skipped 15 next-firing lookups'),
+        );
+      });
+
+      const openSignals = (end: number) => {
+        for (let i = 0; i < 20; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+      };
+
+      it('gives later batches only what is left of the budget', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        let calls = 0;
+        storage.getAnomalyEvents.mockImplementation((q: any) =>
+          q.order === 'asc'
+            ? new Promise((resolve) => {
+                if (++calls <= 5) setTimeout(() => resolve([]), 6_000);
+              })
+            : Promise.resolve([]),
+        );
+        const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        let settled = false;
+
+        const listed = service
+          .getIncidentTimelines(undefined, end - 60 * MIN, end)
+          .finally(() => (settled = true));
+        await jest.advanceTimersByTimeAsync(10_000);
+
+        expect(settled).toBe(true);
+        await listed;
+        expect(lookups()).toHaveLength(10);
+        expect(warn.mock.calls[0][0]).toContain('5 signals');
+      });
+
+      it('skips a batch when almost none of the budget is left', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        storage.getAnomalyEvents.mockImplementation((q: any) =>
+          q.order === 'asc'
+            ? new Promise((resolve) => setTimeout(() => resolve([]), 9_900))
+            : Promise.resolve([]),
+        );
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+
+        expect(lookups()).toHaveLength(5);
+      });
+
+      it('looks up the signals skipped by the previous load first', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const next = jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        const load = async () => {
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          await listed;
+        };
+
+        await load();
+        const first = next.mock.calls.map(([s]: any[]) => s.id);
+        (service as any).nextFiringInFlight.clear();
+        next.mockClear();
+        await load();
+        const second = next.mock.calls.map(([s]: any[]) => s.id);
+
+        expect(second).toHaveLength(5);
+        expect(second.some((id: string) => first.includes(id))).toBe(false);
+      });
+
+      it('serves the longest-skipped signals first across loads', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const next = jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        const load = async () => {
+          next.mockClear();
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          await listed;
+          return next.mock.calls.map(([s]: any[]) => s.id);
+        };
+
+        await load();
+        (service as any).nextFiringInFlight.clear();
+        await load();
+        (service as any).nextFiringInFlight.clear();
+        const third = await load();
+
+        expect(third).toEqual(['c-10', 'c-11', 'c-12', 'c-13', 'c-14']);
+      });
+
+      it('keeps one query per signal running until it settles', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        const firing = { ...anomaly({ id: 'a-again', timestamp: after + MIN }), anomalyType: 'spike' };
+        let release!: (rows: any[]) => void;
+        storage.getAnomalyEvents.mockImplementationOnce(
+          () => new Promise((resolve) => (release = resolve)),
+        );
+
+        const stale = (service as any).nextFiring(signal, after);
+        await jest.advanceTimersByTimeAsync(30_000);
+        const again = (service as any).nextFiring(signal, after);
+        release([firing]);
+
+        expect(again).toBe(stale);
+        await expect(stale).resolves.toMatchObject({ id: 'a-again' });
+        await expect((service as any).nextFiring(signal, after)).resolves.toMatchObject({
+          id: 'a-again',
+        });
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      it('looks up every signal of a load when storage answers', async () => {
+        const end = Date.now() - 24 * 60 * MIN;
+        const loadedThrough = end + 60 * MIN;
+        for (let i = 0; i < 8; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `c-${i}`, timestamp: end - 10 * MIN, connectionId: `conn-${i}` }),
+          );
+        }
+        storage.getAnomalyEvents.mockImplementation(async (q: any) =>
+          q.order === 'asc'
+            ? [
+                {
+                  ...anomaly({
+                    id: `${q.connectionId}-again`,
+                    timestamp: loadedThrough + 5 * MIN,
+                    connectionId: q.connectionId,
+                  }),
+                  anomalyType: 'spike',
+                },
+              ]
+            : [],
+        );
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        await service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+
+        const bounded = new Set(
+          recovery.mock.calls
+            .filter((call: any[]) => call[2] === loadedThrough + 5 * MIN)
+            .map(([event]: any[]) => event.id),
+        );
+        expect(bounded.size).toBe(8);
+        expect((service as any).skippedNextFirings.size).toBe(0);
+      });
+
+      const hangNextFiringReads = () => {
+        const releases: ((rows: any[]) => void)[] = [];
+        storage.getAnomalyEvents.mockImplementation((q: any) =>
+          q.order === 'asc'
+            ? new Promise((resolve) => releases.push(resolve))
+            : Promise.resolve([]),
+        );
+        return releases;
+      };
+
+      it('caps next-firing reads still running across loads', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        const releases = hangNextFiringReads();
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+        const load = async () => {
+          const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+          await jest.advanceTimersByTimeAsync(10_000);
+          return listed;
+        };
+
+        const first = await load();
+        const second = await load();
+
+        expect(first.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(second.flatMap((i) => i.entries)).toHaveLength(20);
+        expect(releases).toHaveLength(5);
+      });
+
+      it('caches a lookup that settles after its load gave up', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        openSignals(end);
+        const releases = hangNextFiringReads();
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+        releases.forEach((release) => release([]));
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect((service as any).nextFiringInFlight.size).toBe(0);
+        expect((service as any).nextFiringCache.size).toBe(5);
+      });
+
+      it('drops the oldest skip when the skip list is full', () => {
+        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+        for (let i = 0; i < 2_000; i++) (service as any).markLookupSkipped(`k-${i}`, true);
+
+        (service as any).markLookupSkipped('newest', true);
+
+        expect(skipped.has('k-0')).toBe(false);
+        expect(skipped.has('k-1')).toBe(true);
+        expect(skipped.has('newest')).toBe(true);
+        expect(skipped.size).toBe(2_000);
+      });
+
+      it('keeps one skip per signal across time ranges', async () => {
+        const signals = Array.from({ length: 1_200 }, (_, i) =>
+          anomaly({ id: `s-${i}`, connectionId: `conn-${i}` }),
+        );
+        jest.spyOn(service as any, 'canStartNextFiring').mockReturnValue(false);
+        jest.spyOn((service as any).logger, 'debug').mockImplementation(() => undefined);
+        const now = Date.now();
+
+        await (service as any).nextFiringsAfter(signals, now - 120 * MIN);
+        await (service as any).nextFiringsAfter(signals, now - 60 * MIN);
+
+        const skipped: Map<string, number> = (service as any).skippedNextFirings;
+        expect(skipped.size).toBe(1_200);
+        expect(skipped.has(signalKey(signals[1_199]))).toBe(true);
+      });
+
+      it('shares a lookup that is still in flight', async () => {
+        const after = Date.now() - 24 * 60 * MIN;
+        const signal = anomaly({ id: 'a', timestamp: after - MIN });
+        storage.getAnomalyEvents.mockImplementation(() => new Promise(() => undefined));
+
+        const first = (service as any).nextFiring(signal, after);
+        const second = (service as any).nextFiring(signal, after);
+
+        expect(second).toBe(first);
+        expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      });
+
+      it('still uses a cached later firing once the budget is spent', async () => {
+        jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+        const end = Date.now() - 24 * 60 * MIN;
+        const loadedThrough = end + 60 * MIN;
+        openSignals(end);
+        const firing = {
+          ...anomaly({ id: 'c-19-again', timestamp: loadedThrough + 5 * MIN, connectionId: 'conn-19' }),
+          anomalyType: 'spike',
+        };
+        storage.getAnomalyEvents.mockImplementation(async (q: any) =>
+          q.order === 'asc' && q.connectionId === 'conn-19' ? [firing] : [],
+        );
+        const cachedSignal = (service as any).recentAnomalies.find((e: any) => e.id === 'c-19');
+        await (service as any).nextFiring(cachedSignal, loadedThrough);
+        jest
+          .spyOn(service as any, 'lookUpNextFiring')
+          .mockImplementation(() => new Promise(() => undefined));
+        jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+        const recovery = jest.spyOn(IncidentTimelineBuilder.prototype as any, 'signalRecovery');
+
+        const listed = service.getIncidentTimelines(undefined, end - 60 * MIN, end);
+        await jest.advanceTimersByTimeAsync(10_000);
+        await listed;
+
+        const bounds = recovery.mock.calls
+          .filter(([event]: any[]) => event.id === 'c-19')
+          .map((call: any[]) => call[2]);
+        expect(bounds).toContain(firing.timestamp);
+        expect((service as any).skippedNextFirings.size).toBe(14);
+      });
+    });
+
+    it('reads incident boundaries once when opening an incident', async () => {
+      const now = Date.now();
+      (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: now - 2 * MIN }));
+      const [listed] = await service.getIncidentTimelines('conn-1');
+      storage.getIncidentBoundaries.mockClear();
+
+      const incident = await service.getIncidentTimeline(listed.incidentId, 'conn-1');
+
+      expect(incident?.incidentId).toBe(listed.incidentId);
+      expect(storage.getIncidentBoundaries).toHaveBeenCalledTimes(1);
+    });
+
+    it('includes memory-only events older than the cache TTL in history', async () => {
+      const old = anomaly({ id: 'mem-only', timestamp: Date.now() - 2 * 60 * MIN });
+      (service as any).recentAnomalies.push(old);
+
+      const incidents = await service.getIncidentTimelines('conn-1');
+
+      expect(incidents.flatMap((i) => i.entries.map((e) => e.anomalyId))).toContain('mem-only');
+    });
+
+    it('stamps resolvedAt when an anomaly is resolved', async () => {
+      const event: AnomalyEvent = anomaly({ id: 'mem-only' });
+      (service as any).recentAnomalies.push(event);
+
+      await service.resolveAnomaly('mem-only');
+
+      expect(event.resolvedAt).toEqual(expect.any(Number));
+    });
+
+    describe('findIncidentIdByEvent', () => {
+      it('returns the id the incident list shows for a member event', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: t }),
+          anomaly({ id: 'b', timestamp: t + MIN }),
+        );
+        const [listed] = await service.getIncidentTimelines('conn-1', t - MIN);
+
+        await expect(service.findIncidentIdByEvent('b', t + MIN, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+      });
+
+      it('returns null for an event that is not in any incident at that time', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+
+        await expect(service.findIncidentIdByEvent('missing', t, 'conn-1')).resolves.toBeNull();
+      });
+
+      it('returns null under another connection', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+
+        await expect(service.findIncidentIdByEvent('a', t, 'conn-other')).resolves.toBeNull();
+      });
+
+      it('returns null without loading when the time is past the lookback', async () => {
+        storage.getAnomalyEvents.mockClear();
+        const at = Date.now() - 31 * 24 * 60 * MIN;
+
+        await expect(service.findIncidentIdByEvent('a', at, 'conn-1')).resolves.toBeNull();
+        expect(storage.getAnomalyEvents).not.toHaveBeenCalled();
+      });
+
+      it('does not wait on later firings of the open signals', async () => {
+        const t = Date.now() - 3 * 60 * MIN;
+        (service as any).recentAnomalies.push(anomaly({ id: 'a', timestamp: t }));
+        const [listed] = await service.getIncidentTimelines('conn-1', t - MIN, t + MIN);
+        storage.getAnomalyEvents.mockClear();
+
+        await expect(service.findIncidentIdByEvent('a', t, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+        expect(storage.getAnomalyEvents).not.toHaveBeenCalledWith(
+          expect.objectContaining({ order: 'asc', limit: 1 }),
+        );
+      });
+
+      it('follows the incident to its new id after a regroup', async () => {
+        const t = Date.now() - 10 * MIN;
+        (service as any).recentAnomalies.push(
+          anomaly({ id: 'a', timestamp: t }),
+          anomaly({ id: 'b', timestamp: t + MIN }),
+        );
+        const before = await service.findIncidentIdByEvent('b', t + MIN, 'conn-1');
+        (service as any).recentAnomalies.push(anomaly({ id: 'z', timestamp: t - MIN }));
+
+        const after = await service.findIncidentIdByEvent('b', t + MIN, 'conn-1');
+
+        const [listed] = await service.getIncidentTimelines('conn-1', t - 2 * MIN);
+        expect(before).not.toBeNull();
+        expect(after).not.toBe(before);
+        expect(after).toBe(listed.incidentId);
+      });
+
+      it('resolves an event whose incident adopted an earlier stored start', async () => {
+        const t = Date.now() - 3 * 60 * MIN;
+        for (let i = 0; i <= 40; i++) {
+          (service as any).recentAnomalies.push(
+            anomaly({ id: `e-${i}`, timestamp: t - 40 * MIN + i * MIN }),
+          );
+        }
+        storage.getIncidentBoundaries.mockImplementation(async ({ startTime }: any) =>
+          [
+            { scopeId: 'conn-1', startedAt: t - 40 * MIN, anomalyId: 'e-0' },
+            { scopeId: 'conn-1', startedAt: t, anomalyId: 'e-40' },
+          ].filter((b, i, all) => b.startedAt >= startTime || all[i + 1]?.startedAt >= startTime),
+        );
+        const listed = (await service.getIncidentTimelines('conn-1', t - 50 * MIN)).find((i) =>
+          i.entries.some((e) => e.anomalyId === 'e-40'),
+        )!;
+
+        await expect(service.findIncidentIdByEvent('e-40', t, 'conn-1')).resolves.toBe(
+          listed.incidentId,
+        );
+      });
+    });
+  });
+
+  describe('recovery amplification', () => {
+    const REPLICA = 'ip=10.0.0.2,port=6379,state=online,offset=1000,lag=0';
+    let clock: number;
+    let offset: number;
+
+    async function pollPrimary(stats: {
+      bytes: number;
+      replica?: boolean;
+      replicaState?: string;
+      syncFull?: number;
+      backlogSize?: number;
+      memory?: Record<string, string>;
+      persistence?: Record<string, string>;
+    }): Promise<void> {
+      clock += 1000;
+      offset += stats.bytes;
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { redis_version: '8.0.0' },
+        replication: {
+          role: 'master',
+          master_replid: 'r',
+          master_repl_offset: String(offset),
+          repl_backlog_size: String(stats.backlogSize ?? 1_000_000),
+          connected_slaves: stats.replica === false ? '0' : '1',
+          ...(stats.replica === false
+            ? {}
+            : { slave0: REPLICA.replace('online', stats.replicaState ?? 'online') }),
+        },
+        clients: { connected_clients: '10', blocked_clients: '0' },
+        memory: stats.memory ?? { used_memory: '1000000' },
+        persistence: stats.persistence ?? {},
+        stats: { sync_full: String(stats.syncFull ?? 0), sync_partial_ok: '0', sync_partial_err: '0' },
+      });
+      await (service as any).pollConnection(mockCtx);
+    }
+
+    it('adopts open rows before the first detector runs', async () => {
+      const adopt = jest.spyOn(service as any, 'adoptOpenEvents');
+      const churn = jest.spyOn(service as any, 'detectConnectionChurn');
+
+      await pollPrimary({ bytes: 1000 });
+
+      expect(adopt.mock.invocationCallOrder[0]).toBeLessThan(churn.mock.invocationCallOrder[0]);
+    });
+
+    it('retries a backlog close from the drain and stops tracking the event', async () => {
+      (service as any).backlogCoverageEventIds.set('conn-1', '11111111-1111-4111-8111-111111111111');
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await (service as any).settleBacklogCoverageEvent('conn-1');
+      await (service as any).drainPersistenceOutbox();
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+      expect((service as any).persistenceOutbox.size).toBe(0);
+      expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+    });
+
+    it('keeps tracking a backlog event whose close failed until a later close lands', async () => {
+      const id = '11111111-1111-4111-8111-111111111111';
+      (service as any).backlogCoverageEventIds.set('conn-1', id);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      await (service as any).settleBacklogCoverageEvent('conn-1');
+
+      expect((service as any).staleBacklogEventIds.get('conn-1')).toEqual([id]);
+
+      await (service as any).settleEvents((service as any).staleBacklogEventIds, 'conn-1');
+
+      expect((service as any).staleBacklogEventIds.has('conn-1')).toBe(false);
+    });
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+
+    beforeEach(() => {
+      clock = Date.now();
+      offset = 0;
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('warns when the backlog covers under a minute of writes and resolves when it recovers', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0]).toMatchObject({
+        severity: AnomalySeverity.WARNING,
+        resolved: false,
+      });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].message).toContain('repl-backlog-size');
+
+      for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].resolved).toBe(true);
+    });
+
+    it('sizes repl-backlog-size to cover 75s of writes at the measured rate', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+
+      // 30,000 B/s x 60s x 1.25 = 2.15 MB, one decimal because it is under 10
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 1, target: 2.2, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps a sub-megabyte backlog from displaying the same current and target', async () => {
+      const mb = 1024 * 1024;
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: (0.75 * mb) / 75,
+          bytesPerSecEwma: (0.75 * mb) / 75,
+          replBacklogSize: 0.6 * mb,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)[0].values).toEqual([
+        { setting: 'repl-backlog-size', current: 0.6, target: 0.8, unit: 'MB' },
+      ]);
+    });
+
+    it('keeps the fixed text when the backlog size is unknown', async () => {
+      const sample = {
+        timestamp: clock,
+        role: 'primary',
+        replid: 'r',
+        masterReplOffset: 0,
+        bytesPerSec: 30_000,
+        bytesPerSecEwma: 30_000,
+        replBacklogSize: null,
+        replicas: [],
+      };
+      await (service as any).emitBacklogCoverageRisk(mockCtx, sample, 30, 'warning', 'none');
+
+      const [event] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(event.message).toContain('Raise repl-backlog-size or reduce the write rate.');
+      expect(event.values).toBeUndefined();
+    });
+
+    it('raises the risk again when the outbox drops its unsaved event', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [first] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+
+      const polledAt = clock;
+      clock += OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      clock = polledAt;
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await pollPrimary({ bytes: 30_000 });
+
+      const raised = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+      expect((service as any).backlogCoverageEventIds.get('conn-1')).not.toBe(first.id);
+    });
+
+    it('stays quiet when an older risk is dropped after a newer one was saved', async () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+
+      (service as any).persistenceOutbox.due(clock + OUTBOX_MAX_AGE_MS + 1);
+      await pollPrimary({ bytes: 30_000 });
+
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+    });
+
+    it('emits one escalation when a replica returns through a full resync', async () => {
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1 });
+      await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+      const [escalation, ...rest] = events(MetricType.RESYNC_ESCALATION);
+      expect(rest).toEqual([]);
+      expect(escalation.replicaAddr).toBe('10.0.0.2:6379');
+      expect(escalation.message).toContain('10.0.0.2:6379');
+      expect(escalation.message).toContain('sync_full +1');
+    });
+
+    it('turns a disconnect, a full resync and its fork into one incident', async () => {
+      const GB = 1024 ** 3;
+      const forking = {
+        bytes: 2000,
+        syncFull: 1,
+        replicaState: 'send_bulk',
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1, replicaState: 'wait_bgsave' });
+      await pollPrimary(forking);
+      await pollPrimary(forking);
+      await (service as any).tickIncidentTimelines(clock);
+
+      const [resync] = events(MetricType.RESYNC_ESCALATION);
+      const [fork] = events(MetricType.FORK_MEMORY_RISK);
+      const incidents = (service as any).liveIncidents;
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0].matchedPatterns).toEqual([AnomalyPattern.RECOVERY_AMPLIFICATION]);
+      expect(incidents[0].sequenceMatches[0].anomalyIds).toEqual([resync.id, fork.id]);
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pattern: AnomalyPattern.RECOVERY_AMPLIFICATION,
+          anomalyIds: [resync.id, fork.id],
+        }),
+        'conn-1',
+      );
+    });
+
+    it('puts the fork memory target on the incident, also when read back from storage', async () => {
+      const GB = 1024 ** 3;
+      const forking = {
+        bytes: 2000,
+        syncFull: 1,
+        replicaState: 'send_bulk',
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000, syncFull: 1, replicaState: 'wait_bgsave' });
+      await pollPrimary(forking);
+      await pollPrimary(forking);
+      await (service as any).tickIncidentTimelines(clock);
+
+      // 9 GB projected peak / 0.7 = 13,165.7 MB, rounded up
+      const expected = [
+        { setting: 'total_system_memory', current: 10240, target: 13166, unit: 'MB' },
+      ];
+      expect(events(MetricType.FORK_MEMORY_RISK)[0].values).toEqual(expected);
+      const forkEntry = (incident: { entries: { metricType: string; values?: unknown }[] }) =>
+        incident.entries.find((entry) => entry.metricType === MetricType.FORK_MEMORY_RISK);
+      expect(forkEntry((service as any).liveIncidents[0])?.values).toEqual(expected);
+      expect((service as any).liveIncidents[0].sequenceMatches[0].values).toBeUndefined();
+
+      const stored = service
+        .getRecentEvents()
+        .map((e) => (service as any).toStoredAnomalyEvent(e, mockCtx));
+      expect(stored.some((e: Record<string, unknown>) => 'values' in e)).toBe(false);
+      storage.getAnomalyEvents.mockResolvedValue(stored);
+      const [timeline] = await service.getIncidentTimelines('conn-1');
+      expect(forkEntry(timeline)?.values).toEqual(expected);
+      expect(timeline.sequenceMatches[0].values).toBeUndefined();
+
+      (service as any).recentAnomalies = (service as any).recentAnomalies.filter(
+        (event: { metricType: MetricType }) => event.metricType !== MetricType.FORK_MEMORY_RISK,
+      );
+      const [aged] = await service.getIncidentTimelines('conn-1');
+      expect(forkEntry(aged)?.values).toEqual(expected);
+    });
+
+    it('keeps values after the emitting connection leaves the scope', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed' ? { id: 'seed' } : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'conn-1' }, { id: 'keeper' }]);
+      await (service as any).emitBacklogCoverageRisk(
+        mockCtx,
+        {
+          timestamp: clock,
+          role: 'primary',
+          replid: 'r',
+          masterReplOffset: 0,
+          bytesPerSec: 30_000,
+          bytesPerSecEwma: 30_000,
+          replBacklogSize: 1_000_000,
+          replicas: [],
+        },
+        30,
+        'warning',
+        'none',
+      );
+      const [live] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(live.scopeId).toBe('seed');
+
+      registry.getConfig.mockImplementation((id: string) =>
+        id === 'seed'
+          ? { id: 'seed' }
+          : id === 'conn-1'
+            ? undefined
+            : { id, membership: { seedId: 'seed' } },
+      );
+      registry.listMembers.mockReturnValue([{ id: 'keeper' }]);
+      (service as any).recentAnomalies = [];
+      storage.getAnomalyEvents.mockImplementation(async ({ scope, order }: any) =>
+        order === 'asc' || scope?.id !== 'seed'
+          ? []
+          : [(service as any).toStoredAnomalyEvent(live, mockCtx)],
+      );
+
+      const [timeline] = await service.getIncidentTimelines('keeper');
+
+      expect(timeline.entries.find((entry) => entry.anomalyId === live.id)?.values).toEqual(
+        live.values,
+      );
+    });
+
+    it('stays quiet when a short disconnect is covered by the backlog', async () => {
+      await pollPrimary({ bytes: 2000 });
+      await pollPrimary({ bytes: 2000, replica: false });
+      await pollPrimary({ bytes: 2000 });
+
+      expect(events(MetricType.RESYNC_ESCALATION)).toEqual([]);
+    });
+
+    describe('rows left open by an earlier run', () => {
+      beforeEach(() => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+      });
+
+      const openBacklogRows = (...ids: string[]) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
+            ? ids.map((id) => ({ id }))
+            : [],
+        );
+      const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id);
+
+      it('resolves the row once coverage is measured above the re-arm level', async () => {
+        openBacklogRows('old-1', 'old-2');
+
+        await pollPrimary({ bytes: 2000 });
+        expect(resolvedIds()).toEqual([]);
+
+        for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds()).toEqual(['old-1', 'old-2']);
+      });
+
+      it('keeps the row with no new alert while coverage stays low', async () => {
+        openBacklogRows('old-1');
+
+        for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([]);
+        expect(resolvedIds()).toEqual([]);
+
+        for (let i = 0; i < 20; i += 1) await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds()).toEqual(['old-1']);
+      });
+
+      it('does not seed its own backlog level from a node-tagged open row', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0
+            ? [{ id: 'node-backlog', nodeAddr: '10.0.1.5:6379', severity: AnomalySeverity.CRITICAL }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        expect((service as any).backlogCoverage.get('conn-1')?.level).not.toBe('critical');
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+        expect((service as any).staleBacklogEventIds.get('conn-1') ?? []).not.toContain('node-backlog');
+      });
+
+      it('does not adopt a node-tagged resync row as its own', async () => {
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [{ id: 'node-resync', nodeAddr: '10.0.1.5:6379', replicaAddr: '10.0.1.6:6379', timestamp: clock }]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000 });
+
+        const tracked = (service as any).resyncEscalationEvents.get('conn-1') ?? [];
+        expect(tracked.map((e: { id: string }) => e.id)).not.toContain('node-resync');
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        const id = '11111111-1111-4111-8111-111111111111';
+        openBacklogRows(id);
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        for (let i = 0; i < 21; i += 1) await pollPrimary({ bytes: 2000 });
+        storage.resolveAnomaly.mockClear();
+        storage.resolveAnomaly.mockResolvedValue(true);
+
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000 });
+
+        expect(resolvedIds()).toEqual([id]);
+      });
+    });
+
+    it('does not hold the current event as stale after a failed read', async () => {
+      (service as any).connectionRegistry.getConfig.mockReturnValue({});
+      storage.getAnomalyEvents.mockRejectedValue(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [raised] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+        metricType === MetricType.BACKLOG_COVERAGE_RISK && offset === 0 ? [{ id: raised.id }] : [],
+      );
+
+      for (let i = 0; i < 40; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(storage.resolveAnomaly.mock.calls.map(([id]) => id)).toEqual([raised.id]);
+    });
+
+    describe('resync escalation resolution', () => {
+      const resyncs = () => events(MetricType.RESYNC_ESCALATION);
+
+      it('names the sync state and resolves when the replica is online', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replicaState: 'wait_bgsave' });
+
+        expect(resyncs()).toHaveLength(1);
+        expect(resyncs()[0].message).toContain('wait_bgsave');
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000 });
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('stamps an escalation raised at online with the disconnect', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replica: false });
+        const disconnectedAt = clock;
+        clock += 60_000;
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+        expect(resyncs()[0].timestamp).toBe(disconnectedAt);
+      });
+
+      it('resolves an escalation raised at online on the next poll', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replica: false });
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+        expect(resyncs()[0].resolved).toBe(false);
+
+        await pollPrimary({ bytes: 2000, syncFull: 1 });
+
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('retries a failed resolve on the next poll', async () => {
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000, replicaState: 'wait_bgsave' });
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await pollPrimary({ bytes: 2000 });
+        await pollPrimary({ bytes: 2000 });
+
+        expect(resyncs()[0].resolved).toBe(true);
+      });
+
+      it('adopts a row left open by an earlier run', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [
+                {
+                  id: 'old-1',
+                  timestamp: clock,
+                  replicaAddr: '10.0.0.2:6379',
+                  message: 'A replica needed a full resync.',
+                },
+              ]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+        await pollPrimary({ bytes: 2000 });
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      });
+
+      it('settles a row without a replica address once the window passes', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({});
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          metricType === MetricType.RESYNC_ESCALATION && offset === 0
+            ? [
+                {
+                  id: 'old-1',
+                  timestamp: clock,
+                  message: 'A replica needed a full resync.',
+                },
+              ]
+            : [],
+        );
+
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+        expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+        clock += RESYNC_ESCALATION_WINDOW_MS + 1;
+        await pollPrimary({ bytes: 2000, replicaState: 'send_bulk' });
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      });
+    });
+
+    it('resolves the risk once the last replica has been gone past the resync window', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+      expect(risk.resolved).toBe(false);
+
+      await pollPrimary({ bytes: 30_000, replica: false });
+      expect(risk.resolved).toBe(false);
+
+      clock += RESYNC_ESCALATION_WINDOW_MS;
+      await pollPrimary({ bytes: 30_000, replica: false });
+
+      expect(risk.resolved).toBe(true);
+    });
+
+    it('keeps a superseded event whose resolve failed until coverage recovers', async () => {
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 30_000 });
+      const [warning] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      for (let i = 0; i < 5; i += 1) await pollPrimary({ bytes: 200_000 });
+      expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(2);
+      storage.resolveAnomaly.mockClear();
+
+      for (let i = 0; i < 40; i += 1) await pollPrimary({ bytes: 2000 });
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(warning.id, expect.any(Number));
+    });
+
+    it('clears its state when a connection is removed', async () => {
+      await pollPrimary({ bytes: 2000 });
+
+      (service as any).onConnectionRemoved(mockCtx.connectionId);
+
+      expect((service as any).resyncEscalation.has(mockCtx.connectionId)).toBe(false);
+      expect((service as any).backlogCoverage.has(mockCtx.connectionId)).toBe(false);
+    });
+  });
+
+  describe('replication stream sample', () => {
+    it('exposes the per-replica gap and backlog length from the latest poll', async () => {
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        replication: {
+          role: 'master',
+          master_replid: 'a'.repeat(40),
+          master_repl_offset: '5000',
+          repl_backlog_size: '4096',
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=4000,lag=0',
+        },
+      });
+
+      const observe = jest.spyOn((service as any).replicationStream, 'observe');
+      await poll();
+
+      const sample = observe.mock.results.at(-1)!.value as ReplicationStreamSample;
+      expect(sample).toMatchObject({
+        role: 'primary',
+        masterReplOffset: 5000,
+        replBacklogSize: 4096,
+        bytesPerSec: null,
+      });
+      expect(sample!.replicas).toEqual([
+        expect.objectContaining({ addr: '10.0.0.2:6379', gapBytes: 1000 }),
+      ]);
+
+      dbClient.getInfoParsed = jest.fn().mockResolvedValue({
+        server: { role: 'master' },
+        replication: {
+          role: 'master',
+          master_replid: 'a'.repeat(40),
+          master_repl_offset: '7000',
+          repl_backlog_size: '6144',
+          slave0: 'ip=10.0.0.2,port=6379,state=online,offset=6500,lag=0',
+        },
+      });
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 1000);
+      await poll();
+      clock.mockRestore();
+
+      const next = observe.mock.results.at(-1)!.value as ReplicationStreamSample;
+      expect(next).toMatchObject({ masterReplOffset: 7000, replBacklogSize: 6144 });
+      expect(next!.bytesPerSec).not.toBeNull();
+      expect(next!.replicas[0].gapBytes).toBe(500);
+    });
+  });
+
+  describe('detectors on a fan-out node', () => {
+    const NODE = '10.0.1.5:6379';
+    const NODE_KEY = `conn-1@${NODE}`;
+    const target = { addr: NODE, host: '10.0.1.5', port: 6379, nodeId: 'node-b' };
+    let clock: number;
+
+    interface NodeState {
+      offset: number;
+      backlogSize: number;
+      replica: boolean;
+      replicaState: string;
+      syncFull: number;
+      memory: Record<string, string>;
+      persistence: Record<string, string>;
+      role: string;
+      gap: number;
+      cobLimit: string | null;
+      replicaOmem: number;
+    }
+
+    let node: NodeState;
+    const HARD = 256 * 1024 * 1024;
+    const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+    const GB = 1024 ** 3;
+    const FORKING = {
+      memory: { used_memory: String(9 * GB), used_memory_rss: String(9 * GB), total_system_memory: String(10 * GB) },
+      persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+    };
+
+    function section(name: string, fields: Record<string, string | number>): string {
+      return [`# ${name}`, ...Object.entries(fields).map(([k, v]) => `${k}:${v}`)].join('\r\n');
+    }
+
+    function nodeInfo(name?: string): string {
+      const replication =
+        node.role === 'master'
+          ? section('Replication', {
+              role: 'master',
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+              repl_backlog_size: node.backlogSize,
+              connected_slaves: node.replica ? 1 : 0,
+              ...(node.replica
+                ? {
+                    slave0: `ip=10.0.1.6,port=6379,state=${node.replicaState},offset=${node.offset - node.gap},lag=0`,
+                  }
+                : {}),
+            })
+          : section('Replication', {
+              role: 'slave',
+              master_host: '10.0.1.7',
+              master_port: 6379,
+              master_link_status: 'up',
+              slave_repl_offset: node.offset,
+              master_replid: 'b'.repeat(40),
+              master_repl_offset: node.offset,
+            });
+      const parts: Record<string, string> = {
+        clients: section('Clients', { connected_clients: 10 }),
+        memory: section('Memory', { used_memory: 1_000_000, ...node.memory }),
+        stats: section('Stats', {
+          instantaneous_ops_per_sec: 100,
+          sync_full: node.syncFull,
+          sync_partial_ok: 0,
+          sync_partial_err: 0,
+        }),
+        replication,
+        persistence: section('Persistence', node.persistence),
+      };
+      return name ? (parts[name] ?? '') : Object.values(parts).join('\r\n');
+    }
+
+    function nodeCall(...args: string[]): Promise<unknown> | unknown {
+      if (args[0] === 'CLUSTER') return `node-b ${NODE}@16379 myself,master - 0 0 1 connected 0-5460\n`;
+      if (args[0] === 'CONFIG') return node.cobLimit === null ? [] : ['client-output-buffer-limit', node.cobLimit];
+      if (args[0] === 'CLIENT') {
+        return node.replica
+          ? `id=7 addr=10.0.1.6:6379 laddr=${NODE} fd=8 name= age=10 idle=0 flags=S db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=${node.replicaOmem} events=r cmd=replconf user=default\n`
+          : '';
+      }
+      throw new Error(`unexpected ${args.join(' ')}`);
+    }
+
+    function nodeClient(call: (...args: string[]) => Promise<unknown> | unknown = nodeCall) {
+      return {
+        info: jest.fn().mockImplementation(async (name?: string) => nodeInfo(name)),
+        call: jest.fn().mockImplementation(async (...args: string[]) => call(...args)),
+        disconnect: jest.fn(),
+      };
+    }
+
+    async function pollNode(
+      update: Partial<NodeState> & { bytes?: number; stepMs?: number } = {},
+      targets: TopologyTarget[] = [target],
+    ): Promise<void> {
+      const { bytes = 2000, stepMs = 1000, ...rest } = update;
+      clock += stepMs;
+      node.offset += bytes;
+      Object.assign(node, rest);
+      await (service as any).detectTopologyAnomalies(mockCtx, {
+        targets,
+        members: new Set(targets.map((t) => t.addr)),
+      });
+    }
+
+    const events = (metricType: MetricType) =>
+      service.getRecentEvents().filter((e) => e.metricType === metricType);
+    const resolvedIds = async () => {
+      await (service as any).drainPersistenceOutbox();
+      return storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id);
+    };
+
+    beforeEach(() => {
+      clock = 1_700_000_000_000;
+      node = {
+        offset: 0,
+        backlogSize: 1_000_000,
+        replica: true,
+        replicaState: 'online',
+        syncFull: 0,
+        memory: {},
+        persistence: {},
+        role: 'master',
+        gap: 0,
+        cobLimit: LIMIT_RAW,
+        replicaOmem: 0,
+      };
+      jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      (service as any).clusterDiscovery = {
+        retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+        getNodeConnection: jest.fn().mockResolvedValue(nodeClient()),
+      };
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    describe('backlog coverage and resync escalation', () => {
+      async function raiseBacklog(): Promise<void> {
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+      }
+
+      async function raiseResync(): Promise<void> {
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1 });
+        await pollNode();
+      }
+
+      it('raises backlog coverage risk on a fan-out primary with its node address', async () => {
+        await raiseBacklog();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING }),
+        ]);
+        expect((service as any).backlogCoverage.has(NODE_KEY)).toBe(true);
+      });
+
+      it('leaves the seed backlog state alone while a node raises', async () => {
+        await raiseBacklog();
+
+        expect((service as any).backlogCoverage.has('conn-1')).toBe(false);
+        expect((service as any).backlogCoverageEventIds.has('conn-1')).toBe(false);
+      });
+
+      it('raises resync escalation on a fan-out primary and matches backlog exhaustion per node', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync, ...rest] = events(MetricType.RESYNC_ESCALATION);
+        expect(rest).toEqual([]);
+        expect(resync).toMatchObject({ nodeAddr: NODE, replicaAddr: '10.0.1.6:6379' });
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.BACKLOG_EXHAUSTION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([risk.id, resync.id]);
+      });
+
+      it('closes node backlog and resync events when the node leaves the topology', async () => {
+        await raiseBacklog();
+        await raiseResync();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([risk.id, resync.id]));
+        for (const map of ['backlogCoverage', 'backlogCoverageEventIds', 'staleBacklogEventIds', 'resyncEscalation', 'resyncEscalationEvents']) {
+          expect((service as any)[map].has(NODE_KEY)).toBe(false);
+        }
+      });
+
+      it('starts clean when a node rejoins after leaving', async () => {
+        await raiseBacklog();
+        await pollNode({}, []);
+        const closed = await resolvedIds();
+
+        for (let i = 0; i < 3; i += 1) await pollNode();
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toHaveLength(1);
+        expect(await resolvedIds()).toEqual(closed);
+      });
+
+      it('closes node backlog events when the seed connection is removed', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+
+        expect(await resolvedIds()).toContain(risk.id);
+      });
+
+      it('keeps node backlog events open when the seed cannot list topology', async () => {
+        await raiseBacklog();
+        const [risk] = events(MetricType.BACKLOG_COVERAGE_RISK);
+
+        (service as any).clearFanoutNodeSignals('conn-1');
+
+        expect(await resolvedIds()).not.toContain(risk.id);
+        expect((service as any).backlogCoverageEventIds.get(NODE_KEY)).toBe(risk.id);
+      });
+    });
+
+    describe('open rows left by an earlier run', () => {
+      const openRows = (rows: Partial<Record<MetricType, Record<string, unknown>[]>>) =>
+        storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+          offset === 0 ? (rows[metricType as MetricType] ?? []) : [],
+        );
+      const readsOf = (metricType: MetricType) =>
+        storage.getAnomalyEvents.mock.calls.filter(([q]: [{ metricType: MetricType }]) => q.metricType === metricType).length;
+      const adoptSeed = async () => {
+        (service as any).connectionRegistry.getConfig.mockImplementation((id: string) => ({ id }));
+        await (service as any).adoptOpenEvents(mockCtx, clock);
+      };
+      const OTHER = '10.0.1.9:6379';
+
+      it('re-adopts its own open backlog row after a restart instead of raising again', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        for (let i = 0; i < 5; i += 1) await pollNode({ bytes: 30_000 });
+
+        expect(events(MetricType.BACKLOG_COVERAGE_RISK)).toEqual([]);
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+
+        for (let i = 0; i < 20; i += 1) await pollNode({ bytes: 2000 });
+
+        expect(await resolvedIds()).toContain('b-1');
+      });
+
+      it('re-adopts its own open resync row and settles it when the replica is back online', async () => {
+        openRows({
+          [MetricType.RESYNC_ESCALATION]: [
+            { id: 'r-1', nodeAddr: NODE, replicaAddr: '10.0.1.6:6379', timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+        await pollNode();
+
+        expect(await resolvedIds()).toContain('r-1');
+      });
+
+      it('ignores open rows that belong to another node', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'other', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('other');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level).toBe('none');
+      });
+
+      it('closes an earlier row of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'gone-b', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.RESYNC_ESCALATION]: [{ id: 'gone-r', nodeAddr: OTHER, replicaAddr: '10.0.1.8:6379', timestamp: clock }],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-b', 'gone-r']));
+      });
+
+      it('keeps the earlier row of an unreachable node until it answers', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toContain('b-1');
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(nodeClient());
+        (service as any).topologyBackoff.clear();
+        await pollNode({ bytes: 30_000 });
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY)).toEqual(['b-1']);
+      });
+
+      it('closes an earlier node row when the seed is removed before the node is read', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.releaseConnection = jest.fn().mockResolvedValue(undefined);
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(await resolvedIds()).toContain('b-1');
+        expect((service as any).pendingNodeOpenEvents.has('conn-1')).toBe(false);
+      });
+
+      it('takes node rows from the seed read without reading storage again', async () => {
+        await adoptSeed();
+        await pollNode();
+        await pollNode();
+        await pollNode();
+
+        expect(readsOf(MetricType.BACKLOG_COVERAGE_RISK)).toBe(1);
+        expect(readsOf(MetricType.RESYNC_ESCALATION)).toBe(1);
+      });
+
+      it('does not re-adopt a closed row when the node comes back', async () => {
+        openRows({
+          [MetricType.BACKLOG_COVERAGE_RISK]: [
+            { id: 'b-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, value: 20, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        await pollNode();
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('b-1');
+
+        await pollNode();
+
+        expect((service as any).staleBacklogEventIds.get(NODE_KEY) ?? []).not.toContain('b-1');
+        expect((service as any).backlogCoverage.get(NODE_KEY)?.level ?? 'none').toBe('none');
+      });
+
+      it('re-adopts its own open fork row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('f-1');
+      });
+
+      it('re-adopts its own open output-buffer row instead of raising a second one', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+
+        await pollNode({}, []);
+        expect(await resolvedIds()).toContain('c-1');
+      });
+
+      it('still alerts when a re-adopted node escalates past its earlier output-buffer row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replicaOmem: HARD * 0.95 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.CRITICAL }),
+        ]);
+      });
+
+      it('closes earlier fork and output-buffer rows of a node that is no longer in the topology', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'gone-f', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'gone-c', nodeAddr: OTHER, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining(['gone-f', 'gone-c']));
+      });
+
+      it('leaves the seed own fork and output-buffer rows alone', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [{ id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock }],
+          [MetricType.REPL_BUFFER_PRESSURE]: [{ id: 'seed-c', severity: AnomalySeverity.WARNING, timestamp: clock }],
+        });
+        await adoptSeed();
+
+        await pollNode();
+
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-f']));
+        expect(await resolvedIds()).not.toEqual(expect.arrayContaining(['seed-c']));
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('keeps a re-adopted projected fork warning while the write rate is still unknown', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const projected = (changes: number) => ({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '0', rdb_last_cow_size: String(GB), rdb_changes_since_last_save: String(changes) },
+        });
+
+        await pollNode(projected(0));
+        await pollNode(projected(5000));
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('still raises a live fork warning after re-adopting a projected one', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(8 * GB), used_memory_rss: String(8.5 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, severity: AnomalySeverity.WARNING, dedupeKey: 'live-cow-oom' }),
+        ]);
+      });
+
+      it('does not repeat an open live fork critical when a newer projected warning is also open', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-old', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 60_000 },
+            { id: 'f-new', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+      });
+
+      it('still raises a live fork critical over an open live warning and a projected critical row', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, dedupeKey: 'live-cow-oom', severity: AnomalySeverity.WARNING, timestamp: clock - 60_000 },
+            { id: 'f-2', nodeAddr: NODE, dedupeKey: 'projected-fork-oom', severity: AnomalySeverity.CRITICAL, timestamp: clock - 120_000 },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({
+          memory: { used_memory: String(9.5 * GB), used_memory_rss: String(9.6 * GB), total_system_memory: String(10 * GB) },
+          persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+        });
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: 'live-cow-oom' }),
+        ]);
+      });
+
+      it('does not let a restored warning of one replica hide another replica after CLIENT LIST recovers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored aggregate output-buffer warning when CLIENT LIST answers', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '(aggregate)', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('keeps the oldest of nine open replica output-buffer rows open while it still fires', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: Array.from({ length: 9 }, (_, i) => ({
+            id: `c-${i}`,
+            nodeAddr: NODE,
+            dedupeKey: i === 0 ? '10.0.1.6:6379' : `10.0.2.${i}:6379`,
+            severity: AnomalySeverity.WARNING,
+            timestamp: clock - (9 - i) * 1000,
+          })),
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(await resolvedIds()).not.toContain('c-0');
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('keeps the resync-loop cooldown of a re-adopted resync-loop row', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'loop-1', nodeAddr: NODE, dedupeKey: 'resync-loop', severity: AnomalySeverity.CRITICAL, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode({ replica: false, syncFull: 1 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE).filter((e) => e.severity === AnomalySeverity.CRITICAL)).toEqual([]);
+      });
+
+      it('restores an output-buffer acknowledgement only for the replica it was raised on', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.9.9:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('keeps a restored output-buffer level until the replicas can be read', async () => {
+        openRows({
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+        await adoptSeed();
+        const listing = (service as any).clusterDiscovery.getNodeConnection;
+        listing.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.7) }, replicaOmem: HARD * 0.7 });
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+      });
+
+      it('closes earlier node fork and output-buffer rows when the seed is removed before it adopts them', async () => {
+        openRows({
+          [MetricType.FORK_MEMORY_RISK]: [
+            { id: 'f-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+            { id: 'seed-f', severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+          [MetricType.REPL_BUFFER_PRESSURE]: [
+            { id: 'c-1', nodeAddr: NODE, severity: AnomalySeverity.WARNING, timestamp: clock },
+          ],
+        });
+
+        (service as any).closeConnectionEventsOnRemoval('conn-1');
+        for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        const resolved = await resolvedIds();
+        expect(resolved).toEqual(expect.arrayContaining(['f-1', 'c-1']));
+        expect(resolved).not.toContain('seed-f');
+      });
+    });
+
+    describe('fork memory and output-buffer pressure', () => {
+      it('raises fork memory risk on a fan-out primary with its node address', async () => {
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect((service as any).forkMemoryState.has('conn-1')).toBe(false);
+      });
+
+      it('raises output-buffer pressure on a fan-out primary without touching the seed gauge', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, syncFull: 1 });
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ connectionId: 'conn-1', nodeAddr: NODE }),
+        ]);
+        expect(prometheusService.updateReplBufferPressure).not.toHaveBeenCalled();
+      });
+
+      it('lists node fork and output-buffer pressure in that node divergence alert', async () => {
+        const hook = jest.fn().mockResolvedValue(undefined);
+        (webhookEventsProService as any).dispatchReplicationDivergence = hook;
+        Object.assign(node, FORKING, { replicaOmem: HARD * 0.7 });
+        for (const gap of [2, 4, 6, 8, 10, 12]) {
+          for (let i = 0; i < 3; i += 1) await pollNode({ gap: gap * 1024 * 1024, bytes: 10 * 1024 * 1024, stepMs: 10_000 });
+        }
+
+        expect(hook).toHaveBeenCalled();
+        expect(hook.mock.calls[0][0].correlatedSignals).toEqual(
+          expect.arrayContaining([MetricType.FORK_MEMORY_RISK, MetricType.REPL_BUFFER_PRESSURE]),
+        );
+      });
+
+      it('matches recovery amplification on a fan-out node', async () => {
+        await pollNode();
+        await pollNode({ replica: false });
+        await pollNode({ replica: true, syncFull: 1, replicaState: 'wait_bgsave' });
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        await (service as any).tickIncidentTimelines(clock);
+
+        const [resync] = events(MetricType.RESYNC_ESCALATION);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const incident = (service as any).liveIncidents.find((i: { matchedPatterns: AnomalyPattern[] }) =>
+          i.matchedPatterns.includes(AnomalyPattern.RECOVERY_AMPLIFICATION),
+        );
+        expect(incident.sequenceMatches[0].anomalyIds).toEqual([resync.id, fork.id]);
+      });
+
+      it('still checks a node whose CLIENT LIST is denied', async () => {
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('NOPERM');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+
+        expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('drops the connection of a node whose CLIENT LIST hangs so its next INFO still answers', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          client.info.mockImplementation((name?: string) =>
+            stuck.length > 0 ? new Promise(() => {}) : Promise.resolve(nodeInfo(name)),
+          );
+          client.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode(FORKING);
+          await pollNode(FORKING);
+
+          expect(client.disconnect).toHaveBeenCalled();
+          expect((service as any).topologyBackoff.has(NODE_KEY)).toBe(false);
+          expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('does not raise a second output-buffer alert when one CLIENT LIST read fails', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.7) };
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        await pollNode();
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL }),
+          expect.objectContaining({ severity: AnomalySeverity.WARNING }),
+        ]);
+      });
+
+      it('skips a fan-out primary that is registered under another address', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toEqual([]);
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([]);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('checks a fan-out primary again once its registered connection stops polling', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock - 10 * 60_000 });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('checks a fan-out primary again once its registered connection disconnects', async () => {
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: false }]);
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+
+        expect(events(MetricType.FORK_MEMORY_RISK)).toHaveLength(1);
+      });
+
+      it('does not raise per-replica output-buffer alerts already covered by the aggregate one', async () => {
+        node.memory = { mem_clients_slaves: String(HARD * 0.95) };
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ severity: AnomalySeverity.CRITICAL, dedupeKey: '(aggregate)' }),
+        ]);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
+      it('does not re-alert a replica seen before CLIENT LIST failed once the aggregate alert covers it', async () => {
+        await pollNode();
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValueOnce(
+          nodeClient((...args) => {
+            if (args[0] === 'CLIENT') throw new Error('timed out');
+            return nodeCall(...args);
+          }),
+        );
+        await pollNode({ memory: { mem_clients_slaves: String(HARD * 0.95) }, replicaOmem: HARD * 0.95 });
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+
+        await pollNode();
+        await pollNode();
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+      });
+
+      it('retires the fan-out state of a node once it is registered under another address', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        await pollNode();
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(true);
+        prometheusService.clearNodeSignals.mockClear();
+
+        (service as any).registeredPrimaryReplids.set('conn-2', { replid: 'b'.repeat(40), seenAt: clock });
+        (service as any).connectionRegistry.list.mockReturnValue([{ id: 'conn-2', host: 'primary.internal', port: 6379, isConnected: true }]);
+        await pollNode();
+
+        expect((service as any).retryAmplificationState.has(NODE_KEY)).toBe(false);
+        expect((service as any).divergenceState.has(NODE_KEY)).toBe(false);
+        expect((service as any).reshardSnapshot.has(NODE_KEY)).toBe(false);
+        expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+      });
+
+      it.each([
+        ['INFO latencystats', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          client.info.mockImplementation((name?: string) => (name === 'latencystats' ? hang() : Promise.resolve(nodeInfo(name))));
+        }],
+        ['CLUSTER NODES', (client: ReturnType<typeof nodeClient>, hang: () => Promise<never>) => {
+          const call = client.call.getMockImplementation()!;
+          client.call.mockImplementation((...args: string[]) => (args[0] === 'CLUSTER' ? hang() : call(...args)));
+        }],
+      ])('still reads replica output buffers when %s is slow', async (_name, slow) => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (closed) throw new Error('Connection is closed.');
+            return nodeCall(...args);
+          });
+          slow(client, () => new Promise<never>((_, reject) => stuck.push(reject)));
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+            expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+          ]);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('gives CLIENT LIST its own budget after a slow INFO', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        const client = nodeClient();
+        client.info.mockImplementation(async (name?: string) => {
+          clock += timeout;
+          return nodeInfo(name);
+        });
+        (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+        await pollNode({ replicaOmem: HARD * 0.7 });
+
+        expect(events(MetricType.REPL_BUFFER_PRESSURE)).toEqual([
+          expect.objectContaining({ dedupeKey: '10.0.1.6:6379', severity: AnomalySeverity.WARNING }),
+        ]);
+        expect(client.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('drops a hung connection only after its other reads have answered', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          let closed = false;
+          const stuck: Array<(err: Error) => void> = [];
+          const client = nodeClient((...args) => {
+            if (args[0] === 'CLIENT') return new Promise((_, reject) => stuck.push(reject));
+            if (args[0] === 'CLUSTER') {
+              return new Promise((resolve, reject) =>
+                setTimeout(() => (closed ? reject(new Error('Connection is closed.')) : resolve(nodeCall(...args))), 20),
+              );
+            }
+            return nodeCall(...args);
+          });
+          client.disconnect.mockImplementation(() => {
+            closed = true;
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          (service as any).clusterDiscovery.getNodeConnection.mockResolvedValue(client);
+
+          await pollNode();
+
+          expect((service as any).reshardNodeSelves.has(NODE_KEY)).toBe(true);
+          expect(client.disconnect).toHaveBeenCalledTimes(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('reads a node through a fresh connection after dropping a hung one', async () => {
+        const timeout = (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS;
+        (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = 20;
+        try {
+          const stuck: Array<(err: Error) => void> = [];
+          const hung = nodeClient((...args) =>
+            args[0] === 'CLIENT' ? new Promise((_, reject) => stuck.push(reject)) : nodeCall(...args),
+          );
+          hung.disconnect.mockImplementation(() => {
+            for (const reject of stuck.splice(0)) reject(new Error('Connection is closed.'));
+          });
+          const replacement = nodeClient();
+          (service as any).clusterDiscovery.getNodeConnection
+            .mockResolvedValueOnce(hung)
+            .mockResolvedValue(replacement);
+
+          await pollNode({ replicaOmem: HARD * 0.7 });
+          expect(hung.disconnect).toHaveBeenCalled();
+          await pollNode();
+
+          expect(replacement.info).toHaveBeenCalled();
+          expect(replacement.call).toHaveBeenCalledWith('CLIENT', 'LIST', 'TYPE', 'replica');
+          expect(events(MetricType.REPL_BUFFER_PRESSURE)).toHaveLength(1);
+        } finally {
+          (AnomalyService as any).FANOUT_COMMAND_TIMEOUT_MS = timeout;
+        }
+      });
+
+      it('drops a demoted node output-buffer state', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7 });
+        expect((service as any).cobState.has(NODE_KEY)).toBe(true);
+
+        await pollNode({ role: 'slave' });
+
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('closes node fork and output-buffer events when the node leaves', async () => {
+        await pollNode({ replicaOmem: HARD * 0.7, ...FORKING });
+        await pollNode();
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [cob] = events(MetricType.REPL_BUFFER_PRESSURE);
+
+        await pollNode({}, []);
+
+        expect(await resolvedIds()).toEqual(expect.arrayContaining([fork.id, cob.id]));
+        expect((service as any).fanoutNodeEventIds.has(NODE_KEY)).toBe(false);
+        expect((service as any).forkMemoryState.has(NODE_KEY)).toBe(false);
+        expect((service as any).cobState.has(NODE_KEY)).toBe(false);
+      });
+
+      it('stops tracking a node event whose save was dropped', async () => {
+        const addAnomaly = jest.spyOn(service as any, 'addAnomaly');
+        await pollNode(FORKING);
+        await pollNode(FORKING);
+        const [fork] = events(MetricType.FORK_MEMORY_RISK);
+        const [, , onDrop] = addAnomaly.mock.calls.find(([event]) => (event as { id: string }).id === fork.id)!;
+
+        (onDrop as () => void)();
+
+        expect((service as any).fanoutNodeEventIds.get(NODE_KEY)?.has(fork.id) ?? false).toBe(false);
+      });
+
+      it('closes the oldest node events beyond the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
+        const ids = Array.from({ length: 20 }, (_, i) => `node-event-${i}`);
+        for (const id of ids) (service as any).trackFanoutNodeEvent(NODE_KEY, id, 'replica');
+
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toEqual(ids.slice(-8));
+        expect(close.mock.calls.map(([id]) => id)).toEqual(ids.slice(0, 12));
+      });
+
+      it('keeps the latest event of every alert open past the latest eight', async () => {
+        const close = jest.spyOn(service as any, 'closeLater');
+        const ids = Array.from({ length: 9 }, (_, i) => `node-event-${i}`);
+        ids.forEach((id, i) => (service as any).trackFanoutNodeEvent(NODE_KEY, id, `replica-${i}`));
+        (service as any).trackFanoutNodeEvent(NODE_KEY, 'node-event-9', 'replica-3');
+
+        expect(close.mock.calls.map(([id]) => id)).toEqual(['node-event-3']);
+        expect([...(service as any).fanoutNodeEventIds.get(NODE_KEY).keys()]).toHaveLength(9);
+      });
+    });
+  });
+
+  describe('replication divergence', () => {
+    const MiB = 1024 * 1024;
+    const T0 = 1_700_000_000_000;
+
+    function sample(timestamp: number, gapBytes: number) {
+      return {
+        timestamp,
+        role: 'primary' as const,
+        replid: 'a'.repeat(40),
+        masterReplOffset: 0,
+        bytesPerSec: MiB,
+        bytesPerSecEwma: MiB,
+        replBacklogSize: null,
+        replicas: [
+          { key: 'slave0', addr: '10.0.0.2:6379', state: 'online', offset: 1, lagSec: 0, gapBytes },
+        ],
+      };
+    }
+
+    beforeEach(() => {
+      (webhookEventsProService as any).dispatchReplicationDivergence = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationRecovered = jest.fn().mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore?.();
+    });
+
+    async function feed(gapsMiB: number[], start: number): Promise<number> {
+      let t = start;
+      for (const gap of gapsMiB) {
+        for (let i = 0; i < 3; i++) {
+          await (service as any).detectReplicationDivergence(sample(t, gap * MiB), mockCtx);
+          t += 10_000;
+        }
+      }
+      return t;
+    }
+
+    it('alerts once, stamps related metrics, then reports recovery', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      const recoveredHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      (webhookEventsProService as any).dispatchReplicationRecovered = recoveredHook;
+      (service as any).recentAnomalies.push({
+        id: 'cpu-drop-1',
+        timestamp: T0 + 5_000,
+        metricType: MetricType.CPU_UTILIZATION,
+        anomalyType: AnomalyType.DROP,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 50,
+        zScore: 3,
+        stdDev: 1,
+        threshold: 2,
+        message: 'cpu drop',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+      (service as any).recentAnomalies.push({
+        id: 'mem-1',
+        timestamp: T0 + 5_000,
+        metricType: MetricType.MEMORY_USED,
+        anomalyType: 'spike',
+        severity: 'warning',
+        value: 1,
+        baseline: 1,
+        zScore: 3,
+        stdDev: 1,
+        threshold: 2,
+        message: 'memory spike',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(t);
+
+      expect(divergenceHook).toHaveBeenCalledTimes(1);
+      expect(divergenceHook.mock.calls[0][0]).toMatchObject({
+        replica: '10.0.0.2:6379',
+        level: 'warning',
+        reason: 'growth',
+        windowCount: 4,
+        correlatedSignals: [MetricType.MEMORY_USED],
+        connectionId: 'conn-1',
+      });
+      const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+      expect(event.relatedMetrics).toEqual([MetricType.MEMORY_USED]);
+      expect((await divergenceHistory())[0]).toMatchObject({
+        replica: '10.0.0.2:6379',
+        level: 'warning',
+      });
+
+      await feed([0, 0, 0], t);
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+      expect(recoveredHook.mock.calls[0][0]).toMatchObject({ replica: '10.0.0.2:6379', reason: 'caught_up' });
+      const endStall = (webhookEventsProService as any).endReplicationStall as jest.Mock;
+      expect(endStall).toHaveBeenCalledTimes(1);
+      expect(endStall).toHaveBeenCalledWith('conn-1', '10.0.0.2:6379');
+      expect(endStall.mock.invocationCallOrder[0]).toBeGreaterThan(
+        recoveredHook.mock.invocationCallOrder[0],
+      );
+      expect((await divergenceHistory())[0].level).toBe('none');
+    });
+
+    it('retries a failed window write on the next poll and keeps detecting', async () => {
+      storage.saveReplicationDivergenceWindows.mockRejectedValueOnce(new Error('disk full'));
+
+      await feed([2, 4, 6], T0);
+
+      const saved = storage.saveReplicationDivergenceWindows.mock.calls
+        .slice(1)
+        .flatMap(([rows]: [Array<{ gapBytes: number }>]) => rows.map((r) => r.gapBytes));
+      expect(saved).toEqual([2 * MiB, 4 * MiB]);
+      expect((await divergenceHistory())[0].windows).toHaveLength(2);
+    });
+
+    describe('window retention', () => {
+      const HOUR = 60 * 60 * 1000;
+      const DAY = 24 * HOUR;
+      const prune = () => storage.pruneOldReplicationDivergenceWindows;
+      const trimAfterAnHour = async () => {
+        await feed([2], T0);
+        await feed([2], T0 + 2 * HOUR);
+      };
+
+      it('leaves the first poll to the sweep', async () => {
+        await feed([2, 4], T0);
+
+        expect(prune()).not.toHaveBeenCalled();
+      });
+
+      it('trims this connection to seven days without a retention policy', async () => {
+        await trimAfterAnHour();
+
+        expect(prune()).toHaveBeenCalledTimes(1);
+        const [cutoff, connectionId] = prune().mock.calls[0];
+        expect(connectionId).toBe('conn-1');
+        expect(Math.abs(T0 + 2 * HOUR - 7 * DAY - cutoff)).toBeLessThan(HOUR);
+      });
+
+      it('follows a configured sample window', async () => {
+        (service as any).retentionPolicy = { getSampleRetentionMs: () => 30 * DAY };
+
+        await trimAfterAnHour();
+
+        const [cutoff] = prune().mock.calls[0];
+        expect(Math.abs(T0 + 2 * HOUR - 30 * DAY - cutoff)).toBeLessThan(HOUR);
+      });
+
+      it('keeps every window when the sample window is keep-forever', async () => {
+        (service as any).retentionPolicy = { getSampleRetentionMs: () => null };
+
+        await trimAfterAnHour();
+
+        expect(prune()).not.toHaveBeenCalled();
+      });
+
+      it('keeps detecting when a trim fails', async () => {
+        prune().mockRejectedValueOnce(new Error('disk full'));
+
+        await expect(trimAfterAnHour()).resolves.toBeUndefined();
+      });
+    });
+
+    it('serves the stored gap series with the live level per replica', async () => {
+      await feed([2, 4, 6, 8, 10, 12], T0);
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
+          replicaGapBytes: MiB,
+          replicaView: 'ok',
+        },
+        {
+          id: 'w2',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.9:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 0,
+          bytesPerSec: null,
+          secondsBehind: null,
+        },
+      ]);
+
+      const history = await service.getReplicationDivergenceHistory('conn-1', T0 - 1, T0 + 600_000);
+
+      expect(storage.getReplicationDivergenceWindows).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        startTime: T0 - 1,
+        endTime: T0 + 600_000,
+        limit: DIVERGENCE_HISTORY_QUERY_WINDOWS,
+      });
+      expect(history.map((h) => [h.replica, h.level, h.windows.length])).toEqual([
+        ['10.0.0.2:6379', 'warning', 5],
+        ['10.0.0.9:6379', 'unobserved', 1],
+      ]);
+      expect(history[0].windows[0]).toEqual({
+        start: T0,
+        end: T0 + 30_000,
+        gapBytes: 2 * MiB,
+        bytesPerSec: MiB,
+        secondsBehind: 2,
+        replicaGapBytes: MiB,
+        replicaView: 'ok',
+      });
+      expect(history[0].latest).toMatchObject({ gapBytes: 10 * MiB, replicaGapBytes: null, replicaView: null });
+      expect(history[1].windows[0]).toMatchObject({ replicaGapBytes: null, replicaView: null });
+    });
+
+    it('reads a stored gap as behind until a live window closes', async () => {
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([0], T0));
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0 - 30_000,
+          windowEnd: T0,
+          gapBytes: 10 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 10,
+        },
+      ]);
+
+      const history = await service.getReplicationDivergenceHistory('conn-1', T0 - 60_000, T0 + 1);
+
+      expect(history.map((h) => [h.replica, h.level])).toEqual([['10.0.0.2:6379', 'behind']]);
+    });
+
+    it('does not read a past range as the current level', async () => {
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([0], T0 + 3_600_000));
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0 - 30_000,
+          windowEnd: T0,
+          gapBytes: 10 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 10,
+        },
+      ]);
+
+      const history = await service.getReplicationDivergenceHistory('conn-1', T0 - 60_000, T0 + 1);
+
+      expect(history[0].level).toBe('none');
+    });
+
+    it('adds live windows that are newer than the stored series', async () => {
+      jest.spyOn(Date, 'now').mockReturnValue(await feed([2, 4, 6], T0));
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
+        },
+      ]);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
+      expect(replica.latest?.gapBytes).toBe(4 * MiB);
+    });
+
+    it('does not report the last stored window as current for an unobserved replica', async () => {
+      const stored = {
+        id: 'w1',
+        connectionId: 'conn-1',
+        replicaAddr: '10.0.0.9:6379',
+        windowStart: T0,
+        windowEnd: T0 + 30_000,
+        gapBytes: 2 * MiB,
+        bytesPerSec: MiB,
+        secondsBehind: 2,
+      };
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([stored]);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.level).toBe('unobserved');
+      expect(replica.latest).toBeNull();
+      expect(replica.windows).toHaveLength(1);
+    });
+
+    const orphan = (id: string, addr: string) => ({
+      id,
+      metricType: MetricType.REPLICATION_DIVERGENCE,
+      resolved: false,
+      message: 'WARNING: replica behind the primary.',
+      replicaAddr: addr,
+    });
+    const restartRecoveries = () =>
+      (webhookEventsProService as any).dispatchReplicationRecovered.mock.calls
+        .map(([data]: [{ replica: string; reason: string }]) => data)
+        .filter((data: { reason: string }) => data.reason === 'resolved_after_restart');
+
+    it('reads open events once and closes them silently when the replica has left', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
+
+      const t = await feed([2], T0);
+      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalled();
+
+      await feed([4, 6, 8], t);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(1);
+      expect(storage.getAnomalyEvents).toHaveBeenCalledWith({
+        connectionId: 'conn-1',
+        metricType: MetricType.REPLICATION_DIVERGENCE,
+        resolved: false,
+        limit: OPEN_EVENT_PAGE_SIZE,
+        offset: 0,
+      });
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect(restartRecoveries()).toEqual([]);
+    });
+
+    it('keeps an orphaned event open until the replica has caught up', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      const t = await feed([8, 8, 8, 8], T0);
+      expect(storage.resolveOpenAnomaly).not.toHaveBeenCalled();
+      expect(restartRecoveries()).toEqual([]);
+
+      await feed([0, 0, 0, 0], t);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(1);
+      expect(restartRecoveries()).toHaveLength(1);
+    });
+
+    it('shows a replica with an event left open by a restart as behind until it is assessed', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      const t = await feed([0, 0], T0);
+      jest.spyOn(Date, 'now').mockReturnValue(t);
+      expect((await divergenceHistory())[0].level).toBe('behind');
+
+      const later = await feed([0, 0, 0], t);
+      jest.spyOn(Date, 'now').mockReturnValue(later);
+      expect((await divergenceHistory())[0].level).toBe('none');
+    });
+
+    it('closes an orphaned event without a recovery when the replica alerts again', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.2:6379')]);
+
+      await feed([6, 8, 10, 12, 14, 16], T0);
+
+      expect((await divergenceHistory())[0].level).toBe('warning');
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect(restartRecoveries()).toEqual([]);
+    });
+
+    it('keeps the first resolution time when an orphaned event resolves again', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([orphan('old-1', '10.0.0.9:6379')]);
+      const t = await feed([2], T0);
+      const cached = { id: 'old-1', resolved: true, resolvedAt: T0 - 1 };
+      (service as any).recentAnomalies.push(cached);
+
+      await feed([4, 6, 8], t);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect(cached.resolvedAt).toBe(T0 - 1);
+    });
+
+    it('sends no recovered webhook for an orphaned event something else already resolved', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        { id: 'old-1', metricType: MetricType.REPLICATION_DIVERGENCE, resolved: false, message: '' },
+      ]);
+      storage.resolveOpenAnomaly.mockResolvedValueOnce(false);
+
+      await feed([2, 4, 6, 8], T0);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(1);
+      expect(restartRecoveries()).toEqual([]);
+    });
+
+    it('pages past a full page of tracked events to reach older orphans', async () => {
+      const page = (prefix: string, count: number) =>
+        Array.from({ length: count }, (_, i) => orphan(`${prefix}-${i}`, '10.0.0.9:6379'));
+      storage.getAnomalyEvents
+        .mockResolvedValueOnce(page('a', OPEN_EVENT_PAGE_SIZE))
+        .mockResolvedValueOnce(page('b', 3));
+
+      await feed([2, 4, 6, 8], T0);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+      expect(storage.getAnomalyEvents).toHaveBeenLastCalledWith(
+        expect.objectContaining({ offset: OPEN_EVENT_PAGE_SIZE }),
+      );
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(OPEN_EVENT_PAGE_SIZE + 3);
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith('b-2', expect.any(Number));
+    });
+
+    it('sends no recovered webhook for a replica that left or is still diverging', async () => {
+      let calls = 0;
+      storage.getAnomalyEvents.mockImplementation(async () => {
+        calls++;
+        if (calls < 16) throw new Error('db down');
+        return calls === 16
+          ? [
+              orphan('live-old', '10.0.0.2:6379'),
+              orphan('a-warn', '10.0.0.9:6379'),
+              orphan('a-crit', '10.0.0.9:6379'),
+            ]
+          : [];
+      });
+
+      await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
+
+      expect((await divergenceHistory())[0].level).toBe('warning');
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
+      expect(restartRecoveries()).toEqual([]);
+    });
+
+    it('sends no second recovered webhook when closing a replica\'s events is retried', async () => {
+      storage.getAnomalyEvents.mockResolvedValueOnce([
+        orphan('a-warn', '10.0.0.2:6379'),
+        orphan('a-crit', '10.0.0.2:6379'),
+      ]);
+      storage.resolveOpenAnomaly.mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
+
+      await feed([0, 0, 0, 0], T0);
+
+      expect(storage.resolveOpenAnomaly).toHaveBeenCalledTimes(3);
+      expect(restartRecoveries()).toHaveLength(1);
+      expect((service as any).divergenceOrphans.has('conn-1')).toBe(false);
+    });
+
+    it('reports a replica with only stored windows as unobserved', async () => {
+      storage.getReplicationDivergenceWindows.mockResolvedValueOnce([
+        {
+          id: 'w1',
+          connectionId: 'conn-1',
+          replicaAddr: '10.0.0.2:6379',
+          windowStart: T0,
+          windowEnd: T0 + 30_000,
+          gapBytes: 2 * MiB,
+          bytesPerSec: MiB,
+          secondsBehind: 2,
+        },
+      ]);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.level).toBe('unobserved');
+    });
+
+    it('retries the orphan sweep on the next poll when storage cannot be read', async () => {
+      storage.getAnomalyEvents.mockRejectedValueOnce(new Error('db down'));
+
+      await feed([2], T0);
+
+      expect(storage.getAnomalyEvents).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls back to in-memory windows when storage cannot be read', async () => {
+      await feed([2, 4, 6], T0);
+      storage.getReplicationDivergenceWindows.mockRejectedValueOnce(new Error('db down'));
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+      expect(replica.replica).toBe('10.0.0.2:6379');
+      expect(replica.windows.map((w) => w.gapBytes)).toEqual([2 * MiB, 4 * MiB]);
+    });
+
+    it('evaluates divergence after the poll, even when a later detector fails', async () => {
+      const sample = { role: 'primary', replicas: [] };
+      const detect = jest.fn().mockResolvedValue(undefined);
+      const order: string[] = [];
+      (service as any).replicationStream = { observe: () => sample, forget: jest.fn() };
+      (service as any).detectReplicationDivergence = (...args: unknown[]) => {
+        order.push('divergence');
+        return detect(...args);
+      };
+      (service as any).detectLargeReplyPressure = async () => {
+        order.push('pressure');
+        throw new Error('boom');
+      };
+
+      await expect((service as any).pollConnection(mockCtx)).rejects.toThrow('boom');
+
+      expect(order).toEqual(['pressure', 'divergence']);
+      expect(detect).toHaveBeenCalledWith(sample, mockCtx);
+    });
+
+    it('retries resolving a superseded warning that storage could not resolve', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('db down'));
+
+      await feed([130, 140, 150], t);
+
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual([
+        'warning',
+        'critical',
+      ]);
+      await (service as any).drainPersistenceOutbox();
+
+      const attempts = storage.resolveAnomaly.mock.calls.filter(([id]: [string]) => id === warningId);
+      expect(attempts.length).toBe(2);
+      expect((service as any).persistenceOutbox.size).toBe(0);
+    });
+
+    it('saves a finding once, as it was sent, when the first save fails', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+      await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
+      await (service as any).drainPersistenceOutbox();
+
+      const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+      const saved = storage.saveAnomalyEvent.mock.calls.map(([event]: [{ id: string; message: string; value: number }]) => event);
+      expect(saved.map((event: { id: string }) => event.id)).toEqual([replica.eventId, replica.eventId]);
+      expect(saved[1].message).toBe(divergenceHook.mock.calls[0][0].message);
+      expect(saved[1].value).toBe(divergenceHook.mock.calls[0][0].gapBytes);
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual(['warning']);
+    });
+
+    describe('reading its own replicas', () => {
+      const REPLID = 'b'.repeat(40);
+      const ADDR = '10.0.0.2:6379';
+      let primaryGap: number;
+      let replica: { info: jest.Mock; disconnect: jest.Mock };
+      let getReplicaConnection: jest.Mock;
+
+      function replicaReply(gap: number, replid = REPLID) {
+        return [
+          '# Replication',
+          'role:slave',
+          `master_replid:${replid}`,
+          'master_link_status:up',
+          `slave_repl_offset:${1_000 * MiB - gap}`,
+        ].join('\r\n');
+      }
+
+      beforeEach(() => {
+        primaryGap = 0;
+        (dbClient.getInfoParsed as jest.Mock).mockImplementation(async () => ({
+          replication: {
+            role: 'master',
+            master_replid: REPLID,
+            master_repl_offset: String(1_000 * MiB),
+            slave0: `ip=10.0.0.2,port=6379,state=online,offset=${1_000 * MiB - primaryGap},lag=0`,
+          },
+        }));
+        (dbClient as any).getClients = jest.fn().mockResolvedValue([{ addr: '10.0.0.2:51234' }]);
+        replica = { info: jest.fn().mockResolvedValue(replicaReply(0)), disconnect: jest.fn() };
+        getReplicaConnection = jest.fn().mockResolvedValue(replica);
+        (service as any).clusterDiscovery = { getReplicaConnection };
+      });
+
+      const disagreements = () =>
+        service
+          .getRecentEvents(20, MetricType.REPLICATION_DIVERGENCE)
+          .filter((event) => event.message.includes('disagree on how far behind it is'));
+
+      const persistedViews = async () => {
+        await (service as any).drainPersistenceOutbox();
+        return storage.saveReplicationDivergenceWindows.mock.calls
+          .flatMap(([rows]: [Array<{ replicaView: string | null; replicaGapBytes: number | null }>]) => rows)
+          .map((row) => [row.replicaView, row.replicaGapBytes]);
+      };
+
+      it("dials a replica it has no connection for with the primary's credentials", async () => {
+        replica.info.mockResolvedValue(replicaReply(MiB / 2));
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1');
+        expect(await persistedViews()).toContainEqual(['ok', MiB / 2]);
+      });
+
+      it('does not send credentials to an address no replica is connected from', async () => {
+        (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '10.0.0.9:51234' }]);
+
+        await feed([0, 0, 0], T0);
+
+        expect(dbClient.getClients).toHaveBeenCalledWith({ type: 'replica' });
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view]) => view === 'unreachable')).toBe(true);
+      });
+
+      it('does not dial the replica when the primary refuses CLIENT LIST', async () => {
+        (dbClient.getClients as jest.Mock).mockRejectedValue(new Error('NOPERM'));
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('stores an unreachable replica without its own gap', async () => {
+        getReplicaConnection.mockRejectedValue(new Error('refused'));
+
+        await feed([0, 0, 0], T0);
+
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view, gap]) => view === 'unreachable' && gap === null)).toBe(true);
+      });
+
+      it('stores a replica that follows another history without its own gap', async () => {
+        replica.info.mockResolvedValue(replicaReply(0, 'c'.repeat(40)));
+
+        await feed([0, 0, 0], T0);
+
+        const views = await persistedViews();
+        expect(views.length).toBeGreaterThan(0);
+        expect(views.every(([view, gap]) => view === 'replid_mismatch' && gap === null)).toBe(true);
+      });
+
+      it('does not dial the replicas of a Sentinel connection', async () => {
+        (dbClient as any).getCapabilities = jest.fn().mockReturnValue({ isSentinel: true });
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('does not dial the replicas of a Sentinel member', async () => {
+        (service as any).connectionRegistry.getConfig.mockReturnValue({
+          id: 'conn-1',
+          membership: { source: 'sentinel', seedId: 'seed-s', nodeId: 'n' },
+        });
+
+        await feed([0, 0, 0], T0);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('raises a warning while the two views disagree and resolves it once they agree', async () => {
+        const divergenceHook = (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+        replica.info.mockResolvedValue(replicaReply(20 * MiB));
+
+        let t = await feed([0, 0, 0, 0, 0, 0], T0);
+
+        const [raised] = disagreements();
+        expect(disagreements()).toHaveLength(1);
+        expect(raised).toMatchObject({
+          severity: AnomalySeverity.WARNING,
+          value: 20 * MiB,
+          replicaAddr: ADDR,
+          resolved: false,
+        });
+        expect(raised.message).toContain('the primary sees 0 B, the replica reports 20 MB');
+        expect(divergenceHook).not.toHaveBeenCalled();
+        await (service as any).drainPersistenceOutbox();
+        expect(storage.saveAnomalyEvent).toHaveBeenCalledWith(
+          expect.objectContaining({ id: raised.id, dedupeKey: 'replica-views' }),
+          'conn-1',
+        );
+        expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+
+        replica.info.mockResolvedValue(replicaReply(0));
+        t = await feed([0, 0, 0], t);
+
+        expect(disagreements()).toEqual([expect.objectContaining({ id: raised.id, resolved: true })]);
+        const replicaState = (service as any).divergenceState.get('conn-1').replicas.get(ADDR);
+        expect(replicaState?.disagreeEventId ?? null).toBeNull();
+      });
+
+      it('keeps the primary re-read when another replica hangs', async () => {
+        const other = { info: jest.fn().mockReturnValue(new Promise(() => undefined)), disconnect: jest.fn() };
+        getReplicaConnection.mockImplementation(async (host: string) => (host === '10.0.0.3' ? other : replica));
+        (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '10.0.0.2:51234' }, { addr: '10.0.0.3:51234' }]);
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 700);
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [ADDR, '10.0.0.3:6379'], true, async () => ({
+          master_repl_offset: String(1_000 * MiB),
+          master_replid: REPLID,
+        }));
+
+        expect(samples.get(ADDR)).toMatchObject({ status: 'ok' });
+        expect(samples.get('10.0.0.3:6379')).toMatchObject({ status: 'unreachable' });
+      });
+
+      const readPrimary = async () => ({ master_repl_offset: String(1_000 * MiB), master_replid: REPLID });
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+      it('drops the connection of a replica whose read hangs and reads it afresh next time', async () => {
+        replica.info.mockReturnValueOnce(new Promise(() => undefined));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+
+        const first = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+        await settle();
+        (service as any).crossCheckDeadline.set('conn-1', null);
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(first.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.disconnect).toHaveBeenCalledTimes(1);
+        expect(second.get(ADDR)).toMatchObject({ status: 'ok' });
+      });
+
+      it('keeps the connection when the replica refuses the read', async () => {
+        replica.info.mockRejectedValueOnce(new Error('NOPERM'));
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(samples.get(ADDR)).toMatchObject({ status: 'unreachable' });
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('does not dial a replica again while the last dial has not returned', async () => {
+        getReplicaConnection.mockReturnValueOnce(new Promise(() => undefined));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+        (service as any).crossCheckDeadline.set('conn-1', null);
+        const second = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(getReplicaConnection).toHaveBeenCalledTimes(1);
+        expect(second.get(ADDR)).toMatchObject({ status: 'unreachable' });
+      });
+
+      it('reads a replica through its own connection once registered, while a discovered dial still hangs', async () => {
+        getReplicaConnection.mockReturnValueOnce(new Promise(() => undefined));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        const registry = (service as any).connectionRegistry;
+        registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.0.2' ? 'conn-r' : null));
+        registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+        const getInfoParsed = jest.fn().mockResolvedValue({
+          replication: {
+            role: 'slave',
+            master_replid: REPLID,
+            master_link_status: 'up',
+            slave_repl_offset: String(1_000 * MiB),
+          },
+        });
+        registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+        (service as any).crossCheckDeadline.set('conn-1', null);
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        expect(samples.get(ADDR)).toMatchObject({ status: 'ok' });
+      });
+
+      it('dials a replica announced by hostname when it is connected from an address the name resolves to', async () => {
+        const named = 'replica-0.cache.svc:6379';
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.2']));
+        (dbClient.getClients as jest.Mock).mockResolvedValue([{ addr: '::ffff:10.0.0.2:51234' }]);
+
+        const samples = await (service as any).sampleReplicas(mockCtx, [named], true, readPrimary);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1', 'replica-0.cache.svc');
+        expect(samples.get(named)).toMatchObject({ status: 'ok' });
+      });
+
+      it('dials only the resolved address a replica is connected from', async () => {
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.9', '10.0.0.2']));
+
+        await (service as any).sampleReplicas(mockCtx, ['replica-0.cache.svc:6379'], true, readPrimary);
+
+        expect(getReplicaConnection).toHaveBeenCalledWith('10.0.0.2', 6379, 'conn-1', 'replica-0.cache.svc');
+      });
+
+      it('sends no command on a connection that arrives after the read budget', async () => {
+        let connect!: (client: typeof replica) => void;
+        getReplicaConnection.mockReturnValueOnce(new Promise((resolve) => (connect = resolve)));
+        (service as any).crossCheckDeadline.set('conn-1', Date.now() + 600);
+        await (service as any).sampleReplicas(mockCtx, [ADDR], true, readPrimary);
+
+        connect(replica);
+        await settle();
+
+        expect(replica.info).not.toHaveBeenCalled();
+        expect(replica.disconnect).not.toHaveBeenCalled();
+      });
+
+      it('does not dial a hostname that resolves away from every connected replica', async () => {
+        jest.spyOn(service as any, 'resolveHost').mockResolvedValue(new Set(['10.0.0.9']));
+
+        await (service as any).sampleReplicas(mockCtx, ['replica-0.cache.svc:6379'], true, readPrimary);
+
+        expect(getReplicaConnection).not.toHaveBeenCalled();
+      });
+
+      it('closes a disagreement left open by a restart without a recovery webhook', async () => {
+        const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+        storage.getAnomalyEvents.mockResolvedValueOnce([
+          {
+            id: 'views-1',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            resolved: false,
+            message: 'WARNING: views disagree',
+            replicaAddr: ADDR,
+            dedupeKey: 'replica-views',
+          },
+        ]);
+
+        await feed([0, 0, 0], T0);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('views-1', expect.any(Number));
+        expect(recoveredHook).not.toHaveBeenCalled();
+        const [history] = await divergenceHistory();
+        expect(history.level).not.toBe('behind');
+      });
+
+      it('retries a dropped close of a restored disagreement without opening a divergence orphan', async () => {
+        storage.getAnomalyEvents.mockResolvedValueOnce([
+          {
+            id: 'views-1',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            resolved: false,
+            message: 'WARNING: views disagree',
+            replicaAddr: ADDR,
+            dedupeKey: 'replica-views',
+          },
+        ]);
+        const retire = jest.spyOn(service as any, 'retireDivergenceEvent');
+        jest.spyOn(service as any, 'resolveAnomalyOutcome').mockImplementation(async (...args: unknown[]) => {
+          (args[1] as () => void)?.();
+          return 'retry';
+        });
+
+        await feed([0, 0, 0], T0);
+
+        const orphaned = [...(service as any).divergenceOrphans.values()].flatMap((orphans: Map<string, unknown>) => [
+          ...orphans.keys(),
+        ]);
+        expect(orphaned).not.toContain(ADDR);
+        expect(retire).toHaveBeenCalledWith('conn-1', 'views-1');
+      });
+
+      it('holds back recovery while the replica still reports it is behind', async () => {
+        const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+        replica.info.mockResolvedValue(replicaReply(400 * MiB));
+        primaryGap = 400 * MiB;
+        let t = await feed([2, 4, 6, 8, 10, 12], T0);
+        expect((webhookEventsProService as any).dispatchReplicationDivergence).toHaveBeenCalledTimes(1);
+
+        primaryGap = 0;
+        t = await feed([0, 0, 0], t);
+        expect(recoveredHook).not.toHaveBeenCalled();
+
+        replica.info.mockResolvedValue(replicaReply(0));
+        await feed([0, 0], t);
+        expect(recoveredHook).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('across the topology', () => {
+      const NODE = '10.0.1.5:6379';
+      const NODE_REPLICA = '10.0.1.6:6379';
+      const target = { addr: NODE, host: '10.0.1.5', port: 6379, nodeId: 'node-b' };
+
+      function infoReply(masterOffset: number, gap: number, role = 'master') {
+        const lines = ['# Stats', 'instantaneous_ops_per_sec:250', 'total_error_replies:7'];
+        lines.push('# Replication', `role:${role}`, `master_replid:${'b'.repeat(40)}`);
+        lines.push(`master_repl_offset:${masterOffset}`);
+        if (role === 'master') {
+          lines.push('connected_slaves:1');
+          lines.push(`slave0:ip=10.0.1.6,port=6379,state=online,offset=${masterOffset - gap},lag=0`);
+        }
+        return lines.join('\r\n');
+      }
+
+      function nodeClient(gapsMiB: number[], role = 'master') {
+        let call = 0;
+        return {
+          info: jest.fn().mockImplementation(async (section?: string) => {
+            const step = Math.min(Math.floor(call / 3), gapsMiB.length - 1);
+            const reply = infoReply(1_000 * MiB + call * 10 * MiB, gapsMiB[step] * MiB, role);
+            if (section === 'replication') call++;
+            return reply;
+          }),
+        };
+      }
+
+      async function poll(
+        targets: TopologyTarget[],
+        times: number,
+        start: number,
+        members = new Set(targets.map((t) => t.addr)),
+      ): Promise<number> {
+        let t = start;
+        for (let i = 0; i < times; i++) {
+          jest.spyOn(Date, 'now').mockReturnValue(t);
+          await (service as any).detectTopologyAnomalies(mockCtx, { targets, members });
+          t += 10_000;
+        }
+        return t;
+      }
+
+      it('alerts on a replica of a primary the seed does not see', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+        await poll([target], 18, T0);
+
+        const hook = (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+        expect(hook).toHaveBeenCalledTimes(1);
+        expect(hook.mock.calls[0][0]).toMatchObject({
+          replica: NODE_REPLICA,
+          connectionId: 'conn-1',
+          instance: { host: '10.0.1.5', port: 6379 },
+          correlatedSignals: [],
+        });
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event).toMatchObject({ connectionId: 'conn-1', nodeAddr: NODE, replicaAddr: NODE_REPLICA });
+        expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-b', 'conn-1');
+        expect((await divergenceHistory()).map((h) => h.replica)).toContain(NODE_REPLICA);
+      });
+
+      describe('cross-checked against the replica', () => {
+        const replicaNode = { id: 'node-r', address: `${NODE_REPLICA}@16379`, role: 'replica', flags: ['slave'] };
+
+        function replicaClient(offset: number, link = 'up', readOffset = offset) {
+          return {
+            info: jest.fn().mockResolvedValue(
+              [
+                '# Replication',
+                'role:slave',
+                `master_replid:${'b'.repeat(40)}`,
+                `master_link_status:${link}`,
+                `slave_repl_offset:${offset}`,
+                `slave_read_repl_offset:${readOffset}`,
+              ].join('\r\n'),
+            ),
+          };
+        }
+
+        function clusterWith(primary: object, replica: object | Error) {
+          (service as any).clusterViews.set('conn-1', new Set(['node-b', 'node-r']));
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            discoverNodes: jest.fn().mockResolvedValue([replicaNode]),
+            getNodeConnection: jest.fn().mockImplementation(async (id: string) => {
+              if (id === 'node-b') return primary;
+              if (replica instanceof Error) throw replica;
+              return replica;
+            }),
+          };
+        }
+
+        const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+
+        it('skips the divergence alert when the replica reports it is caught up', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).not.toHaveBeenCalled();
+          expect(
+            service
+              .getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)
+              .every((event) => event.message.includes('disagree on how far behind it is')),
+          ).toBe(true);
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-r', 'conn-1');
+        });
+
+        it('alerts with the replica view when the replica agrees it is behind', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(100 * MiB, 'up', 300 * MiB));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          const data = hook().mock.calls[0][0];
+          expect(data.replicaView).toMatchObject({ linkStatus: 'up', applyBacklogBytes: 200 * MiB });
+          expect(data.replicaView.gapBytes).toBeGreaterThan(900 * MiB);
+          expect(data.message).toContain('The replica confirms it is');
+          expect(data.message).toContain('slow to apply');
+          const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+          expect(event.message).toBe(data.message);
+        });
+
+        it('alerts when the replica reports its link is down, even with a small gap', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB, 'down'));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].message).toContain('link to the primary is down');
+        });
+
+        it('alerts as before when the replica cannot be read', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), new Error('refused'));
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+          expect(hook().mock.calls[0][0].message).not.toContain('The replica');
+        });
+
+        it('ignores a replica that follows a different replication history', async () => {
+          const other = replicaClient(10_000 * MiB);
+          other.info.mockResolvedValue(
+            ['# Replication', 'role:slave', `master_replid:${'c'.repeat(40)}`, 'master_link_status:up', `slave_repl_offset:${10_000 * MiB}`].join('\r\n'),
+          );
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), other);
+
+          await poll([target], 18, T0);
+
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+        });
+
+        it('reads a Sentinel replica by address with the data-node credentials', async () => {
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const replica = replicaClient(10_000 * MiB);
+          const registry = (service as any).connectionRegistry;
+          registry.sentinelDataNodeCredentials.mockReturnValue({ username: 'data', password: 'secret' });
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection: jest.fn().mockImplementation(async (host: string) =>
+              host === '10.0.1.6' ? replica : primary,
+            ),
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(hook()).not.toHaveBeenCalled();
+          expect((service as any).clusterDiscovery.getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+        });
+
+        it('does not dial a replica that Sentinel does not report', async () => {
+          (service as any).connectionRegistry.sentinelDataNodeCredentials.mockReturnValue({ username: 'data', password: 'secret' });
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set(['10.0.9.9:6379']));
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const getAddressConnection = jest.fn().mockResolvedValue(primary);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection,
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(getAddressConnection).not.toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+          expect(hook()).toHaveBeenCalledTimes(1);
+          expect(hook().mock.calls[0][0].replicaView).toBeNull();
+        });
+
+        it('does not dial a Sentinel replica without data-node credentials', async () => {
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
+          const primary = nodeClient([2, 4, 6, 8, 10, 12]);
+          const getAddressConnection = jest.fn().mockResolvedValue(primary);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getAddressConnection,
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 18, T0);
+
+          expect(getAddressConnection).not.toHaveBeenCalledWith('10.0.1.6', 6379, 'conn-1');
+          expect(hook()).toHaveBeenCalledTimes(1);
+        });
+
+        it('reads the replica of a Sentinel member through its seed', async () => {
+          const replica = replicaClient(10_000 * MiB);
+          const registry = (service as any).connectionRegistry;
+          registry.getConfig.mockImplementation((id: string) =>
+            id === 'conn-1' ? { id, membership: { source: 'sentinel', seedId: 'seed-s', nodeId: 'n' } } : null,
+          );
+          registry.sentinelDataNodeCredentials.mockImplementation((id: string) =>
+            id === 'seed-s' ? { username: 'data', password: 'secret' } : null,
+          );
+          (service as any).sentinelReplicaAddrs.set('seed-s', new Set(['10.0.1.6:6379']));
+          const getAddressConnection = jest.fn().mockResolvedValue(replica);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getAddressConnection };
+
+          const samples = await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, async () => ({
+            master_repl_offset: String(1_000 * MiB),
+            master_replid: 'b'.repeat(40),
+          }));
+
+          expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.6', 6379, 'seed-s');
+          expect(samples.get(NODE_REPLICA).view).toMatchObject({ gapBytes: 0, linkStatus: 'up' });
+        });
+
+        it('skips the cross-check once the poll has used up its time', async () => {
+          clusterWith(nodeClient([2]), replicaClient(10_000 * MiB));
+          (service as any).crossCheckDeadline.set('conn-1', T0 - 1);
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          const readPrimary = jest.fn();
+
+          const samples = await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, readPrimary);
+
+          expect(samples.get(NODE_REPLICA)).toMatchObject({ status: 'unreachable', view: null });
+          expect(readPrimary).not.toHaveBeenCalled();
+          expect((service as any).clusterDiscovery.discoverNodes).not.toHaveBeenCalled();
+        });
+
+        it('reads the replica before the primary', async () => {
+          const order: string[] = [];
+          const replica = replicaClient(10_000 * MiB);
+          replica.info.mockImplementation(async () => {
+            order.push('replica');
+            return ['# Replication', 'role:slave', `master_replid:${'b'.repeat(40)}`, 'slave_repl_offset:1'].join('\r\n');
+          });
+          clusterWith(nodeClient([2]), replica);
+
+          await (service as any).sampleReplicas(mockCtx, [NODE_REPLICA], false, async () => {
+            order.push('primary');
+            return { master_repl_offset: '1', master_replid: 'b'.repeat(40) };
+          });
+
+          expect(order).toEqual(['replica', 'primary']);
+        });
+
+        it('keeps Sentinel replica connections open across the topology prune', async () => {
+          (service as any).sentinelReplicaAddrs.set('conn-1', new Set([NODE_REPLICA]));
+          const retainAddressConnections = jest.fn().mockResolvedValue(undefined);
+          (service as any).clusterDiscovery = {
+            retainAddressConnections,
+            getAddressConnection: jest.fn().mockResolvedValue(nodeClient([2])),
+          };
+          const { nodeId: _nodeId, ...byAddress } = target;
+
+          await poll([byAddress], 1, T0);
+
+          expect(retainAddressConnections).toHaveBeenCalledWith('conn-1', new Set([NODE, NODE_REPLICA]));
+        });
+
+        it('reads a replica that is registered as its own connection', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), new Error('not used'));
+          const registry = (service as any).connectionRegistry;
+          registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.1.6' ? 'conn-r' : null));
+          registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+          const getInfoParsed = jest.fn().mockResolvedValue({
+            replication: {
+              role: 'slave',
+              master_replid: 'b'.repeat(40),
+              master_link_status: 'up',
+              slave_repl_offset: 10_000 * MiB,
+            },
+          });
+          registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+
+          await poll([target], 18, T0);
+
+          expect(getInfoParsed).toHaveBeenCalledWith(['replication']);
+          expect(hook()).not.toHaveBeenCalled();
+          expect((service as any).clusterDiscovery.getNodeConnection).not.toHaveBeenCalledWith('node-r', 'conn-1');
+        });
+
+        it('reads through cluster discovery when the replica connection is down', async () => {
+          clusterWith(nodeClient([2, 4, 6, 8, 10, 12]), replicaClient(10_000 * MiB));
+          const registry = (service as any).connectionRegistry;
+          registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.1.6' ? 'conn-r' : null));
+          registry.list.mockReturnValue([{ id: 'conn-r', isConnected: false }]);
+
+          await poll([target], 18, T0);
+
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-r', 'conn-1');
+          expect(hook()).not.toHaveBeenCalled();
+        });
+      });
+
+      it('evaluates retry amplification with the node INFO', async () => {
+        const client = nodeClient([2]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const retry = jest.spyOn(service as any, 'detectRetryAmplification');
+
+        await poll([target], 1, T0);
+
+        expect(retry).toHaveBeenCalledWith(
+          expect.objectContaining({
+            role: 'master',
+            connected_slaves: '1',
+            instantaneous_ops_per_sec: '250',
+            total_error_replies: '7',
+          }),
+          expect.objectContaining({ connectionId: 'conn-1', host: '10.0.1.5', port: 6379 }),
+          T0,
+          NODE,
+        );
+      });
+
+      it('skips retry amplification on a node that reports a replica role', async () => {
+        const client = nodeClient([2], 'slave');
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const retry = jest.spyOn(service as any, 'detectRetryAmplification');
+
+        await poll([target], 1, T0);
+
+        expect(client.info).toHaveBeenCalled();
+        expect(retry).not.toHaveBeenCalled();
+      });
+
+      it('leaves a primary another connection already covers', async () => {
+        const client = nodeClient([2]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        jest.spyOn(Date, 'now').mockReturnValue(T0);
+        (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
+
+        await poll([target], 1, T0);
+
+        expect(client.info).not.toHaveBeenCalled();
+      });
+
+      it('reaches a Sentinel-managed primary by address', async () => {
+        const client = nodeClient([2]);
+        const getAddressConnection = jest.fn().mockResolvedValue(client);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getAddressConnection };
+
+        await poll([{ addr: NODE, host: '10.0.1.5', port: 6379 }], 1, T0);
+
+        expect(getAddressConnection).toHaveBeenCalledWith('10.0.1.5', 6379, 'conn-1');
+        expect(client.info.mock.calls).toEqual([['clients'], ['memory'], ['stats'], ['replication'], ['persistence']]);
+      });
+
+      describe('Sentinel targets', () => {
+        const masters = [{ name: 'alpha', ip: '10.0.1.5', port: 6379, runid: 'r', flags: ['master'], fields: {} }];
+        const credentials = () =>
+          (service as any).connectionRegistry.sentinelDataNodeCredentials as jest.Mock;
+        const config = (value: object | null) => {
+          (service as any).connectionRegistry.getConfig = jest.fn().mockReturnValue(value);
+        };
+
+        beforeEach(() => {
+          (service as any).sentinelMastersSnapshot.set('conn-1', masters);
+        });
+
+        it('fans out when the connection has data-node credentials', () => {
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
+            scope: { targets: [{ addr: NODE, host: '10.0.1.5', port: 6379 }], members: new Set([NODE]) },
+            gap: null,
+          });
+        });
+
+        it('does not send the Sentinel credentials to the primaries it reports', () => {
+          credentials().mockReturnValue(null);
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
+            scope: { targets: [], members: new Set() },
+            gap: { reason: 'no_sentinel_credentials', notDialed: 1 },
+          });
+        });
+
+        it('reports the topology as unknown until SENTINEL MASTERS has been read', () => {
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
+          (service as any).sentinelMastersSnapshot.delete('conn-1');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx)).toEqual({
+            scope: null,
+            gap: { reason: 'topology_unknown', notDialed: 0 },
+          });
+        });
+
+        it('reports the topology as unreadable once SENTINEL MASTERS fails', async () => {
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
+          (dbClient as any).getSentinelMasters = jest.fn().mockRejectedValue(new Error('NOPERM'));
+
+          await (service as any).detectSentinelDrift(mockCtx, T0, { redis_mode: 'sentinel' });
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'topology_unreadable',
+            notDialed: 0,
+          });
+        });
+
+        it.each([
+          ['an SSH tunnel', { sshTunnel: { enabled: true } }, 'ssh_tunnel'],
+          ['the agent', { host: 'agent' }, 'agent_connection'],
+        ])('names %s, not the credentials, and does not log a fix', (_case, value, reason) => {
+          credentials().mockReturnValue(null);
+          config(value);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe(reason);
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('names a data-node password it cannot decrypt', () => {
+          credentials().mockReturnValue(null);
+          config({ nodePassword: 'ciphertext', nodePasswordEncrypted: true });
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe(
+            'sentinel_credentials_unreadable',
+          );
+          expect(String(warn.mock.calls[0][0])).toContain('ENCRYPTION_KEY');
+        });
+
+        it('names other stored secrets, not the data-node password, when those failed to decrypt', () => {
+          credentials().mockReturnValue(null);
+          config({ nodeUsername: 'app', nodePassword: 'secret', credentialStatus: 'decryption_failed' });
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe(
+            'connection_secrets_unreadable',
+          );
+        });
+
+        it('names missing credentials when there are none, whatever else failed to decrypt', () => {
+          credentials().mockReturnValue(null);
+          config({ credentialStatus: 'decryption_failed' });
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe('no_sentinel_credentials');
+        });
+
+        it('keeps the topology it just read when the work after SENTINEL MASTERS fails', async () => {
+          credentials().mockReturnValue({ username: 'app', password: 'secret' });
+          (service as any).sentinelMastersSnapshot.delete('conn-1');
+          (dbClient as any).getSentinelMasters = jest.fn().mockResolvedValue(masters);
+          (dbClient as any).getSentinelReplicas = jest.fn().mockResolvedValue([]);
+          jest.spyOn(service as any, 'applyTopologyPersistenceGate').mockRejectedValue(new Error('storage down'));
+
+          await (service as any).detectSentinelDrift(mockCtx, T0, { redis_mode: 'sentinel' });
+
+          expect((service as any).sentinelMastersFailed.has('conn-1')).toBe(false);
+          expect((service as any).sentinelMastersSnapshot.get('conn-1')).toBe(masters);
+          expect((service as any).sentinelReplicaAddrs.has('conn-1')).toBe(true);
+          const { scope, gap } = (service as any).sentinelDivergenceTargets(mockCtx);
+          expect(gap).toBeNull();
+          expect(scope).toEqual({ targets: [{ addr: NODE, host: '10.0.1.5', port: 6379 }], members: new Set([NODE]) });
+        });
+
+        it('names certificate auth, which the connection form stores no data-node settings for', () => {
+          credentials().mockReturnValue(null);
+          config({ authMode: 'certificate' });
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap.reason).toBe('certificate_auth');
+          expect(String(warn.mock.calls[0][0])).toContain('nodeUsername ""');
+        });
+
+        it('reports no gap when every primary is its own connection', () => {
+          credentials().mockReturnValue(null);
+          (service as any).connectionRegistry.list = jest
+            .fn()
+            .mockReturnValue([{ id: 'conn-p', host: '10.0.1.5', port: 6379, isConnected: true }]);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'no_targets',
+            notDialed: 0,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('reports no gap when another Sentinel already checks every primary', () => {
+          credentials().mockReturnValue(null);
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [{ addr: NODE, host: '10.0.1.5', port: 6379 }], T0, 30_000);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          expect((service as any).sentinelDivergenceTargets(mockCtx).gap).toEqual({
+            reason: 'covered_elsewhere',
+            notDialed: 0,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        describe('without data-node credentials', () => {
+          let warn: jest.SpyInstance;
+          const notices = () =>
+            warn.mock.calls.filter(([msg]) => String(msg).includes('no data-node credentials'));
+
+          beforeEach(() => {
+            credentials().mockReturnValue(null);
+            (service as any).clusterDiscovery = {
+              retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+              releaseConnection: jest.fn().mockResolvedValue(undefined),
+            };
+            warn = jest.spyOn((service as any).logger, 'warn');
+          });
+
+          async function pollSentinel(at: number): Promise<void> {
+            jest.spyOn(Date, 'now').mockReturnValue(at);
+            const { scope, gap } = (service as any).sentinelDivergenceTargets(mockCtx);
+            await (service as any).detectTopologyAnomalies(mockCtx, scope, gap, 'sentinel');
+          }
+
+          it('surfaces the primaries as not dialed and says what to set', async () => {
+            await pollSentinel(T0);
+
+            expect(service.getFanoutCoverage('conn-1')).toEqual([
+              {
+                connectionId: 'conn-1',
+                topology: 'sentinel',
+                checked: 0,
+                unreachable: 0,
+                authFailed: 0,
+                skipped: 0,
+                notDialed: 1,
+                reason: 'no_sentinel_credentials',
+                tunnelled: false,
+                targetLimit: TOPOLOGY_TARGET_LIMIT,
+                timeoutMs: 2_000,
+                timestamp: T0,
+                ageMs: 0,
+                stale: false,
+              },
+            ]);
+            expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledWith('conn-1', {
+              checked: 0,
+              unreachable: 0,
+              authFailed: 0,
+              skipped: 0,
+              notDialed: 1,
+              reason: 'no_sentinel_credentials',
+            });
+            expect(notices()).toHaveLength(1);
+            expect(String(notices()[0][0])).toContain('Test Connection');
+            expect(String(notices()[0][0])).toContain('nodeUsername/nodePassword');
+          });
+
+          it('logs the missing credentials once, and again after they were set and removed', async () => {
+            await pollSentinel(T0);
+            await pollSentinel(T0 + 10_000);
+            await pollSentinel(T0 + 20_000);
+            expect(notices()).toHaveLength(1);
+
+            credentials().mockReturnValue({ username: 'app', password: 'secret' });
+            (service as any).sentinelDivergenceTargets(mockCtx);
+            expect(notices()).toHaveLength(1);
+
+            credentials().mockReturnValue(null);
+            await pollSentinel(T0 + 40_000);
+            expect(notices()).toHaveLength(2);
+          });
+
+          it('does not log again while another connection claims the primaries and lets go', async () => {
+            const primary = [{ addr: NODE, host: '10.0.1.5', port: 6379 }];
+            await pollSentinel(T0);
+            (service as any).topologyTargetClaims.claim('conn-2', primary, T0 + 10_000, 30_000);
+            await pollSentinel(T0 + 10_000);
+            expect(service.getFanoutCoverage('conn-1')[0].reason).toBe('covered_elsewhere');
+            (service as any).topologyTargetClaims.release('conn-2');
+            await pollSentinel(T0 + 20_000);
+
+            expect(service.getFanoutCoverage('conn-1')[0].reason).toBe('no_sentinel_credentials');
+            expect(notices()).toHaveLength(1);
+          });
+
+          it('records the gap through a Sentinel poll', async () => {
+            (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+              server: { role: 'master', redis_mode: 'sentinel' },
+            });
+            (dbClient as any).getSentinelMasters = jest.fn().mockResolvedValue(masters);
+            (dbClient as any).getSentinelReplicas = jest.fn().mockResolvedValue([]);
+            jest.spyOn(Date, 'now').mockReturnValue(T0);
+
+            await (service as any).pollConnection(mockCtx);
+
+            expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({
+              topology: 'sentinel',
+              notDialed: 1,
+              reason: 'no_sentinel_credentials',
+            });
+            expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith(
+              'conn-1',
+              expect.objectContaining({ notDialed: 1, reason: 'no_sentinel_credentials' }),
+            );
+          });
+
+          it('records the gap when cluster discovery is not available', async () => {
+            (service as any).clusterDiscovery = undefined;
+
+            await pollSentinel(T0);
+
+            expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({
+              notDialed: 1,
+              reason: 'no_sentinel_credentials',
+            });
+          });
+
+          it('forgets the notice and the coverage with the connection', async () => {
+            await pollSentinel(T0);
+
+            (service as any).onConnectionRemoved('conn-1');
+
+            expect(service.getFanoutCoverage('conn-1')).toEqual([]);
+            expect((service as any).fanoutGapNoticed.has('conn-1')).toBe(false);
+          });
+        });
+      });
+
+      describe('coverage', () => {
+        const other = { addr: '10.0.1.7:6379', host: '10.0.1.7', port: 6379, nodeId: 'node-c' };
+        const latest = () => service.getFanoutCoverage('conn-1')[0];
+
+        function discovery(client: unknown = nodeClient([2])) {
+          (service as any).clusterDiscovery = {
+            retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+            getNodeConnection: jest.fn().mockResolvedValue(client),
+          };
+          return (service as any).clusterDiscovery.getNodeConnection as jest.Mock;
+        }
+
+        it('counts the primaries it read', async () => {
+          discovery();
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toEqual({
+            connectionId: 'conn-1',
+            topology: null,
+            checked: 2,
+            unreachable: 0,
+            authFailed: 0,
+            skipped: 0,
+            notDialed: 0,
+            reason: null,
+            tunnelled: false,
+            targetLimit: TOPOLOGY_TARGET_LIMIT,
+            timeoutMs: 2_000,
+            timestamp: T0,
+            ageMs: 0,
+            stale: false,
+          });
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', {
+            checked: 2,
+            unreachable: 0,
+            authFailed: 0,
+            skipped: 0,
+            notDialed: 0,
+            reason: null,
+          });
+        });
+
+        it('counts a primary it cannot reach, and keeps counting it while it backs off', async () => {
+          const client = nodeClient([2]);
+          const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
+            return client;
+          });
+
+          await poll([target, other], 1, T0);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0, skipped: 0, reason: null });
+
+          // Inside the backoff window node-c is not retried but is still uncovered.
+          await poll([target, other], 1, T0 + (service as any).getIntervalMs() / 2);
+          expect(getNodeConnection.mock.calls.filter(([id]) => id === 'node-c')).toHaveLength(1);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0, skipped: 0 });
+        });
+
+        // ClusterDiscoveryService surfaces a connect-time refusal as
+        // `Failed to connect to host:port: <reply>`; the raw reply only ever
+        // comes back from a command on an open client.
+        const REFUSED = 'Failed to connect to 10.0.1.7:6379: WRONGPASS invalid username-password pair or user is disabled.';
+
+        it('counts a primary that refuses the credentials apart from unreachable ones', async () => {
+          const client = nodeClient([2]);
+          const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error(REFUSED);
+            return client;
+          });
+
+          await poll([target, other], 1, T0);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
+
+          await poll([target, other], 1, T0 + (service as any).getIntervalMs() / 2);
+          expect(getNodeConnection.mock.calls.filter(([id]) => id === 'node-c')).toHaveLength(1);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
+        });
+
+        it('counts a primary whose dial closed without a reply as unreachable', async () => {
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('Connection is closed.');
+            return nodeClient([2]);
+          });
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0 });
+        });
+
+        it('counts a primary whose ACL user may not run INFO as refusing the credentials', async () => {
+          const denied = {
+            info: jest.fn().mockRejectedValue(new Error("NOPERM User monitor has no permissions to run the 'info' command")),
+          };
+          discovery().mockImplementation(async (nodeId: string) => (nodeId === 'node-c' ? denied : nodeClient([2])));
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, authFailed: 1 });
+        });
+
+        it('does not read a code in the host name as a refusal', async () => {
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('connect ETIMEDOUT redis-noauth-0:6379');
+            return nodeClient([2]);
+          });
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, authFailed: 0 });
+        });
+
+        it('counts a primary the topology flags as failed as unreachable', async () => {
+          discovery();
+
+          await poll([target], 1, T0, new Set([NODE, other.addr]));
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1, skipped: 0, reason: null });
+        });
+
+        it('leaves a down primary to the one connection that holds it', async () => {
+          discovery();
+          const members = new Set([NODE, other.addr]);
+
+          await poll([target], 1, T0, members);
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [target], members },
+          );
+
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({
+            checked: 0,
+            unreachable: 0,
+            reason: 'covered_elsewhere',
+          });
+        });
+
+        it('reads a down primary from the connection whose topology still reaches it', async () => {
+          discovery();
+          const members = new Set([NODE, other.addr]);
+
+          // conn-1's seed flags node-c as failed and holds it as down.
+          await poll([target], 1, T0, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+
+          // conn-2's seed still reaches node-c: it takes it over and reads it.
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [target, other], members },
+          );
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({
+            checked: 1,
+            unreachable: 0,
+            skipped: 0,
+            reason: null,
+          });
+          expect((service as any).clusterDiscovery.getNodeConnection).toHaveBeenCalledWith('node-c', 'conn-2');
+
+          // conn-1 no longer counts it: the one connection counting node-c is the one reading it.
+          await poll([target], 1, T0 + 10_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, reason: null });
+        });
+
+        it('keeps a down primary with its holder while the takeover read fails', async () => {
+          discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
+            return nodeClient([2]);
+          });
+          const members = new Set([NODE, other.addr]);
+          const conn2 = () =>
+            (service as any).detectTopologyAnomalies(
+              { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+              { targets: [target, other], members },
+            );
+
+          await poll([target], 1, T0, members);
+          await conn2();
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+
+          await poll([target], 1, T0 + 10_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+          // Whether it retries node-c or backs off, conn-2 still leaves it to conn-1.
+          await conn2();
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+          await poll([target], 1, T0 + 20_000, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 1 });
+        });
+
+        it('takes over every down-held primary it read even when detection on one throws', async () => {
+          discovery();
+          const members = new Set([NODE, other.addr]);
+          await poll([], 1, T0, members);
+          jest.spyOn(service as any, 'detectRetryAmplification').mockRejectedValueOnce(new Error('detector bug'));
+
+          await expect(
+            (service as any).detectTopologyAnomalies(
+              { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+              { targets: [target, other], members },
+            ),
+          ).rejects.toThrow('detector bug');
+
+          const claims = (service as any).topologyTargetClaims;
+          expect(claims.heldByOther('conn-1', NODE, T0, 30_000)).toBe(true);
+          expect(claims.heldByOther('conn-1', other.addr, T0, 30_000)).toBe(true);
+          expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(false);
+        });
+
+        it('leaves a primary past the cap to the connection holding it as down, not skipped', async () => {
+          discovery();
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [], T0, 30_000, TOPOLOGY_TARGET_LIMIT, [other.addr]);
+          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT }, (_, i) => ({
+            addr: `10.0.0.${i}:6379`,
+            host: `10.0.0.${i}`,
+            port: 6379,
+            nodeId: `node-${i}`,
+          }));
+
+          await poll([...targets, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: TOPOLOGY_TARGET_LIMIT, skipped: 0 });
+        });
+
+        it('neither counts nor checks a takeover whose holder reclaimed the primary mid-read', async () => {
+          const claims = (service as any).topologyTargetClaims;
+          discovery().mockImplementation(async () => {
+            claims.claim('conn-1', [other], T0, 30_000);
+            return nodeClient([2]);
+          });
+          const detect = jest.spyOn(service as any, 'detectRetryAmplification');
+          const members = new Set([other.addr]);
+          await poll([], 1, T0, members);
+
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [other], members },
+          );
+
+          expect(service.getFanoutCoverage('conn-2')[0]).toMatchObject({ checked: 0, unreachable: 0 });
+          expect(detect).not.toHaveBeenCalled();
+          expect(claims.heldByOther('conn-2', other.addr, T0, 30_000)).toBe(true);
+        });
+
+        it('counts the primaries past the target cap as skipped', async () => {
+          discovery();
+          const targets = Array.from({ length: TOPOLOGY_TARGET_LIMIT + 3 }, (_, i) => ({
+            addr: `10.0.2.${i}:6379`,
+            host: `10.0.2.${i}`,
+            port: 6379,
+            nodeId: `node-${i}`,
+          }));
+
+          await poll(targets, 1, T0);
+
+          expect(latest()).toMatchObject({
+            checked: TOPOLOGY_TARGET_LIMIT,
+            unreachable: 0,
+            skipped: 3,
+            reason: null,
+          });
+        });
+
+        it('leaves a primary another connection checks out of every count', async () => {
+          discovery();
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [other], T0, 30_000);
+
+          await poll([target, other], 1, T0);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 0, skipped: 0, reason: null });
+
+          (service as any).topologyTargetClaims.release('conn-1');
+          (service as any).topologyTargetClaims.claim('conn-2', [target, other], T0 + 10_000, 30_000);
+          await poll([target, other], 1, T0 + 10_000);
+          expect(latest()).toMatchObject({
+            checked: 0,
+            unreachable: 0,
+            skipped: 0,
+            reason: 'covered_elsewhere',
+          });
+        });
+
+        it('reports no targets when every other primary is its own connection', async () => {
+          discovery();
+
+          await poll([], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 0, unreachable: 0, skipped: 0, reason: 'no_targets' });
+        });
+
+        it('records the reads even when detection on them throws', async () => {
+          discovery();
+          jest.spyOn(service as any, 'detectRetryAmplification').mockRejectedValue(new Error('storage down'));
+
+          await expect(poll([target, other], 1, T0)).rejects.toThrow('storage down');
+
+          expect(latest()).toMatchObject({ checked: 2, unreachable: 0, timestamp: T0 });
+        });
+
+        it('says the reads did not run when the storage work before them throws', async () => {
+          const getNodeConnection = discovery();
+          jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          await expect(poll([target, other], 1, T0)).rejects.toThrow('storage down');
+
+          expect(getNodeConnection).not.toHaveBeenCalled();
+          expect(latest()).toMatchObject({ checked: 0, notDialed: 2, reason: 'fanout_failed', timestamp: T0 });
+        });
+
+        it('keeps the backed-off and down counts, and lets its claims go, when the storage work throws', async () => {
+          const third = { addr: '10.0.1.8:6379', host: '10.0.1.8', port: 6379, nodeId: 'node-d' };
+          const members = new Set([NODE, other.addr, third.addr, '10.0.1.9:6379']);
+          const client = nodeClient([2]);
+          const getNodeConnection = discovery().mockImplementation(async (nodeId: string) => {
+            if (nodeId === 'node-c') throw new Error('ECONNREFUSED');
+            if (nodeId === 'node-d') throw new Error(REFUSED);
+            return client;
+          });
+          await poll([target, other, third], 1, T0, members);
+          expect(latest()).toMatchObject({ checked: 1, unreachable: 2, authFailed: 1 });
+          getNodeConnection.mockClear();
+          jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          const at = T0 + (service as any).getIntervalMs() / 2;
+          await expect(poll([target, other, third], 1, at, members)).rejects.toThrow('storage down');
+
+          expect(getNodeConnection).not.toHaveBeenCalled();
+          expect(latest()).toMatchObject({
+            checked: 0,
+            unreachable: 2,
+            authFailed: 1,
+            skipped: 0,
+            notDialed: 1,
+            reason: 'fanout_failed',
+            timestamp: at,
+          });
+          // Another connection of the topology may take the primaries over
+          // rather than report them covered here.
+          expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, at, 30_000)).toBe(false);
+          expect((service as any).topologyTargetClaims.heldByOther('conn-2', '10.0.1.9:6379', at, 30_000)).toBe(false);
+        });
+
+        it('says the primaries were not read when there is no cluster discovery to dial them', async () => {
+          (service as any).clusterDiscovery = undefined;
+
+          await poll([target, other], 1, T0);
+
+          expect(latest()).toMatchObject({ checked: 0, unreachable: 0, notDialed: 2, reason: 'fanout_failed' });
+        });
+
+        it('logs once per connection that cluster discovery is not available', async () => {
+          (service as any).clusterDiscovery = undefined;
+          const warn = jest.spyOn((service as any).logger, 'warn');
+          const notices = () => warn.mock.calls.filter(([msg]) => String(msg).includes('cluster discovery is not available'));
+
+          await poll([target, other], 2, T0);
+          expect(notices()).toHaveLength(1);
+          expect(notices()[0][0]).toContain('the topology lists');
+
+          // Another connection gets its own notice; a removed one is told again.
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' },
+            { targets: [{ addr: '10.0.3.1:6379', host: '10.0.3.1', port: 6379 }], members: new Set(['10.0.3.1:6379']) },
+            null,
+            'sentinel',
+          );
+          expect(notices()).toHaveLength(2);
+          expect(notices()[1][0]).toContain('this Sentinel monitors');
+          (service as any).onConnectionRemoved('conn-1');
+          await poll([target, other], 1, T0 + 20_000);
+          expect(notices()).toHaveLength(3);
+        });
+
+        it('reports a covered topology, not a failure, without cluster discovery', async () => {
+          (service as any).clusterDiscovery = undefined;
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+          (service as any).topologyTargetClaims.claim('conn-2', [target], T0, 30_000);
+          const warn = jest.spyOn((service as any).logger, 'warn');
+
+          await poll([target], 1, T0);
+
+          expect(latest()).toMatchObject({ notDialed: 0, reason: 'covered_elsewhere' });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('records an empty cycle before the storage writes that can throw', async () => {
+          discovery();
+          jest.spyOn(service as any, 'persistPendingDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          await expect(poll([], 1, T0)).rejects.toThrow('storage down');
+
+          expect(latest()).toMatchObject({ checked: 0, reason: 'no_targets', timestamp: T0 });
+        });
+
+        it('marks coverage stale, and withdraws its series once, when no poll refreshes it', async () => {
+          discovery();
+          await poll([target], 1, T0);
+          prometheusService.updateFanoutCoverage.mockClear();
+
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 29_000);
+          expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({ ageMs: 29_000, stale: false });
+          expect(prometheusService.updateFanoutCoverage).not.toHaveBeenCalled();
+
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 31_000);
+          await (service as any).updatePrometheusSummary();
+          expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({ checked: 1, ageMs: 31_000, stale: true });
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledTimes(1);
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledWith('conn-1', null);
+        });
+
+        it('withdraws stale series on the next poll of any connection', async () => {
+          discovery();
+          await poll([target], 1, T0);
+          prometheusService.updateFanoutCoverage.mockClear();
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 31_000);
+
+          await (service as any).pollConnection({ ...mockCtx, connectionId: 'conn-2', connectionName: 'Other' });
+
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenCalledWith('conn-1', null);
+        });
+
+        it('publishes fresh coverage again after it went stale', async () => {
+          discovery();
+          await poll([target], 1, T0);
+          jest.spyOn(Date, 'now').mockReturnValue(T0 + 31_000);
+          service.getFanoutCoverage();
+
+          await poll([target], 1, T0 + 40_000);
+
+          expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({ stale: false, timestamp: T0 + 40_000 });
+        });
+
+        it('marks a standalone connection as not applicable and drops its gauge', async () => {
+          discovery();
+          jest.spyOn(Date, 'now').mockReturnValue(T0);
+
+          await (service as any).pollConnection(mockCtx);
+
+          expect(latest()).toMatchObject({ checked: 0, reason: 'not_applicable' });
+          expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', null);
+        });
+
+        describe('on a cluster connection', () => {
+          beforeEach(() => {
+            (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+              server: { role: 'master' },
+              stats: { cluster_enabled: '1' },
+            });
+            jest.spyOn(Date, 'now').mockReturnValue(T0);
+          });
+
+          it('reports the topology as unreadable when CLUSTER NODES fails', async () => {
+            discovery();
+            (dbClient as any).getClusterInfo = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
+            (dbClient as any).getClusterNodes = jest.fn().mockRejectedValue(new Error('CLUSTERDOWN'));
+
+            await (service as any).pollConnection(mockCtx);
+
+            expect(latest()).toMatchObject({ topology: 'cluster', checked: 0, reason: 'topology_unreadable' });
+            expect(prometheusService.updateFanoutCoverage).toHaveBeenLastCalledWith('conn-1', {
+              checked: 0,
+              unreachable: 0,
+              authFailed: 0,
+              skipped: 0,
+              notDialed: 0,
+              reason: 'topology_unreadable',
+            });
+          });
+
+          function clusterNodes(config: object) {
+            (service as any).connectionRegistry.getConfig = jest.fn().mockReturnValue(config);
+            (dbClient as any).getClusterInfo = jest.fn().mockResolvedValue({ cluster_state: 'ok' });
+            (dbClient as any).getClusterNodes = jest.fn().mockResolvedValue([
+              { id: 'self', flags: ['myself', 'master'], master: '-', slots: [], address: '127.0.0.1:6379@16379' },
+              { id: 'node-b', flags: ['master'], master: '-', slots: [], address: `${NODE}@16379` },
+            ]);
+          }
+
+          it('still dials the other primaries of an SSH-tunnelled cluster, and says it is tunnelled', async () => {
+            const getNodeConnection = discovery();
+            clusterNodes({ host: '127.0.0.1', port: 6379, sshTunnel: { enabled: true } });
+
+            await (service as any).pollConnection(mockCtx);
+
+            expect(getNodeConnection).toHaveBeenCalledWith('node-b', 'conn-1');
+            expect(latest()).toMatchObject({ topology: 'cluster', checked: 1, reason: null, tunnelled: true });
+          });
+
+          it('does not dial the other primaries of a cluster reached through the agent', async () => {
+            const getNodeConnection = discovery();
+            clusterNodes({ host: 'agent', port: 0 });
+
+            await (service as any).pollConnection(mockCtx);
+
+            expect(latest()).toMatchObject({ topology: 'cluster', notDialed: 1, reason: 'agent_connection' });
+            expect(getNodeConnection).not.toHaveBeenCalled();
+          });
+        });
+
+        it('lists every connection without a filter', async () => {
+          discovery();
+          await poll([], 1, T0);
+          await (service as any).detectTopologyAnomalies(
+            { ...mockCtx, connectionId: 'conn-0', connectionName: 'Other' },
+            { targets: [], members: new Set() },
+          );
+
+          expect(service.getFanoutCoverage().map((c) => c.connectionId)).toEqual(['conn-0', 'conn-1']);
+          expect(service.getFanoutCoverage('conn-9')).toEqual([]);
+        });
+      });
+
+      it('keeps per-node state apart from the seed', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+        await poll([target], 18, T0);
+        await feed([0, 0, 0], T0);
+
+        const nodeState = (service as any).divergenceState.get(`conn-1@${NODE}`);
+        expect(nodeState.replicas.get(NODE_REPLICA).level).not.toBe('none');
+        expect((service as any).divergenceState.get('conn-1').replicas.has(NODE_REPLICA)).toBe(false);
+      });
+
+      it('resolves a node event once that node stops being a primary', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const t = await poll([target], 18, T0);
+
+        await poll([], 1, t);
+
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event.resolved).toBe(true);
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(false);
+        expect((webhookEventsProService as any).endReplicationStall).toHaveBeenCalledWith(
+          'conn-1',
+          NODE_REPLICA,
+        );
+      });
+
+      it('resolves stored events of nodes that left the topology while the monitor was down', async () => {
+        storage.getAnomalyEvents.mockResolvedValue([
+          {
+            id: 'stale-node-event',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            connectionId: 'conn-1',
+            nodeAddr: '10.0.9.9:6379',
+            replicaAddr: '10.0.9.10:6379',
+            resolved: false,
+          },
+        ]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
+
+        await poll([], 1, T0);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('stale-node-event', expect.any(Number));
+      });
+
+      it('leaves node events out of the seed orphan sweep', async () => {
+        storage.getAnomalyEvents.mockResolvedValue([
+          {
+            id: 'node-event',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            connectionId: 'conn-1',
+            nodeAddr: NODE,
+            replicaAddr: NODE_REPLICA,
+            resolved: false,
+          },
+        ]);
+
+        await feed([0], T0);
+
+        expect((service as any).divergenceOrphans.get('conn-1')).toBeUndefined();
+      });
+
+      it('keeps the alert of a primary flagged as failed while it stays in the topology', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const t = await poll([target], 18, T0);
+
+        await poll([], 3, t, new Set([NODE]));
+
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event.resolved).toBe(false);
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+      });
+
+      it('keeps the alert of a failed primary while another connection counts it', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        const t = await poll([target], 18, T0);
+        // The failed read released the claim; the other connection polls first.
+        (service as any).topologyTargetClaims.releaseTarget('conn-1', NODE);
+        (service as any).topologyTargetClaims.claim('conn-2', [], t, 30_000, TOPOLOGY_TARGET_LIMIT, [NODE]);
+
+        await poll([], 1, t, new Set([NODE]));
+
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        expect(event.resolved).toBe(false);
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+        expect(service.getFanoutCoverage('conn-1')[0]).toMatchObject({ unreachable: 0, reason: 'covered_elsewhere' });
+      });
+
+      it('closes a stored alert of a failed primary once it leaves the topology', async () => {
+        storage.getAnomalyEvents.mockResolvedValue([
+          {
+            id: 'failed-node-event',
+            metricType: MetricType.REPLICATION_DIVERGENCE,
+            connectionId: 'conn-1',
+            nodeAddr: NODE,
+            replicaAddr: NODE_REPLICA,
+            resolved: false,
+          },
+        ]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
+        const t = await poll([], 1, T0, new Set([NODE]));
+        expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('failed-node-event', expect.any(Number));
+
+        await poll([], 1, t);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('failed-node-event', expect.any(Number));
+      });
+
+      it('saves the closed windows of a retired primary once storage recovers', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        storage.saveReplicationDivergenceWindows.mockRejectedValue(new Error('storage down'));
+        let t = await poll([target], 18, T0);
+        t = await poll([], 1, t);
+        storage.saveReplicationDivergenceWindows.mockReset();
+        storage.saveReplicationDivergenceWindows.mockResolvedValue(undefined);
+
+        await poll([], 1, t);
+
+        const saved = storage.saveReplicationDivergenceWindows.mock.calls.flatMap(([rows]) => rows);
+        expect(saved.map((w: { replicaAddr: string }) => w.replicaAddr)).toContain(NODE_REPLICA);
+      });
+
+      it('reads stored history once a retired primary had windows in the range', async () => {
+        const client = nodeClient([2, 4, 6, 8, 10, 12]);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+        let t = await poll([target], 18, T0);
+        t = await feed([0, 0, 0, 0, 0, 0], t);
+        await poll([], 1, t);
+        (service as any).divergenceState.get('conn-1').windowsHeldSince = T0 - 1;
+        storage.getReplicationDivergenceWindows.mockClear();
+
+        await service.getReplicationDivergenceHistory('conn-1', T0, t);
+
+        expect(storage.getReplicationDivergenceWindows).toHaveBeenCalled();
+      });
+
+      it('reads the open divergence events once per poll', async () => {
+        const second = { addr: '10.0.1.7:6379', host: '10.0.1.7', port: 6379, nodeId: 'node-c' };
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn(async () => nodeClient([2])),
+        };
+        storage.getAnomalyEvents.mockClear();
+
+        await poll([target, second], 3, T0);
+
+        const reads = storage.getAnomalyEvents.mock.calls.filter(
+          ([q]: [{ metricType?: string }]) => q.metricType === MetricType.REPLICATION_DIVERGENCE,
+        );
+        expect(reads.length).toBeLessThanOrEqual(2);
+        expect((service as any).divergenceOrphansSwept.has(`conn-1@${second.addr}`)).toBe(true);
+      });
+
+      it('gives up its claim on a primary it cannot reach', async () => {
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection: jest.fn().mockRejectedValue(new Error('ECONNREFUSED')),
+        };
+
+        await poll([target], 1, T0);
+
+        expect((service as any).topologyTargetClaims.heldByOther('conn-2', NODE, T0, 30_000)).toBe(false);
+      });
+
+      it('waits longer before each retry of a primary it cannot reach', async () => {
+        const getNodeConnection = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+        (service as any).clusterDiscovery = {
+          retainAddressConnections: jest.fn().mockResolvedValue(undefined),
+          getNodeConnection,
+        };
+        const interval = (service as any).getIntervalMs();
+        const attemptAt = async (at: number) => {
+          jest.spyOn(Date, 'now').mockReturnValue(at);
+          await (service as any).detectTopologyAnomalies(mockCtx, { targets: [target], members: new Set([NODE]) });
+          return getNodeConnection.mock.calls.length;
+        };
+
+        expect(await attemptAt(T0)).toBe(1);
+        expect(await attemptAt(T0 + interval / 2)).toBe(1);
+        expect(await attemptAt(T0 + interval)).toBe(2);
+        expect(await attemptAt(T0 + 2 * interval)).toBe(2);
+        expect(await attemptAt(T0 + 3 * interval)).toBe(3);
+        expect((service as any).topologyFanoutUnreachable.get('conn-1')).toBe(1);
+      });
+
+      it('closes the node clients of a removed connection', () => {
+        const releaseConnection = jest.fn().mockResolvedValue(undefined);
+        (service as any).clusterDiscovery = { releaseConnection };
+
+        (service as any).onConnectionRemoved('conn-1');
+
+        expect(releaseConnection).toHaveBeenCalledWith('conn-1');
+      });
+
+      it('marks a primary unreachable when connecting to it stalls', async () => {
+        jest.useFakeTimers();
+        try {
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn(() => new Promise(() => {})) };
+
+          const done = poll([target], 1, T0);
+          await jest.advanceTimersByTimeAsync(5_000);
+          await done;
+
+          expect((service as any).topologyFanoutUnreachable.get('conn-1')).toBe(1);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('clears the unreachable count once no primary is left to read', async () => {
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn() };
+        (service as any).topologyFanoutUnreachable.set('conn-1', 1);
+        const log = jest.spyOn((service as any).logger, 'log');
+
+        await poll([], 1, T0);
+
+        expect((service as any).topologyFanoutUnreachable.has('conn-1')).toBe(false);
+        expect(log).toHaveBeenCalledWith(expect.stringContaining('no reachable primaries left'));
+      });
+
+      it('does not queue another INFO on a primary that has not answered the last one', async () => {
+        jest.useFakeTimers();
+        try {
+          const client = { info: jest.fn(() => new Promise(() => {})), disconnect: jest.fn() };
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          for (let i = 0; i < 3; i++) {
+            const done = poll([target], 1, T0 + i * 10_000);
+            await jest.advanceTimersByTimeAsync(5_000);
+            await done;
+          }
+
+          const calls = client.info.mock.calls as unknown as string[][];
+          expect(calls.filter(([section]) => section !== 'latencystats')).toHaveLength(5);
+          expect(calls.filter(([section]) => section === 'latencystats')).toHaveLength(0);
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it('serves an unsaved window older than the stored ones', async () => {
+        storage.getReplicationDivergenceWindows.mockResolvedValue([
+          {
+            replicaAddr: NODE_REPLICA,
+            windowStart: T0 + 5000,
+            windowEnd: T0 + 6000,
+            gapBytes: 1,
+            bytesPerSec: 1,
+            secondsBehind: 1,
+          },
+        ]);
+        (service as any).divergencePendingWindows.set('conn-1', [
+          { addr: NODE_REPLICA, start: T0, end: T0 + 1000, gapBytes: 1, bytesPerSec: 1, secondsBehind: 1 },
+        ]);
+
+        const [history] = await divergenceHistory();
+
+        expect(history.windows.map((w: { start: number }) => w.start)).toEqual([T0, T0 + 5000]);
+      });
+
+      it('serves unsaved windows of retired primaries in order', async () => {
+        storage.getReplicationDivergenceWindows.mockResolvedValue([]);
+        const window = (start: number) => ({
+          addr: NODE_REPLICA,
+          start,
+          end: start + 1000,
+          gapBytes: 1,
+          bytesPerSec: 1,
+          secondsBehind: 1,
+        });
+        (service as any).divergencePendingWindows.set('conn-1', [window(T0 + 5000), window(T0)]);
+
+        const [history] = await divergenceHistory();
+
+        expect(history.replica).toBe(NODE_REPLICA);
+        expect(history.windows.map((w: { start: number }) => w.start)).toEqual([T0, T0 + 5000]);
+      });
+
+      it('logs the unsaved windows it drops from a full backlog', () => {
+        const warn = jest.spyOn((service as any).logger, 'warn');
+        const windows = Array.from({ length: DIVERGENCE_PERSIST_BACKLOG + 2 }, (_, i) => ({
+          addr: NODE_REPLICA,
+          start: i,
+          end: i + 1,
+          gapBytes: 1,
+          bytesPerSec: 1,
+          secondsBehind: 1,
+        }));
+
+        (service as any).queuePendingDivergenceWindows(mockCtx, windows);
+
+        const kept = (service as any).divergencePendingWindows.get('conn-1').map((w: { start: number }) => w.start);
+        expect(kept).toHaveLength(DIVERGENCE_PERSIST_BACKLOG);
+        expect(kept[0]).toBe(2);
+        expect(kept[kept.length - 1]).toBe(DIVERGENCE_PERSIST_BACKLOG + 1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Dropped 2'));
+      });
+
+      it('skips only connected registrations, whatever the host case', () => {
+        (service as any).connectionRegistry.list.mockReturnValue([
+          { id: 'a', host: 'NODE.example', port: 6379, isConnected: true },
+          { id: 'b', host: '10.0.1.9', port: 6379, isConnected: false },
+        ]);
+
+        const registered = (service as any).registeredAddresses();
+
+        expect(registered('node.EXAMPLE', 6379)).toBe(true);
+        expect(registered('10.0.1.9', 6379)).toBe(false);
+      });
+
+      it('skips a cluster primary registered under its hostname', () => {
+        (service as any).connectionRegistry.list.mockReturnValue([
+          {
+            id: 'a',
+            host: 'node-b.example',
+            port: 6379,
+            isConnected: true,
+            membership: { seedId: 'conn-1', nodeId: 'node-b', origin: 'auto', source: 'cluster' },
+          },
+        ]);
+
+        const registered = (service as any).registeredAddresses();
+
+        expect(registered('10.0.1.5', 6379, 'node-b')).toBe(true);
+        expect(registered('10.0.1.5', 6379)).toBe(false);
+      });
+
+      it('logs unreachable primaries once and keeps their state', async () => {
+        const client = nodeClient([2, 4]);
+        const getNodeConnection = jest.fn().mockResolvedValue(client);
+        (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
+        const warn = jest.spyOn((service as any).logger, 'warn');
+        let t = await poll([target], 6, T0);
+
+        getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+        t = await poll([target], 3, t);
+
+        const fanoutWarnings = warn.mock.calls.filter(([msg]) => String(msg).includes('fan-out'));
+        expect(fanoutWarnings).toHaveLength(1);
+        expect(String(fanoutWarnings[0][0])).toContain(
+          '1/1 primaries unreachable — replication divergence, retry amplification, backlog coverage, resync escalation, fork memory, output-buffer and reshard checks are not run on them.',
+        );
+        expect((service as any).divergenceState.has(`conn-1@${NODE}`)).toBe(true);
+      });
+
+      describe('prometheus signal gauges', () => {
+        it('publishes the seed replication signals under its own address', async () => {
+          await (service as any).detectReplicationDivergence(
+            { ...sample(T0, 2 * MiB), replBacklogSize: 10 * MiB },
+            mockCtx,
+          );
+
+          expect(prometheusService.updateReplicationSignals).toHaveBeenLastCalledWith(
+            'conn-1',
+            'localhost:6379',
+            { replicas: [], writeRateBytesPerSecond: MiB, backlogCoverageSeconds: 10 },
+          );
+        });
+
+        it('publishes the latest window gap and level of each seed replica', async () => {
+          await feed([2, 4, 6, 8, 10, 12], T0);
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.backlogCoverageSeconds).toBeNull();
+          expect(signals.replicas).toEqual([
+            expect.objectContaining({ replica: '10.0.0.2:6379', gapBytes: 10 * MiB, level: 1 }),
+          ]);
+        });
+
+        it('publishes the live gap of a replica that stopped acknowledging', async () => {
+          let t = await feed([0, 0], T0);
+          for (let i = 0; i < 16; i++) {
+            const base = sample(t, 9 * MiB);
+            await (service as any).detectReplicationDivergence(
+              { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) },
+              mockCtx,
+            );
+            t += 10_000;
+          }
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.replicas).toEqual([
+            { replica: '10.0.0.2:6379', gapBytes: 9 * MiB, secondsBehind: null, level: 2 },
+          ]);
+        });
+
+        it('clears the gauges of a fan-out node it cannot read', async () => {
+          const client = nodeClient([2]);
+          const getNodeConnection = jest.fn().mockResolvedValue(client);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection };
+          let t = await poll([target], 1, T0);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalled();
+
+          getNodeConnection.mockRejectedValue(new Error('ECONNREFUSED'));
+          t = await poll([target], 1, t);
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+
+          prometheusService.clearNodeSignals.mockClear();
+          await poll([target], 1, t);
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+        });
+
+        it('publishes replication and retry signals of a fan-out node under its address', async () => {
+          const client = nodeClient([2, 4, 6, 8, 10, 12]);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          await poll([target], 18, T0);
+
+          const nodeCalls = prometheusService.updateReplicationSignals.mock.calls.filter(
+            ([, node]: [string, string]) => node === NODE,
+          );
+          expect(nodeCalls.length).toBeGreaterThan(0);
+          expect(nodeCalls.at(-1)[2].replicas).toEqual([
+            expect.objectContaining({ replica: NODE_REPLICA, level: expect.any(Number) }),
+          ]);
+          expect(nodeCalls.at(-1)[2].replicas[0].level).toBeGreaterThan(0);
+          expect(prometheusService.updateRetrySignals).toHaveBeenLastCalledWith(
+            'conn-1',
+            NODE,
+            expect.objectContaining({ retryState: 0 }),
+          );
+        });
+
+        it('clears the gauges of a node that left the topology', async () => {
+          const client = nodeClient([2]);
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+          const t = await poll([target], 1, T0);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalled();
+
+          await poll([], 1, t);
+
+          expect(prometheusService.clearNodeSignals).toHaveBeenCalledWith('conn-1', NODE);
+          expect(prometheusService.clearNodeSignals).not.toHaveBeenCalledWith('conn-1', 'localhost:6379');
+        });
+
+        it('clears the retry gauges of a node that reports a replica role', async () => {
+          const client = nodeClient([2], 'slave');
+          (service as any).clusterDiscovery = { retainAddressConnections: jest.fn().mockResolvedValue(undefined), getNodeConnection: jest.fn().mockResolvedValue(client) };
+
+          await poll([target], 1, T0);
+
+          expect(prometheusService.clearRetrySignals).toHaveBeenCalledWith('conn-1', NODE);
+          expect(prometheusService.updateRetrySignals).not.toHaveBeenCalled();
+        });
+
+        it('publishes the seed connects per second and churn per op', async () => {
+          (service as any).connectionChurnSamples.set('conn-1', {
+            timestamp: T0,
+            connectsPerSec: 50,
+            connectedClients: 10,
+            retainedRatio: 1,
+          });
+
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10', role: 'master' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
+            connectsPerSecond: 50,
+            churnPerOp: 0.2,
+            retryState: 0,
+          });
+        });
+
+        it.each([
+          ['unknown', {}],
+          ['idle', { instantaneous_ops_per_sec: '0' }],
+        ])('divides churn by at least one op when ops per second is %s', async (_label, info) => {
+          (service as any).connectionChurnSamples.set('conn-1', {
+            timestamp: T0,
+            connectsPerSec: 50,
+            connectedClients: 10,
+            retainedRatio: 1,
+          });
+
+          await (service as any).detectRetryAmplification({ ...info, connected_clients: '10', role: 'master' }, mockCtx, T0);
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379', {
+            connectsPerSecond: 50,
+            churnPerOp: 50,
+            retryState: 0,
+          });
+        });
+
+        it('clears the seed retry gauges when the seed reports a replica role', async () => {
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10', role: 'slave' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).not.toHaveBeenCalled();
+          expect(prometheusService.clearRetrySignals).toHaveBeenCalledWith('conn-1', 'localhost:6379');
+        });
+
+        it('leaves write rate and backlog coverage out of a replica sample', async () => {
+          await (service as any).detectReplicationDivergence(
+            { ...sample(T0, 2 * MiB), role: 'replica', replBacklogSize: 10 * MiB },
+            mockCtx,
+          );
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals).toMatchObject({ writeRateBytesPerSecond: null, backlogCoverageSeconds: null });
+        });
+
+        it('publishes the seed retry gauges when the role is not reported', async () => {
+          await (service as any).detectRetryAmplification(
+            { instantaneous_ops_per_sec: '250', connected_clients: '10' },
+            mockCtx,
+            T0,
+          );
+
+          expect(prometheusService.updateRetrySignals).toHaveBeenCalled();
+          expect(prometheusService.clearRetrySignals).not.toHaveBeenCalled();
+        });
+
+        it('still publishes replication gauges when storing a window fails', async () => {
+          jest.spyOn(service as any, 'persistDivergenceWindows').mockRejectedValue(new Error('storage down'));
+
+          await expect(
+            (service as any).detectReplicationDivergence(sample(T0, 2 * MiB), mockCtx),
+          ).rejects.toThrow('storage down');
+
+          expect(prometheusService.updateReplicationSignals).toHaveBeenCalled();
+        });
+
+        it('clears other nodes gauges when the fan-out cannot run', () => {
+          (service as any).divergenceState.set('conn-1@10.0.0.5:6379', {});
+          (service as any).retryAmplificationState.set('conn-1@10.0.0.6:6379', {});
+          (service as any).divergenceState.set('conn-1', {});
+
+          (service as any).clearFanoutNodeSignals('conn-1');
+
+          expect(prometheusService.clearNodeSignals.mock.calls.map((c: string[]) => c[1]).sort()).toEqual([
+            '10.0.0.5:6379',
+            '10.0.0.6:6379',
+          ]);
+        });
+
+        it('drops a replica that left the INFO sample', async () => {
+          const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+          await (service as any).detectReplicationDivergence({ ...sample(t, 0), replicas: [] }, mockCtx);
+
+          const [, , signals] = prometheusService.updateReplicationSignals.mock.calls.at(-1);
+          expect(signals.replicas).toEqual([]);
+        });
+
+        it('skips an incident gauge refresh while one is still running', async () => {
+          let release!: (value: unknown[]) => void;
+          const timelines = jest
+            .spyOn(service, 'getIncidentTimelines')
+            .mockReturnValue(new Promise((resolve) => (release = resolve)) as never);
+
+          const first = (service as any).updateIncidentGauges(0);
+          await (service as any).updateIncidentGauges(0);
+          release([]);
+          await first;
+
+          expect(timelines).toHaveBeenCalledTimes(1);
+          expect(prometheusService.updateActiveIncidents).toHaveBeenCalledTimes(1);
+        });
+
+        it('keeps detecting when a gauge update throws', async () => {
+          prometheusService.updateRetrySignals.mockImplementation(() => {
+            throw new Error('registry gone');
+          });
+          prometheusService.updateReplicationSignals.mockImplementation(() => {
+            throw new Error('registry gone');
+          });
+
+          await expect(
+            (service as any).detectRetryAmplification({ instantaneous_ops_per_sec: '1' }, mockCtx, T0),
+          ).resolves.toBeUndefined();
+          await feed([2, 4, 6], T0);
+
+          expect(storage.saveReplicationDivergenceWindows).toHaveBeenCalled();
+        });
+      });
+    });
+
+    describe('replication.divergence timing', () => {
+      const hook = () => (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+      const levels = () => hook().mock.calls.map(([data]: [{ level: string }]) => data.level);
+      const expireOutbox = async () => {
+        jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_MAX_AGE_MS + 1);
+        await (service as any).drainPersistenceOutbox();
+      };
+
+      it('waits for the save before sending it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        expect(hook()).not.toHaveBeenCalled();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(levels()).toEqual(['warning']);
+      });
+
+      it('sends none for a dropped save and alerts again', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const dropped = replica.eventId;
+
+        await expireOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+        expect(replica.eventId).toBeNull();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([14, 16, 18, 20, 22, 24], t);
+        expect(levels()).toEqual(['warning']);
+        expect(replica.eventId).not.toBe(dropped);
+      });
+
+      it('sends none for an event that closed before its save landed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        let t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        while (replica.eventId !== null) t = await feed([0], t);
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(hook()).not.toHaveBeenCalled();
+      });
+    });
+
+    it('moves to the escalation while its save is pending', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      const warningId = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)[0].id;
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+      await feed([130, 140, 150], t);
+
+      const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+      expect(replica.eventId).not.toBe(warningId);
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(warningId, expect.anything());
+
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+      await (service as any).drainPersistenceOutbox();
+
+      expect((service as any).persistenceOutbox.size).toBe(0);
+      expect(divergenceHook.mock.calls.map(([data]: [{ level: string }]) => data.level)).toEqual([
+        'warning',
+        'critical',
+      ]);
+    });
+
+    it('reports recovery of an announced warning while its escalation is unsaved', async () => {
+      const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+      let t = await feed([2, 4, 6, 8, 10, 12], T0);
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+      t = await feed([130, 140, 150], t);
+
+      await feed([0, 0, 0, 0], t);
+
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the generic webhook to replication.divergence', async () => {
+      await feed([2, 4, 6, 8, 10, 12], T0);
+
+      expect(service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE)).toHaveLength(1);
+      expect(anomalyWebhookSink.dispatchAnomalyWebhook).not.toHaveBeenCalled();
+    });
+
+    describe('reading the gap history', () => {
+      const addr = '10.0.0.2:6379';
+
+      it('answers from memory when the windows cover the range', async () => {
+        const t = await feed([2, 4, 6], T0);
+
+        const history = await service.getReplicationDivergenceHistory('conn-1', T0 + 1, t);
+
+        expect(storage.getReplicationDivergenceWindows).not.toHaveBeenCalled();
+        expect(history[0].windows).toHaveLength(2);
+      });
+
+      it('reads storage for a range older than memory', async () => {
+        const t = await feed([2, 4, 6], T0);
+
+        await service.getReplicationDivergenceHistory('conn-1', T0 - 1, t);
+
+        expect(storage.getReplicationDivergenceWindows).toHaveBeenCalledTimes(1);
+      });
+
+      it('reads storage once memory lost windows of a dropped replica', async () => {
+        const t = await feed([2, 4, 6], T0);
+        const gone = async (at: number) => {
+          for (let i = 0; i < 3; i++) {
+            await (service as any).detectReplicationDivergence(
+              { ...sample(at + i * 10_000, 0), replicas: [] },
+              mockCtx,
+            );
+          }
+        };
+        await gone(t);
+        await gone(t + 30_000);
+        expect((service as any).divergenceState.get('conn-1').replicas.has(addr)).toBe(false);
+
+        await service.getReplicationDivergenceHistory('conn-1', T0 + 1, t + 60_000);
+
+        expect(storage.getReplicationDivergenceWindows).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('stays silent on recovery of a finding whose save never landed', async () => {
+      const divergenceHook = jest.fn().mockResolvedValue(undefined);
+      const recoveredHook = jest.fn().mockResolvedValue(undefined);
+      (webhookEventsProService as any).dispatchReplicationDivergence = divergenceHook;
+      (webhookEventsProService as any).dispatchReplicationRecovered = recoveredHook;
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+      const t = await feed([2, 4, 6, 8, 10, 12], T0);
+      await feed([0, 0, 0, 0], t);
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+
+      expect(divergenceHook).not.toHaveBeenCalled();
+      expect(recoveredHook).not.toHaveBeenCalled();
+    });
+
+    it('words recovery above the floor as back under the thresholds, not caught up', async () => {
+      const recoveredHook = (webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock;
+      let t = await feed([2, 4, 6, 8, 10, 12], T0);
+      for (let i = 0; i < 12; i++) {
+        await (service as any).detectReplicationDivergence(
+          { ...sample(t, (120 - i) * MiB), bytesPerSec: 50 * MiB, bytesPerSecEwma: 50 * MiB },
+          mockCtx,
+        );
+        t += 10_000;
+      }
+
+      expect(recoveredHook).toHaveBeenCalledTimes(1);
+      expect(recoveredHook.mock.calls[0][0]).toMatchObject({
+        reason: 'caught_up',
+        gapBytes: expect.any(Number),
+        message: 'Replica 10.0.0.2:6379 is back under the alert thresholds.',
+      });
+    });
+
+    it('alerts for not acking with the replica view even when the replica is caught up', async () => {
+      const registry = (service as any).connectionRegistry;
+      registry.findIdByHostPort.mockImplementation((host: string) => (host === '10.0.0.2' ? 'conn-r' : null));
+      registry.list.mockReturnValue([{ id: 'conn-r', isConnected: true }]);
+      const getInfoParsed = jest.fn().mockResolvedValue({
+        replication: {
+          role: 'slave',
+          master_replid: 'a'.repeat(40),
+          master_link_status: 'up',
+          slave_repl_offset: 100,
+        },
+      });
+      registry.get.mockImplementation((id: string) => (id === 'conn-r' ? { getInfoParsed } : undefined));
+      const readPrimary = jest.fn().mockResolvedValue({ master_replid: 'a'.repeat(40), master_repl_offset: '100' });
+      let t = await feed([0, 0], T0);
+      for (let i = 0; i < 16; i++) {
+        const base = sample(t, 9 * MiB);
+        await (service as any).detectReplicationDivergence(
+          { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) },
+          mockCtx,
+          undefined,
+          readPrimary,
+        );
+        t += 10_000;
+      }
+
+      const hook = (webhookEventsProService as any).dispatchReplicationDivergence as jest.Mock;
+      expect(hook).toHaveBeenCalled();
+      expect(hook.mock.calls[0][0]).toMatchObject({
+        reason: 'not_acking',
+        replicaView: { gapBytes: 0, linkStatus: 'up' },
+      });
+      expect(hook.mock.calls[0][0].message).toContain('acknowledgements are not reaching the primary');
+    });
+
+    it('reports the current gap as latest while a replica is alerted for not acking', async () => {
+      let t = await feed([0, 0], T0);
+      const stale = (timestamp: number) => {
+        const base = sample(timestamp, 9 * MiB);
+        return { ...base, replicas: base.replicas.map((r) => ({ ...r, lagSec: 30 })) };
+      };
+      for (let i = 0; i < 16; i++) {
+        await (service as any).detectReplicationDivergence(stale(t), mockCtx);
+        t += 10_000;
+      }
+      jest.spyOn(Date, 'now').mockReturnValue(t);
+
+      const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, t);
+
+      expect(replica.level).toBe('critical');
+      expect(replica.latest?.gapBytes).toBe(9 * MiB);
+    });
+
+    describe('polls that stop arriving', () => {
+      const staleAfterMs = () => Math.max(30_000, 3 * (service as any).getIntervalMs());
+      const quiet = async () => {
+        const t = await feed([0, 0], T0);
+        return t - 10_000;
+      };
+
+      it('reports the replica as not observed, with no current measurement', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs() + 1);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('unobserved');
+        expect(replica.latest).toBeNull();
+        expect((await divergenceHistory())[0].level).toBe('unobserved');
+      });
+
+      it('stays in sync within one window', async () => {
+        const last = await quiet();
+        jest.spyOn(Date, 'now').mockReturnValue(last + staleAfterMs());
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
+
+      it('scales with the poll interval', async () => {
+        const last = await quiet();
+        jest.spyOn(service as any, 'getIntervalMs').mockReturnValue(60_000);
+        jest.spyOn(Date, 'now').mockReturnValue(last + 170_000);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, last + 60_000);
+
+        expect(replica.level).toBe('none');
+      });
+    });
+
+    describe('replica gone', () => {
+      const absent = (timestamp: number) => ({ ...sample(timestamp, 0), replicas: [] });
+      const offline = (timestamp: number) => {
+        const base = sample(timestamp, 0);
+        return { ...base, replicas: base.replicas.map((r) => ({ ...r, state: 'wait_bgsave' })) };
+      };
+      const recoveredCalls = () =>
+        ((webhookEventsProService as any).dispatchReplicationRecovered as jest.Mock).mock.calls;
+
+      async function poll(build: (timestamp: number) => unknown, start: number): Promise<number> {
+        let t = start;
+        for (let i = 0; i < 9; i++) {
+          await (service as any).detectReplicationDivergence(build(t), mockCtx);
+          t += 10_000;
+        }
+        return t;
+      }
+
+      const trackedEventId = () =>
+        (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379').eventId;
+      const fillOutbox = () => {
+        for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) {
+          (service as any).persistenceOutbox.enqueueResolve(`filler-${i}`, 1, 1);
+        }
+      };
+
+      it('closes silently when an alerted replica drops out', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+
+        await poll(absent, t);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('closes silently when an alerted replica goes offline', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+
+        await poll(offline, t);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('closes silently when the node stops being a primary', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+
+        await (service as any).detectReplicationDivergence({ ...sample(t, 0), role: 'replica' }, mockCtx);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('leaves a failed close to the outbox', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await poll(absent, t);
+
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(true);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends nothing for an alert that was never saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+
+        await poll(absent, t);
+
+        expect(recoveredCalls()).toEqual([]);
+        expect((webhookEventsProService as any).dispatchReplicationDivergence).not.toHaveBeenCalled();
+      });
+
+      it('closes a dropped-out replica event again after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        const next = await poll(absent, t);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await poll(absent, next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends no second recovered webhook when it re-closes an evicted recovery', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValue(new Error('storage down'));
+        let next = t;
+        while (recoveredCalls().length === 0) next = await feed([0], next);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await feed([0, 0, 0, 0], next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toHaveLength(1);
+      });
+
+      it('re-closes a superseded warning after the outbox evicts its close', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const warningId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        await feed([130, 140, 150], t);
+        fillOutbox();
+
+        const orphans = (service as any).divergenceOrphans.get('conn-1');
+        expect([...orphans.get('10.0.0.2:6379').eventIds]).toEqual([warningId]);
+      });
+
+      it('re-closes an event whose close rode on a pending rewrite the outbox evicted', async () => {
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        const [event] = service.getRecentEvents(10, MetricType.REPLICATION_DIVERGENCE);
+        (service as any).persistenceOutbox.enqueueRewrite(event, Date.now());
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        const next = await poll(absent, t);
+        fillOutbox();
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(false);
+
+        await poll(absent, next);
+
+        expect(storage.resolveOpenAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+      });
+
+      it('sweeps a removed connection again after the outbox evicts its close', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const eventId = trackedEventId();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        fillOutbox();
+        expect((service as any).removedConnectionSweeps.has('conn-1')).toBe(true);
+
+        storage.getAnomalyEvents.mockResolvedValueOnce([{ id: eventId }]);
+        await (service as any).sweepRemovedConnections();
+
+        const attempts = storage.resolveAnomaly.mock.calls.filter(([id]: [string]) => id === eventId);
+        expect(attempts).toHaveLength(2);
+      });
+
+      it('sends nothing for a replica that never alerted', async () => {
+        const t = await feed([2, 2], T0);
+
+        await poll(absent, t);
+
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('sends nothing and closes the saved event when the connection is removed', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        expect(eventId).toEqual(expect.any(String));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(eventId, expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      it('closes the removed alert in the live incident as well as in storage', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        const copy = (service as any).recentAnomalies.find((a: { id: string }) => a.id === eventId);
+        await (service as any).tickIncidentTimelines(copy.timestamp + 1000);
+
+        const [incident] = (service as any).liveIncidents.filter((i: { entries: any[] }) =>
+          i.entries.some((e) => e.anomalyId === eventId),
+        );
+        expect(copy.resolvedAt).toEqual(expect.any(Number));
+        expect((service as any).incidentEvents.has('conn-1')).toBe(false);
+        expect(incident.recovery.openSignals).not.toContain(MetricType.REPLICATION_DIVERGENCE);
+      });
+
+      it('keeps a retried close quiet when the first sweep lands after it', async () => {
+        (service as any).divergenceOrphans.set(
+          'conn-1',
+          new Map([
+            [
+              '10.0.0.2:6379',
+              { eventIds: new Set(['retried']), sinceWindow: 0, claimed: false, notified: true },
+            ],
+          ]),
+        );
+        storage.getAnomalyEvents.mockResolvedValueOnce([
+          { id: 'retried', replicaAddr: '10.0.0.2:6379' },
+        ]);
+
+        await (service as any).collectOrphanedDivergenceEvents(
+          { replicas: new Map(), closedWindowCount: 3 },
+          mockCtx,
+        );
+
+        const orphans = (service as any).divergenceOrphans.get('conn-1');
+        expect(orphans.get('10.0.0.2:6379')).toMatchObject({ notified: true, sinceWindow: 0 });
+      });
+
+      it('closes restart-orphaned events when the connection is removed', async () => {
+        (service as any).divergenceOrphans.set(
+          'conn-1',
+          new Map([
+            ['10.0.0.2:6379', { eventIds: new Set(['orphan-1']), sinceWindow: 0, claimed: false }],
+          ]),
+        );
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith('orphan-1', expect.any(Number));
+        expect(recoveredCalls()).toEqual([]);
+      });
+
+      describe('removed before the first sweep', () => {
+        const flush = () => new Promise((resolve) => setImmediate(resolve));
+        const pending = () => (service as any).removedConnectionSweeps as Map<string, MetricType[]>;
+        const readsFor = (connectionId: string) =>
+          storage.getAnomalyEvents.mock.calls.filter(
+            ([opts]) =>
+              opts.connectionId === connectionId &&
+              opts.metricType === MetricType.REPLICATION_DIVERGENCE,
+          );
+        const pollOther = (timestamp: number) =>
+          (service as any).detectReplicationDivergence(sample(timestamp, 0), {
+            ...mockCtx,
+            connectionId: 'conn-2',
+          });
+
+        it('closes rows left open by an earlier run', async () => {
+          storage.getAnomalyEvents.mockResolvedValueOnce([{ id: 'old-1' }, { id: 'old-2' }]);
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-2', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect(recoveredCalls()).toEqual([]);
+        });
+
+        it('retries a failed read on a later drain, then stops', async () => {
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+          expect(pending().has('conn-9')).toBe(true);
+
+          storage.getAnomalyEvents.mockResolvedValueOnce([{ id: 'old-1' }]);
+          await (service as any).drainPersistenceOutbox();
+          await (service as any).drainPersistenceOutbox();
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect(readsFor('conn-9')).toHaveLength(2);
+        });
+
+        it('stops after one read when there are no open rows', async () => {
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+          await pollOther(T0);
+
+          expect(pending().size).toBe(0);
+          expect(readsFor('conn-9')).toHaveLength(1);
+        });
+
+        it('collects every page before closing any row', async () => {
+          const page = Array.from({ length: 500 }, (_, i) => ({ id: `old-${i}` }));
+          storage.getAnomalyEvents
+            .mockResolvedValueOnce(page)
+            .mockResolvedValueOnce([{ id: 'old-last' }]);
+
+          (service as any).onConnectionRemoved('conn-9');
+          await flush();
+
+          expect(readsFor('conn-9').map(([opts]) => opts.offset)).toEqual([0, 500]);
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-last', expect.any(Number));
+        });
+
+        it('does not read a connection that was already swept', async () => {
+          await feed([2], T0);
+          const reads = readsFor('conn-1').length;
+
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          expect(readsFor('conn-1')).toHaveLength(reads);
+        });
+
+        describe('saturation and backlog rows', () => {
+          beforeEach(() => {
+            (service as any).connectionRegistry.getConfig.mockReturnValue({});
+          });
+
+          const openRows = (rows: Record<string, string[]>) =>
+            storage.getAnomalyEvents.mockImplementation(async ({ metricType, offset }) =>
+              offset === 0 ? (rows[metricType] ?? []).map((id) => ({ id })) : [],
+            );
+          const rows: Record<string, string[]> = {
+            [MetricType.CLIENT_SATURATION]: ['sat-1'],
+            [MetricType.BACKLOG_COVERAGE_RISK]: ['backlog-1'],
+          };
+          const resolvedIds = () => storage.resolveAnomaly.mock.calls.map(([id]) => id).sort();
+          const clients = (connected: number) => ({
+            connected_clients: String(connected),
+            maxclients: '100',
+          });
+          const pollClients = async (connectionId: string, connected: number) => {
+            const ctx = { ...mockCtx, connectionId };
+            await (service as any).adoptOpenEvents(ctx, T0);
+            await (service as any).detectClientSaturation(clients(connected), ctx, T0);
+          };
+
+          it('closes them when the connection never adopted them', async () => {
+            openRows(rows);
+
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            expect(resolvedIds()).toEqual(['backlog-1', 'sat-1']);
+          });
+
+          it('retries a failed read from the drain', async () => {
+            storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+            expect(resolvedIds()).toEqual([]);
+
+            storage.getAnomalyEvents.mockImplementation(async ({ connectionId, metricType, offset }) =>
+              connectionId === 'conn-9' && offset === 0
+                ? (rows[metricType] ?? []).map((id) => ({ id }))
+                : [],
+            );
+            await (service as any).drainPersistenceOutbox();
+
+            expect(resolvedIds()).toEqual(['backlog-1', 'sat-1']);
+          });
+
+          it('closes adopted rows without reading them again', async () => {
+            openRows(rows);
+            await pollClients('conn-9', 85);
+            const adoptionReads = () =>
+              storage.getAnomalyEvents.mock.calls.filter(
+                ([opts]) =>
+                  opts.connectionId === 'conn-9' &&
+                  opts.metricType !== MetricType.REPLICATION_DIVERGENCE &&
+                  opts.metricType !== MetricType.RAFT_HEALTH,
+              ).length;
+            const reads = adoptionReads();
+
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            expect(resolvedIds()).toEqual(expect.arrayContaining(['backlog-1', 'sat-1']));
+            expect(adoptionReads()).toBe(reads);
+          });
+
+          describe('every resolver-backed metric', () => {
+            const row = (id: string, timestamp = T0) => ({ id, timestamp, message: 'msg' });
+            const slotRow = (id: string, signature: string, timestamp = T0) => ({
+              ...row(id, timestamp),
+              dedupeKey: signature,
+            });
+            const ctx = { ...mockCtx, connectionId: 'conn-9' };
+            const adopt = () => (service as any).adoptOpenEvents(ctx, T0);
+            const rowsBy = (byMetric: Record<string, unknown[]>) =>
+              storage.getAnomalyEvents.mockImplementation(
+                async ({ metricType, offset }) => (offset ? [] : (byMetric[metricType] ?? [])),
+              );
+            const gate = (signature: string | null, eventIdsByConn: unknown) =>
+              (service as any).applyTopologyPersistenceGate({
+                ctx,
+                timestamp: T0,
+                findings: signature ? [signature] : [],
+                signatureOf: (s: string) => s,
+                firstSeenByConn: new Map(),
+                activeByConn: new Map(),
+                minPersistMs: 0,
+                eventIdsByConn,
+                buildEvent: () => {
+                  throw new Error('duplicate event');
+                },
+              });
+
+            it('tracks a replica slot row under its signature until it clears', async () => {
+              rowsBy({
+                [MetricType.REPLICA_SLOT_STATE]: [slotRow('slot-1', 'abc|stale|1,2')],
+              });
+              await adopt();
+              const ids = (service as any).replicaSlotEventIds;
+
+              storage.getAnomalyEvents.mockResolvedValue([slotRow('slot-1', 'abc|stale|1,2')]);
+              await gate('abc|stale|1,2', ids);
+              expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+              await gate(null, ids);
+              expect(resolvedIds()).toEqual(['slot-1']);
+            });
+
+            it('closes an older duplicate of a slot row', async () => {
+              rowsBy({
+                [MetricType.REPLICA_SLOT_STATE]: [
+                  slotRow('slot-newer', 'abc|stale|1', T0 + 1),
+                  slotRow('slot-older', 'abc|stale|1'),
+                ],
+              });
+              await adopt();
+              await (service as any).drainPersistenceOutbox();
+
+              expect(resolvedIds()).toEqual(['slot-older']);
+            });
+
+            describe('rows from before dedupe keys', () => {
+              const finding = {
+                replicaId: 'abcdef0123456789',
+                replicaAddress: '10.0.0.1:6379',
+                reason: 'replica_migrating',
+                affectedSlots: [7],
+              };
+              const signature = replicaSlotSignature(finding as ReplicaSlotAnomaly);
+              const message = () =>
+                'WARNING: Replica 10.0.0.1:6379 (abcdef01) is reporting slot(s) 7 in MIGRATING state — ' +
+                'replicas must never carry slot-migration state, so this is a stuck, inconsistent ' +
+                'cluster state (valkey#1664). Run `CLUSTER SETSLOT <slot> STABLE` on 10.0.0.1:6379 ' +
+                'for each affected slot (7) to clear it.';
+              const legacyRow = (id: string, text: string, timestamp = T0) => ({
+                ...row(id, timestamp),
+                message: text,
+              });
+              const claim = (findings: unknown[], unreachable = new Set<string>()) =>
+                (service as any).claimLegacyReplicaSlotEvents('conn-9', findings, unreachable);
+              const settle = () => (service as any).drainPersistenceOutbox();
+
+              it('stays open for the finding it describes', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', message())] });
+                await adopt();
+                claim([finding]);
+                await settle();
+                const ids = (service as any).replicaSlotEventIds;
+
+                expect(ids.get('conn-9').get(signature)).toBe('legacy');
+                storage.getAnomalyEvents.mockResolvedValue([legacyRow('legacy', message())]);
+                await gate(signature, ids);
+                expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+                await gate(null, ids);
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('closes all but the newest row of one finding', async () => {
+                rowsBy({
+                  [MetricType.REPLICA_SLOT_STATE]: [
+                    legacyRow('older', message()),
+                    legacyRow('newer', message(), T0 + 1),
+                  ],
+                });
+                await adopt();
+                claim([finding]);
+                await settle();
+
+                expect((service as any).replicaSlotEventIds.get('conn-9').get(signature)).toBe(
+                  'newer',
+                );
+                expect(resolvedIds()).toEqual(['older']);
+              });
+
+              it('closes a row whose condition is gone', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+                claim([finding]);
+                await settle();
+
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('waits for every replica to answer before closing a row', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+                claim([], new Set(['abcdef0123456789']));
+                await settle();
+                expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+
+                claim([]);
+                await settle();
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+
+              it('closes a row left unclaimed when the connection goes away', async () => {
+                rowsBy({ [MetricType.REPLICA_SLOT_STATE]: [legacyRow('legacy', 'other')] });
+                await adopt();
+
+                (service as any).onConnectionRemoved('conn-9');
+                await new Promise((resolve) => setImmediate(resolve));
+                await settle();
+
+                expect(resolvedIds()).toEqual(['legacy']);
+              });
+            });
+
+            it('does not raise a second reshard event for a row left open', async () => {
+              rowsBy({
+                [MetricType.RESHARD_SHARD_SKEW]: [row('old-new', T0 + 1), row('old-old', T0)],
+              });
+              await adopt();
+              await (service as any).drainPersistenceOutbox();
+              expect(resolvedIds()).toEqual(['old-old']);
+
+              (service as any).claimAdoptedReshardEvent('conn-9', 'shard-a');
+              storage.getAnomalyEvents.mockResolvedValue([row('old-new', T0 + 1)]);
+              const ids = (service as any).reshardSkewEventIds;
+              await gate('reshard_skew:shard-a', ids);
+              expect(resolvedIds()).toEqual(['old-old']);
+
+              await gate(null, ids);
+              expect(resolvedIds()).toEqual(['old-new', 'old-old']);
+            });
+
+            it('closes a row adopted for a shard that already tracks an event', async () => {
+              (service as any).reshardSkewEventIds.set(
+                'conn-9',
+                new Map([['reshard_skew:shard-a', 'live-1']]),
+              );
+              (service as any).adoptedReshardEventIds.set('conn-9', 'old-1');
+
+              (service as any).claimAdoptedReshardEvent('conn-9', 'shard-a');
+              await (service as any).drainPersistenceOutbox();
+
+              expect(resolvedIds()).toEqual(['old-1']);
+              expect((service as any).reshardSkewEventIds.get('conn-9').size).toBe(1);
+            });
+
+            it('leaves a tracked reshard event alone when adoption runs late', async () => {
+              (service as any).reshardSkewEventIds.set(
+                'conn-9',
+                new Map([['reshard_skew:shard-a', 'live-1']]),
+              );
+              rowsBy({ [MetricType.RESHARD_SHARD_SKEW]: [row('live-1', T0 + 1), row('old-1')] });
+
+              await adopt();
+              (service as any).claimAdoptedReshardEvent('conn-9', 'shard-a');
+              await (service as any).drainPersistenceOutbox();
+
+              expect(resolvedIds()).toEqual(['old-1']);
+            });
+
+            it('leaves a tracked slot event alone when an older row shares its signature', async () => {
+              const older = slotRow('slot-older', 'abc|stale|1');
+              const live = slotRow('slot-live', 'abc|stale|1', T0 + 1);
+              (service as any).adoptReplicaSlotEvents('conn-9', [live]);
+
+              (service as any).adoptReplicaSlotEvents('conn-9', [older, live]);
+              await (service as any).drainPersistenceOutbox();
+
+              expect(resolvedIds()).toEqual(['slot-older']);
+              expect([...(service as any).replicaSlotEventIds.get('conn-9').values()]).toEqual([
+                'slot-live',
+              ]);
+            });
+
+            it('does not alert again for a saturation row left open', async () => {
+              rowsBy({
+                [MetricType.CLIENT_SATURATION]: [{ ...row('sat-1'), severity: AnomalySeverity.WARNING }],
+              });
+              await adopt();
+
+              await (service as any).detectClientSaturation(clients(85), ctx, T0);
+
+              expect(storage.saveAnomalyEvent).not.toHaveBeenCalled();
+              expect((service as any).clientSaturationEventIds.get('conn-9')).toEqual(['sat-1']);
+            });
+
+            it('still escalates past an adopted saturation warning', async () => {
+              rowsBy({
+                [MetricType.CLIENT_SATURATION]: [{ ...row('sat-1'), severity: AnomalySeverity.WARNING }],
+              });
+              await adopt();
+
+              await (service as any).detectClientSaturation(clients(99), ctx, T0);
+
+              expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+            });
+
+            it('seeds the backlog level from a row left open', async () => {
+              rowsBy({
+                [MetricType.BACKLOG_COVERAGE_RISK]: [
+                  { ...row('bk-1'), severity: AnomalySeverity.CRITICAL },
+                ],
+              });
+
+              await adopt();
+
+              expect((service as any).backlogCoverage.get('conn-9').level).toBe('critical');
+            });
+
+            it('adopts nothing when the connection is removed during the read', async () => {
+              rowsBy({ [MetricType.CLIENT_SATURATION]: [row('sat-1')] });
+              (service as any).connectionRegistry.getConfig
+                .mockReturnValueOnce({})
+                .mockReturnValue(undefined);
+
+              await adopt();
+
+              expect((service as any).openEventsAdopted.size).toBe(0);
+              expect((service as any).clientSaturationEventIds.size).toBe(0);
+            });
+
+            it('marks a raft outage left open so a healthy poll resolves it', async () => {
+              rowsBy({
+                [MetricType.RAFT_HEALTH]: [{ ...row('raft-1'), severity: AnomalySeverity.CRITICAL }],
+              });
+
+              await adopt();
+
+              expect((service as any).raftLeaderlessActive.get('conn-9')).toBe(true);
+            });
+
+            it('leaves the raft flag alone for a warning row', async () => {
+              rowsBy({
+                [MetricType.RAFT_HEALTH]: [{ ...row('raft-1'), severity: AnomalySeverity.WARNING }],
+              });
+
+              await adopt();
+
+              expect((service as any).raftLeaderlessActive.get('conn-9')).toBeUndefined();
+            });
+
+            it('closes every tracked row on removal', async () => {
+              (service as any).reshardSkewEventIds.set('conn-9', new Map([['a', 'reshard-1']]));
+              (service as any).replicaSlotEventIds.set('conn-9', new Map([['b', 'slot-1']]));
+              (service as any).adoptedReshardEventIds.set('conn-9', 'reshard-2');
+              (service as any).resyncEscalationEvents.set('conn-9', [
+                { id: 'resync-1', addr: 'a:1', since: T0 },
+              ]);
+
+              (service as any).onConnectionRemoved('conn-9');
+              await flush();
+
+              expect(resolvedIds()).toEqual(
+                expect.arrayContaining(['reshard-1', 'reshard-2', 'resync-1', 'slot-1']),
+              );
+            });
+
+            it('sweeps raft rows of a removed connection even after adoption', async () => {
+              await adopt();
+              rowsBy({ [MetricType.RAFT_HEALTH]: [row('raft-1')] });
+
+              (service as any).onConnectionRemoved('conn-9');
+              await flush();
+
+              expect(resolvedIds()).toEqual(['raft-1']);
+            });
+          });
+
+          it('leaves them to the connection when it comes back', async () => {
+            storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+            (service as any).onConnectionRemoved('conn-9');
+            await flush();
+
+            openRows(rows);
+            await pollClients('conn-9', 85);
+
+            expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('sat-1', expect.any(Number));
+            expect(storage.resolveAnomaly).not.toHaveBeenCalledWith('backlog-1', expect.any(Number));
+          });
+        });
+
+        it('does not let a poll in flight during removal cancel the sweep', async () => {
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          storage.getAnomalyEvents.mockResolvedValue([{ id: 'old-1' }]);
+          await (service as any).detectClientSaturation({}, mockCtx, T0);
+          await (service as any).drainPersistenceOutbox();
+
+          expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+          expect(pending().size).toBe(0);
+          expect((service as any).openEventsAdopted.size).toBe(0);
+        });
+
+        it('leaves the rows to the connection when it comes back', async () => {
+          (service as any).connectionRegistry.getConfig.mockReturnValue({});
+          storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+          (service as any).onConnectionRemoved('conn-1');
+          await flush();
+
+          await (service as any).detectReplicationDivergence(sample(T0, 0), mockCtx);
+
+          expect(pending().size).toBe(0);
+          expect(storage.resolveAnomaly).not.toHaveBeenCalled();
+        });
+      });
+
+      it('keeps closing a saved event until storage accepts it after removal', async () => {
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const { eventId } = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await new Promise((resolve) => setImmediate(resolve));
+        expect((service as any).persistenceOutbox.has(eventId)).toBe(true);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+    });
+
+    describe('unsaved attempts', () => {
+      const divergenceCopies = () =>
+        (service as any).recentAnomalies.filter(
+          (a: { metricType: MetricType }) => a.metricType === MetricType.REPLICATION_DIVERGENCE,
+        );
+      const openCopies = () => divergenceCopies().filter((a: { resolved: boolean }) => !a.resolved);
+      const absent = (timestamp: number) => ({ ...sample(timestamp, 0), replicas: [] });
+      const divergenceCounts = () =>
+        (prometheusService.incrementAnomalyEvent as jest.Mock).mock.calls.filter(
+          ([, metricType]) => metricType === MetricType.REPLICATION_DIVERGENCE,
+        );
+      const divergenceDispatches = () =>
+        otelEvents.dispatch.mock.calls.filter(
+          ([type, data]) =>
+            type === WebhookEventType.ANOMALY_DETECTED &&
+            data.metricType === MetricType.REPLICATION_DIVERGENCE,
+        );
+      const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
+
+      async function dropReplica(start: number): Promise<void> {
+        let t = start;
+        for (let i = 0; i < 9; i++) {
+          await (service as any).detectReplicationDivergence(absent(t), mockCtx);
+          t += 10_000;
+        }
+      }
+
+      it('saves a retry under the id of the attempt that failed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+        await feed([2, 4, 6, 8, 10, 12, 14, 16, 18], T0);
+        await (service as any).drainPersistenceOutbox();
+
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        const savedIds = new Set(storage.saveAnomalyEvent.mock.calls.map(([event]) => event.id));
+        expect([...savedIds]).toEqual([replica.eventId]);
+        expect(openCopies().map((a: { id: string }) => a.id)).toEqual([replica.eventId]);
+      });
+
+      it('keeps the first timestamp when a resolved attempt is retried', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const [attempt] = divergenceCopies();
+        const firstSeen = attempt.timestamp;
+        jest.spyOn(Date, 'now').mockReturnValue(firstSeen + 5_000);
+        await service.resolveAnomaly(attempt.id);
+
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+
+        const saved = storage.saveAnomalyEvent.mock.calls
+          .map(([event]) => event)
+          .find((event) => event.id === attempt.id);
+        expect(saved).toMatchObject({ timestamp: firstSeen, resolvedAt: firstSeen + 5_000, durationMs: 5_000 });
+      });
+
+      it('counts a retried event once in Prometheus and OTLP', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+        await feed([2, 4, 6, 8, 10, 12, 14, 16], T0);
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.calls.length).toBeGreaterThan(1);
+        expect(divergenceCounts()).toHaveLength(1);
+        expect(divergenceDispatches()).toHaveLength(1);
+        expect(divergenceCopies()).toHaveLength(1);
+      });
+
+      it('counts a higher level as a new event while the first is unsaved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        await feed([130, 140, 150], t);
+
+        expect(divergenceCopies().map((a: { severity: string }) => a.severity)).toEqual(['warning', 'critical']);
+        expect(divergenceCounts()).toHaveLength(2);
+        expect(divergenceDispatches()).toHaveLength(2);
+      });
+
+      it('closes the lower level when the higher one is saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        const next = await feed([130, 140, 150], t);
+        const [warning] = divergenceCopies();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([160], next);
+
+        expect(warning.resolved).toBe(true);
+        expect(openCopies().map((a: { severity: string }) => a.severity)).toEqual(['critical']);
+      });
+
+      it('resolves the unsaved copies on recovery', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        expect(openCopies()).toHaveLength(1);
+
+        await feed([0, 0, 0, 0], t);
+
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('resolves the unsaved copies when the replica drops out', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+
+        const t = await feed([2, 4, 6, 8, 10, 12], T0);
+        expect(openCopies()).toHaveLength(1);
+
+        await dropReplica(t);
+
+        expect(openCopies()).toEqual([]);
+        expect((service as any).divergenceState.get('conn-1').replicas.size).toBe(0);
+      });
+
+      it('treats an attempt saved by correlation as saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        await (service as any).correlateAnomalies();
+        expect(attempt.persisted).toBe(true);
+        const correlationId = attempt.correlationId;
+
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([12, 14], t);
+
+        const replica = (service as any).divergenceState.get('conn-1').replicas.get('10.0.0.2:6379');
+        expect(replica.eventId).toBe(attempt.id);
+        expect(divergenceCopies()).toHaveLength(1);
+        expect(divergenceCopies()[0].correlationId).toBe(correlationId);
+      });
+
+      it('resolves the unsaved copies when the connection is removed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('stamps resolvedAt when the connection is removed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+        const [copy] = divergenceCopies();
+
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+
+        expect(copy.resolvedAt).toEqual(expect.any(Number));
+        const stored = (service as any).toStoredAnomalyEvent(copy);
+        expect(stored.resolvedAt).toBe(copy.resolvedAt);
+        expect(stored.durationMs).toBe(copy.resolvedAt - copy.timestamp);
+      });
+
+      it('closes a correlation-saved copy in storage when the connection is removed', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).correlateAnomalies();
+        expect(attempt.persisted).toBe(true);
+
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+        expect(attempt.resolved).toBe(true);
+      });
+
+      it('keeps closing a removed connection copy until storage accepts it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).correlateAnomalies();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+        expect(attempt.resolved).toBe(false);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(attempt.resolved).toBe(true);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
+      it('keeps a failed resolve pending when correlation saves the event', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+        (service as any).onConnectionRemoved('conn-1');
+        await flushPromises();
+
+        await (service as any).correlateAnomalies();
+        expect(attempt.correlationId).toBeDefined();
+        expect((service as any).persistenceOutbox.has(attempt.id)).toBe(true);
+
+        await (service as any).drainPersistenceOutbox();
+
+        expect(attempt.resolved).toBe(true);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
+      it('keeps a group whose save failed and retries the save', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveCorrelatedGroup.mockRejectedValue(new Error('storage down'));
+
+        await (service as any).correlateAnomalies();
+        await (service as any).correlateAnomalies();
+
+        expect(attempt.correlationId).toBeDefined();
+        expect((service as any).recentGroups).toHaveLength(1);
+        expect(prometheusService.incrementCorrelatedGroup).toHaveBeenCalledTimes(1);
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+
+        await (service as any).drainPersistenceOutbox();
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(2);
+
+        storage.saveCorrelatedGroup.mockResolvedValue(undefined);
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await (service as any).drainPersistenceOutbox();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(3);
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].correlationId).toBe(attempt.correlationId);
+      });
+
+      it('holds the outbox until a pending group save settles', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        let failGroup: (err: Error) => void = () => undefined;
+        storage.saveCorrelatedGroup.mockImplementationOnce(
+          () => new Promise((_, reject) => (failGroup = reject)),
+        );
+
+        const tick = (service as any).correlationTick();
+        await new Promise((resolve) => setImmediate(resolve));
+        failGroup(new Error('storage down'));
+        await tick;
+
+        const ids = storage.saveAnomalyEvent.mock.calls.map(([event]) => event.correlationId);
+        expect(ids).toEqual([expect.any(String)]);
+      });
+
+      it('retries a grouped member whose correlation save fails', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        expect(attempt.persisted).toBe(true);
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+
+        await (service as any).correlateAnomalies();
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent).toHaveBeenCalledTimes(1);
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].correlationId).toBe(attempt.correlationId);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
+      it('resolves in storage while a stored member waits on its retry', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+        await (service as any).correlateAnomalies();
+        const correlationId = attempt.correlationId;
+
+        await service.resolveAnomaly(attempt.id);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.lastCall[0]).toMatchObject({ correlationId, resolved: true });
+      });
+
+      it('carries a failed resolve on a stored member\x27s pending retry', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+        await (service as any).correlateAnomalies();
+        storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+        await service.resolveAnomaly(attempt.id);
+        storage.saveAnomalyEvent.mockClear();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.saveAnomalyEvent.mock.lastCall[0].resolved).toBe(true);
+        expect((service as any).persistenceOutbox.size).toBe(0);
+      });
+
+      it('closes a row resolved while correlation saves it', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        storage.saveAnomalyEvent.mockReset();
+        storage.saveAnomalyEvent.mockImplementationOnce(async () => {
+          attempt.resolved = true;
+          attempt.resolvedAt = T0;
+        });
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+
+        await (service as any).correlateAnomalies();
+        await (service as any).drainPersistenceOutbox();
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, T0);
+      });
+
+      it('keeps a retried event in its correlated group', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+
+        await feed([12, 14], t);
+
+        expect(group.anomalies).toEqual([divergenceCopies()[0]]);
+        expect(group.anomalies[0]).toBe(divergenceCopies()[0]);
+        await service.resolveGroup(group.correlationId);
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('closes a group member in storage once its retry is saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+        const [attempt] = divergenceCopies();
+        expect(attempt.persisted).toBeUndefined();
+
+        storage.saveAnomalyEvent.mockResolvedValue(undefined);
+        await feed([12, 14], t);
+        await (service as any).drainPersistenceOutbox();
+        await service.resolveGroup(group.correlationId);
+
+        expect(storage.resolveAnomaly).toHaveBeenCalledWith(attempt.id, expect.any(Number));
+        expect(openCopies()).toEqual([]);
+      });
+
+      it('stamps the cached copy with the stored resolution time', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [saved] = divergenceCopies();
+        await (service as any).correlateAnomalies();
+        const [group] = (service as any).recentGroups;
+
+        await service.resolveGroup(group.correlationId);
+
+        const [, resolvedAt] = storage.resolveAnomaly.mock.calls[0];
+        expect(saved.resolvedAt).toBe(resolvedAt);
+      });
+
+      it('stamps the cached copy when one event is resolved', async () => {
+        await feed([2, 4, 6, 8, 10], T0);
+        const [saved] = divergenceCopies();
+
+        await service.resolveAnomaly(saved.id);
+
+        const [, resolvedAt] = storage.resolveAnomaly.mock.calls[0];
+        expect(saved.resolvedAt).toBe(resolvedAt);
+      });
+
+      it('keeps a retry resolved when its attempt was resolved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        const t = await feed([2, 4, 6, 8, 10], T0);
+        const [attempt] = divergenceCopies();
+        await service.resolveAnomaly(attempt.id);
+
+        await feed([12, 14], t);
+
+        expect(openCopies()).toEqual([]);
+        expect(divergenceCopies()[0].resolvedAt).toBe(attempt.resolvedAt);
+      });
+
+      it('shows the sent level while the event cannot be saved', async () => {
+        storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+        await feed([2, 4, 6, 8, 10, 12], T0);
+
+        const [replica] = await service.getReplicationDivergenceHistory('conn-1', T0, T0 + 600_000);
+
+        expect(replica.level).toBe('warning');
+        expect((await divergenceHistory())[0].level).toBe('warning');
+      });
+    });
+  });
+
+  describe('detectors re-armed by an outbox drop', () => {
+    let now: number;
+
+    beforeEach(() => {
+      now = 1_700_000_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+    });
+
+    afterEach(() => {
+      (Date.now as jest.Mock).mockRestore();
+    });
+
+    const infoWith = (over: {
+      clients?: Record<string, string>;
+      memory?: Record<string, string>;
+      stats?: Record<string, string>;
+      replication?: Record<string, string>;
+      persistence?: Record<string, string>;
+      server?: Record<string, string>;
+    }) => ({
+      server: { role: 'master', ...over.server },
+      clients: { connected_clients: '10', blocked_clients: '0', ...over.clients },
+      memory: { used_memory: '1000000', allocator_frag_ratio: '1.1', ...over.memory },
+      stats: {
+        instantaneous_ops_per_sec: '100',
+        instantaneous_input_kbps: '50',
+        instantaneous_output_kbps: '30',
+        evicted_keys: '0',
+        keyspace_misses: '5',
+        rejected_connections: '0',
+        acl_access_denied_auth: '0',
+        ...over.stats,
+      },
+      ...(over.replication ? { replication: over.replication } : {}),
+      ...(over.persistence ? { persistence: over.persistence } : {}),
+    });
+
+    const pollWith = async (info: Parameters<typeof infoWith>[0], times = 1) => {
+      (dbClient.getInfoParsed as jest.Mock).mockResolvedValue(infoWith(info));
+      for (let i = 0; i < times; i += 1) {
+        await poll();
+        now += 1_000;
+      }
+    };
+
+    const eventsOf = (metricType: MetricType) =>
+      service.getRecentEvents(100, metricType).reverse();
+
+    const failSaves = () => {
+      storage.saveAnomalyEvent.mockRejectedValue(new Error('storage down'));
+    };
+
+    const healSaves = () => {
+      storage.saveAnomalyEvent.mockResolvedValue(undefined);
+    };
+
+    const expireOutbox = async () => {
+      const polledAt = now;
+      now = polledAt + OUTBOX_MAX_AGE_MS + 1;
+      await (service as any).drainPersistenceOutbox();
+      now = polledAt;
+    };
+
+    const expectRaisedAgain = (metricType: MetricType, first: AnomalyEvent) => {
+      const raised = eventsOf(metricType);
+      expect(raised).toHaveLength(2);
+      expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+    };
+
+    describe('client saturation', () => {
+      const clients = (connected: number) => ({
+        clients: { connected_clients: String(connected), maxclients: '100' },
+      });
+      const events = () => eventsOf(MetricType.CLIENT_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(clients(85), 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        expectRaisedAgain(MetricType.CLIENT_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        await pollWith(clients(50));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(clients(85));
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(clients(85));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0]).toMatchObject({ resolved: true, persisted: true });
+        expect(events()[1].resolved).toBe(false);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(clients(85));
+        failSaves();
+        await pollWith(clients(97));
+        const critical = events()[1];
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(97));
+
+        const raised = events();
+        expect(raised).toHaveLength(3);
+        expect(raised[2].severity).toBe(AnomalySeverity.CRITICAL);
+        expect(raised[2].id).not.toBe(critical.id);
+      });
+
+      it('raises the lower level when a dropped escalation was never followed', async () => {
+        failSaves();
+        await pollWith(clients(97));
+        await pollWith(clients(85));
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised[1].severity).toBe(AnomalySeverity.WARNING);
+      });
+
+      it('stops tracking a dropped event so recovery does not resolve it', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        const [first] = events();
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(clients(85));
+        const retried = events().find((e) => e.id !== first.id);
+
+        expect((service as any).clientSaturationEventIds.get('conn-1')).toEqual([retried?.id]);
+
+        await pollWith(clients(50));
+
+        const resolved = storage.resolveAnomaly.mock.calls.map(([id]: [string]) => id);
+        expect(resolved).toContain(retried?.id);
+        expect(resolved).not.toContain(first.id);
+      });
+
+      it('keeps tracking the later event when an older one is dropped', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        const [first] = events();
+        await pollWith(clients(97));
+        const critical = events()[1];
+        storage.saveAnomalyEvent.mockReset();
+        healSaves();
+        await (service as any).persistAnomaly(critical, mockCtx);
+
+        await expireOutbox();
+
+        expect(first.persisted).not.toBe(true);
+        expect((service as any).clientSaturationEventIds.get('conn-1')).toEqual([critical.id]);
+      });
+
+      describe('dismissed before its save landed', () => {
+        const fillOutbox = (enqueue: (i: number) => void) => {
+          for (let i = 0; i < OUTBOX_MAX_ENTRIES; i++) enqueue(i);
+        };
+
+        it('keeps the save past its age and does not raise it again', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          await service.resolveAnomaly(first.id);
+
+          await expireOutbox();
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(true);
+
+          healSaves();
+          await (service as any).drainPersistenceOutbox();
+          await pollWith(clients(85));
+
+          expect(events()).toHaveLength(1);
+          expect(storage.saveAnomalyEvent).toHaveBeenLastCalledWith(
+            expect.objectContaining({ id: first.id, resolved: true }),
+            'conn-1',
+          );
+        });
+
+        it('does not raise it again when a full outbox of closes evicts it', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          await service.resolveAnomaly(first.id);
+
+          fillOutbox((i) => (service as any).persistenceOutbox.enqueueResolve(`r-${i}`, 1, 1));
+          (service as any).persistenceOutbox.due(Date.now());
+
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
+          healSaves();
+          await pollWith(clients(85));
+          expect(events()).toHaveLength(1);
+        });
+
+        it('does not raise it again when it was dismissed after being evicted', async () => {
+          failSaves();
+          await pollWith(clients(85));
+          const [first] = events();
+          fillOutbox((i) =>
+            (service as any).persistenceOutbox.enqueueSave({ id: `s-${i}` }, undefined, 1),
+          );
+          expect((service as any).persistenceOutbox.has(first.id)).toBe(false);
+
+          await service.resolveAnomaly(first.id);
+          (service as any).persistenceOutbox.settle('s-0');
+          (service as any).persistenceOutbox.due(Date.now());
+
+          healSaves();
+          await pollWith(clients(85));
+          expect(events()).toHaveLength(1);
+        });
+      });
+
+      it('leaves no state behind when the connection went away before the drop', async () => {
+        failSaves();
+        await pollWith(clients(85));
+        (service as any).clientSaturationLevel.delete('conn-1');
+
+        await expireOutbox();
+
+        expect((service as any).clientSaturationLevel.has('conn-1')).toBe(false);
+      });
+    });
+
+    describe('load saturation', () => {
+      const busy = (usec: number) => ({
+        stats: {
+          instantaneous_eventloop_duration_usec: String(usec),
+          instantaneous_eventloop_cycles_per_sec: '1000',
+        },
+      });
+      const events = () => eventsOf(MetricType.LOAD_SATURATION);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(busy(900), 4);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(900));
+
+        expectRaisedAgain(MetricType.LOAD_SATURATION, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(busy(900), 3);
+        await pollWith(busy(100));
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(busy(900), 3);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(busy(900));
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('falls back to the level below when only the escalation is dropped', async () => {
+        await pollWith(busy(900), 3);
+        failSaves();
+        await pollWith(busy(990), 3);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(busy(990));
+
+        const raised = events();
+        expect(raised.map((e) => e.severity)).toEqual([
+          AnomalySeverity.WARNING,
+          AnomalySeverity.CRITICAL,
+          AnomalySeverity.CRITICAL,
+        ]);
+      });
+    });
+
+    describe('memory overhead', () => {
+      const overhead = {
+        memory: {
+          maxmemory: '1000',
+          maxmemory_policy: 'noeviction',
+          used_memory: '800',
+          used_memory_overhead: '700',
+          used_memory_startup: '100',
+          used_memory_dataset: '100',
+        },
+      };
+      const quiet = {
+        memory: { ...overhead.memory, used_memory_overhead: '150' },
+      };
+      const inconsistent = {
+        memory: { ...overhead.memory, used_memory_overhead: '900' },
+      };
+      const events = () => eventsOf(MetricType.MEMORY_OVERHEAD);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(overhead, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('stays quiet when the event was saved from the outbox', async () => {
+        failSaves();
+        await pollWith(overhead);
+        healSaves();
+        now += OUTBOX_RETRY_BASE_MS + 1;
+        await (service as any).drainPersistenceOutbox();
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(1);
+      });
+
+      it('keeps the later event when an older one of the same level is dropped', async () => {
+        failSaves();
+        await pollWith(overhead);
+        await pollWith(quiet);
+        now += OUTBOX_MAX_AGE_MS - 5_000;
+        healSaves();
+        await pollWith(overhead);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+        expect(events()[0].persisted).not.toBe(true);
+      });
+
+      it('raises the inconsistency note again when the outbox drops it', async () => {
+        failSaves();
+        await pollWith(inconsistent, 11);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.INFO);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(inconsistent);
+
+        expectRaisedAgain(MetricType.MEMORY_OVERHEAD, first);
+      });
+
+      it('leaves the level armed when only the note is dropped', async () => {
+        await pollWith(overhead);
+        failSaves();
+        await pollWith(inconsistent, 10);
+        expect(events()).toHaveLength(2);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(overhead);
+
+        expect(events()).toHaveLength(2);
+      });
+    });
+
+    describe('fork memory risk', () => {
+      const GB = 1024 * 1024 * 1024;
+      const risky = {
+        memory: {
+          used_memory: String(9 * GB),
+          used_memory_rss: String(9 * GB),
+          total_system_memory: String(10 * GB),
+        },
+        persistence: { rdb_bgsave_in_progress: '1', current_cow_size: '0' },
+      };
+      const events = () => eventsOf(MetricType.FORK_MEMORY_RISK);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await pollWith(risky, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(risky);
+
+        expectRaisedAgain(MetricType.FORK_MEMORY_RISK, first);
+      });
+    });
+
+    describe('COB pressure', () => {
+      const HARD = 256 * 1024 * 1024;
+      const LIMIT_RAW = `normal 0 0 0 slave ${HARD} ${64 * 1024 * 1024} 60 pubsub 33554432 8388608 60`;
+      const replicated = {
+        memory: { mem_clients_slaves: '0' },
+        replication: { connected_slaves: '1', sync_full: '1' },
+      };
+      const events = () => eventsOf(MetricType.REPL_BUFFER_PRESSURE);
+
+      it('raises the level again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue(LIMIT_RAW);
+        dbClient.getClients = jest
+          .fn()
+          .mockResolvedValue([{ addr: '10.0.0.5:6380', omem: HARD * 0.7 }]);
+        failSaves();
+        await pollWith(replicated, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(replicated);
+
+        expectRaisedAgain(MetricType.REPL_BUFFER_PRESSURE, first);
+      });
+    });
+
+    describe('replica resync loop', () => {
+      const looping = (syncing: string) => ({
+        replication: {
+          role: 'slave',
+          master_link_status: 'down',
+          master_sync_in_progress: syncing,
+        },
+        server: { role: 'slave' },
+      });
+      const events = () => eventsOf(MetricType.RESYNC_LOOP);
+
+      const loop = async () => {
+        for (const syncing of ['1', '0', '1', '0', '1', '0']) {
+          await pollWith(looping(syncing));
+          now += 60_000;
+        }
+      };
+
+      it('raises the loop again when the outbox drops its unsaved event', async () => {
+        failSaves();
+        await loop();
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(looping('1'));
+
+        expectRaisedAgain(MetricType.RESYNC_LOOP, first);
+      });
+    });
+
+    describe('persistence child', () => {
+      const IDLE = {
+        rdb_bgsave_in_progress: '0',
+        rdb_current_bgsave_time_sec: '-1',
+        rdb_last_bgsave_status: 'ok',
+        current_save_keys_processed: '0',
+        current_save_keys_total: '0',
+        aof_rewrite_in_progress: '0',
+        aof_current_rewrite_time_sec: '-1',
+        aof_last_bgrewrite_status: 'ok',
+      };
+      const events = () => eventsOf(MetricType.PERSISTENCE_CHILD);
+
+      it('raises the failed save again when the outbox drops its unsaved event', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed, 2);
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(failed);
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the stall again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: '1000',
+            current_save_keys_total: '42657',
+          },
+        });
+        failSaves();
+        await pollWith(running(5));
+        now += 61_000;
+        await pollWith(running(66));
+        now += 1_000;
+        await pollWith(running(68));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(70));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+
+      it('raises the long-running save again when the outbox drops its unsaved event', async () => {
+        const running = (elapsed: number, processed: number) => ({
+          persistence: {
+            ...IDLE,
+            rdb_bgsave_in_progress: '1',
+            rdb_current_bgsave_time_sec: String(elapsed),
+            current_save_keys_processed: String(processed),
+            current_save_keys_total: '100000000',
+          },
+        });
+        await pollWith(running(100, 1000));
+        failSaves();
+        now += 30_000;
+        await pollWith(running(130, 2000));
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+        expect(first.severity).toBe(AnomalySeverity.WARNING);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith(running(140, 3000));
+
+        expectRaisedAgain(MetricType.PERSISTENCE_CHILD, first);
+      });
+    });
+
+    describe('large-reply pressure', () => {
+      it('raises the offender again when the outbox drops its unsaved event', async () => {
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(
+          Array.from({ length: 5 }, (_, i) => ({
+            id: i + 1,
+            timestamp: 1000,
+            duration: 20000,
+            command: ['GET', `k${i}`],
+            clientAddress: '127.0.0.1:1234',
+            clientName: '',
+            type: 'large-reply' as const,
+          })),
+        );
+        failSaves();
+        await pollWith({}, 2);
+        const [first] = eventsOf(MetricType.LARGE_REPLY_PRESSURE);
+        expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollWith({});
+
+        expectRaisedAgain(MetricType.LARGE_REPLY_PRESSURE, first);
+      });
+    });
+
+    describe('tracked topology gate', () => {
+      let built = 0;
+      const topologyEvent = () => ({
+        id: `finding-${(built += 1)}`,
+        timestamp: now,
+        metricType: MetricType.CLUSTER_TOPOLOGY,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 1,
+        baseline: 0,
+        zScore: 0,
+        stdDev: 0,
+        threshold: 0,
+        message: 'finding',
+        resolved: false,
+        connectionId: 'conn-1',
+      });
+
+      it('raises a finding again on a gate that tracks no event ids', async () => {
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(buildEvent).toHaveBeenCalledTimes(1);
+
+        await expireOutbox();
+        healSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('forgets the tracked id of a dropped event so it is not resolved later', async () => {
+        const eventIdsByConn = new Map<string, Map<string, string>>();
+        const buildEvent = jest.fn(topologyEvent);
+        const gate = {
+          ctx: mockCtx,
+          findings: ['finding'],
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn,
+          minPersistMs: 0,
+          buildEvent,
+        };
+        failSaves();
+        await (service as any).applyTopologyPersistenceGate({ ...gate, timestamp: now });
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(1);
+
+        await expireOutbox();
+
+        expect(eventIdsByConn.get('conn-1')?.size).toBe(0);
+      });
+    });
+
+    describe('an older event dropped after a newer one was saved', () => {
+      const IDLE = {
+        rdb_bgsave_in_progress: '0',
+        rdb_current_bgsave_time_sec: '-1',
+        rdb_last_bgsave_status: 'ok',
+        current_save_keys_processed: '0',
+        current_save_keys_total: '0',
+        aof_rewrite_in_progress: '0',
+        aof_current_rewrite_time_sec: '-1',
+        aof_last_bgrewrite_status: 'ok',
+      };
+      const running = (elapsed: number, processed: number) => ({
+        persistence: {
+          ...IDLE,
+          rdb_bgsave_in_progress: '1',
+          rdb_current_bgsave_time_sec: String(elapsed),
+          current_save_keys_processed: String(processed),
+          current_save_keys_total: '100000000',
+        },
+      });
+      const persistenceEvents = () => eventsOf(MetricType.PERSISTENCE_CHILD);
+
+      const expireOutboxDuringNextSave = (skip = 0) => {
+        const save = storage.saveAnomalyEvent;
+        const fail = () => Promise.reject(new Error('storage down'));
+        for (let i = 0; i < skip; i += 1) save.mockImplementationOnce(fail);
+        save.mockImplementationOnce(() => {
+          (service as any).persistenceOutbox.due(now + OUTBOX_MAX_AGE_MS + 1);
+          return fail();
+        });
+      };
+
+      const expectOlderUnsaved = (events: AnomalyEvent[]) => {
+        expect(events).toHaveLength(2);
+        expect(events[0].persisted).not.toBe(true);
+        expect(events[1].persisted).toBe(true);
+      };
+
+      it('keeps the failed-save latch', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed);
+        await pollWith({ persistence: IDLE });
+        healSaves();
+        await pollWith(failed);
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(failed);
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the stall latch of a new child reusing the track', async () => {
+        failSaves();
+        await pollWith(running(50, 1000));
+        now += 61_000;
+        await pollWith(running(55, 1000));
+        await pollWith(running(1, 1000));
+        healSaves();
+        now += 61_000;
+        await pollWith(running(62, 1000));
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(running(63, 1000));
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the long-running latch of a new child reusing the track', async () => {
+        await pollWith(running(100, 1000));
+        failSaves();
+        await pollWith(running(130, 2000));
+        await pollWith(running(1, 10));
+        healSaves();
+        await pollWith(running(125, 20));
+        expect(persistenceEvents()).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith(running(126, 30));
+
+        expectOlderUnsaved(persistenceEvents());
+      });
+
+      it('keeps the large-reply claim', async () => {
+        const entries = Array.from({ length: 5 }, (_, i) => ({
+          id: i + 1,
+          timestamp: 1000,
+          duration: 20000,
+          command: ['GET', `k${i}`],
+          clientAddress: '127.0.0.1:1234',
+          clientName: '',
+          type: 'large-reply' as const,
+        }));
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+        failSaves();
+        await pollWith({});
+        commandLogAnalytics.getCachedEntries.mockReturnValue([]);
+        await pollWith({});
+        healSaves();
+        commandLogAnalytics.getCachedEntries.mockReturnValue(entries);
+        await pollWith({});
+        expect(eventsOf(MetricType.LARGE_REPLY_PRESSURE)).toHaveLength(2);
+
+        await expireOutbox();
+        await pollWith({});
+
+        expectOlderUnsaved(eventsOf(MetricType.LARGE_REPLY_PRESSURE));
+      });
+
+      it('keeps the topology gate claim', async () => {
+        let built = 0;
+        const buildEvent = jest.fn(() => ({
+          id: `gate-${(built += 1)}`,
+          timestamp: now,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message: 'finding',
+          resolved: false,
+          connectionId: 'conn-1',
+        }));
+        const gate = {
+          ctx: mockCtx,
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+          timestamp: now,
+        };
+        const run = (findings: string[]) =>
+          (service as any).applyTopologyPersistenceGate({ ...gate, findings });
+
+        failSaves();
+        await run(['finding']);
+        await run([]);
+        healSaves();
+        await run(['finding']);
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+
+        await expireOutbox();
+        await run(['finding']);
+
+        expect(buildEvent).toHaveBeenCalledTimes(2);
+      });
+
+      it('keeps a large-reply drop that lands while a later offender saves', async () => {
+        const offending = (commands: string[]) =>
+          commands.flatMap((command, c) =>
+            Array.from({ length: 5 }, (_, i) => ({
+              id: c * 10 + i + 1,
+              timestamp: 1000,
+              duration: 20000,
+              command: [command, `k${i}`],
+              clientAddress: '127.0.0.1:1234',
+              clientName: '',
+              type: 'large-reply' as const,
+            })),
+          );
+        const raisedFor = (command: string) =>
+          eventsOf(MetricType.LARGE_REPLY_PRESSURE).filter((e) =>
+            e.message.startsWith(`WARNING: ${command} `),
+          );
+        dbClient.getConfigValue = jest.fn().mockResolvedValue('8192');
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET']));
+        failSaves();
+        await pollWith({});
+        commandLogAnalytics.getCachedEntries.mockReturnValue(offending(['GET', 'LRANGE']));
+        expireOutboxDuringNextSave();
+        await pollWith({});
+        healSaves();
+        await pollWith({});
+
+        expect(raisedFor('GET')).toHaveLength(2);
+        expect(raisedFor('LRANGE')).toHaveLength(1);
+      });
+
+      it('keeps a gate drop that lands while a later finding saves', async () => {
+        let built = 0;
+        const buildEvent = jest.fn((finding: string) => ({
+          id: `${finding}-${(built += 1)}`,
+          timestamp: now,
+          metricType: MetricType.CLUSTER_TOPOLOGY,
+          anomalyType: AnomalyType.SPIKE,
+          severity: AnomalySeverity.WARNING,
+          value: 1,
+          baseline: 0,
+          zScore: 0,
+          stdDev: 0,
+          threshold: 0,
+          message: finding,
+          resolved: false,
+          connectionId: 'conn-1',
+        }));
+        const gate = {
+          ctx: mockCtx,
+          signatureOf: (finding: string) => finding,
+          firstSeenByConn: new Map(),
+          activeByConn: new Map(),
+          eventIdsByConn: new Map(),
+          minPersistMs: 0,
+          buildEvent,
+          timestamp: now,
+        };
+        const run = (findings: string[]) =>
+          (service as any).applyTopologyPersistenceGate({ ...gate, findings });
+        const raisedFor = (finding: string) =>
+          buildEvent.mock.calls.filter((call) => call[0] === finding);
+
+        failSaves();
+        expireOutboxDuringNextSave(1);
+        await run(['first', 'second']);
+        healSaves();
+        await run(['first', 'second']);
+
+        expect(raisedFor('first')).toHaveLength(2);
+        expect(raisedFor('second')).toHaveLength(1);
+      });
+
+      it('holds no latch once every event is saved or dropped', async () => {
+        const failed = { persistence: { ...IDLE, rdb_last_bgsave_status: 'err' } };
+        failSaves();
+        await pollWith(failed);
+        expect((service as any).latchHolders.size).toBe(1);
+
+        await expireOutbox();
+        expect((service as any).latchHolders.size).toBe(0);
+
+        healSaves();
+        await pollWith(failed);
+        expect((service as any).latchHolders.size).toBe(0);
+      });
+    });
+
+    describe('control-plane saturation', () => {
+      const events = () =>
+        eventsOf(MetricType.CPU_UTILIZATION).filter(
+          (e) => e.severity === AnomalySeverity.CRITICAL && e.zScore === 0,
+        );
+
+      it('raises the episode again on fresh evidence after the outbox drops it', async () => {
+        let counter = 100;
+        const pollSaturated = async (slaves: string) => {
+          (dbClient.getInfoParsed as jest.Mock).mockResolvedValue({
+            ...infoWith({ replication: { connected_slaves: slaves } }),
+            cpu: { used_cpu_sys: String(counter / 2), used_cpu_user: String(counter / 2) },
+          });
+          await poll();
+          counter += 9.5;
+          now += 10_000;
+        };
+
+        failSaves();
+        for (let i = 0; i < 6; i += 1) await pollSaturated('3');
+        await pollSaturated('1');
+        await pollSaturated('1');
+        const [first] = events();
+        expect(events()).toHaveLength(1);
+
+        await expireOutbox();
+        healSaves();
+        await pollSaturated('3');
+        await pollSaturated('1');
+
+        const raised = events();
+        expect(raised).toHaveLength(2);
+        expect(raised.find((e) => e.id !== first.id)?.persisted).toBe(true);
+      });
+    });
+  });
+
+  describe('persistence outbox', () => {
+    const stored = (id: string) =>
+      storage.saveAnomalyEvent.mock.calls.map(([event]) => event).filter((event) => event.id === id);
+    const drain = () => (service as any).drainPersistenceOutbox();
+    const outbox = () => (service as any).persistenceOutbox;
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+    function buildEvent(overrides: Partial<AnomalyEvent> = {}): AnomalyEvent {
+      return {
+        id: '11111111-1111-4111-8111-111111111111',
+        timestamp: 1_000,
+        metricType: MetricType.CONNECTIONS,
+        anomalyType: AnomalyType.SPIKE,
+        severity: AnomalySeverity.WARNING,
+        value: 10,
+        baseline: 1,
+        stdDev: 1,
+        zScore: 9,
+        threshold: 3,
+        message: 'first',
+        resolved: false,
+        connectionId: 'conn-1',
+        ...overrides,
+      };
+    }
+
+    async function addUnsaved(event: AnomalyEvent): Promise<void> {
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(event, mockCtx);
+    }
+
+    it('saves a failed event on the next drain with no poll', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      expect(event.persisted).toBeUndefined();
+
+      await drain();
+
+      expect(event.persisted).toBe(true);
+      expect(stored(event.id)).toHaveLength(2);
+      expect(outbox().size).toBe(0);
+    });
+
+    it('keeps retrying while the save keeps failing', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('still down'));
+
+      await drain();
+      expect(outbox().has(event.id)).toBe(true);
+
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + OUTBOX_RETRY_BASE_MS);
+      await drain();
+      expect(event.persisted).toBe(true);
+    });
+
+    it('backs off between failed retries', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('still down'));
+
+      await drain();
+      const attempts = stored(event.id).length;
+      await drain();
+
+      expect(stored(event.id)).toHaveLength(attempts);
+      expect(outbox().has(event.id)).toBe(true);
+    });
+
+    it('keeps correlating while a slow retry is running', async () => {
+      const event = buildEvent({ correlationId: 'group-1' });
+      await addUnsaved(event);
+      let release: () => void = () => undefined;
+      storage.saveAnomalyEvent.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+      const correlate = jest.spyOn(service as any, 'correlateAnomalies');
+
+      const slow = (service as any).correlationTick();
+      await flush();
+      await (service as any).correlationTick();
+
+      expect(correlate).toHaveBeenCalledTimes(2);
+      release();
+      await slow;
+      expect(event.persisted).toBe(true);
+    });
+
+    it('stores the event as it stands when the retry runs', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      await service.resolveAnomaly(event.id);
+      event.correlationId = 'group-1';
+
+      await drain();
+
+      expect(stored(event.id).at(-1)).toMatchObject({
+        message: 'first',
+        resolved: true,
+        resolvedAt: event.resolvedAt,
+        correlationId: 'group-1',
+      });
+    });
+
+    it('counts a retried event once', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+
+      await drain();
+
+      expect(prometheusService.incrementAnomalyEvent).toHaveBeenCalledTimes(1);
+      expect((service as any).recentAnomalies.filter((a: AnomalyEvent) => a.id === event.id)).toHaveLength(1);
+    });
+
+    it('stops retrying an event another writer saved', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      event.persisted = true;
+
+      await drain();
+
+      expect(stored(event.id)).toHaveLength(1);
+      expect(outbox().size).toBe(0);
+    });
+
+    it('retries a failed resolve with its first timestamp', async () => {
+      const event = buildEvent();
+      await (service as any).addAnomaly(event, mockCtx);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      jest.spyOn(Date, 'now').mockReturnValue(5_000);
+      await service.resolveAnomaly(event.id);
+      expect(event.resolved).toBe(false);
+
+      jest.spyOn(Date, 'now').mockReturnValue(9_000);
+      await drain();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(storage.resolveAnomaly).toHaveBeenLastCalledWith(event.id, 5_000);
+      expect(event).toMatchObject({ resolved: true, resolvedAt: 5_000 });
+      expect(outbox().size).toBe(0);
+    });
+
+    it('stops retrying a resolve whose row no longer exists', async () => {
+      const event = buildEvent();
+      await (service as any).addAnomaly(event, mockCtx);
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+      await service.resolveAnomaly(event.id);
+      (service as any).recentAnomalies = [];
+      storage.resolveAnomaly.mockResolvedValueOnce(false);
+
+      await drain();
+
+      expect(outbox().size).toBe(0);
+    });
+
+    it('resolves an unsaved event that left the recent list', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      (service as any).recentAnomalies = [];
+
+      await expect(service.resolveAnomaly(event.id)).resolves.toBe(true);
+      await drain();
+
+      expect(stored(event.id).at(-1)).toMatchObject({ resolved: true });
+    });
+
+    it('closes the row when the event was resolved during its save', async () => {
+      const event = buildEvent();
+      await addUnsaved(event);
+      storage.saveAnomalyEvent.mockImplementationOnce(async () => {
+        event.resolved = true;
+        event.resolvedAt = 7_000;
+      });
+
+      await drain();
+      await drain();
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith(event.id, 7_000);
+    });
+
+    it('stores the source of a save that lands during correlation', async () => {
+      const event = buildEvent();
+      const ctx = { ...mockCtx, host: 'replica-host', port: 7000 };
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(event, ctx);
+
+      await (service as any).correlateAnomalies();
+
+      expect(event.persisted).toBe(true);
+      expect(stored(event.id).at(-1)).toMatchObject({ sourceHost: 'replica-host', sourcePort: 7000 });
+    });
+
+    it('stores the source of a save retried after correlation', async () => {
+      const event = buildEvent();
+      const ctx = { ...mockCtx, host: 'replica-host', port: 7000 };
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).addAnomaly(event, ctx);
+      storage.saveAnomalyEvent.mockRejectedValueOnce(new Error('storage down'));
+      await (service as any).correlateAnomalies();
+      outbox().settle(event.id);
+      outbox().enqueueRewrite(event, Date.now());
+
+      await drain();
+
+      expect(stored(event.id).at(-1)).toMatchObject({ sourceHost: 'replica-host', sourcePort: 7000 });
+    });
+
+    it('does not overlap outbox drains', async () => {
+      const event = buildEvent({ correlationId: 'group-1' });
+      await addUnsaved(event);
+      let release: () => void = () => undefined;
+      storage.saveAnomalyEvent.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+
+      const first = (service as any).correlationTick();
+      await flush();
+      await (service as any).correlationTick();
+      release();
+      await first;
+
+      expect(stored(event.id)).toHaveLength(2);
+    });
+
+    it('does not overlap correlation', async () => {
+      await addUnsaved(buildEvent());
+      let release: () => void = () => undefined;
+      storage.saveCorrelatedGroup.mockImplementationOnce(
+        () => new Promise<void>((resolve) => (release = resolve)),
+      );
+
+      const first = (service as any).correlationTick();
+      await flush();
+      await (service as any).correlationTick();
+      release();
+      await first;
+
+      expect(storage.saveCorrelatedGroup).toHaveBeenCalledTimes(1);
+    });
+
+    it('warns when an entry is dropped', async () => {
+      const warn = jest.spyOn((service as any).logger, 'warn');
+      const event = buildEvent();
+      await addUnsaved(event);
+      const { enqueuedAt } = outbox().due(Date.now())[0];
+      jest.spyOn(Date, 'now').mockReturnValue(enqueuedAt + OUTBOX_MAX_AGE_MS + 1);
+
+      await drain();
+      (Date.now as jest.Mock).mockRestore();
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(event.id));
+      expect(outbox().size).toBe(0);
+    });
+
+    it('sweeps a removed connection from the drain on a single-connection install', async () => {
+      storage.getAnomalyEvents.mockRejectedValueOnce(new Error('storage down'));
+      (service as any).onConnectionRemoved('conn-1');
+      await flush();
+      expect((service as any).removedConnectionSweeps.has('conn-1')).toBe(true);
+
+      storage.getAnomalyEvents.mockResolvedValueOnce([{ id: 'old-1' }]);
+      await drain();
+
+      expect(storage.resolveAnomaly).toHaveBeenCalledWith('old-1', expect.any(Number));
+      expect((service as any).removedConnectionSweeps.size).toBe(0);
+    });
+
+    it('closes a removed connection event once storage accepts it, with no poll', async () => {
+      const orphanId = '0b6f2a6e-8a43-4f0e-9d0b-7f2c1a5e3d10';
+      (service as any).divergenceOrphans.set(
+        'conn-1',
+        new Map([['10.0.0.2:6379', { eventIds: new Set([orphanId]), sinceWindow: 0, claimed: false }]]),
+      );
+      (service as any).divergenceOrphansSwept.add('conn-1');
+      storage.resolveAnomaly.mockRejectedValueOnce(new Error('storage down'));
+
+      (service as any).onConnectionRemoved('conn-1');
+      await flush();
+      expect(outbox().has(orphanId)).toBe(true);
+
+      await drain();
+
+      expect(outbox().size).toBe(0);
+      expect(storage.resolveAnomaly).toHaveBeenCalledTimes(2);
+    });
+
+    it('drains on the correlation tick', async () => {
+      const spy = jest.spyOn(service as any, 'drainPersistenceOutbox').mockResolvedValue(undefined);
+      jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
+      (service as any).settingsService = {
+        getDetectorConfig: async () => ({}),
+        getCachedSettings: () => ({ anomalyPrometheusIntervalMs: 30_000 }),
+        onDetectorConfigChange: () => () => undefined,
+      };
+      jest.useFakeTimers();
+      try {
+        await service.onModuleInit();
+        await jest.advanceTimersByTimeAsync((service as any).correlationIntervalMs);
+
+        expect(spy).toHaveBeenCalledTimes(1);
+        await service.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

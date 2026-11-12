@@ -7,8 +7,8 @@ import {
   isPlanComplete,
   planBlock,
   preflightNotes,
-  SSH_TUNNEL_BLOCK_MESSAGE,
-  usesSshTunnel,
+  serverlessCheckBlock,
+  serverlessCheckNotes,
 } from '../preflight';
 
 function conn(partial: Partial<Connection> & Pick<Connection, 'id'>): Connection {
@@ -145,22 +145,13 @@ describe('planBlock', () => {
     expect(planBlock(child, VALKEY_81)).toBe(CLUSTER_MEMBER_BLOCK_MESSAGE);
   });
 
-  it('blocks an SSH-tunneled connection as source or target', () => {
+  it('allows an SSH-tunneled connection as source or target', () => {
     const tunneled = conn({
       id: 'tunneled',
       sshTunnel: { enabled: true, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
     });
-    expect(planBlock(tunneled, VALKEY_81)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
-    expect(planBlock(REDIS_72, tunneled)).toBe(SSH_TUNNEL_BLOCK_MESSAGE);
-  });
-
-  it('does not block a connection whose saved tunnel is disabled', () => {
-    const tunnelOff = conn({
-      id: 'off',
-      sshTunnel: { enabled: false, host: 'bastion', port: 22, username: 'ops', authMethod: 'password' },
-    });
-    expect(usesSshTunnel(tunnelOff)).toBe(false);
-    expect(planBlock(tunnelOff, VALKEY_81)).toBeNull();
+    expect(planBlock(tunneled, VALKEY_81)).toBeNull();
+    expect(planBlock(REDIS_72, tunneled)).toBeNull();
   });
 
   it('blocks external connections as source or target', () => {
@@ -237,5 +228,39 @@ describe('preflightNotes', () => {
     });
     expect(readOnly).toBeDefined();
     expect(readOnly?.message).toMatch(/modif/i);
+  });
+});
+
+describe('serverlessCheckBlock', () => {
+  it('allows a live direct source', () => {
+    expect(serverlessCheckBlock(REDIS_72)).toBeNull();
+    expect(serverlessCheckBlock(null)).toBeNull();
+  });
+
+  it('blocks a source that analysis cannot reach directly', () => {
+    expect(serverlessCheckBlock(conn({ id: 'p', connectionType: 'external' }))).toBe(EXTERNAL_BLOCK_MESSAGE);
+  });
+
+  it('allows a source reached through an SSH tunnel', () => {
+    expect(
+      serverlessCheckBlock(
+        conn({ id: 't', sshTunnel: { enabled: true, host: 'b', port: 22, username: 'u', authMethod: 'password' } }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('serverlessCheckNotes', () => {
+  it('says the check needs no target and does not unlock a migration', () => {
+    const messages = serverlessCheckNotes(REDIS_72).map((note) => {
+      return note.message;
+    });
+    expect(messages.some((message) => /does not unlock a migration/i.test(message))).toBe(true);
+    expect(messages.some((message) => /offline/i.test(message))).toBe(false);
+  });
+
+  it('warns when the source is offline', () => {
+    const notes = serverlessCheckNotes(conn({ id: 'off', isConnected: false }));
+    expect(notes[0].tone).toBe('warning');
   });
 });

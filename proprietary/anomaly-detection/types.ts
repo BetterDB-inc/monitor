@@ -1,3 +1,7 @@
+import type { StoredAnomalyEvent } from '@app/common/interfaces/storage-port.interface';
+import type { RegressionKind } from '../latency-regression/types';
+import type { RetryAmplificationContributor } from './retry-amplification-attribution';
+
 export enum MetricType {
   CONNECTIONS = 'connections',
   OPS_PER_SEC = 'ops_per_sec',
@@ -64,6 +68,15 @@ export enum MetricType {
   SENTINEL_ENDPOINT_DRIFT = 'sentinel_endpoint_drift',
   /** Sentinel event-loop stall / TILT from blocking hostname resolution on the main loop (valkey-sentinel-tilt-repro) — state-based. */
   SENTINEL_LOOP_STALL = 'sentinel_loop_stall',
+  /** Connect/disconnect churn: total_connections_received rate spiking while connected_clients does not grow — z-score on the per-poll rate, fed inline. */
+  CONNECTION_CHURN = 'connection_churn',
+  RESHARD_SHARD_SKEW = 'reshard_shard_skew',
+  HOT_SHARD = 'hot_shard',
+  RETRY_AMPLIFICATION = 'retry_amplification',
+  ERROR_REPLIES = 'error_replies',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
+  BACKLOG_COVERAGE_RISK = 'backlog_coverage_risk',
+  RESYNC_ESCALATION = 'resync_escalation',
 }
 
 /**
@@ -104,6 +117,14 @@ export const METRICS_HANDLED_OUTSIDE_EXTRACTOR: ReadonlySet<MetricType> = new Se
   MetricType.SLOWLOG_COUNT,
   MetricType.CONFIG_DRIFT,
   MetricType.LARGE_REPLY_PRESSURE,
+  MetricType.CONNECTION_CHURN,
+  MetricType.RESHARD_SHARD_SKEW,
+  MetricType.HOT_SHARD,
+  MetricType.RETRY_AMPLIFICATION,
+  MetricType.ERROR_REPLIES,
+  MetricType.REPLICATION_DIVERGENCE,
+  MetricType.BACKLOG_COVERAGE_RISK,
+  MetricType.RESYNC_ESCALATION,
 ]);
 
 export enum AnomalySeverity {
@@ -129,7 +150,61 @@ export enum AnomalyPattern {
   PERSISTENCE_STALL = 'persistence_stall',
   SPLIT_BRAIN = 'split_brain',
   CONTROL_PLANE_SATURATION = 'control_plane_saturation',
+  RESHARD_PRESSURE = 'reshard_pressure',
+  RETRY_AMPLIFICATION = 'retry_amplification',
+  REPLICATION_DIVERGENCE = 'replication_divergence',
+  RECOVERY_AMPLIFICATION = 'recovery_amplification',
+  DIVERGENCE_UNDER_PRESSURE = 'divergence_under_pressure',
+  RESHARD_UNDER_WRITES = 'reshard_under_writes',
+  RETRY_STORM = 'retry_storm',
+  BACKLOG_EXHAUSTION = 'backlog_exhaustion',
+  RESHARD_DIVERGENCE_PRESSURE = 'reshard_divergence_pressure',
   UNKNOWN = 'unknown',
+}
+
+export type RetryAmplificationTrigger = 'latency' | 'errors' | 'churn';
+
+/** A setting the recommendation names, with the value computed from this instance's numbers. */
+export interface RecommendationValue {
+  setting: string;
+  current: number;
+  target: number;
+  unit: string;
+  /** Set when the value belongs to one node of a group. */
+  nodeAddr?: string;
+}
+
+/**
+ * One value per node and setting. A later reading replaces an earlier one
+ * only when its target is at least as large, so a smaller replica cannot
+ * shrink the limit a larger one still needs. Node identity is `nodeAddr`,
+ * then the connection, so two nodes in one group each keep their own value.
+ */
+export function mergeRecommendationValues(
+  events: readonly {
+    nodeAddr?: string;
+    connectionId?: string;
+    values?: readonly RecommendationValue[];
+  }[],
+): RecommendationValue[] {
+  const best = new Map<string, RecommendationValue>();
+  for (const event of events) {
+    for (const value of event.values ?? []) {
+      const nodeAddr = value.nodeAddr ?? event.nodeAddr;
+      const identity = nodeAddr ?? event.connectionId ?? '';
+      const stamped: RecommendationValue = nodeAddr ? { ...value, nodeAddr } : { ...value };
+      const key = `${identity}\0${stamped.setting}`;
+      const held = best.get(key);
+      if (!held || stamped.target >= held.target) best.set(key, stamped);
+    }
+  }
+  return [...best.values()];
+}
+
+const RETRY_AMPLIFICATION_TRIGGERS: ReadonlySet<string> = new Set<RetryAmplificationTrigger>(['latency', 'errors', 'churn']);
+
+export function isRetryTrigger(value: unknown): value is RetryAmplificationTrigger {
+  return typeof value === 'string' && RETRY_AMPLIFICATION_TRIGGERS.has(value);
 }
 
 export interface AnomalyEvent {
@@ -146,8 +221,16 @@ export interface AnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: MetricType[];
+  replicaAddr?: string;
+  nodeAddr?: string;
+  dedupeKey?: string;
+  commands?: string[];
+  eventSequence?: number;
+  kind?: RegressionKind;
   resolved: boolean;
+  resolvedAt?: number;
   connectionId?: string;
+  scopeId?: string;
   /**
    * Set only by synthetic-event constructors (e.g.
    * createControlPlaneSaturationEvent) to mark an event that represents a
@@ -156,12 +239,19 @@ export interface AnomalyEvent {
    * the numeric fields.
    */
   syntheticPattern?: AnomalyPattern;
+  retryTrigger?: RetryAmplificationTrigger;
+  /** In-memory only, like retryTrigger: the top clients of a retry amplification event. */
+  retryContributors?: RetryAmplificationContributor[] | null;
+  /**
+   * In-memory only, like retryTrigger: target values computed from the
+   * detector's inputs. Absent when an input is unknown, and on events read
+   * back from storage.
+   */
+  values?: RecommendationValue[];
   /**
    * Transient (not persisted): whether this cached event was durably written to
-   * storage. Deterministic string-id events (failover/promotion/cluster/
-   * persistence/dup-primary) can't be stored on Postgres (UUID PK), so they stay
-   * memory-only and are resolved by flipping the cache — a storage-backed poll
-   * can never resurface a row that was never written.
+   * storage. An event whose save has not landed is resolved by flipping the cache
+   * and carrying the close on its pending save.
    */
   persisted?: boolean;
 }
@@ -173,7 +263,9 @@ export interface CorrelatedAnomalyGroup {
   pattern: AnomalyPattern;
   diagnosis: string;
   recommendations: string[];
+  values?: RecommendationValue[];
   severity: AnomalySeverity;
+  truncated?: boolean;
 }
 
 export interface MetricSample {
@@ -211,4 +303,95 @@ export interface AnomalySummary {
   byPattern: Record<AnomalyPattern, number>;
   activeEvents: number;
   resolvedEvents: number;
+}
+
+/**
+ * Why the per-node fan-out of a connection dials no other primary:
+ * - `not_applicable`: a standalone, replica or external connection, which has
+ *   no other primaries to reach.
+ * - `no_sentinel_credentials`: a Sentinel connection without data-node
+ *   credentials, so none of its primaries are dialed.
+ * - `sentinel_credentials_unreadable`: the data-node password is stored but
+ *   could not be decrypted (missing or rotated `ENCRYPTION_KEY`).
+ * - `connection_secrets_unreadable`: data-node credentials are set, but
+ *   another stored secret (password, TLS key, SSH material) could not be
+ *   decrypted.
+ * - `certificate_auth`: a certificate-authenticated Sentinel connection; the
+ *   connection form stores no data-node settings in that mode.
+ * - `agent_connection`: a cluster or Sentinel connection reached through the
+ *   agent, so the monitor cannot dial the data nodes itself.
+ * - `ssh_tunnel`: a Sentinel connection behind an SSH tunnel; its data nodes
+ *   are not dialed. (A tunnelled cluster connection still dials; see
+ *   `tunnelled`.)
+ * - `topology_unknown`: `SENTINEL MASTERS` has not been read yet.
+ * - `topology_unreadable`: `CLUSTER NODES` or `SENTINEL MASTERS` failed on the
+ *   latest read.
+ * - `no_targets`: every other primary is monitored as its own connection.
+ * - `covered_elsewhere`: every other primary is claimed by another connection,
+ *   which reads it or holds it as down; see that connection's coverage.
+ * - `fanout_failed`: the cycle failed before the primaries were read (a
+ *   storage error, for example), or the deployment has no cluster discovery
+ *   to dial them; `notDialed` counts the ones it skipped.
+ */
+export type FanoutCoverageReason =
+  | 'not_applicable'
+  | 'no_sentinel_credentials'
+  | 'sentinel_credentials_unreadable'
+  | 'connection_secrets_unreadable'
+  | 'certificate_auth'
+  | 'agent_connection'
+  | 'ssh_tunnel'
+  | 'topology_unknown'
+  | 'topology_unreadable'
+  | 'no_targets'
+  | 'covered_elsewhere'
+  | 'fanout_failed';
+
+/** Per-connection outcome of the latest per-node fan-out cycle. */
+export interface FanoutCoverage {
+  connectionId: string;
+  /** `cluster` or `sentinel` once the topology mode is known. */
+  topology: 'cluster' | 'sentinel' | null;
+  /** Primaries read this cycle. */
+  checked: number;
+  /** Primaries flagged down by the topology, in backoff, or whose read failed. */
+  unreachable: number;
+  /** Primaries that refused the credentials (WRONGPASS, NOAUTH, NOPERM). */
+  authFailed: number;
+  /** Primaries past the per-connection cap that no other connection checks. */
+  skipped: number;
+  /** Primaries the topology lists that the connection does not dial (see `reason`). */
+  notDialed: number;
+  /**
+   * Set when the fan-out cannot dial, or has nothing to check. Null while the
+   * connection has primaries to count, even if it dialed none because each is
+   * in backoff or flagged down, so read the counts for gaps too.
+   */
+  reason: FanoutCoverageReason | null;
+  /** The connection goes through an SSH tunnel, which the per-node reads do not use. */
+  tunnelled: boolean;
+  /** Most primaries one connection checks. */
+  targetLimit: number;
+  /** Per-primary connect and INFO timeout. */
+  timeoutMs: number;
+  timestamp: number;
+  /** Server-side age of the entry when it was read. */
+  ageMs: number;
+  /** No poll has refreshed the entry for 3 poll intervals (at least 30 seconds); its gauges are withdrawn. */
+  stale: boolean;
+}
+
+export const ANOMALY_EVENT_SINK = Symbol('ANOMALY_EVENT_SINK');
+
+export interface AnomalyEventSink {
+  ingestExternalAnomaly(event: AnomalyEvent): void;
+  stampExternalAnomaly?(event: AnomalyEvent): void;
+  reportLatencyDegraded?(connectionId: string, degraded: boolean | null): void;
+}
+
+export const ANOMALY_WEBHOOK_SINK = 'ANOMALY_WEBHOOK_SINK';
+
+export interface AnomalyWebhookSink {
+  dispatchAnomalyWebhook(anomaly: StoredAnomalyEvent): Promise<void>;
+  dispatchSequenceWebhook(group: CorrelatedAnomalyGroup): Promise<void>;
 }

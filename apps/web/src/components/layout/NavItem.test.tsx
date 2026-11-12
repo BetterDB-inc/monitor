@@ -3,9 +3,9 @@ import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { NavItem } from './NavItem';
 
-function renderItem(to: string) {
+function renderItem(to: string, at = '/') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[at]}>
       <NavItem to={to} active={false}>
         {to}
       </NavItem>
@@ -40,5 +40,19 @@ describe('NavItem shortcut hint', () => {
     renderItem('/slowlog');
 
     expect(screen.getByText('G S')).toBeVisible();
+  });
+});
+
+describe('NavItem connection', () => {
+  it('links to the page on the connection open in this tab', () => {
+    renderItem('/latency', '/slowlog?connection=conn-2&tab=patterns');
+
+    expect(screen.getByRole('link').getAttribute('href')).toBe('/latency?connection=conn-2');
+  });
+
+  it('links to the bare page before a connection is selected', () => {
+    renderItem('/latency', '/slowlog');
+
+    expect(screen.getByRole('link').getAttribute('href')).toBe('/latency');
   });
 });

@@ -152,7 +152,7 @@ async function insertSlowLogBatch(pool: Pool, rows: any[][]): Promise<void> {
     `INSERT INTO slow_log_entries
       (slowlog_id, timestamp, duration, command, client_address, client_name, captured_at, source_host, source_port, connection_id)
      VALUES ${placeholders.join(', ')}
-     ON CONFLICT (slowlog_id, source_host, source_port, connection_id) DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     values,
   );
 }
@@ -224,7 +224,7 @@ async function insertCommandLogBatch(pool: Pool, rows: any[][]): Promise<void> {
     `INSERT INTO command_log_entries
       (commandlog_id, timestamp, duration, command, client_address, client_name, log_type, captured_at, source_host, source_port, connection_id)
      VALUES ${placeholders.join(', ')}
-     ON CONFLICT (commandlog_id, log_type, source_host, source_port, connection_id) DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     values,
   );
 }

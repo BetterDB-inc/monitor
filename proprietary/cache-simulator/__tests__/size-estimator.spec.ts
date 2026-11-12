@@ -1,4 +1,4 @@
-import { estimate, keyMemoryCeiling } from '../size-estimator';
+import { estimate, keyMemoryCeiling, likelyMissed } from '../size-estimator';
 import type { NodeSample } from '../sample-types';
 
 const node = (strata: NodeSample['strata'], timedOut = false): NodeSample => ({
@@ -118,32 +118,106 @@ describe('estimate', () => {
   });
 
   it('widens the interval to the memory the sample cannot explain', () => {
-    const result = estimate([node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [10, 10] }])], 0, 5000);
+    const result = estimate([{ ...node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [10, 10] }]), ceiling: 5000 }], 0);
     expect(result.totalBytes).toBe(1000);
     expect(result.ci95Bytes).toBe(4000);
   });
 
   it('widens the interval when the estimate exceeds the memory ceiling', () => {
-    const result = estimate([node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [1000, 1000] }])], 0, 5000);
+    const result = estimate([{ ...node([{ type: 'string', estimatedKeys: 100, exact: true, observed: 0, sizes: [1000, 1000] }]), ceiling: 5000 }], 0);
     expect(result.totalBytes).toBe(100_000);
     expect(result.ci95Bytes).toBe(95_000);
   });
 
   it('treats a nonempty node without measured strata as unsampled', () => {
-    const result = estimate([{ node: 'n', dbSize: 100, strata: [], exhausted: false, timedOut: true }], 0, 5000);
+    const result = estimate([{ node: 'n', dbSize: 100, strata: [], exhausted: false, timedOut: true, ceiling: 5000 }], 0);
     expect(result.totalBytes).toBe(0);
     expect(result.ci95Bytes).toBe(5000);
   });
 
   it('ignores the memory ceiling when every key was sampled', () => {
-    const result = estimate([node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 10] }])], 0, 5000);
+    const result = estimate([{ ...node([{ type: 'string', estimatedKeys: 2, exact: true, observed: 0, sizes: [10, 10] }]), ceiling: 5000 }], 0);
     expect(result.ci95Bytes).toBe(0);
   });
 
   it('keeps the statistical interval when it is wider than the unexplained memory', () => {
     const withoutCeiling = estimate([node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }])], 0);
-    const withCeiling = estimate([node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }])], 0, 100_001);
+    const withCeiling = estimate([{ ...node([{ type: 'string', estimatedKeys: 1000, exact: true, observed: 0, sizes: [90, 100, 110] }]), ceiling: 100_001 }], 0);
     expect(withCeiling.ci95Bytes).toBe(withoutCeiling.ci95Bytes);
+  });
+
+  describe('likely missed large keys', () => {
+    const strings = (sizes: number[], ceiling?: number, estimatedKeys = 1000): NodeSample => ({
+      ...node([{ type: 'string', estimatedKeys, exact: true, observed: 0, sizes }]),
+      ceiling,
+    });
+
+    it('flags a sample that falls well below the memory ceiling', () => {
+      expect(estimate([strings([100, 100, 100], 2_000_000)], 0).likelyMissedLargeKeys).toBe(true);
+    });
+
+    it('does not flag a sample within the ceiling margin', () => {
+      expect(estimate([strings([100, 100, 100], 110_000)], 0).likelyMissedLargeKeys).toBe(false);
+    });
+
+    it('does not flag an estimate above the ceiling', () => {
+      expect(estimate([strings([100, 100, 100], 50_000)], 0).likelyMissedLargeKeys).toBe(false);
+    });
+
+    it('does not flag a gap the statistical interval already covers', () => {
+      const { ci95Bytes, totalBytes } = estimate([strings([10, 100, 10_000])], 0);
+      expect(estimate([strings([10, 100, 10_000], totalBytes + ci95Bytes * 0.9)], 0).likelyMissedLargeKeys).toBe(false);
+    });
+
+    it('does not flag without a ceiling or when every key was sampled', () => {
+      expect(estimate([strings([100, 100, 100])], 0).likelyMissedLargeKeys).toBe(false);
+      expect(estimate([strings([100, 100], 200_000, 2)], 0).likelyMissedLargeKeys).toBe(false);
+    });
+
+    it('flags a node that misses large keys even when another node covers the gap', () => {
+      const over = strings([1000, 1000, 1000], 100_000);
+      const under = strings([100, 100, 100], 2_000_000);
+      expect(likelyMissed(estimate([over, under], 0).totalBytes, 0, 2_100_000, 2000)).toBe(false);
+      expect(estimate([over, under], 0).likelyMissedLargeKeys).toBe(true);
+    });
+
+    it('does not blame large keys for a node with no measurements, but still widens the range', () => {
+      const unmeasured: NodeSample = { node: 'n', dbSize: 100, strata: [], exhausted: false, timedOut: true, ceiling: 5000 };
+      const result = estimate([unmeasured], 0);
+      expect(result.likelyMissedLargeKeys).toBe(false);
+      expect(result.ci95Bytes).toBe(5000);
+    });
+
+    it('does not flag a node whose ceiling also covers keys in other databases, but still widens the range', () => {
+      const result = estimate([{ ...strings([100, 100, 100], 2_000_000), otherDbKeys: true }], 0);
+      expect(result.likelyMissedLargeKeys).toBe(false);
+      expect(result.ci95Bytes).toBe(1_900_000);
+    });
+
+    it('widens the range by the nodes with a known ceiling when another node has none', () => {
+      const result = estimate([strings([100, 100, 100], 2_000_000), strings([100, 100, 100])], 0);
+      expect(result.likelyMissedLargeKeys).toBe(true);
+      expect(result.ci95Bytes).toBe(1_900_000);
+    });
+  });
+
+  describe('likelyMissed', () => {
+    it('needs the gap to exceed both the interval and the margin share of the ceiling', () => {
+      expect(likelyMissed(10_000_000, 1000, 20_000_000, 1000)).toBe(true);
+      expect(likelyMissed(10_000_000, 15_000_000, 20_000_000, 1000)).toBe(false);
+      expect(likelyMissed(10_000_000, 1000, 11_000_000, 1000)).toBe(false);
+      expect(likelyMissed(30_000_000, 0, 20_000_000, 1000)).toBe(false);
+    });
+
+    it('allows the per-key table overhead a small-value keyspace leaves outside MEMORY USAGE', () => {
+      expect(likelyMissed(32_000_000, 0, 40_240_528, 1_000_000)).toBe(false);
+      expect(likelyMissed(312_000, 0, 678_032, 10_000)).toBe(false);
+      expect(likelyMissed(43_888_890, 0, 62_024_064, 1_000_000)).toBe(false);
+    });
+
+    it('still flags a few megabyte-sized keys missing from a small-value keyspace', () => {
+      expect(likelyMissed(6_392_000, 0, 8_240_528 + 5 * 2 * 1024 * 1024, 200_000)).toBe(true);
+    });
   });
 
   it('adds the per-key dict entry to the dataset memory for the ceiling', () => {

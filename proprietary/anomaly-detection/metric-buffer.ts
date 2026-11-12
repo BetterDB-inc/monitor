@@ -79,6 +79,10 @@ export class MetricBuffer {
     };
   }
 
+  getSamples(): readonly MetricSample[] {
+    return this.samples;
+  }
+
   getSampleCount(): number {
     return this.samples.length;
   }

@@ -2,6 +2,9 @@ export type { StoredAclEntry, AuditQueryOptions, AuditStats } from '@betterdb/sh
 export type {
   StoredClientSnapshot,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   ClientAnalyticsStats,
   CommandDistributionParams,
@@ -94,6 +97,9 @@ import type {
   ClientAnalyticsStats,
   ClientSnapshotGroupRow,
   ClientSnapshotQueryOptions,
+  ClientCaptureReadBounds,
+  ClientCaptureRowCount,
+  ClientCaptureSummary,
   ClientTimeSeriesPoint,
   DatabaseConnectionConfig,
   HotKeyEntry,
@@ -134,6 +140,7 @@ import type {
   CaptureSessionQueryOptions,
   StoredCaptureChunk,
   CaptureSessionPatch,
+  CaptureTriggerStatus,
   StoredCaptureTrigger,
   CaptureTriggerQueryOptions,
   CaptureTriggerPatch,
@@ -144,6 +151,8 @@ import type {
 import type { AgentToken, TokenType } from '@betterdb/shared';
 
 // Anomaly Event Types
+export type AnomalyKind = 'upgrade_regression' | 'sustained_degradation';
+
 export interface StoredAnomalyEvent {
   id: string;
   timestamp: number;
@@ -158,12 +167,20 @@ export interface StoredAnomalyEvent {
   message: string;
   correlationId?: string;
   relatedMetrics?: string[];
+  replicaAddr?: string;
+  nodeAddr?: string;
+  dedupeKey?: string;
+  commands?: string[];
+  eventSequence?: number;
+  kind?: AnomalyKind;
+  retryTrigger?: string;
   resolved: boolean;
   resolvedAt?: number;
   durationMs?: number;
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  scopeId?: string;
 }
 
 // Bulk-Delete Audit Types (one row per execute run; dry-runs are not audited)
@@ -208,6 +225,32 @@ export interface StoredCorrelatedGroup {
   sourceHost?: string;
   sourcePort?: number;
   connectionId?: string;
+  anomalyIds?: string[];
+  scopeId?: string;
+}
+
+export interface AnomalyEventCursor {
+  timestamp: number;
+  id: string;
+}
+
+export interface StoredIncidentBoundary {
+  scopeId: string;
+  startedAt: number;
+  anomalyId: string;
+  metricType?: string;
+  connectionId?: string;
+}
+
+export interface IncidentBoundaryQuery {
+  scopeIds?: string[];
+  startTime: number;
+  endTime?: number;
+}
+
+export interface AnomalyScopeFilter {
+  id: string;
+  connectionIds: string[];
 }
 
 export interface AnomalyQueryOptions {
@@ -220,6 +263,20 @@ export interface AnomalyQueryOptions {
   limit?: number;
   offset?: number;
   connectionId?: string;
+  order?: 'asc' | 'desc';
+  after?: AnomalyEventCursor;
+  scope?: AnomalyScopeFilter;
+  nodeAddr?: string | null;
+  commands?: string[];
+}
+
+export interface CorrelatedGroupQueryOptions
+  extends Omit<
+    AnomalyQueryOptions,
+    'metricType' | 'resolved' | 'order' | 'after' | 'nodeAddr' | 'commands'
+  > {
+  patterns?: string[];
+  involvingConnectionId?: string;
 }
 
 export interface AnomalyStats {
@@ -231,6 +288,18 @@ export interface AnomalyStats {
 }
 
 // Slow Log Entry Types
+/**
+ * The server a slow/command log entry was read from. Log IDs are per server
+ * process, so entries are tracked and deduplicated per process (`runId`, from
+ * INFO server). host/port is where the process was reached; it is only the key
+ * when the run id is unavailable (empty).
+ */
+export interface LogSource {
+  host: string;
+  port: number;
+  runId?: string;
+}
+
 export interface StoredSlowLogEntry {
   id: number; // Original slowlog ID from Valkey/Redis
   timestamp: number; // Unix timestamp in seconds
@@ -241,6 +310,8 @@ export interface StoredSlowLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 
@@ -279,6 +350,8 @@ export interface StoredCommandLogEntry {
   capturedAt: number; // When we captured this entry (ms)
   sourceHost: string;
   sourcePort: number;
+  /** Server process run id the entry was read from; empty when unknown. */
+  sourceRunId?: string;
   connectionId?: string;
 }
 
@@ -369,6 +442,29 @@ export interface LatencyStatsHistoryQueryOptions {
    * baselines (6h/≥5 upgrade, 24h/≥30 sustained) would be starved despite older rows in storage.
    * Default 10,000.
    */
+  limit?: number;
+}
+
+export interface StoredReplicationDivergenceWindow {
+  id: string;
+  connectionId: string;
+  replicaAddr: string;
+  windowStart: number;
+  windowEnd: number;
+  gapBytes: number;
+  bytesPerSec: number | null;
+  secondsBehind: number | null;
+  replicaGapBytes: number | null;
+  replicaView: ReplicaViewStatus | null;
+}
+
+export type ReplicaViewStatus = 'ok' | 'unreachable' | 'replid_mismatch' | 'not_replica';
+
+export interface ReplicationDivergenceWindowQueryOptions {
+  connectionId: string;
+  replicaAddr?: string;
+  startTime: number;
+  endTime: number;
   limit?: number;
 }
 
@@ -499,11 +595,40 @@ export interface StoragePort {
   saveAclEntries(entries: StoredAclEntry[], connectionId: string): Promise<number>;
   getAclEntries(options?: AuditQueryOptions): Promise<StoredAclEntry[]>;
   getAuditStats(startTime?: number, endTime?: number, connectionId?: string): Promise<AuditStats>;
-  pruneOldEntries(olderThanTimestamp: number, connectionId?: string): Promise<number>;
+  pruneOldEntries(olderThanSeconds: number, connectionId?: string): Promise<number>;
 
   // Client Analytics Methods - connectionId required for writes, optional filter for reads
   saveClientSnapshot(clients: StoredClientSnapshot[], connectionId: string): Promise<number>;
   getClientSnapshots(options?: ClientSnapshotQueryOptions): Promise<StoredClientSnapshot[]>;
+  /**
+   * The client snapshots captured in [since, until], replica and master links left out, aggregated
+   * for retry attribution: per capture, the connections per (name, user, ip) with the oldest age and
+   * the highest numeric client id over the whole capture; per connection (client_id, addr), when it
+   * opened (the earliest captured_at - age) and its first capture. Each connection takes the name
+   * and user of its newest row in the range, so a client captured before it ran CLIENT SETNAME
+   * counts under the name it set later. The monitor's own connections are in, like any other.
+   * Captures in [bounds.skipFrom, bounds.skipTo) are not read, so the read is two index ranges;
+   * a read that matches more than bounds.maxRows rows stops there and aggregates nothing
+   * (`truncated`), so its cost does not grow with the range.
+   */
+  getClientCaptureSummary(
+    connectionId: string,
+    since: number,
+    until: number,
+    bounds: ClientCaptureReadBounds,
+  ): Promise<ClientCaptureSummary>;
+  /**
+   * The client_snapshots rows of each capture that getClientCaptureSummary with the same range and
+   * skipped captures would read, so a caller can pick a range that fits its row bound. Replica and
+   * master links are counted too: it reads only the (connection_id, captured_at) index, and its
+   * counts are an upper bound of the rows the summary aggregates.
+   */
+  getClientCaptureRowCounts(
+    connectionId: string,
+    since: number,
+    until: number,
+    skip: Pick<ClientCaptureReadBounds, 'skipFrom' | 'skipTo'>,
+  ): Promise<ClientCaptureRowCount[]>;
   getClientTimeSeries(
     startTime: number,
     endTime: number,
@@ -590,11 +715,28 @@ export interface StoragePort {
    * false only when no anomaly with that id exists.
    */
   resolveAnomaly(id: string, resolvedAt: number): Promise<boolean>;
+  /**
+   * Resolve an anomaly only if it is still open. Returns true only when this
+   * call resolved it, so a caller can tell it apart from one already resolved.
+   */
+  resolveOpenAnomaly(id: string, resolvedAt: number): Promise<boolean>;
   pruneOldAnomalyEvents(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   saveCorrelatedGroup(group: StoredCorrelatedGroup, connectionId: string): Promise<string>;
-  getCorrelatedGroups(options?: AnomalyQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroups(options?: CorrelatedGroupQueryOptions): Promise<StoredCorrelatedGroup[]>;
+  getCorrelatedGroupMembers(
+    correlationIds: string[],
+    anomalyIds: string[],
+    maxPerGroup: number,
+    maxRows: number,
+  ): Promise<StoredAnomalyEvent[]>;
   pruneOldCorrelatedGroups(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
+  saveIncidentBoundaries(boundaries: StoredIncidentBoundary[]): Promise<number>;
+
+  getIncidentBoundaries(query: IncidentBoundaryQuery): Promise<StoredIncidentBoundary[]>;
+
+  pruneOldIncidentBoundaries(cutoffTimestamp: number): Promise<number>;
 
   // Key Analytics Methods - connectionId required for writes, optional filter for reads
   saveKeyPatternSnapshots(snapshots: KeyPatternSnapshot[], connectionId: string): Promise<number>;
@@ -677,14 +819,16 @@ export interface StoragePort {
   // Slow Log Methods - connectionId required for writes, optional filter for reads
   saveSlowLogEntries(entries: StoredSlowLogEntry[], connectionId: string): Promise<number>;
   getSlowLogEntries(options?: SlowLogQueryOptions): Promise<StoredSlowLogEntry[]>;
-  getLatestSlowLogId(connectionId?: string): Promise<number | null>;
+  getLatestSlowLogId(connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldSlowLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
   // Command Log Methods (Valkey-specific) - connectionId required for writes, optional filter for reads
   saveCommandLogEntries(entries: StoredCommandLogEntry[], connectionId: string): Promise<number>;
   getCommandLogEntries(options?: CommandLogQueryOptions): Promise<StoredCommandLogEntry[]>;
-  getLatestCommandLogId(type: CommandLogType, connectionId?: string): Promise<number | null>;
+  getLatestCommandLogId(type: CommandLogType, connectionId?: string, source?: LogSource): Promise<number | null>;
   pruneOldCommandLogEntries(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+  /** Whether any slow or command log entry of the connection was stored under a run id. */
+  hasRunIdLogEntries(connectionId: string): Promise<boolean>;
 
   // Latency Snapshot Methods - connectionId required for writes, optional filter for reads
   saveLatencySnapshots(snapshots: StoredLatencySnapshot[], connectionId: string): Promise<number>;
@@ -748,6 +892,15 @@ export interface StoragePort {
   getLatencyStatsHistory(options: LatencyStatsHistoryQueryOptions): Promise<StoredLatencyStatsSample[]>;
   pruneOldLatencyStatsSamples(cutoffTimestamp: number, connectionId?: string): Promise<number>;
 
+  saveReplicationDivergenceWindows(
+    windows: Omit<StoredReplicationDivergenceWindow, 'id' | 'connectionId'>[],
+    connectionId: string,
+  ): Promise<number>;
+  getReplicationDivergenceWindows(
+    options: ReplicationDivergenceWindowQueryOptions,
+  ): Promise<StoredReplicationDivergenceWindow[]>;
+  pruneOldReplicationDivergenceWindows(cutoffTimestamp: number, connectionId?: string): Promise<number>;
+
   // AI Cache/Memory Sample Methods (AI Cache & Memory observability) - connectionId required for writes
   saveAiCacheSamples(
     samples: Omit<StoredAiCacheSample, 'id' | 'connectionId'>[],
@@ -784,7 +937,11 @@ export interface StoragePort {
 
   // Monitor Capture Trigger Methods (Pro+)
   saveCaptureTrigger(trigger: StoredCaptureTrigger): Promise<string>;
-  updateCaptureTrigger(id: string, patch: CaptureTriggerPatch): Promise<boolean>;
+  updateCaptureTrigger(
+    id: string,
+    patch: CaptureTriggerPatch,
+    fromStatuses?: readonly CaptureTriggerStatus[],
+  ): Promise<boolean>;
   getCaptureTrigger(id: string): Promise<StoredCaptureTrigger | null>;
   getCaptureTriggers(options?: CaptureTriggerQueryOptions): Promise<StoredCaptureTrigger[]>;
 

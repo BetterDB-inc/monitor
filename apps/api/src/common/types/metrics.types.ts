@@ -225,6 +225,7 @@ export interface ReplicationInfo {
   master_sync_left_bytes?: string;
   master_sync_last_io_seconds_ago?: string;
   master_link_down_since_seconds?: string;
+  [replicaLine: `slave${number}`]: string | undefined;
 }
 
 export interface CpuInfo {
@@ -453,6 +454,8 @@ export interface ClusterNode {
    * hostname — see valkey-io/valkey#304.
    */
   hostname?: string;
+  availabilityZone?: string;
+  shardId?: string;
 }
 
 /** A node entry within a `CLUSTER SHARDS` shard. */
@@ -466,6 +469,7 @@ export interface ClusterShardNode {
   hostname?: string;
   port?: number;
   replicationOffset?: number;
+  availabilityZone?: string;
 }
 
 /**
@@ -476,13 +480,19 @@ export interface ClusterShardNode {
 export interface ClusterShard {
   slots: number[][];
   nodes: ClusterShardNode[];
+  shardId?: string;
 }
 
+/**
+ * One slot's row from `CLUSTER SLOT-STATS`. `key_count` is always reported;
+ * the usage counters only exist while `cluster-slot-stats-enabled` is on, and
+ * are cumulative on the node that owns the slot.
+ */
 export interface SlotStatsMetric {
   key_count: number;
-  expires_count: number;
-  total_reads: number;
-  total_writes: number;
+  cpu_usec?: number;
+  network_bytes_in?: number;
+  network_bytes_out?: number;
 }
 
 export interface SlotStats {

@@ -1,6 +1,7 @@
 import type Valkey from 'iovalkey';
 import type { DatabasePort } from '../../common/interfaces/database-port.interface';
 import type { ClusterNode } from '../../common/types/metrics.types';
+import { type PrimaryClients, readable } from '../primary-nodes';
 
 export interface FakeEntry {
   type: string;
@@ -57,6 +58,7 @@ const READ_COMMANDS = [
   'xrangeBuffer',
   'callBuffer',
   'call',
+  'ping',
 ];
 
 const KEY_INDEPENDENT = new Set(['memory', 'object']);
@@ -74,12 +76,18 @@ export class FakeValkey {
   pipelineExecs = 0;
   scanPages?: string[][];
   connectError?: Error;
+  serverError?: Error;
+  clusterNodes?: ClusterNode[];
   noTouchError?: Error;
+  pingError?: Error;
   duplicateWith?: FakeValkey;
   disconnected = false;
   options: Record<string, unknown>;
   failKeys = new Map<string, string>();
   movedKeys = new Set<string>();
+  failTypeKeys = new Set<string>();
+  failPipelinesWith = new Set<string>();
+  failExactMemory = false;
   failHstrlen = false;
   lfu = false;
   noValues = true;
@@ -95,15 +103,27 @@ export class FakeValkey {
       };
     }
     for (const name of READ_COMMANDS) {
-      (this as unknown as Record<string, unknown>)[name] = async (...args: unknown[]) => {
+      (this as unknown as Record<string, unknown>)[name] = async function (
+        this: FakeValkey,
+        ...args: unknown[]
+      ) {
         this.record(name, args);
         return this.run(name, args);
       };
     }
   }
 
+  readers: FakeValkey[] = [];
+
+  get reader(): FakeValkey {
+    const reader = this.readers.at(-1);
+    if (!reader) throw new Error('no reader was opened');
+    return reader;
+  }
+
   private record(name: string, args: unknown[]) {
     this.calls.push({ name, args });
+    if (this.serverError) throw this.serverError;
   }
 
   callsOf(name: string) {
@@ -111,7 +131,9 @@ export class FakeValkey {
   }
 
   get directReads() {
-    return this.calls.filter((c) => READ_COMMANDS.includes(c.name));
+    return this.calls.filter(
+      (c) => READ_COMMANDS.includes(c.name) && String(c.args[0]).toUpperCase() !== 'CLIENT',
+    );
   }
 
   on() {
@@ -119,7 +141,7 @@ export class FakeValkey {
   }
 
   async connect() {
-    this.record('connect', []);
+    this.calls.push({ name: 'connect', args: [] });
     if (this.connectError) throw this.connectError;
   }
 
@@ -128,9 +150,32 @@ export class FakeValkey {
   }
 
   duplicate(overrides: Record<string, unknown> = {}) {
-    this.record('duplicate', [overrides]);
-    if (!this.duplicateWith) throw new Error('duplicate unsupported');
-    return this.duplicateWith;
+    this.calls.push({ name: 'duplicate', args: [overrides] });
+    if (this.duplicateWith) {
+      this.duplicateWith.clusterNodes ??= this.clusterNodes;
+      return this.duplicateWith;
+    }
+    const own: Record<string | symbol, unknown> = {
+      calls: [],
+      fetchedBytes: 0,
+      pipelineExecs: 0,
+      disconnected: false,
+      readers: [],
+    };
+    const reader: FakeValkey = new Proxy(this, {
+      get: (target, prop) => {
+        if (prop in own) return own[prop];
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(reader) : value;
+      },
+      set: (target, prop, value) => {
+        if (prop in own) own[prop] = value;
+        else Reflect.set(target, prop, value);
+        return true;
+      },
+    });
+    this.readers.push(reader);
+    return reader;
   }
 
   async quit() {
@@ -166,6 +211,7 @@ export class FakeValkey {
   private answer(name: string, args: unknown[]): unknown {
     const key = this.keyOf(name, args);
     if (this.movedKeys.has(key)) throw new Error('MOVED 1 10.0.0.9:7000');
+    if (name === 'type' && this.failTypeKeys.has(key)) throw new Error('ERR type failed');
     if (this.failKeys.has(key) && !['type', 'pttl', 'memory', 'object'].includes(name)) {
       throw new Error(this.failKeys.get(key));
     }
@@ -178,6 +224,9 @@ export class FakeValkey {
         return e ? (e.pttl ?? -1) : -2;
       case 'exists':
         return e ? 1 : 0;
+      case 'ping':
+        if (this.pingError) throw this.pingError;
+        return 'PONG';
       case 'hstrlen': {
         if (this.failHstrlen) throw new Error('ERR hstrlen failed');
         const v = (raw as Record<string, string | Buffer> | undefined)?.[args[1] as string];
@@ -278,8 +327,10 @@ export class FakeValkey {
       case 'callBuffer': {
         const command = String(args[0]).toUpperCase();
         if (WRITE_CALLS.includes(command)) throw new Error(`write command ${command} issued`);
+        if (command === 'CLUSTER' && args[1] === 'NODES')
+          return clusterNodesText(this.clusterNodes ?? []);
         if (command === 'CLIENT' && args[1] === 'NO-TOUCH') {
-          if (this.noTouchError) throw this.noTouchError;
+          if (this.noTouchError) throw Object.assign(this.noTouchError, { name: 'ReplyError' });
           return 'OK';
         }
         if (command === 'JSON.GET') return e ? Buffer.from(raw as string) : null;
@@ -313,6 +364,15 @@ export class FakeValkey {
     }
     chain.exec = async () => {
       this.pipelineExecs++;
+      const failing = ops.find(({ name }) => this.failPipelinesWith.has(name));
+      if (failing) {
+        this.failPipelinesWith.delete(failing.name);
+        throw new Error(`ERR pipeline with ${failing.name} failed`);
+      }
+      if (this.failExactMemory && ops.some(({ name, args }) => name === 'memory' && args.includes('SAMPLES'))) {
+        this.failExactMemory = false;
+        throw new Error('ERR exact memory pipeline failed');
+      }
       return ops.map(({ name, args }) => {
         try {
           return [null, this.run(name, args)];
@@ -344,10 +404,31 @@ export function masterNode(
   };
 }
 
+const clusterNodesText = (nodes: ClusterNode[]) =>
+  nodes
+    .map((n) =>
+      [
+        n.id,
+        n.address,
+        n.flags.join(','),
+        n.master,
+        0,
+        0,
+        0,
+        'connected',
+        ...n.slots.map(([start, end]) => (start === end ? `${start}` : `${start}-${end}`)),
+      ].join(' '),
+    )
+    .join('\n');
+
 export function fakeDb(parent: FakeValkey, cluster?: { nodes: ClusterNode[] }): DatabasePort {
+  if (cluster) parent.clusterNodes = cluster.nodes;
   return {
     getClient: () => parent as unknown as Valkey,
     getCapabilities: () => ({ clusterEnabled: cluster !== undefined }),
     getClusterNodes: async () => cluster?.nodes ?? [],
   } as unknown as DatabasePort;
 }
+
+export const clientsOf = (primaries: PrimaryClients) =>
+  readable(primaries).map(({ client }) => client);

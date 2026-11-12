@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/card';
 import { EmptyState } from '../ui/empty-state';
-import { Info } from 'lucide-react';
+import { AlertTriangle, Info } from 'lucide-react';
 import type { SlotStats, ClusterNode } from '../../types/metrics';
 import { buildSlotNodeMap, CLUSTER_TOTAL_SLOTS, CLUSTER_GRID_SIZE } from '../../types/cluster';
 
 interface SlotHeatmapProps {
   slotStats: SlotStats | null;
+  /** Primaries that did not answer for all their slots; those slots are missing from slotStats. */
+  failedNodes?: string[];
   nodes: ClusterNode[];
   hasSlotStats: boolean;
 }
 
-export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps) {
+export function SlotHeatmap({ slotStats, failedNodes = [], nodes, hasSlotStats }: SlotHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredSlot, setHoveredSlot] = useState<{
@@ -177,6 +179,20 @@ export function SlotHeatmap({ slotStats, nodes, hasSlotStats }: SlotHeatmapProps
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
+          {failedNodes.length > 0 && (
+            <div
+              role="status"
+              className="flex items-start gap-2 rounded-md border border-yellow-500/50 bg-yellow-500/10 px-3 py-2 text-sm"
+            >
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-yellow-600" />
+              <span>
+                Partial data: {failedNodes.join(', ')} did not answer for all{' '}
+                {failedNodes.length === 1 ? 'its' : 'their'} slots, so some of the slots{' '}
+                {failedNodes.length === 1 ? 'it owns' : 'they own'} may be shown as empty.
+              </span>
+            </div>
+          )}
+
           {/* Canvas */}
           <div ref={containerRef} className="relative w-full">
             <canvas

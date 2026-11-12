@@ -48,7 +48,10 @@ function setup(keys = Array.from({ length: 6 }, (_, i) => KEY(i)), licensed = tr
     getKvCacheFootprintSnapshots: jest.fn().mockResolvedValue([]),
     deleteKvCacheConnectionData: jest.fn().mockResolvedValue(undefined),
   } as any;
-  const license = { hasFeature: jest.fn((f: string) => licensed && f === Feature.KV_CACHE_MONITORING) } as any;
+  const license = {
+    hasFeature: jest.fn((f: string) => licensed && f === Feature.KV_CACHE_MONITORING),
+    ensureValidated: jest.fn().mockResolvedValue({}),
+  } as any;
   const service = new KvCacheFootprintService(registry, storage, license);
   return { service, storage, client, registry, license };
 }
@@ -261,6 +264,22 @@ describe('KvCacheFootprintService', () => {
   it('reads a tag ending in a suffix name as a tag when no node shows two-key evidence', async () => {
     const { service } = setup(['m/x@1@0@1@bfloat16@kind%metadata', 'm/x@1@0@2@bfloat16@kind%decode']);
     expect(await service.triggerCollection('c1')).toMatchObject({ matchedKeys: 2, chunksEst: 2 });
+  });
+
+  it('resolves tag suffixes per model so two-key keys of another model do not change it', async () => {
+    const { service } = setup([
+      'a/m@1@0@1@bfloat16kv_bytes',
+      'a/m@1@0@1@bfloat16metadata',
+      'b/m@1@0@2@half@salt%user_metadata',
+      'b/m@1@0@3@half@salt%user_prefill',
+    ]);
+    const snapshot = await service.triggerCollection('c1');
+    expect(snapshot?.perModel.map((m) => [m.model, m.layout, m.chunksEst])).toEqual(
+      expect.arrayContaining([
+        ['a/m', 'two_key', 1],
+        ['b/m', 'single_key', 2],
+      ]),
+    );
   });
 
   it('drops the eviction baseline of a node that misses a run', async () => {
@@ -807,6 +826,71 @@ describe('KvCacheFootprintService', () => {
     expect((await service.triggerCollection('c1'))?.otherDbs).toEqual([0]);
   });
 
+  it('records a failed manual scan until the next successful one', async () => {
+    const { service, client } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM this user has no permissions to run the scan command'));
+    await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+    expect(service.getLastScanAttempt('c1')).toEqual({
+      at: expect.any(Number),
+      error: 'NOPERM this user has no permissions to run the scan command',
+    });
+    await service.triggerCollection('c1');
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
+  it('records a manual scan of a disconnected connection until it scans again', async () => {
+    const { service, registry } = setup();
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]);
+    await expect(service.triggerCollection('c1')).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(service.getLastScanAttempt('c1')).toEqual({ at: expect.any(Number), error: "Connection 'c1' is not connected" });
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }]);
+    await service.triggerCollection('c1');
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
+  it('clears a not-connected failure once the poller sees the connection back during the recheck cooldown', async () => {
+    const { service, registry, client } = setup([]);
+    const ctx = { connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 };
+    const poll = () => (service as any).pollConnection(ctx);
+    await poll();
+    expect(service.getScanCooldownUntil('c1')).toBeGreaterThan(Date.now());
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: false, connectionType: 'direct' }]);
+    await poll();
+    expect(service.getLastScanAttempt('c1')?.error).toBe("Connection 'c1' is not connected");
+    registry.list.mockReturnValue([{ id: 'c1', name: 'one', isConnected: true, connectionType: 'direct' }]);
+    await poll();
+    expect(service.getLastScanAttempt('c1')).toBeNull();
+  });
+
+  it('keeps a scan failure that is not about the connection when the poller sees it connected', async () => {
+    const { service, client } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM'));
+    await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+    (service as any).undetectedUntil.set('c1', Date.now() + 60_000);
+    await (service as any).pollConnection({ connectionId: 'c1', connectionName: 'one', client, host: 'h', port: 6379 });
+    expect(service.getLastScanAttempt('c1')?.error).toBe('NOPERM');
+  });
+
+  it('reports no scan cooldown once LMCache is detected', async () => {
+    const { service } = setup();
+    await service.triggerCollection('c1');
+    expect(service.getScanCooldownUntil('c1')).toBeNull();
+  });
+
+  it('forgets a failed scan when the connection is removed', async () => {
+    const { service, client, registry } = setup();
+    client.call.mockRejectedValueOnce(new Error('NOPERM'));
+    await service.onModuleInit();
+    try {
+      await expect(service.triggerCollection('c1')).rejects.toThrow(/NOPERM/);
+      expect(service.getLastScanAttempt('c1')).not.toBeNull();
+      registry.removed('c1');
+      expect(service.getLastScanAttempt('c1')).toBeNull();
+    } finally {
+      await service.onModuleDestroy();
+    }
+  });
+
   it('keeps going when a listener throws', async () => {
     const { service, storage } = setup();
     service.onSnapshot(() => { throw new Error('boom'); });
@@ -818,7 +902,28 @@ describe('KvCacheFootprintService', () => {
     const { service } = setup(undefined, false);
     const start = jest.spyOn(service as any, 'start').mockImplementation(() => undefined);
     await service.onModuleInit();
+    await new Promise((resolve) => setImmediate(resolve));
     expect(start).toHaveBeenCalled();
+  });
+
+  it('runs the first scan as soon as the licence resolves instead of a full interval later', async () => {
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] });
+    const { service, storage, license } = setup(undefined, false);
+    let resolveLicence!: (value: unknown) => void;
+    license.ensureValidated.mockReturnValue(new Promise((resolve) => (resolveLicence = resolve)));
+    try {
+      await service.onModuleInit();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.saveKvCacheFootprintSnapshot).not.toHaveBeenCalled();
+
+      license.hasFeature.mockImplementation((f: string) => f === Feature.KV_CACHE_MONITORING);
+      resolveLicence({});
+      for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+      expect(storage.saveKvCacheFootprintSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      await service.onModuleDestroy();
+      jest.useRealTimers();
+    }
   });
 
   it('skips collection while unlicensed and collects once the licence resolves', async () => {

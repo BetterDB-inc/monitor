@@ -2,18 +2,24 @@ import { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import type { SessionListResponse, SessionSummary } from '@betterdb/shared';
 import { Badge } from '../../ui/badge';
+import { Button } from '../../ui/button';
+import { Input } from '../../ui/input';
 import { Alert, AlertDescription } from '../../ui/alert';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../../ui/table';
 import { cn, formatBytes } from '../../../lib/utils';
-import { formatIdle, formatTtl } from './format';
+import { displaySessionId, formatIdle, formatTtl } from './format';
 
 type SortKey = 'access' | 'size' | 'ttl';
+
+const PAGE_SIZE = 50;
 
 interface Props {
   data: SessionListResponse;
   oversizeIds: Set<string> | null;
   selectedId: string | null;
   onSelect: (sessionId: string) => void;
+  idPrefix?: string;
+  namespaceId?: string;
 }
 
 const DEFAULT_DESCENDING: Record<SortKey, boolean> = { access: false, size: true, ttl: false };
@@ -36,16 +42,21 @@ function SortHeader({
   column,
   sort,
   onSort,
+  className,
 }: {
   label: string;
   column: SortKey;
+  className?: string;
   sort: { key: SortKey; descending: boolean };
   onSort: (key: SortKey) => void;
 }) {
   const active = sort.key === column;
   const Icon = sort.descending ? ArrowDown : ArrowUp;
   return (
-    <TableHead aria-sort={active ? (sort.descending ? 'descending' : 'ascending') : undefined}>
+    <TableHead
+      className={className}
+      aria-sort={active ? (sort.descending ? 'descending' : 'ascending') : undefined}
+    >
       <button
         type="button"
         onClick={() => onSort(column)}
@@ -58,11 +69,27 @@ function SortHeader({
   );
 }
 
-export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) {
+export function SessionList({
+  data,
+  oversizeIds,
+  selectedId,
+  onSelect,
+  idPrefix = '',
+  namespaceId,
+}: Props) {
   const [sort, setSort] = useState<{ key: SortKey; descending: boolean }>({
     key: 'access',
     descending: DEFAULT_DESCENDING.access,
   });
+  const [filter, setFilter] = useState('');
+  const [shown, setShown] = useState(PAGE_SIZE);
+  const [shownNamespace, setShownNamespace] = useState(namespaceId);
+
+  if (shownNamespace !== namespaceId) {
+    setShownNamespace(namespaceId);
+    setFilter('');
+    setShown(PAGE_SIZE);
+  }
 
   const onSort = (key: SortKey) =>
     setSort((prev) =>
@@ -71,10 +98,19 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
         : { key, descending: DEFAULT_DESCENDING[key] },
     );
 
-  const sessions = useMemo(
+  const sorted = useMemo(
     () => [...data.sessions].sort((a, b) => comparators[sort.key](a, b, sort.descending)),
     [data.sessions, sort],
   );
+  const sessions = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (needle === '') return sorted;
+    return sorted.filter((s) =>
+      displaySessionId(s.sessionId, idPrefix).toLowerCase().includes(needle),
+    );
+  }, [sorted, filter, idPrefix]);
+  const visible = sessions.slice(0, shown);
+  const remaining = sessions.length - visible.length;
 
   return (
     <div className="space-y-3">
@@ -101,21 +137,53 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
           </AlertDescription>
         </Alert>
       )}
-      {sessions.length === 0 ? (
+      {data.sessions.length > 0 && (
+        <Input
+          type="search"
+          aria-label="Filter sessions"
+          placeholder="Filter sessions"
+          value={filter}
+          onChange={(e) => {
+            setFilter(e.target.value);
+            setShown(PAGE_SIZE);
+          }}
+        />
+      )}
+      {data.sessions.length === 0 ? (
         <p className="text-sm text-muted-foreground">No sessions match this pattern.</p>
+      ) : sessions.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No sessions match this filter.</p>
       ) : (
-        <Table>
+        <Table className="lg:table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead>Session</TableHead>
-              <TableHead>Keys</TableHead>
-              <SortHeader label="Last access" column="access" sort={sort} onSort={onSort} />
-              <SortHeader label="Size" column="size" sort={sort} onSort={onSort} />
-              <SortHeader label="TTL" column="ttl" sort={sort} onSort={onSort} />
+              <TableHead className="lg:w-20">Keys</TableHead>
+              <SortHeader
+                label="Last access"
+                column="access"
+                sort={sort}
+                onSort={onSort}
+                className="lg:w-32"
+              />
+              <SortHeader
+                label="Size"
+                column="size"
+                sort={sort}
+                onSort={onSort}
+                className="lg:w-32"
+              />
+              <SortHeader
+                label="TTL"
+                column="ttl"
+                sort={sort}
+                onSort={onSort}
+                className="lg:w-24"
+              />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sessions.map((s) => (
+            {visible.map((s) => (
               <TableRow
                 key={s.sessionId}
                 tabIndex={0}
@@ -129,17 +197,17 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
                 data-state={s.sessionId === selectedId ? 'selected' : undefined}
                 className="cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
-                <TableCell className="max-w-xs">
-                  <span className="break-all font-mono text-xs">{s.sessionId}</span>
-                  {oversizeIds?.has(s.sessionId) && (
-                    <Badge variant="warning" className="ms-2">
-                      Oversize
-                    </Badge>
-                  )}
+                <TableCell>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="break-all font-mono text-xs lg:truncate" title={s.sessionId}>
+                      {displaySessionId(s.sessionId, idPrefix)}
+                    </span>
+                    {oversizeIds?.has(s.sessionId) && <Badge variant="warning">Oversize</Badge>}
+                  </div>
                 </TableCell>
                 <TableCell>{s.keyCount}</TableCell>
                 <TableCell>{formatIdle(s.idleSeconds)}</TableCell>
-                <TableCell>
+                <TableCell className="whitespace-nowrap">
                   {s.unmeasuredKeys > 0 ? (
                     <span
                       title={`${s.unmeasuredKeys} ${s.unmeasuredKeys === 1 ? 'key' : 'keys'} could not be measured`}
@@ -155,6 +223,11 @@ export function SessionList({ data, oversizeIds, selectedId, onSelect }: Props) 
             ))}
           </TableBody>
         </Table>
+      )}
+      {remaining > 0 && (
+        <Button variant="outline" size="sm" onClick={() => setShown((n) => n + PAGE_SIZE)}>
+          Show more ({remaining.toLocaleString()} remaining)
+        </Button>
       )}
     </div>
   );

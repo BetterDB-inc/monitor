@@ -28,7 +28,7 @@ import { SlowLogAnalyticsService } from '../slowlog-analytics/slowlog-analytics.
 import { CommandLogAnalyticsService } from '../commandlog-analytics/commandlog-analytics.service';
 import { HealthService } from '../health/health.service';
 import { DatabasePort } from '../common/interfaces/database-port.interface';
-import { InfoResponse } from '../common/types/metrics.types';
+import { InfoResponse, SlotStats } from '../common/types/metrics.types';
 import {
   MultiConnectionPoller,
   ConnectionContext,
@@ -43,7 +43,13 @@ import {
   TopologyDiff,
   TopologySnapshot,
 } from '../cluster/topology-diff';
-import { ClusterMetricsService } from '../cluster/cluster-metrics.service';
+import {
+  ClusterMetricsService,
+  ClusterSlotStatsResult,
+  NODE_COMMAND_TIMEOUT_MS,
+  inSlotRanges,
+} from '../cluster/cluster-metrics.service';
+import { ShardLoadService } from '../cluster/shard-load.service';
 import {
   demotedWritesMessage,
   evaluateDemotedWrites,
@@ -76,6 +82,7 @@ import {
   evaluateWriteRejection,
   type WriteRejectionState,
 } from '../monitor/write-rejection';
+import { isReplicaRole } from '../database/parsers/replication-info.parser';
 
 /** How long a CONFIG GET of the BGSAVE stop-writes settings stays fresh. */
 const RDB_STOPS_WRITES_TTL_MS = 5 * 60_000;
@@ -89,16 +96,60 @@ const STORAGE_REFRESH_WARN_INTERVAL_MS = 5 * 60_000;
  * is answering at all.
  */
 const DEMOTED_NODE_READ_TIMEOUT_MS = 2_000;
+// Least of the pass left for the slot-stats fan-out to start at all, or half
+// the pass when that is shorter, so a short poll interval still collects.
+const SLOT_STATS_MIN_BUDGET_MS = 1_000;
+// Export the biggest slots and the busiest ones: a hot slot is usually a few
+// heavily used keys, which a key-count ranking alone misses.
+const SLOT_STATS_RANKING = ['key-count', 'cpu-usec'] as const;
 
-const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([
-  POLL_STALE_METRIC,
+const ANOMALY_SERIES: ReadonlySet<string> = new Set([
   'betterdb_anomaly_events_current',
   'betterdb_anomaly_by_severity',
   'betterdb_anomaly_by_metric',
   'betterdb_correlated_groups_by_severity',
   'betterdb_correlated_groups_by_pattern',
+  'betterdb_incident_active',
 ]);
+const SWEEP_EXCLUSIONS: ReadonlySet<string> = new Set([POLL_STALE_METRIC, ...ANOMALY_SERIES]);
 const NO_EXCLUSIONS: ReadonlySet<string> = new Set();
+
+const FANOUT_STATES = [
+  ['checked', 'checked'],
+  ['unreachable', 'unreachable'],
+  ['auth_failed', 'authFailed'],
+  ['skipped', 'skipped'],
+  ['not_dialed', 'notDialed'],
+] as const;
+
+type FanoutCounts = Record<(typeof FANOUT_STATES)[number][1], number>;
+
+/** Reasons that need no fan-out gap series: nothing is wrong. */
+const FANOUT_NO_GAP: ReadonlySet<string> = new Set(['not_applicable']);
+
+/**
+ * Connection id for anomaly events, correlated groups and incidents that
+ * belong to no connection. It doubles as their `connection` label value: an
+ * empty value, which Prometheus treats as the label being absent, so these
+ * series never collide with a connection's `host:port`.
+ */
+export const NO_CONNECTION_ID = '';
+
+export interface AnomalySummaryCounts {
+  bySeverity: Record<string, number>;
+  byMetric: Record<string, number>;
+  byPattern: Record<string, number>;
+  groupsBySeverity: Record<string, number>;
+  unresolvedBySeverity: Record<string, number>;
+}
+
+const ANOMALY_SEVERITIES = ['info', 'warning', 'critical'] as const;
+
+interface IncidentCount {
+  pattern: string;
+  status: string;
+  count: number;
+}
 
 // Per-connection state for tracking previous values and stale labels
 interface ConnectionMetricState {
@@ -112,6 +163,9 @@ interface ConnectionMetricState {
   rdbStopsWrites: { value: boolean | null; fetchedAt: number } | null;
   currentKeyspaceDbLabels: Set<string>;
   currentClusterSlotLabels: Set<string>;
+  /** When each exported slot was last answered for, so a failing owner's series age out. */
+  clusterSlotSeenAt: Map<string, number>;
+  currentShardLabels: Map<string, string>;
   // Key-size metric labels (per-connection). Per-key and keysize-bucket label
   // tuples are stored JSON-encoded so a single set tracks the full tuple
   // (key names may contain any delimiter character).
@@ -149,13 +203,13 @@ interface ConnectionMetricState {
   currentSlowlogPatternLabels: Set<string>;
   currentCommandlogRequestPatternLabels: Set<string>;
   currentCommandlogReplyPatternLabels: Set<string>;
-  // Anomaly detection labels (per-connection)
-  currentAnomalyMetricLabels: Set<string>;
-  currentCorrelatedPatternLabels: Set<string>;
   // Vector index labels (per-connection)
   currentVectorIndexLabels: Set<string>;
   // Replication output-buffer pressure labels (per-connection)
   currentReplBufferReplicaLabels: Set<string>;
+  signalReplicaLabelsByNode: Map<string, Set<string>>;
+  signalNodes: Set<string>;
+  signalConnLabel: string | null;
   // Commandstats labels (per-connection)
   currentCommandStatsLabels: Set<string>;
   // Inference latency labels (per-connection)
@@ -192,6 +246,37 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Per-connection state tracking
   private perConnectionState = new Map<string, ConnectionMetricState>();
+  // When the current INFO pass of each connection is abandoned by its bound.
+  private passDeadlines = new Map<string, number>();
+  // Seeds whose cluster-wide slot-stats fan-out is running. Their members
+  // export no slot series of their own meanwhile.
+  private slotStatsFanOuts = new Set<string>();
+  // Metric-type and pattern labels last published per anomaly summary label.
+  // Keyed by label rather than connection id, so connections that share a
+  // host:port share one summary instead of overwriting each other.
+  private readonly anomalySummaryLabels = new Map<
+    string,
+    { metrics: Set<string>; patterns: Set<string> }
+  >();
+  // Pattern and status pairs last published per incident label, keyed like
+  // anomalySummaryLabels.
+  private readonly incidentLabels = new Map<string, Set<string>>();
+  // The label each connection's anomaly-detection series were last published
+  // under. The freshness tracker only knows connections this service polls
+  // itself; the anomaly service also covers Sentinels, so this is what lets
+  // cleanupConnectionMetrics find their summary and incident series.
+  private readonly anomalyLabels = new Map<string, string>();
+  // The anomaly and correlated group counter series published per connection
+  // label, keyed by their labels. Counters have no removal by
+  // partial labels, and the label sweep only removes gauges, so this is what
+  // lets cleanupConnectionMetrics drop them.
+  private readonly anomalyCounterSeries = new Map<
+    string,
+    Map<string, { counter: Counter; labels: LabelValues<string> }>
+  >();
+  // The label and metric types the anomaly buffer gauges were last published under.
+  private anomalyBufferLabel: string | null = null;
+  private anomalyBufferMetrics = new Set<string>();
 
   private static readonly CVE_METRICS_REFRESH_MS = 60_000;
 
@@ -319,9 +404,15 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
   // Cluster Slot Metrics (Valkey 8.0+ specific)
   private clusterSlotKeys: Gauge;
-  private clusterSlotExpires: Gauge;
-  private clusterSlotReadsTotal: Gauge;
-  private clusterSlotWritesTotal: Gauge;
+  private clusterSlotCpuUsecTotal: Gauge;
+  private clusterSlotNetworkBytesInTotal: Gauge;
+  private clusterSlotNetworkBytesOutTotal: Gauge;
+  private clusterShardCpuUsecPerSecond: Gauge;
+  private clusterShardNetworkBytesInPerSecond: Gauge;
+  private clusterShardNetworkBytesOutPerSecond: Gauge;
+  private clusterShardCpuShare: Gauge;
+  private clusterShardNetworkShare: Gauge;
+  private clusterShardSlots: Gauge;
 
   // Key Size Metrics (from key analytics runs and INFO keysizes)
   private keyPatternMemoryBytes: Gauge;
@@ -375,6 +466,19 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   private anomalyDetectionBufferReady: Gauge;
   private anomalyDetectionBufferMean: Gauge;
   private anomalyDetectionBufferStdDev: Gauge;
+  private replicationGapBytes: Gauge;
+  private replicationSecondsBehind: Gauge;
+  private replicationDivergenceLevel: Gauge;
+  private replicationWriteRate: Gauge;
+  private replicationBacklogCoverage: Gauge;
+  private connectionsReceivedPerSecond: Gauge;
+  private connectionChurnPerOp: Gauge;
+  private retryAmplificationState: Gauge;
+  private anomalyFanoutPrimaries: Gauge;
+  private anomalyFanoutGap: Gauge;
+  // Reason exported under betterdb_anomaly_fanout_gap, by connection label.
+  private fanoutGapReasons = new Map<string, string>();
+  private incidentActive: Gauge;
 
   // Metric Forecasting
   private metricForecastTimeToLimitSeconds: Gauge;
@@ -418,6 +522,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     private readonly clientAnalyticsRollup?: ClientAnalyticsRollupService,
     @Optional()
     private readonly auditStatsCache?: AuditStatsCacheService,
+    @Optional()
+    private readonly shardLoadService?: ShardLoadService,
   ) {
     super(connectionRegistry);
     this.pollIntervalMs = Number(
@@ -595,12 +701,59 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private getConnectionLabel(connectionId: string): string | null {
+    // The registry resolves an empty id to the default connection, which would
+    // file connection-less series under that connection's label.
+    if (connectionId === NO_CONNECTION_ID) {
+      return NO_CONNECTION_ID;
+    }
     try {
       const config = this.connectionRegistry.getConfig(connectionId);
       return config ? `${config.host}:${config.port}` : null;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Label for an anomaly-detection series. Unlike getConnectionLabel it
+   * resolves only connections the registry still lists, so a retired member or
+   * a deleted connection cannot bring its series back after
+   * cleanupConnectionMetrics removed them, and it remembers the label so that
+   * cleanup can find the series of a connection this service never polled.
+   */
+  private getAnomalyConnectionLabel(connectionId: string): string | null {
+    if (connectionId === NO_CONNECTION_ID) {
+      return NO_CONNECTION_ID;
+    }
+    if (!this.connectionRegistry.isListed(connectionId)) {
+      return null;
+    }
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel !== null) {
+      this.anomalyLabels.set(connectionId, connLabel);
+    }
+    return connLabel;
+  }
+
+  /**
+   * Whether a connection the registry still lists owns the label. A connection
+   * added and deleted between two polls of this service never reaches
+   * cleanupConnectionMetrics, so its entry is pruned here instead of letting it
+   * claim the label for every later connection on the same host:port.
+   */
+  private hasAnomalyLabel(connLabel: string): boolean {
+    let found = false;
+    for (const [connectionId, label] of this.anomalyLabels) {
+      if (label !== connLabel) {
+        continue;
+      }
+      if (this.connectionRegistry.isListed(connectionId)) {
+        found = true;
+      } else {
+        this.anomalyLabels.delete(connectionId);
+      }
+    }
+    return found;
   }
 
   /**
@@ -624,6 +777,8 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         rdbStopsWrites: null,
         currentKeyspaceDbLabels: new Set(),
         currentClusterSlotLabels: new Set(),
+        clusterSlotSeenAt: new Map(),
+        currentShardLabels: new Map(),
         // Key-size metric labels
         currentKeyPatternLabels: new Set(),
         currentKeyDetailLabels: new Set(),
@@ -646,13 +801,13 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         currentSlowlogPatternLabels: new Set(),
         currentCommandlogRequestPatternLabels: new Set(),
         currentCommandlogReplyPatternLabels: new Set(),
-        // Anomaly detection labels
-        currentAnomalyMetricLabels: new Set(),
-        currentCorrelatedPatternLabels: new Set(),
         // Vector index labels
         currentVectorIndexLabels: new Set(),
         // Replication output-buffer pressure labels
         currentReplBufferReplicaLabels: new Set(),
+        signalReplicaLabelsByNode: new Map(),
+        signalNodes: new Set(),
+        signalConnLabel: null,
         // Commandstats labels
         currentCommandStatsLabels: new Set(),
         // Inference latency labels
@@ -938,20 +1093,54 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
 
     // Cluster Slot Metrics (Valkey 8.0+) - per connection, per slot
     this.clusterSlotKeys = this.createGauge('cluster_slot_keys', 'Keys in cluster slot', ['slot']);
-    this.clusterSlotExpires = this.createGauge(
-      'cluster_slot_expires',
-      'Expiring keys in cluster slot',
+    // The usage counters are cumulative on the owning node and only exist
+    // with cluster-slot-stats-enabled; rate() them to find a hot slot.
+    this.clusterSlotCpuUsecTotal = this.createGauge(
+      'cluster_slot_cpu_usec_total',
+      'CPU time spent on the cluster slot in microseconds (requires cluster-slot-stats-enabled)',
       ['slot'],
     );
-    this.clusterSlotReadsTotal = this.createGauge(
-      'cluster_slot_reads_total',
-      'Total reads for cluster slot',
+    this.clusterSlotNetworkBytesInTotal = this.createGauge(
+      'cluster_slot_network_bytes_in_total',
+      'Bytes received for the cluster slot (requires cluster-slot-stats-enabled)',
       ['slot'],
     );
-    this.clusterSlotWritesTotal = this.createGauge(
-      'cluster_slot_writes_total',
-      'Total writes for cluster slot',
+    this.clusterSlotNetworkBytesOutTotal = this.createGauge(
+      'cluster_slot_network_bytes_out_total',
+      'Bytes sent for the cluster slot (requires cluster-slot-stats-enabled)',
       ['slot'],
+    );
+
+    const shardLabels = ['node', 'node_id'];
+    this.clusterShardCpuUsecPerSecond = this.createGauge(
+      'cluster_shard_cpu_usec_per_second',
+      'Smoothed CPU microseconds per second spent on the slots of the shard (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardNetworkBytesInPerSecond = this.createGauge(
+      'cluster_shard_network_bytes_in_per_second',
+      'Smoothed bytes per second received for the slots of the shard (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardNetworkBytesOutPerSecond = this.createGauge(
+      'cluster_shard_network_bytes_out_per_second',
+      'Smoothed bytes per second sent for the slots of the shard, to clients and once per replica for replication (requires cluster-slot-stats-enabled)',
+      shardLabels,
+    );
+    this.clusterShardCpuShare = this.createGauge(
+      'cluster_shard_cpu_share',
+      'Share of the cluster-wide per-slot CPU rate that the shard takes, from 0 to 1, held at its last value while slot counters settle',
+      shardLabels,
+    );
+    this.clusterShardNetworkShare = this.createGauge(
+      'cluster_shard_network_share',
+      'Share of the cluster-wide per-slot network rate, in plus out, that the shard takes, from 0 to 1. Bytes out count replication once per replica, so this is not client load alone',
+      shardLabels,
+    );
+    this.clusterShardSlots = this.createGauge(
+      'cluster_shard_slots',
+      'Slots the shard owns, as counted for its load',
+      shardLabels,
     );
 
     // Key Size Metrics (per connection). Pattern/per-key series come from the
@@ -1150,6 +1339,62 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       'anomaly_buffer_stddev',
       'Rolling stddev for anomaly detection',
       ['metric_type'],
+    );
+
+    this.replicationGapBytes = this.createGauge(
+      'replication_gap_bytes',
+      'Replica offset gap behind its primary in the latest closed divergence window',
+      ['node', 'replica'],
+    );
+    this.replicationSecondsBehind = this.createGauge(
+      'replication_seconds_behind',
+      'Estimated seconds the replica trails its primary in the latest closed divergence window',
+      ['node', 'replica'],
+    );
+    this.replicationDivergenceLevel = this.createGauge(
+      'replication_divergence_level',
+      'Replication divergence level per replica: 0 none, 1 warning, 2 critical',
+      ['node', 'replica'],
+    );
+    this.replicationWriteRate = this.createGauge(
+      'replication_write_rate_bytes_per_second',
+      'Smoothed replication stream write rate of the primary in bytes per second',
+      ['node'],
+    );
+    this.replicationBacklogCoverage = this.createGauge(
+      'replication_backlog_coverage_seconds',
+      'Seconds of writes the replication backlog holds at the current write rate',
+      ['node'],
+    );
+    this.connectionsReceivedPerSecond = this.createGauge(
+      'connections_received_per_second',
+      'New client connections accepted per second',
+      ['node'],
+    );
+    this.connectionChurnPerOp = this.createGauge(
+      'connection_churn_per_op',
+      'New client connections per command processed',
+      ['node'],
+    );
+    this.retryAmplificationState = this.createGauge(
+      'retry_amplification_state',
+      'Retry amplification classification: 0 none, 1 candidate, 2 amplifying',
+      ['node'],
+    );
+    this.anomalyFanoutPrimaries = this.createGauge(
+      'anomaly_fanout_primaries',
+      'Primaries the anomaly fan-out checked, could not reach, was refused by, skipped past its cap, or does not dial, in the latest cycle',
+      ['state'],
+    );
+    this.anomalyFanoutGap = this.createGauge(
+      'anomaly_fanout_gap',
+      'Why the anomaly fan-out of a cluster or Sentinel connection dialed no primary in the latest cycle (1 for the current reason)',
+      ['reason'],
+    );
+    this.incidentActive = this.createGauge(
+      'incident_active',
+      'Open incidents per connection, by matched pattern and recovery status',
+      ['pattern', 'status'],
     );
 
     // Metric Forecasting
@@ -1581,6 +1826,7 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     // Captured now: a removal during the INFO phase must stop this pass from
     // starting storage work for the (possibly re-added) connection.
     const storageEpoch = this.currentStorageEpoch(connectionId);
+    this.passDeadlines.set(connectionId, Date.now() + this.pollIntervalMs);
     const run: Promise<number> = (async () => {
       // A hung INFO releases the in-flight entry when the bound expires
       // (otherwise the entry would outlive every later pass and no connection
@@ -2212,7 +2458,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   ): void {
     const replication = info.replication;
     const role = replication?.role;
-    const isReplica = role === 'slave' || role === 'replica';
+    const isReplica = isReplicaRole(role);
+    this.webhookEventsProService?.observeReplication(
+      connectionId,
+      replication as Record<string, string | undefined> | undefined,
+      { host: config?.host || 'localhost', port: config?.port || 6379 },
+    );
 
     if (replication === undefined || role === undefined) {
       this.masterLinkUp.remove(connLabel);
@@ -2382,12 +2633,12 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.clusterEnabled.labels(connLabel).set(clusterEnabled ? 1 : 0);
 
     if (!clusterEnabled) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
     if (!this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterInfo')) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
@@ -2602,14 +2853,28 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         'canClusterInfo',
         error instanceof Error ? error : String(error),
       );
-      if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connLabel, state);
+      if (!this.isSuperseded(connectionId, epoch)) {
+        if (disabled) this.clearSlotSeries(connectionId, connLabel, state);
+        else this.exportShardLoad(connectionId, connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster metrics for ${connLabel}`, error);
     }
   }
 
   private async updateSlotStatsMetrics(
+    client: DatabasePort,
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    epoch: number,
+  ): Promise<void> {
+    await this.readSlotStats(client, connectionId, connLabel, state, epoch);
+    if (!this.isSuperseded(connectionId, epoch)) {
+      this.exportShardLoad(connectionId, connLabel, state, Date.now());
+    }
+  }
+
+  private async readSlotStats(
     client: DatabasePort,
     connectionId: string,
     connLabel: string,
@@ -2626,28 +2891,92 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       !client.getCapabilities().hasClusterSlotStats ||
       !this.runtimeCapabilityTracker.isAvailable(connectionId, 'canClusterSlotStats')
     ) {
-      this.clearSlotSeries(connLabel, state);
+      this.clearSlotSeries(connectionId, connLabel, state);
+      return;
+    }
+    // Its seed exports the whole cluster, this node's slots included; a second
+    // copy here would count them twice in any sum across connections. Skip
+    // while that seed's fan-out runs or it holds series fresher than the
+    // staleness bound. A seed without slot stats holds none, nor does one that
+    // is down or keeps running out of pass time once its series are older than
+    // that; clearing here then would drop the slots from Prometheus entirely.
+    if (
+      client.getCapabilities().clusterEnabled &&
+      this.clusterMetricsService?.coveredBySeed(connectionId) &&
+      this.seedHoldsSlotStats(connectionId)
+    ) {
+      this.clearSlotSeries(connectionId, connLabel, state);
       return;
     }
 
     try {
-      const slotStats = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+      let result: ClusterSlotStatsResult;
+      const clusterWide =
+        client.getCapabilities().clusterEnabled && this.clusterMetricsService
+          ? await this.clusterMetricsService.usesClusterWideSlotStats(connectionId)
+          : false;
+      if (clusterWide && this.clusterMetricsService) {
+        // The fan-out must finish inside this pass, or a later pass retires the
+        // epoch and every primary's answer is thrown away.
+        const now = Date.now();
+        const remainingMs = (this.passDeadlines.get(connectionId) ?? Infinity) - now;
+        // Too little left for a node round trip: keep last pass's series rather
+        // than expire every primary on a deadline it never had a chance to meet,
+        // until they are older than the staleness bound.
+        if (remainingMs < Math.min(SLOT_STATS_MIN_BUDGET_MS, Math.floor(this.pollIntervalMs / 2))) {
+          this.dropExpiredSlotSeries(connLabel, state, now);
+          return;
+        }
+        this.slotStatsFanOuts.add(connectionId);
+        try {
+          result = await this.clusterMetricsService.getClusterSlotStatsResult(
+            SLOT_STATS_RANKING,
+            this.slotStatsTopN,
+            connectionId,
+            Math.min(NODE_COMMAND_TIMEOUT_MS, remainingMs),
+            Math.min(NODE_COMMAND_TIMEOUT_MS, this.pollIntervalMs),
+          );
+        } finally {
+          this.slotStatsFanOuts.delete(connectionId);
+        }
+      } else {
+        if (clusterWide === false) this.shardLoadService?.forget(connectionId);
+        result = {
+          stats: await this.readOwnTopSlots(client),
+          failedNodes: [],
+          failedSlotRanges: [],
+        };
+      }
+      const { stats: slotStats, failedSlotRanges } = result;
       if (this.isSuperseded(connectionId, epoch)) {
         return;
       }
 
       const newSlotLabels = new Set<string>();
+      const now = Date.now();
+      if (result.nodeStats !== undefined && result.failedNodes.length === 0) {
+        this.shardLoadService?.record(connectionId, result.nodeStats, now);
+      }
       for (const [slot, stats] of Object.entries(slotStats)) {
         newSlotLabels.add(slot);
+        state.clusterSlotSeenAt.set(slot, now);
         this.clusterSlotKeys.labels(connLabel, slot).set(stats.key_count || 0);
-        this.clusterSlotExpires.labels(connLabel, slot).set(stats.expires_count || 0);
-        this.clusterSlotReadsTotal.labels(connLabel, slot).set(stats.total_reads || 0);
-        this.clusterSlotWritesTotal.labels(connLabel, slot).set(stats.total_writes || 0);
+        this.setSlotCounter(this.clusterSlotCpuUsecTotal, connLabel, slot, stats.cpu_usec);
+        this.setSlotCounter(this.clusterSlotNetworkBytesInTotal, connLabel, slot, stats.network_bytes_in);
+        this.setSlotCounter(this.clusterSlotNetworkBytesOutTotal, connLabel, slot, stats.network_bytes_out);
       }
 
+      // A primary that did not answer is missing from this result; keep the
+      // series its slots exported last time instead of dropping them, until
+      // they are older than the staleness bound.
       for (const staleSlot of state.currentClusterSlotLabels) {
-        if (!newSlotLabels.has(staleSlot)) {
+        if (newSlotLabels.has(staleSlot)) continue;
+        const seenAt = state.clusterSlotSeenAt.get(staleSlot) ?? 0;
+        if (inSlotRanges(Number(staleSlot), failedSlotRanges) && now - seenAt <= this.stalenessMs) {
+          newSlotLabels.add(staleSlot);
+        } else {
           this.removeSlotSeries(connLabel, staleSlot);
+          state.clusterSlotSeenAt.delete(staleSlot);
         }
       }
 
@@ -2658,25 +2987,114 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         'canClusterSlotStats',
         slotStatsError instanceof Error ? slotStatsError : String(slotStatsError),
       );
-      if (disabled && !this.isSuperseded(connectionId, epoch)) {
-        this.clearSlotSeries(connLabel, state);
+      if (!this.isSuperseded(connectionId, epoch)) {
+        // A fan-out that keeps throwing (discovery timing out) never reaches
+        // the success path, so the series it last wrote would stay at their
+        // old values. Age them out the same way a pass that never starts does,
+        // or once they pass the staleness bound the members export too and
+        // every sum counts the slots twice.
+        if (disabled) this.clearSlotSeries(connectionId, connLabel, state);
+        else this.dropExpiredSlotSeries(connLabel, state, Date.now());
       }
       this.logger.error(`Failed to update cluster slot stats for ${connLabel}`, slotStatsError);
     }
   }
 
-  private clearSlotSeries(connLabel: string, state: ConnectionMetricState): void {
+  /**
+   * This node's own top slots by key count plus, when it tracks usage, by CPU.
+   * ORDERBY cpu-usec is an error without cluster-slot-stats-enabled, so only
+   * ask once the key-count read carried the counters.
+   */
+  private async readOwnTopSlots(client: DatabasePort): Promise<SlotStats> {
+    const byKeys = await client.getClusterSlotStats('key-count', this.slotStatsTopN);
+    const tracksUsage = Object.values(byKeys).some((row) => row.cpu_usec !== undefined);
+    return tracksUsage
+      ? { ...byKeys, ...(await client.getClusterSlotStats('cpu-usec', this.slotStatsTopN)) }
+      : byKeys;
+  }
+
+  private setSlotCounter(gauge: Gauge, connLabel: string, slot: string, value: number | undefined): void {
+    if (value === undefined) {
+      gauge.remove(connLabel, slot);
+    } else {
+      gauge.labels(connLabel, slot).set(value);
+    }
+  }
+
+  /** Remove slot series last seen longer ago than the staleness bound. */
+  private dropExpiredSlotSeries(connLabel: string, state: ConnectionMetricState, now: number): void {
+    for (const slot of [...state.currentClusterSlotLabels]) {
+      if (now - (state.clusterSlotSeenAt.get(slot) ?? 0) <= this.stalenessMs) continue;
+      this.removeSlotSeries(connLabel, slot);
+      state.clusterSlotSeenAt.delete(slot);
+      state.currentClusterSlotLabels.delete(slot);
+    }
+  }
+
+  /**
+   * The member's seed is reading the cluster's slot stats now, or holds slot
+   * series read within the staleness bound.
+   */
+  private seedHoldsSlotStats(connectionId: string): boolean {
+    const membership = this.connectionRegistry.getConfig(connectionId)?.membership;
+    if (membership?.seedId === undefined || membership.retiredAt !== undefined) return false;
+    if (this.slotStatsFanOuts.has(membership.seedId)) return true;
+    const now = Date.now();
+    const seenAt = this.perConnectionState.get(membership.seedId)?.clusterSlotSeenAt.values() ?? [];
+    for (const at of seenAt) {
+      if (now - at <= this.stalenessMs) return true;
+    }
+    return false;
+  }
+
+  private clearSlotSeries(connectionId: string, connLabel: string, state: ConnectionMetricState): void {
     for (const slot of state.currentClusterSlotLabels) {
       this.removeSlotSeries(connLabel, slot);
     }
     state.currentClusterSlotLabels = new Set();
+    state.clusterSlotSeenAt.clear();
+    this.shardLoadService?.forget(connectionId);
+    this.exportShardLoad(connectionId, connLabel, state, Date.now());
+  }
+
+  private exportShardLoad(
+    connectionId: string,
+    connLabel: string,
+    state: ConnectionMetricState,
+    now: number,
+  ): void {
+    const sample = this.shardLoadService?.getLatest(connectionId) ?? null;
+    const shards = sample !== null && now - sample.timestamp <= this.stalenessMs ? sample.shards : [];
+    const labels = new Map<string, string>();
+    for (const shard of shards) {
+      const series = [connLabel, shard.address, shard.nodeId] as const;
+      labels.set(shard.nodeId, shard.address);
+      this.clusterShardCpuUsecPerSecond.labels(...series).set(shard.cpuUsecPerSecond);
+      this.clusterShardNetworkBytesInPerSecond.labels(...series).set(shard.networkBytesInPerSecond);
+      this.clusterShardNetworkBytesOutPerSecond.labels(...series).set(shard.networkBytesOutPerSecond);
+      if (shard.cpuShare !== null) this.clusterShardCpuShare.labels(...series).set(shard.cpuShare);
+      if (shard.networkShare !== null) {
+        this.clusterShardNetworkShare.labels(...series).set(shard.networkShare);
+      }
+      this.clusterShardSlots.labels(...series).set(shard.slotCount);
+    }
+    for (const [nodeId, address] of state.currentShardLabels) {
+      if (labels.get(nodeId) === address) continue;
+      this.clusterShardCpuUsecPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkBytesInPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkBytesOutPerSecond.remove(connLabel, address, nodeId);
+      this.clusterShardCpuShare.remove(connLabel, address, nodeId);
+      this.clusterShardNetworkShare.remove(connLabel, address, nodeId);
+      this.clusterShardSlots.remove(connLabel, address, nodeId);
+    }
+    state.currentShardLabels = labels;
   }
 
   private removeSlotSeries(connLabel: string, slot: string): void {
     this.clusterSlotKeys.remove(connLabel, slot);
-    this.clusterSlotExpires.remove(connLabel, slot);
-    this.clusterSlotReadsTotal.remove(connLabel, slot);
-    this.clusterSlotWritesTotal.remove(connLabel, slot);
+    this.clusterSlotCpuUsecTotal.remove(connLabel, slot);
+    this.clusterSlotNetworkBytesInTotal.remove(connLabel, slot);
+    this.clusterSlotNetworkBytesOutTotal.remove(connLabel, slot);
   }
 
   private async updateAclMetrics(
@@ -3542,7 +3960,18 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     for (const label of stale) {
       this.pollStale.labels(label).set(1);
     }
+    this.dropExpiredShardLoad(Date.now());
     await this.removeSeriesForLabels(stale, SWEEP_EXCLUSIONS);
+  }
+
+  private dropExpiredShardLoad(now: number): void {
+    for (const [connectionId, state] of this.perConnectionState) {
+      if (state.currentShardLabels.size === 0) continue;
+      const sample = this.shardLoadService?.getLatest(connectionId) ?? null;
+      if (sample !== null && now - sample.timestamp <= this.stalenessMs) continue;
+      const connLabel = this.getConnectionLabel(connectionId);
+      if (connLabel !== null) this.exportShardLoad(connectionId, connLabel, state, now);
+    }
   }
 
   private async removeSeriesForLabels(
@@ -3648,6 +4077,250 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
       }
     }
     state.currentReplBufferReplicaLabels = currentLabels;
+  }
+
+  updateReplicationSignals(
+    connectionId: string,
+    node: string,
+    signals: {
+      replicas: ReadonlyArray<{
+        replica: string;
+        gapBytes: number | null;
+        secondsBehind: number | null;
+        level: number;
+      }>;
+      writeRateBytesPerSecond: number | null;
+      backlogCoverageSeconds: number | null;
+    },
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
+    const currentLabels = new Set<string>();
+
+    for (const entry of signals.replicas) {
+      currentLabels.add(entry.replica);
+      this.replicationDivergenceLevel.labels(connLabel, node, entry.replica).set(entry.level);
+      this.setSignalOrRemove(
+        this.replicationGapBytes,
+        [connLabel, node, entry.replica],
+        entry.gapBytes,
+      );
+      this.setSignalOrRemove(
+        this.replicationSecondsBehind,
+        [connLabel, node, entry.replica],
+        entry.secondsBehind,
+      );
+    }
+
+    for (const staleLabel of state.signalReplicaLabelsByNode.get(node) ?? []) {
+      if (!currentLabels.has(staleLabel)) {
+        this.removeReplicaSignals(connLabel, node, staleLabel);
+      }
+    }
+    state.signalReplicaLabelsByNode.set(node, currentLabels);
+
+    this.setSignalOrRemove(
+      this.replicationWriteRate,
+      [connLabel, node],
+      signals.writeRateBytesPerSecond,
+    );
+    this.setSignalOrRemove(
+      this.replicationBacklogCoverage,
+      [connLabel, node],
+      signals.backlogCoverageSeconds,
+    );
+  }
+
+  updateRetrySignals(
+    connectionId: string,
+    node: string,
+    signals: {
+      connectsPerSecond: number | null;
+      churnPerOp: number | null;
+      retryState: number;
+    },
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalNodes.add(node);
+    state.signalConnLabel = connLabel;
+    this.setSignalOrRemove(
+      this.connectionsReceivedPerSecond,
+      [connLabel, node],
+      signals.connectsPerSecond,
+    );
+    this.setSignalOrRemove(this.connectionChurnPerOp, [connLabel, node], signals.churnPerOp);
+    this.retryAmplificationState.labels(connLabel, node).set(signals.retryState);
+  }
+
+  clearNodeSignals(connectionId: string, node: string): void {
+    const state = this.perConnectionState.get(connectionId);
+    if (state === undefined || !state.signalNodes.has(node)) {
+      return;
+    }
+    const connLabel = this.getConnectionLabel(connectionId);
+    state.signalNodes.delete(node);
+    const replicas = state.signalReplicaLabelsByNode.get(node) ?? new Set<string>();
+    state.signalReplicaLabelsByNode.delete(node);
+    if (connLabel === null) {
+      return;
+    }
+    for (const replica of replicas) {
+      this.removeReplicaSignals(connLabel, node, replica);
+    }
+    this.replicationWriteRate.remove(connLabel, node);
+    this.replicationBacklogCoverage.remove(connLabel, node);
+    this.removeRetrySignals(connLabel, node);
+  }
+
+  clearRetrySignals(connectionId: string, node: string): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel !== null) {
+      this.removeRetrySignals(connLabel, node);
+    }
+  }
+
+  private removeRetrySignals(connLabel: string, node: string): void {
+    this.connectionsReceivedPerSecond.remove(connLabel, node);
+    this.connectionChurnPerOp.remove(connLabel, node);
+    this.retryAmplificationState.remove(connLabel, node);
+  }
+
+  /**
+   * Latest per-node fan-out outcome of a connection. `null` removes the series:
+   * the connection has no other primaries to reach (standalone, replica,
+   * external), or its coverage went stale because it is no longer polled. A
+   * cluster or Sentinel connection keeps one series per state, so a topology
+   * it does not dial shows up under `not_dialed` rather than as absent.
+   */
+  updateFanoutCoverage(
+    connectionId: string,
+    coverage: (FanoutCounts & { reason?: string | null }) | null,
+  ): void {
+    const connLabel = this.getConnectionLabel(connectionId);
+    if (connLabel === null) {
+      return;
+    }
+    if (coverage === null) {
+      for (const [fanoutState] of FANOUT_STATES) {
+        this.anomalyFanoutPrimaries.remove(connLabel, fanoutState);
+      }
+      this.setFanoutGap(connLabel, null);
+      return;
+    }
+    const state = this.getConnectionState(connectionId);
+    state.signalConnLabel = connLabel;
+    for (const [fanoutState, key] of FANOUT_STATES) {
+      this.anomalyFanoutPrimaries.labels(connLabel, fanoutState).set(coverage[key]);
+    }
+    this.setFanoutGap(connLabel, coverage.reason ?? null);
+  }
+
+  /**
+   * One series for the reason the fan-out dialed nothing, so `topology_unreadable`
+   * and full coverage (`covered_elsewhere`, `no_targets`), which all export zero
+   * counts, can be told apart. Absent while the fan-out reads its primaries.
+   */
+  private setFanoutGap(connLabel: string, reason: string | null): void {
+    const previous = this.fanoutGapReasons.get(connLabel);
+    const next = reason !== null && !FANOUT_NO_GAP.has(reason) ? reason : null;
+    if (previous !== undefined && previous !== next) {
+      this.anomalyFanoutGap.remove(connLabel, previous);
+      this.fanoutGapReasons.delete(connLabel);
+    }
+    if (next === null) return;
+    this.anomalyFanoutGap.labels(connLabel, next).set(1);
+    this.fanoutGapReasons.set(connLabel, next);
+  }
+
+  /**
+   * Publishes `betterdb_incident_active` from every open incident. An incident
+   * counts once under each label its connections resolve to, so connections
+   * that share a host:port count a shared incident once. Labels missing from
+   * this call lose their series.
+   */
+  updateActiveIncidents(
+    incidents: ReadonlyArray<{
+      connectionIds: readonly string[];
+      patterns: readonly string[];
+      status: string;
+    }>,
+  ): void {
+    const byLabel = new Map<string, Map<string, IncidentCount>>();
+    for (const incident of incidents) {
+      const connectionIds =
+        incident.connectionIds.length > 0 ? incident.connectionIds : [NO_CONNECTION_ID];
+      const labels = new Set<string>();
+      for (const connectionId of connectionIds) {
+        const connLabel = this.getAnomalyConnectionLabel(connectionId);
+        if (connLabel !== null) {
+          labels.add(connLabel);
+        }
+      }
+      const patterns = new Set(incident.patterns.length > 0 ? incident.patterns : ['none']);
+      for (const connLabel of labels) {
+        const counts = byLabel.get(connLabel) ?? new Map<string, IncidentCount>();
+        for (const pattern of patterns) {
+          const key = JSON.stringify([pattern, incident.status]);
+          const entry: IncidentCount = counts.get(key) ?? {
+            pattern,
+            status: incident.status,
+            count: 0,
+          };
+          entry.count++;
+          counts.set(key, entry);
+        }
+        byLabel.set(connLabel, counts);
+      }
+    }
+
+    for (const [connLabel, counts] of byLabel) {
+      for (const entry of counts.values()) {
+        this.incidentActive.labels(connLabel, entry.pattern, entry.status).set(entry.count);
+      }
+      this.removeStaleIncidentLabels(connLabel, new Set(counts.keys()));
+    }
+    for (const connLabel of [...this.incidentLabels.keys()]) {
+      if (!byLabel.has(connLabel)) {
+        this.removeStaleIncidentLabels(connLabel, new Set());
+      }
+    }
+  }
+
+  private removeStaleIncidentLabels(connLabel: string, currentLabels: Set<string>): void {
+    for (const staleLabel of this.incidentLabels.get(connLabel) ?? []) {
+      if (!currentLabels.has(staleLabel)) {
+        const [pattern, status] = JSON.parse(staleLabel) as [string, string];
+        this.incidentActive.remove(connLabel, pattern, status);
+      }
+    }
+    if (currentLabels.size > 0) {
+      this.incidentLabels.set(connLabel, currentLabels);
+    } else {
+      this.incidentLabels.delete(connLabel);
+    }
+  }
+
+  private removeReplicaSignals(connLabel: string, node: string, replica: string): void {
+    this.replicationGapBytes.remove(connLabel, node, replica);
+    this.replicationSecondsBehind.remove(connLabel, node, replica);
+    this.replicationDivergenceLevel.remove(connLabel, node, replica);
+  }
+
+  private setSignalOrRemove(gauge: Gauge, labels: string[], value: number | null): void {
+    if (value === null || !Number.isFinite(value)) {
+      gauge.remove(...labels);
+    } else {
+      gauge.labels(...labels).set(value);
+    }
   }
 
   updateCommandstatsMetrics(
@@ -3758,11 +4431,11 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     anomalyType: string,
     connectionId?: string,
   ): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const connLabel = this.getAnomalyConnectionLabel(connectionId ?? NO_CONNECTION_ID);
     if (connLabel === null) {
       return;
     }
-    this.anomalyEventsTotal.inc({
+    this.incrementAnomalyCounter(this.anomalyEventsTotal, {
       connection: connLabel,
       severity,
       metric_type: metricType,
@@ -3771,32 +4444,72 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   incrementCorrelatedGroup(pattern: string, severity: string, connectionId?: string): void {
-    const connLabel = connectionId ? this.getConnectionLabel(connectionId) : 'unknown';
+    const connLabel = this.getAnomalyConnectionLabel(connectionId ?? NO_CONNECTION_ID);
     if (connLabel === null) {
       return;
     }
-    this.correlatedGroupsTotal.inc({ connection: connLabel, pattern, severity });
+    this.incrementAnomalyCounter(this.correlatedGroupsTotal, {
+      connection: connLabel,
+      pattern,
+      severity,
+    });
   }
 
-  updateAnomalySummary(
-    summary: {
-      bySeverity: Record<string, number>;
-      byMetric: Record<string, number>;
-      byPattern: Record<string, number>;
-      groupsBySeverity: Record<string, number>;
-      unresolvedBySeverity: Record<string, number>;
-    },
-    connectionId?: string,
+  private incrementAnomalyCounter(
+    counter: Counter,
+    labels: LabelValues<string> & { connection: string },
   ): void {
-    const effectiveConnectionId =
-      connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
-    const connLabel = this.getConnectionLabel(effectiveConnectionId);
-    if (connLabel === null) {
-      return;
+    counter.inc(labels);
+    let series = this.anomalyCounterSeries.get(labels.connection);
+    if (series === undefined) {
+      series = new Map();
+      this.anomalyCounterSeries.set(labels.connection, series);
     }
-    const state = this.getConnectionState(effectiveConnectionId);
+    // The two counters have different label names, so the labels alone are unique.
+    const key = JSON.stringify(labels);
+    if (!series.has(key)) {
+      series.set(key, { counter, labels });
+    }
+  }
 
-    for (const sev of ['info', 'warning', 'critical']) {
+  private removeAnomalyCounters(connLabel: string): void {
+    for (const { counter, labels } of this.anomalyCounterSeries.get(connLabel)?.values() ?? []) {
+      counter.remove(labels);
+    }
+    this.anomalyCounterSeries.delete(connLabel);
+  }
+
+  /**
+   * Publishes the anomaly summary gauges for every connection in
+   * `byConnection` and removes the series of every label that was published
+   * last time but is missing now (a connection that stopped being polled, was
+   * retired or deleted, or connection-less events that aged out). Connections
+   * that resolve to the same host:port are summed into one summary; each
+   * correlated group belongs to one connection, so that sum counts it once.
+   * Retired and deleted connections are dropped here even if passed.
+   */
+  updateAnomalySummaries(byConnection: ReadonlyMap<string, AnomalySummaryCounts>): void {
+    const byLabel = new Map<string, AnomalySummaryCounts>();
+    for (const [connectionId, summary] of byConnection) {
+      const connLabel = this.getAnomalyConnectionLabel(connectionId);
+      if (connLabel === null) {
+        continue;
+      }
+      const merged = byLabel.get(connLabel);
+      byLabel.set(connLabel, merged ? addAnomalySummaries(merged, summary) : summary);
+    }
+    for (const [connLabel, summary] of byLabel) {
+      this.setAnomalySummary(connLabel, summary);
+    }
+    for (const connLabel of [...this.anomalySummaryLabels.keys()]) {
+      if (!byLabel.has(connLabel)) {
+        this.removeAnomalySummary(connLabel);
+      }
+    }
+  }
+
+  private setAnomalySummary(connLabel: string, summary: AnomalySummaryCounts): void {
+    for (const sev of ANOMALY_SEVERITIES) {
       this.anomalyBySeverity.labels(connLabel, sev).set(summary.bySeverity[sev] ?? 0);
       this.anomalyEventsCurrent.labels(connLabel, sev).set(summary.unresolvedBySeverity[sev] ?? 0);
       this.correlatedGroupsBySeverity
@@ -3804,49 +4517,79 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
         .set(summary.groupsBySeverity[sev] ?? 0);
     }
 
-    const newMetricLabels = new Set<string>();
-    const newPatternLabels = new Set<string>();
-
+    const metrics = new Set(Object.keys(summary.byMetric));
+    const patterns = new Set(Object.keys(summary.byPattern));
     for (const [metric, count] of Object.entries(summary.byMetric)) {
-      newMetricLabels.add(metric);
       this.anomalyByMetric.labels(connLabel, metric).set(count);
     }
     for (const [pattern, count] of Object.entries(summary.byPattern)) {
-      newPatternLabels.add(pattern);
       this.correlatedGroupsByPattern.labels(connLabel, pattern).set(count);
     }
 
-    // Clean up stale labels for this connection
-    for (const staleMetric of state.currentAnomalyMetricLabels) {
-      if (!newMetricLabels.has(staleMetric)) {
-        this.anomalyByMetric.labels(connLabel, staleMetric).set(0);
+    const previous = this.anomalySummaryLabels.get(connLabel);
+    for (const staleMetric of previous?.metrics ?? []) {
+      if (!metrics.has(staleMetric)) {
+        this.anomalyByMetric.remove(connLabel, staleMetric);
       }
     }
-    for (const stalePattern of state.currentCorrelatedPatternLabels) {
-      if (!newPatternLabels.has(stalePattern)) {
-        this.correlatedGroupsByPattern.labels(connLabel, stalePattern).set(0);
+    for (const stalePattern of previous?.patterns ?? []) {
+      if (!patterns.has(stalePattern)) {
+        this.correlatedGroupsByPattern.remove(connLabel, stalePattern);
       }
     }
-
-    state.currentAnomalyMetricLabels = newMetricLabels;
-    state.currentCorrelatedPatternLabels = newPatternLabels;
+    this.anomalySummaryLabels.set(connLabel, { metrics, patterns });
   }
 
+  private removeAnomalySummary(connLabel: string): void {
+    for (const sev of ANOMALY_SEVERITIES) {
+      this.anomalyBySeverity.remove(connLabel, sev);
+      this.anomalyEventsCurrent.remove(connLabel, sev);
+      this.correlatedGroupsBySeverity.remove(connLabel, sev);
+    }
+    const previous = this.anomalySummaryLabels.get(connLabel);
+    for (const metric of previous?.metrics ?? []) {
+      this.anomalyByMetric.remove(connLabel, metric);
+    }
+    for (const pattern of previous?.patterns ?? []) {
+      this.correlatedGroupsByPattern.remove(connLabel, pattern);
+    }
+    this.anomalySummaryLabels.delete(connLabel);
+  }
+
+  /**
+   * Publishes the anomaly baseline buffers of one connection, normally the
+   * default one. Series left from an earlier call, under another label or for
+   * a metric type no longer reported, are removed; `null` removes them all.
+   */
   updateAnomalyBufferStats(
     buffers: Array<{ metricType: string; mean: number; stdDev: number; ready: boolean }>,
-    connectionId?: string,
+    connectionId: string | null,
   ): void {
-    const effectiveConnectionId =
-      connectionId || this.connectionRegistry.getDefaultId() || 'unknown';
-    const connLabel = this.getConnectionLabel(effectiveConnectionId);
-    if (connLabel === null) {
-      return;
+    const connLabel =
+      connectionId === null || connectionId === NO_CONNECTION_ID
+        ? null
+        : this.getAnomalyConnectionLabel(connectionId);
+    const metrics = new Set<string>();
+    if (connLabel !== null) {
+      for (const buf of buffers) {
+        metrics.add(buf.metricType);
+        this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
+        this.anomalyDetectionBufferMean.labels(connLabel, buf.metricType).set(buf.mean);
+        this.anomalyDetectionBufferStdDev.labels(connLabel, buf.metricType).set(buf.stdDev);
+      }
     }
-    for (const buf of buffers) {
-      this.anomalyDetectionBufferReady.labels(connLabel, buf.metricType).set(buf.ready ? 1 : 0);
-      this.anomalyDetectionBufferMean.labels(connLabel, buf.metricType).set(buf.mean);
-      this.anomalyDetectionBufferStdDev.labels(connLabel, buf.metricType).set(buf.stdDev);
+    if (this.anomalyBufferLabel !== null) {
+      for (const metric of this.anomalyBufferMetrics) {
+        if (this.anomalyBufferLabel === connLabel && metrics.has(metric)) {
+          continue;
+        }
+        this.anomalyDetectionBufferReady.remove(this.anomalyBufferLabel, metric);
+        this.anomalyDetectionBufferMean.remove(this.anomalyBufferLabel, metric);
+        this.anomalyDetectionBufferStdDev.remove(this.anomalyBufferLabel, metric);
+      }
     }
+    this.anomalyBufferLabel = connLabel;
+    this.anomalyBufferMetrics = metrics;
   }
 
   /**
@@ -3860,7 +4603,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     }
     this.clearKvCache(connectionId);
     this.perConnectionState.delete(connectionId);
+    this.passDeadlines.delete(connectionId);
+    this.shardLoadService?.forget(connectionId);
     this.webhookEventsProService?.clearReplicationLag(connectionId);
+    this.webhookEventsProService?.forgetReplication(connectionId);
     // Drop any in-flight metric update so a reused connection ID cannot join
     // stale work. The promise itself still settles; its compare-and-delete
     // finally then no-ops because the entry is already gone.
@@ -3871,7 +4617,20 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     this.lastStorageRefreshWarnAt.delete(connectionId);
     this.retireEpoch(connectionId);
     this.retireStorageEpoch(connectionId);
-    const label = this.freshness.forget(connectionId);
+    // Drop the anomaly summary, incident and anomaly counter series now rather
+    // than at the anomaly service's next summary cycle, unless a connection
+    // that stays shares the label and therefore the series.
+    let anomalyLabel = this.anomalyLabels.get(connectionId);
+    this.anomalyLabels.delete(connectionId);
+    if (anomalyLabel !== undefined && this.hasAnomalyLabel(anomalyLabel)) {
+      anomalyLabel = undefined;
+    }
+    if (anomalyLabel !== undefined) {
+      this.removeAnomalySummary(anomalyLabel);
+      this.removeStaleIncidentLabels(anomalyLabel, new Set());
+      this.removeAnomalyCounters(anomalyLabel);
+    }
+    const label = this.freshness.forget(connectionId) ?? state?.signalConnLabel ?? anomalyLabel;
     if (label !== undefined) {
       this.releaseLabel(label);
     }
@@ -3895,7 +4654,10 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
   }
 
   private dropSeriesForRemovedLabel(label: string): void {
-    this.removeSeriesForLabels(new Set([label]), NO_EXCLUSIONS).catch((error) => {
+    // A listed connection this service does not poll (a Sentinel, or one not
+    // polled yet) can still own the anomaly series under the label.
+    const excluded = this.hasAnomalyLabel(label) ? ANOMALY_SERIES : NO_EXCLUSIONS;
+    this.removeSeriesForLabels(new Set([label]), excluded).catch((error) => {
       this.logger.warn(
         `Failed to remove series for ${label}: ${error instanceof Error ? error.message : error}`,
       );
@@ -3908,6 +4670,23 @@ export class PrometheusService extends MultiConnectionPoller implements OnModule
     if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(2)} KB`;
     return `${bytes} B`;
   }
+}
+
+function addAnomalySummaries(a: AnomalySummaryCounts, b: AnomalySummaryCounts): AnomalySummaryCounts {
+  const add = (x: Record<string, number>, y: Record<string, number>): Record<string, number> => {
+    const sum = { ...x };
+    for (const [key, value] of Object.entries(y)) {
+      sum[key] = (sum[key] ?? 0) + value;
+    }
+    return sum;
+  };
+  return {
+    bySeverity: add(a.bySeverity, b.bySeverity),
+    byMetric: add(a.byMetric, b.byMetric),
+    byPattern: add(a.byPattern, b.byPattern),
+    groupsBySeverity: add(a.groupsBySeverity, b.groupsBySeverity),
+    unresolvedBySeverity: add(a.unresolvedBySeverity, b.unresolvedBySeverity),
+  };
 }
 
 function parseMemoryField(raw: string | number | undefined): number | undefined {

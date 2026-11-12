@@ -293,9 +293,15 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_cluster_size` | `betterdb.cluster.size` | `{node}` |
 | `betterdb_cluster_stats_messages_crc_mismatch` | `betterdb.cluster.messages_crc_mismatch` | `{message}` |
 | `betterdb_cluster_slot_keys` | `betterdb.cluster.slot.keys` | `{key}` |
-| `betterdb_cluster_slot_expires` | `betterdb.cluster.slot.expires` | `{key}` |
-| `betterdb_cluster_slot_reads_total` | `betterdb.cluster.slot.reads` | `{read}` |
-| `betterdb_cluster_slot_writes_total` | `betterdb.cluster.slot.writes` | `{write}` |
+| `betterdb_cluster_slot_cpu_usec_total` | `betterdb.cluster.slot.cpu.time` | `us` |
+| `betterdb_cluster_slot_network_bytes_in_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=receive`) | `By` |
+| `betterdb_cluster_slot_network_bytes_out_total` | `betterdb.cluster.slot.network.io` (`network.io.direction=transmit`) | `By` |
+| `betterdb_cluster_shard_cpu_usec_per_second` | `betterdb.cluster.shard.cpu.rate` | `us/s` |
+| `betterdb_cluster_shard_network_bytes_in_per_second` | `betterdb.cluster.shard.network.io.rate` (`network.io.direction=receive`) | `By/s` |
+| `betterdb_cluster_shard_network_bytes_out_per_second` | `betterdb.cluster.shard.network.io.rate` (`network.io.direction=transmit`) | `By/s` |
+| `betterdb_cluster_shard_cpu_share` | `betterdb.cluster.shard.cpu.share` | `1` |
+| `betterdb_cluster_shard_network_share` | `betterdb.cluster.shard.network.share` | `1` |
+| `betterdb_cluster_shard_slots` | `betterdb.cluster.shard.slots` | `{slot}` |
 | `betterdb_commandstats_latency_us` | `betterdb.cmd.latency_avg` | `us` |
 | `betterdb_slowlog_length` | `betterdb.slowlog.length` | `{entry}` |
 | `betterdb_slowlog_last_id` | `betterdb.slowlog.last_id` | `{id}` |
@@ -335,6 +341,17 @@ Monitor sends one OTLP request per node plus one for the monitor each interval, 
 | `betterdb_anomaly_buffer_ready` | `betterdb.anomaly.buffer.ready` | `1` |
 | `betterdb_anomaly_buffer_mean` | `betterdb.anomaly.buffer.mean` | — |
 | `betterdb_anomaly_buffer_stddev` | `betterdb.anomaly.buffer.stddev` | — |
+| `betterdb_replication_gap_bytes` | `betterdb.replication.gap` | `By` |
+| `betterdb_replication_seconds_behind` | `betterdb.replication.seconds_behind` | `s` |
+| `betterdb_replication_divergence_level` | `betterdb.replication.divergence_level` | `1` |
+| `betterdb_replication_write_rate_bytes_per_second` | `betterdb.replication.write_rate` | `By/s` |
+| `betterdb_replication_backlog_coverage_seconds` | `betterdb.replication.backlog_coverage` | `s` |
+| `betterdb_connections_received_per_second` | `betterdb.connections.received_rate` | `{connection}/s` |
+| `betterdb_connection_churn_per_op` | `betterdb.connections.churn_per_op` | `{connection}/{operation}` |
+| `betterdb_retry_amplification_state` | `betterdb.anomaly.retry_amplification_state` | `1` |
+| `betterdb_anomaly_fanout_primaries` | `betterdb.anomaly.fanout_primaries` | `{primary}` |
+| `betterdb_anomaly_fanout_gap` | `betterdb.anomaly.fanout_gap` | `1` |
+| `betterdb_incident_active` | `betterdb.anomaly.incidents_active` | `{incident}` |
 | `betterdb_metric_forecast_time_to_limit_seconds` | `betterdb.forecast.time_to_limit` | `s` |
 | `betterdb_cve_findings` | `betterdb.cve.findings` | `{finding}` |
 | `betterdb_cve_kev` | `betterdb.cve.kev` | `{finding}` |

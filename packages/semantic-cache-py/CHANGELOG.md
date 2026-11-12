@@ -22,6 +22,8 @@
   until the index is recreated. `flush()` drops the index with `FT.DROPINDEX`
   and no `DD` flag, then deletes the keys itself.
 
+## [0.14.0] - 2026-10-30
+
 ### Fixed
 
 - **`flush()` could delete another cache's keys.** The cache name was put into

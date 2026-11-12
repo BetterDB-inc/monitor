@@ -2,6 +2,8 @@ import { Logger } from '@nestjs/common';
 import { clientRollupBucketStart } from '@betterdb/shared';
 import { StoragePort } from '../common/interfaces/storage-port.interface';
 
+const MS_PER_SECOND = 1000;
+
 /**
  * One prune pass over every store that accumulates monitoring history, keyed
  * by a stable name for logging. Shared by the cloud tier-based sweep and the
@@ -38,9 +40,10 @@ export async function runRetentionSweep(
     },
     { name: 'anomaly_events', fn: () => storage.pruneOldAnomalyEvents(cutoff) },
     { name: 'correlated_groups', fn: () => storage.pruneOldCorrelatedGroups(cutoff) },
+    { name: 'incident_boundaries', fn: () => storage.pruneOldIncidentBoundaries(cutoff) },
     { name: 'key_patterns', fn: () => storage.pruneOldKeyPatternSnapshots(cutoff) },
     { name: 'hot_keys', fn: () => storage.pruneOldHotKeys(cutoff) },
-    { name: 'acl_entries', fn: () => storage.pruneOldEntries(cutoff) },
+    { name: 'acl_entries', fn: () => storage.pruneOldEntries(Math.floor(cutoff / MS_PER_SECOND)) },
     { name: 'webhook_deliveries', fn: () => storage.pruneOldDeliveries(cutoff) },
     { name: 'latency_snapshots', fn: () => storage.pruneOldLatencySnapshots(cutoff) },
     { name: 'latency_histograms', fn: () => storage.pruneOldLatencyHistograms(cutoff) },
@@ -59,6 +62,10 @@ export async function runRetentionSweep(
     // reclaims rows left behind by removed or unreachable connections.
     { name: 'command_stats_samples', fn: () => storage.pruneOldCommandStatsSamples(sampleCutoff) },
     { name: 'latency_stats_samples', fn: () => storage.pruneOldLatencyStatsSamples(sampleCutoff) },
+    {
+      name: 'replication_divergence_windows',
+      fn: () => storage.pruneOldReplicationDivergenceWindows(sampleCutoff),
+    },
     {
       name: 'vector_index_snapshots',
       fn: () => storage.pruneOldVectorIndexSnapshots(sampleCutoff),

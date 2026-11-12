@@ -1,4 +1,4 @@
-import { classifyKey, isChunkKey, maskKey, resolveTagSuffixes, siblingKey } from '../key-classifier';
+import { classifyKey, isChunkKey, maskKey, resolveTagSuffixes, siblingKey, suffixEvidence } from '../key-classifier';
 
 const MODEL = 'Qwen/Qwen2.5-0.5B-Instruct';
 const HASH = '9e3779b97f4a7c15';
@@ -213,14 +213,30 @@ describe('resolveTagSuffixes', () => {
   });
 
   it('reads tag values as tags when single-key evidence comes from another node', () => {
-    expect(resolveTagSuffixes([tagged(1, 'metadata'), tagged(2, 'kv_bytes')], false, true).map((k) => k.suffix)).toEqual([
-      null,
-      null,
-    ]);
+    const node = [tagged(1, 'metadata'), tagged(2, 'kv_bytes')];
+    const evidence = suffixEvidence([...node, tagged(5, 'prefill')]);
+    expect(resolveTagSuffixes(node, evidence).map((k) => k.suffix)).toEqual([null, null]);
   });
 
-  it('keeps the suffix when the run has no single-key evidence even if the node does', () => {
-    expect(resolveTagSuffixes([tagged(1, 'metadata'), tagged(2, 'prefill')], false, false)[0].suffix).toBe('metadata');
+  it('keeps the suffix when another node shows the model stores two keys', () => {
+    const node = [tagged(1, 'metadata'), tagged(2, 'prefill')];
+    const evidence = suffixEvidence([...node, classifyKey(`${MODEL}@1@0@3@halfkv_bytes`)!]);
+    expect(resolveTagSuffixes(node, evidence)[0].suffix).toBe('metadata');
+  });
+
+  it('resolves each model and dtype on its own evidence', () => {
+    const other = (i: number, tail: string) => classifyKey(`other@1@0@${i}@bfloat16@salt%user_${tail}`)!;
+    const keys = [
+      classifyKey(`${MODEL}@1@0@3@halfkv_bytes`)!,
+      classifyKey(`${MODEL}@1@0@3@halfmetadata`)!,
+      other(1, 'metadata'),
+      other(2, 'prefill'),
+    ];
+    expect(resolveTagSuffixes(keys).map((k) => k.suffix)).toEqual(['kv_bytes', 'metadata', null, null]);
+  });
+
+  it('keeps the suffix when the evidence has no entry for the model', () => {
+    expect(resolveTagSuffixes([tagged(1, 'metadata'), tagged(2, 'prefill')], new Map())[0].suffix).toBe('metadata');
   });
 
   it('keeps the suffix when nothing on the node breaks the tie', () => {

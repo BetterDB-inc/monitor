@@ -1,6 +1,23 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { WebhookDispatcherService } from '@app/webhooks/webhook-dispatcher.service';
-import type { WebhookEventType } from '@betterdb/shared';
+import { WebhookEventType } from '@betterdb/shared';
+import type { RecommendationValue } from '../anomaly-detection/types';
+
+export interface AnomalySequenceAlert {
+  correlationId: string;
+  pattern: string;
+  severity: string;
+  diagnosis: string;
+  recommendations: string[];
+  values?: RecommendationValue[];
+  anomalyIds: string[];
+  metricTypes: string[];
+  anomalyId: string;
+  timestamp: number;
+  message: string;
+  incidentUrl?: string;
+  connectionId?: string;
+}
 
 /**
  * Webhook Pro Service - Handles advanced webhook features for Pro+ tiers
@@ -38,6 +55,15 @@ export class WebhookProService implements OnModuleInit {
   }): Promise<void> {
     const { connectionId, ...eventData } = data;
     await this.dispatcherService.dispatchEvent('anomaly.detected' as WebhookEventType, eventData, connectionId);
+  }
+
+  async dispatchAnomalySequenceDetected(data: AnomalySequenceAlert): Promise<void> {
+    const { connectionId, ...eventData } = data;
+    await this.dispatcherService.dispatchEvent(
+      WebhookEventType.ANOMALY_SEQUENCE_DETECTED,
+      eventData,
+      connectionId,
+    );
   }
 
   /**

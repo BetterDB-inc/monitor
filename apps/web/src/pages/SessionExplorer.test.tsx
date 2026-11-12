@@ -1,13 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { SessionNamespace } from '@betterdb/shared';
 import { SessionExplorer } from './SessionExplorer';
 import { sessionExplorerKeys } from '../hooks/useSessionExplorer';
 import { detail, listResponse } from '../components/pages/session-explorer/__tests__/fixtures';
 
-const { api, connection } = vi.hoisted(() => ({
+const { api, connection, demo } = vi.hoisted(() => ({
   connection: { id: 'c1' },
+  demo: { on: false },
   api: {
     listNamespaces: vi.fn(),
     deleteNamespace: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock('../hooks/useConnection', () => ({
   useConnection: () => ({ currentConnection: { id: connection.id } }),
 }));
 
+vi.mock('../contexts/DemoContext', () => ({
+  useIsDemo: () => demo.on,
+}));
+
 vi.mock('../hooks/useLicense', () => ({
   useLicense: () => ({ hasFeature: () => false }),
 }));
@@ -41,6 +46,15 @@ const ns = (id: string): SessionNamespace => ({
   createdAt: 1,
   updatedAt: 1,
 });
+
+const media = (matching: string[]) =>
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({ matches: matching.includes(query), media: query })),
+  );
+
+const spyScroll = () =>
+  vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {});
 
 const renderPage = () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -60,6 +74,13 @@ describe('SessionExplorer', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     api.listSessions.mockResolvedValue(listResponse());
     api.deleteNamespace.mockResolvedValue(undefined);
+    demo.on = false;
+    media([]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it('activates the next namespace after deleting the first one', async () => {
@@ -146,6 +167,104 @@ describe('SessionExplorer', () => {
     expect(screen.queryByText('Sessions')).toBeNull();
   });
 
+  it('brings the session detail into view once it has rendered', async () => {
+    const scrollIntoView = spyScroll();
+    let resolve: (value: ReturnType<typeof detail>) => void = () => {};
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockReturnValue(new Promise((r) => (resolve = r)));
+    renderPage();
+
+    fireEvent.click(await screen.findByText('alpha'));
+    await waitFor(() => expect(api.getSession).toHaveBeenCalled());
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await act(async () => resolve(detail({ sessionId: 'alpha', estimatedTokens: 77 })));
+
+    const region = screen.getByRole('region', { name: 'Session detail' });
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    expect(scrollIntoView.mock.contexts[0]).toBe(region);
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    expect(within(region).getByText(/~77 tokens/)).toBeInTheDocument();
+    expect(document.activeElement).toBe(region);
+  });
+
+  it('brings the detail back into view when the open session is clicked again', async () => {
+    const scrollIntoView = spyScroll();
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
+    renderPage();
+
+    const row = (await screen.findByText('alpha')).closest('tr')!;
+    fireEvent.click(row);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    row.focus();
+    fireEvent.click(row);
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
+    expect(document.activeElement).toBe(screen.getByRole('region', { name: 'Session detail' }));
+  });
+
+  it('does not scroll when the detail sits beside the list', async () => {
+    media(['(min-width: 1536px)']);
+    const scrollIntoView = spyScroll();
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha', estimatedTokens: 77 }));
+    renderPage();
+
+    const row = (await screen.findByText('alpha')).closest('tr')!;
+    row.focus();
+    fireEvent.click(row);
+
+    await screen.findByText(/~77 tokens/);
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(row);
+  });
+
+  it('scrolls without animation when reduced motion is preferred', async () => {
+    media(['(prefers-reduced-motion: reduce)']);
+    const scrollIntoView = spyScroll();
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
+    renderPage();
+
+    fireEvent.click(await screen.findByText('alpha'));
+
+    await waitFor(() =>
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' }),
+    );
+  });
+
+  it('opens another session at the top of the detail panel', async () => {
+    media(['(min-width: 1536px)']);
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    api.getSession.mockImplementation((_ns: string, id: string) =>
+      Promise.resolve(detail({ sessionId: id, estimatedTokens: id === 'alpha' ? 1 : 2 })),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByText('alpha'));
+    await screen.findByText(/~1 tokens/);
+    const region = screen.getByRole('region', { name: 'Session detail' });
+    region.scrollTop = 400;
+
+    fireEvent.click(screen.getByText('bravo'));
+    await screen.findByText(/~2 tokens/);
+
+    expect(region.scrollTop).toBe(0);
+  });
+
+  it('keeps the stuck detail below the demo banner', async () => {
+    demo.on = true;
+    api.listNamespaces.mockResolvedValue([ns('a')]);
+    renderPage();
+
+    await screen.findByText('alpha');
+    const region = screen.getByRole('region', { name: 'Session detail' });
+    expect(region).toHaveClass('2xl:top-[3.25rem]');
+    expect(region).not.toHaveClass('2xl:top-4');
+  });
+
   it('rereads the list and the open session when Refresh is pressed', async () => {
     api.listNamespaces.mockResolvedValue([ns('a')]);
     api.getSession.mockResolvedValue(detail({ sessionId: 'alpha' }));
@@ -159,6 +278,33 @@ describe('SessionExplorer', () => {
 
     await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(api.getSession).toHaveBeenCalledTimes(2));
+  });
+
+  it('clears the session filter when switching to a cached namespace', async () => {
+    api.listNamespaces.mockResolvedValue([ns('a'), ns('b')]);
+    const { client } = renderPage();
+    client.setQueryData(
+      sessionExplorerKeys.sessions('c1', 'b'),
+      listResponse({
+        sessions: [
+          { sessionId: 'delta', keyCount: 1, memoryBytes: 1, unmeasuredKeys: 0, idleSeconds: 1, ttlMs: null },
+        ],
+      }),
+    );
+
+    await screen.findByText('alpha');
+    fireEvent.click(screen.getByRole('button', { name: /Size/ }));
+    fireEvent.change(screen.getByLabelText('Filter sessions'), { target: { value: 'alpha' } });
+    expect(screen.queryByText('bravo')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Namespace'), { target: { value: 'b' } });
+
+    await screen.findByText('delta');
+    expect((screen.getByLabelText('Filter sessions') as HTMLInputElement).value).toBe('');
+    expect(screen.getByRole('button', { name: /Size/ }).closest('th')).toHaveAttribute(
+      'aria-sort',
+      'descending',
+    );
   });
 
   it('does not request the previous session after switching connections', async () => {

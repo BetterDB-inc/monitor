@@ -100,7 +100,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
     // later (boot-time network failure, heartbeat re-validation) enables
     // collection without a restart, and a lapsed one stops it.
     // ensureValidated never rejects (it resolves community on timeout).
-    void this.license.ensureValidated().finally(() => {
+    this.startAfter(this.license.ensureValidated().finally(() => {
       if (this.license.hasFeature('keyAnalytics')) {
         this.logger.log(
           `Key Analytics service initialized (sample: ${this.sampleSize}, interval: ${this.intervalMs}ms)`,
@@ -108,9 +108,7 @@ export class KeyAnalyticsService extends MultiConnectionPoller implements OnModu
       } else {
         this.logger.log('Key Analytics requires Pro license - collection idle until entitled');
       }
-
-      this.start();
-    }).catch((error) => this.logger.error('Key Analytics deferred start failed', error));
+    }));
     // Retention for key_pattern_snapshots and hot_key_stats is owned by the
     // shared sweeps (cloud DataRetentionService / self-hosted
     // LocalRetentionService via runRetentionSweep) — no service-local pruner.

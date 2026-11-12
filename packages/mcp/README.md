@@ -44,7 +44,14 @@ In BetterDB, go to **Settings → MCP Tokens** and generate a new token.
 
 ### 2. Configure your MCP client
 
-Add to your MCP client config (e.g. Claude Code or OpenAI Codex):
+In Claude Code, install the BetterDB plugin and enter your URL and token when prompted:
+
+```bash
+claude plugin marketplace add https://raw.githubusercontent.com/BetterDB-inc/monitor/master/.claude-plugin/marketplace.json
+claude plugin install betterdb@betterdb
+```
+
+For other clients such as OpenAI Codex, or to configure Claude Code by hand, add to your MCP client config:
 
 ```json
 {
@@ -52,7 +59,7 @@ Add to your MCP client config (e.g. Claude Code or OpenAI Codex):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp"],
+      "args": ["-y", "@betterdb/mcp@1.6.0"],
       "env": {
         "BETTERDB_URL": "https://<your-workspace>.app.betterdb.com",
         "BETTERDB_TOKEN": "<your-token>"
@@ -70,7 +77,7 @@ For local development with an existing monitor (token not required):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp"],
+      "args": ["-y", "@betterdb/mcp@1.6.0"],
       "env": {
         "BETTERDB_URL": "http://localhost:3001"
       }
@@ -87,7 +94,7 @@ For zero-config local development (auto-starts and manages a monitor process):
     "betterdb": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@betterdb/mcp", "--autostart", "--persist"]
+      "args": ["-y", "@betterdb/mcp@1.6.0", "--autostart", "--persist"]
     }
   }
 }
@@ -105,6 +112,20 @@ Once connected, your AI assistant can query your databases directly:
 - *"Tune the threshold on my faq-cache — propose a change for me to review"*
 - *"Why is the weather_lookup tool's hit rate so low?"*
 
+## Skills
+
+Clients that load skills from a plugin (Connect Apps and other skill-aware clients) pick these up from `skills/<name>/SKILL.md`. They are playbooks for the tools above: which call to make, which arguments a time window needs, and how to read a license sentence or an empty list.
+
+| Skill | Use when |
+|---|---|
+| `betterdb-triage` | "Is this instance healthy?" or any question before an instance is selected |
+| `betterdb-slow-commands` | Slowest commands in a time window |
+| `betterdb-hot-keys` | Hot keys or uneven key access |
+| `betterdb-memory` | Fragmentation, MEMORY DOCTOR, or time to the memory ceiling |
+| `betterdb-latency` | What is slow, fork time, or a latency regression |
+| `betterdb-durability` | What a crash would lose, last save, replicas, or cluster vs standalone |
+| `betterdb-cache-miss` | Cache hit rate, a trace, or vector index health |
+
 ## Configuration
 
 ### Environment Variables
@@ -113,13 +134,18 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|---|
 | `BETTERDB_URL` | `http://localhost:3001` | BetterDB instance URL (port depends on your Docker config) |
 | `BETTERDB_TOKEN` | — | MCP token from Settings → MCP Tokens. Required for cloud. Optional for self-hosted: without it, read tools work anonymously; with it, calls act as the token's owner (write tools need an admin's token) and changes they make are recorded under the owner's name in the activity log. Tokens cannot manage members or other tokens |
+| `BETTERDB_LOCAL_TOKEN` | — | Token for a monitor started with `--autostart` or `start_monitor` when `BETTERDB_URL` is set to a different monitor. Without it, that monitor gets no token. `BETTERDB_TOKEN` is used when `BETTERDB_URL` is unset or points at the started monitor |
 | `BETTERDB_INSTANCE_ID` | — | Pre-select a specific instance (skips `select_instance`) |
+| `BETTERDB_TELEMETRY` | on | Set to `false`, `0`, `no` or `off` to turn off telemetry: the MCP server's tool usage events, and a monitor started with `--autostart` or `start_monitor`. Usage events (tool name, success, duration, up to 200 characters of error text) go to the monitor the call was made against, which relays them to BetterDB when its own telemetry is on |
+| `BETTERDB_MCP_TELEMETRY` | — | Same values as `BETTERDB_TELEMETRY`, for the MCP server's usage events only. Usage events are off if either variable is off; neither turns them back on |
+| `BETTERDB_MONITOR_<NAME>` | — | Passed to a monitor started with `--autostart` or `start_monitor` as `<NAME>`, overriding the inherited value. `PORT` and `STORAGE_TYPE` come from `--port` and `--storage` instead |
 
 ### CLI Arguments
 
 | Argument | Default | Description |
 |---|---|---|
-| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup |
+| `--autostart` | — | Spawn and manage a local BetterDB monitor process on startup. It inherits the MCP server's environment, except `BETTERDB_URL`, `BETTERDB_TOKEN`, `BETTERDB_LOCAL_TOKEN`, `BETTERDB_INSTANCE_ID` and `BETTERDB_MCP_TELEMETRY` |
+| `--no-monitor-tools` | — | Do not register `start_monitor` and `stop_monitor` |
 | `--persist` | — | Keep the monitor running after the MCP server exits (requires `--autostart`) |
 | `--port <number>` | `3001` | Port for the auto-started monitor API |
 | `--storage <type>` | `sqlite` | Storage backend: `sqlite` or `memory` |
@@ -146,9 +172,10 @@ Once connected, your AI assistant can query your databases directly:
 | `get_commandlog_history` | Persisted COMMANDLOG entries with time range filtering |
 | `get_commandlog_patterns` | Aggregated COMMANDLOG patterns |
 | `get_anomalies` | Anomaly detection events *(Pro)* |
+| `get_retry_amplification` | Live retry-amplification state, last episode and top clients *(Pro)* |
 | `get_client_activity` | Time-bucketed client activity from persisted snapshots |
 | `get_acl_audit` | ACL audit log entries |
-| `get_cluster_nodes` | Cluster node discovery — roles, health, slot ranges |
+| `get_cluster_nodes` | Cluster node discovery — roles, health, slot ranges, plus availability zone and shard id on Valkey 9.1+ (older versions: the zone from the connection's zone map) |
 | `get_cluster_node_stats` | Per-node performance stats across the cluster |
 | `get_cluster_slowlog` | Aggregated slowlog across all cluster nodes |
 | `get_slot_stats` | Per-slot key counts and CPU usage (Valkey 8+) |
@@ -159,7 +186,9 @@ Once connected, your AI assistant can query your databases directly:
 |---|---|
 | `get_forecast` | Capacity forecast for a metric (`opsPerSec`, `usedMemory`, `cpuTotal`, `memFragmentation`) with projected time to ceiling |
 | `get_latency_regressions` | Detected sustained p99 latency regressions vs baseline from the anomaly store *(Pro)* |
+| `get_replication_divergence` | Per-replica offset gap series and divergence events for a primary *(Pro)* |
 | `get_largest_keys` | Largest keys by measured memory usage from key analytics snapshots *(Pro)* |
+| `get_incident_timeline` | Anomaly incidents as ordered timelines with matched sequence patterns and recovery status *(Pro)* |
 
 ### Vector Search Tools
 
@@ -192,6 +221,8 @@ For AI components (semantic caches, agent caches, agent-memory stores, retrieval
 | `set_default_connection` | Set a connection as the active default |
 
 ### Monitor Lifecycle Tools
+
+Registered unless `--no-monitor-tools` is set. `start_monitor` runs `npx --yes @betterdb/monitor` as a background process and switches the session to it. The token for a monitor the server switches to (with `--autostart` or `start_monitor`) is `BETTERDB_TOKEN` when `BETTERDB_URL` is unset or points at that monitor (`localhost`, `127.0.0.1` and `::1` count as the same host), and `BETTERDB_LOCAL_TOKEN` otherwise. The selected instance follows the same rule with `BETTERDB_INSTANCE_ID`. `stop_monitor` switches back to the previous monitor, token and instance.
 
 | Tool | Description |
 |---|---|

@@ -168,8 +168,10 @@ export class AgentDatabaseAdapter implements DatabasePort {
   // --- Info ---
 
   async getInfo(sections?: string[]): Promise<Record<string, unknown>> {
-    const raw = await this.sendCommand('INFO', sections || ['ALL']);
-    return InfoParser.parse(raw as string);
+    const parts = await Promise.all(
+      (sections ?? ['ALL']).map((section) => this.sendCommand('INFO', [section])),
+    );
+    return InfoParser.parse(parts.join('\n'));
   }
 
   async getInfoParsed(sections?: string[]): Promise<InfoResponse> {

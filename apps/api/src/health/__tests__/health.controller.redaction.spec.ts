@@ -194,3 +194,13 @@ describe('health endpoints over HTTP when sign-in is enforced', () => {
     expect(response.json().database.host).toBe('');
   });
 });
+
+describe('HealthController.getLive', () => {
+  it('answers without asking the health service, so a stalled database cannot fail the probe', () => {
+    const service = { getHealth: jest.fn(() => new Promise(() => undefined)) };
+    const controller = new HealthController(service as never, { enabled: true } as WorkspaceConfig);
+
+    expect(controller.getLive()).toEqual({ status: 'ok' });
+    expect(service.getHealth).not.toHaveBeenCalled();
+  });
+});

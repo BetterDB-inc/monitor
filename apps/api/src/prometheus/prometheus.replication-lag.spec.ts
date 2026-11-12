@@ -39,16 +39,19 @@ function buildService(): Harness {
   } as unknown as ConfigService;
   const dispatcher = new WebhookDispatcherService(
     {} as never,
-    { getWebhooksByEvent: jest.fn().mockResolvedValue([webhook('wh-1'), webhook('wh-2')]) } as never,
+    {
+      getWebhooksByEvent: jest.fn().mockResolvedValue([webhook('wh-1'), webhook('wh-2')]),
+    } as never,
     config,
   );
   const fired: string[] = [];
-  jest
-    .spyOn(dispatcher as never, 'dispatchPendingEvent')
-    .mockImplementation((async (event: { connectionId?: string }, targets?: Webhook[]) => {
-      fired.push(`${event.connectionId}:${targets?.[0]?.id}`);
-      return true;
-    }) as never);
+  jest.spyOn(dispatcher as never, 'dispatchPendingEvent').mockImplementation((async (
+    event: { connectionId?: string },
+    targets?: Webhook[],
+  ) => {
+    fired.push(`${event.connectionId}:${targets?.[0]?.id}`);
+    return true;
+  }) as never);
   const pro = new WebhookEventsProService(dispatcher, { getLicenseTier: () => 'pro' } as never);
   const registry = {
     getConfig: jest.fn().mockReturnValue(INSTANCE),
@@ -112,14 +115,22 @@ describe('PrometheusService replication lag alert', () => {
     await poll(service, LINK_DOWN, OTHER_CONNECTION_ID);
     await poll(service, LAGGING, CONNECTION_ID);
 
-    expect(fired).toEqual([...FIRED_ONCE, `${OTHER_CONNECTION_ID}:wh-1`, `${OTHER_CONNECTION_ID}:wh-2`]);
+    expect(fired).toEqual([
+      ...FIRED_ONCE,
+      `${OTHER_CONNECTION_ID}:wh-1`,
+      `${OTHER_CONNECTION_ID}:wh-2`,
+    ]);
   });
 
   it('keeps the latch when the link is up but the lag field is unparsable', async () => {
     const { service, fired } = buildService();
 
     await poll(service, LAGGING);
-    await poll(service, { role: 'slave', master_link_status: 'up', master_last_io_seconds_ago: '' });
+    await poll(service, {
+      role: 'slave',
+      master_link_status: 'up',
+      master_last_io_seconds_ago: '',
+    });
     await poll(service, { role: 'slave', master_link_status: 'up' });
     await poll(service, LAGGING);
 
@@ -134,6 +145,18 @@ describe('PrometheusService replication lag alert', () => {
     await poll(service, LAGGING);
 
     expect(fired).toEqual(FIRED_ONCE);
+  });
+
+  it('alerts on a lagging active-replica and reports its master link', async () => {
+    const { service, fired } = buildService();
+
+    await poll(service, { ...LAGGING, role: 'active-replica' });
+
+    expect(fired).toEqual(FIRED_ONCE);
+    const linkUp = await service['masterLinkUp'].get();
+    expect(linkUp.values).toEqual([expect.objectContaining({ value: 1 })]);
+    const lastIo = await service['masterLastIoSecondsAgo'].get();
+    expect(lastIo.values).toEqual([expect.objectContaining({ value: 30 })]);
   });
 
   it('re-arms the alert when the replica is promoted', async () => {

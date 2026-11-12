@@ -3,7 +3,7 @@ import type { TtlDistribution } from '@betterdb/shared';
 
 export async function sampleTtls(
   client: Valkey,
-  keys: string[],
+  keys: Array<string | Buffer>,
 ): Promise<TtlDistribution> {
   const dist: TtlDistribution = {
     noExpiry: 0,

@@ -5,6 +5,7 @@ import {
   COB_WARN_RATIO,
   CobConnectionState,
   acknowledgeCobFinding,
+  cobPressureRearm,
   createCobConnectionState,
   evaluateCobPressure,
   parseSlaveOutputBufferLimit,
@@ -282,6 +283,25 @@ describe('evaluateCobPressure', () => {
     expect(findings).toHaveLength(0);
   });
 
+  it('reopens the resync-loop gate when its event is dropped', () => {
+    const state = createCobConnectionState();
+    evaluateCobPressure(state, input({ limit: unlimited, syncFullDelta: 1 }));
+    const [finding] = evaluateCobPressure(
+      state,
+      input({ limit: unlimited, syncFullDelta: 1, timestamp: base + 30_000 }),
+    );
+    const rearm = cobPressureRearm(state, finding);
+    acknowledgeCobFinding(state, finding);
+
+    rearm();
+
+    const reraised = evaluateCobPressure(
+      state,
+      input({ limit: unlimited, syncFullDelta: 1, timestamp: base + 60_000 }),
+    );
+    expect(reraised.map((f) => f.kind)).toEqual(['resync-loop']);
+  });
+
   it('suppresses resync-loop re-emission until the refire window passes', () => {
     const state = createCobConnectionState();
     evaluateCobPressure(state, input({ limit: unlimited, syncFullDelta: 1 }));
@@ -458,6 +478,48 @@ describe('evaluateCobPressure', () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].level).toBe('warning');
     expect(findings[0].message).toContain('reduced fidelity');
+  });
+
+  it('raises the replica again when an aggregate alert it inherited is dropped', () => {
+    const state = createCobConnectionState();
+    const [aggregate] = evaluateCobPressure(
+      state,
+      input({ replicas: null, memClientsSlaves: HARD * 0.95, connectedSlaves: 1 }),
+    );
+    const rearm = cobPressureRearm(state, aggregate);
+    acknowledgeCobFinding(state, aggregate);
+    expect(
+      evaluateCobPressure(state, input({ replicas: [{ addr: '10.0.0.5:6380', omem: HARD * 0.95 }], timestamp: base + 30_000 })),
+    ).toEqual([]);
+
+    rearm();
+
+    const reraised = evaluateCobPressure(
+      state,
+      input({ replicas: [{ addr: '10.0.0.5:6380', omem: HARD * 0.95 }], timestamp: base + 60_000 }),
+    );
+    expect(reraised.map((f) => [f.replicaAddr, f.level])).toEqual([['10.0.0.5:6380', 'critical']]);
+  });
+
+  it('keeps a replica acknowledgement raised after inheriting when the aggregate alert is dropped', () => {
+    const state = createCobConnectionState();
+    const [aggregate] = evaluateCobPressure(
+      state,
+      input({ replicas: null, memClientsSlaves: HARD * 0.7, connectedSlaves: 1 }),
+    );
+    const rearm = cobPressureRearm(state, aggregate);
+    acknowledgeCobFinding(state, aggregate);
+    const [critical] = evaluateCobPressure(
+      state,
+      input({ replicas: [{ addr: '10.0.0.5:6380', omem: HARD * 0.95 }], timestamp: base + 30_000 }),
+    );
+    acknowledgeCobFinding(state, critical);
+
+    rearm();
+
+    expect(
+      evaluateCobPressure(state, input({ replicas: [{ addr: '10.0.0.5:6380', omem: HARD * 0.95 }], timestamp: base + 60_000 })),
+    ).toEqual([]);
   });
 
   it('stale aggregate pressure does not arm the coincidence once CLIENT LIST recovers', () => {

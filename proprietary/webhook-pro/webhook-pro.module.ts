@@ -10,6 +10,7 @@ import { WebhookDlqService } from './webhook-dlq.service';
 import { WebhookEventsProService } from './webhook-events-pro.service';
 import { WebhookEventsEnterpriseService } from './webhook-events-enterprise.service';
 import { ConfigMonitorService } from './config-monitor.service';
+import { ANOMALY_WEBHOOK_SINK } from '../anomaly-detection/types';
 import {
   WEBHOOK_EVENTS_PRO_SERVICE,
   WEBHOOK_EVENTS_ENTERPRISE_SERVICE,
@@ -21,6 +22,7 @@ import {
   providers: [
     WebhookProService,
     WebhookAnomalyIntegrationService,
+    { provide: ANOMALY_WEBHOOK_SINK, useExisting: WebhookAnomalyIntegrationService },
     WebhookDlqService,
     WebhookEventsProService,
     { provide: WEBHOOK_EVENTS_PRO_SERVICE, useExisting: WebhookEventsProService },
@@ -31,6 +33,7 @@ import {
   exports: [
     WebhookProService,
     WebhookAnomalyIntegrationService,
+    ANOMALY_WEBHOOK_SINK,
     WebhookDlqService,
     WebhookEventsProService,
     WEBHOOK_EVENTS_PRO_SERVICE,

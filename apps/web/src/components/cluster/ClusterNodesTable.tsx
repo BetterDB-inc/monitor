@@ -35,6 +35,8 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
     return map;
   }, [nodes]);
 
+  const showZone = useMemo(() => nodes.some((node) => node.availabilityZone), [nodes]);
+
   const filteredNodes = useMemo(() => {
     let filtered = nodes;
 
@@ -181,6 +183,7 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                 Slots {sortColumn === 'slots' && (sortDirection === 'asc' ? '↑' : '↓')}
               </TableHead>
               <TableHead>Master</TableHead>
+              {showZone && <TableHead>Zone</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -231,12 +234,21 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                         <span className="text-muted-foreground">-</span>
                       )}
                     </TableCell>
+                    {showZone && (
+                      <TableCell>
+                        {node.availabilityZone ? (
+                          <span className="text-sm">{node.availabilityZone}</span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
 
                   {/* Expanded Details */}
                   {isExpanded && (
                     <TableRow>
-                      <TableCell colSpan={6} className="bg-muted/30">
+                      <TableCell colSpan={showZone ? 7 : 6} className="bg-muted/30">
                         <div className="p-4 space-y-3 text-sm">
                           <div className="grid grid-cols-2 gap-4">
                             <div>
@@ -287,6 +299,12 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                               <span className="text-muted-foreground">Link State:</span>
                               <div className="mt-1">{getStateBadge(node.linkState)}</div>
                             </div>
+                            {node.shardId && (
+                              <div>
+                                <span className="text-muted-foreground">Shard ID:</span>
+                                <div className="font-mono text-xs mt-1">{node.shardId}</div>
+                              </div>
+                            )}
                           </div>
                           {isMaster && node.slots.length > 0 && (
                             <div>

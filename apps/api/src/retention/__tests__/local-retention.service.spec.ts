@@ -21,6 +21,7 @@ describe('LocalRetentionService', () => {
       pruneOldClientAnalyticsRollups: jest.fn().mockResolvedValue(0),
       pruneOldAnomalyEvents: jest.fn().mockResolvedValue(0),
       pruneOldCorrelatedGroups: jest.fn().mockResolvedValue(0),
+      pruneOldIncidentBoundaries: jest.fn().mockResolvedValue(0),
       pruneOldKeyPatternSnapshots: jest.fn().mockResolvedValue(0),
       pruneOldHotKeys: jest.fn().mockResolvedValue(0),
       pruneOldEntries: jest.fn().mockResolvedValue(0),
@@ -39,6 +40,7 @@ describe('LocalRetentionService', () => {
       pruneOldOtelSpans: jest.fn().mockResolvedValue(0),
       pruneOldCommandStatsSamples: jest.fn().mockResolvedValue(0),
       pruneOldLatencyStatsSamples: jest.fn().mockResolvedValue(0),
+      pruneOldReplicationDivergenceWindows: jest.fn().mockResolvedValue(0),
       pruneOldVectorIndexSnapshots: jest.fn().mockResolvedValue(0),
     };
 
@@ -70,12 +72,15 @@ describe('LocalRetentionService', () => {
     await makeService(30).runSweep();
 
     const expectedCutoff = NOW - 30 * MS_PER_DAY;
+    // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
+    // ACL audit rows store captured_at in seconds.
+    const expectedCutoffByMethod: Record<string, number> = {
+      pruneOldClientAnalyticsRollups: clientRollupBucketStart(expectedCutoff),
+      pruneOldEntries: Math.floor(expectedCutoff / 1000),
+    };
     for (const method of Object.keys(storage)) {
       expect(storage[method]).toHaveBeenCalledTimes(1);
-      // Rollups compare bucket_start: the cutoff is aligned down to its bucket.
-      expect(storage[method]).toHaveBeenCalledWith(
-        method === 'pruneOldClientAnalyticsRollups' ? clientRollupBucketStart(expectedCutoff) : expectedCutoff,
-      );
+      expect(storage[method]).toHaveBeenCalledWith(expectedCutoffByMethod[method] ?? expectedCutoff);
     }
   });
 

@@ -408,6 +408,23 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.list({ includeRetired: true }).map((c) => c.id)).toEqual(['seed', 'auto', 'adopted']);
   });
 
+  it('reports listed and auto-registered connections like list() does', () => {
+    const { registry } = build();
+    put(registry, seed);
+    put(registry, { id: 'live', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto', source: 'cluster' } });
+    put(registry, { id: 'auto', membership: { seedId: 'seed', nodeId: 'b', origin: 'auto', source: 'cluster', retiredAt: 5 } });
+    put(registry, { id: 'adopted', membership: { seedId: 'seed', nodeId: 'c', origin: 'adopted', source: 'cluster', retiredAt: 5 } });
+    expect(['seed', 'live', 'auto', 'adopted', 'deleted', ''].filter((id) => registry.isListed(id))).toEqual([
+      'seed',
+      'live',
+      'adopted',
+    ]);
+    expect(['seed', 'live', 'auto', 'adopted', ''].filter((id) => registry.isAutoRegistered(id))).toEqual([
+      'live',
+      'auto',
+    ]);
+  });
+
   it('uses data node credentials for children when the seed has them', async () => {
     const { registry, storage } = build();
     const seedId = await registry.addConnection({ name: 's', host: 's1', port: 26379, username: 'sentinel-user', password: 'sentinel-pass', nodeUsername: 'app', nodePassword: 'secret' });
@@ -451,6 +468,26 @@ describe('ConnectionRegistry membership', () => {
     expect(config?.credentialStatus).not.toBe('decryption_failed');
     const id = await registry.addManagedChild('seed', { host: 'h', port: 6379, nodeId: 'n', source: 'sentinel' });
     expect(registry.getConfig(id)).toEqual(expect.objectContaining({ username: 'app', password: 'p' }));
+  });
+
+  describe('sentinelDataNodeCredentials', () => {
+    it('returns only the data node credentials the seed configures', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeUsername: 'app', nodePassword: 'secret' });
+      expect(registry.sentinelDataNodeCredentials('seed')).toEqual({ username: 'app', password: 'secret' });
+    });
+
+    it.each<[string, Partial<DatabaseConnectionConfig>]>([
+      ['no data node credentials', {}],
+      ['a still-encrypted data node password', { nodeUsername: 'app', nodePassword: 'c', nodePasswordEncrypted: true }],
+      ['failed decryption', { nodeUsername: 'app', nodePassword: 's', credentialStatus: 'decryption_failed' }],
+      ['an SSH tunnel', { nodeUsername: 'app', nodePassword: 's', sshTunnel: { enabled: true } as never }],
+      ['an external connection', { nodeUsername: 'app', nodePassword: 's', connectionType: 'external' }],
+    ])('returns null for a seed with %s', (_label, overrides) => {
+      const { registry } = build();
+      put(registry, { ...seed, ...overrides });
+      expect(registry.sentinelDataNodeCredentials('seed')).toBeNull();
+    });
   });
 
   it('never exposes the data node password in list()', () => {
@@ -581,6 +618,154 @@ describe('ConnectionRegistry membership', () => {
     expect(registry.getConfig('seed')?.autoRegisterNodes).toBeUndefined();
     expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { autoRegisterNodes: undefined });
     await expect(registry.setAutoRegister('auto', true)).rejects.toThrow('Auto-registration can only be set on a seed connection');
+  });
+
+  describe('node availability zones', () => {
+    const zones = { '10.0.0.1:7001': 'us-east-1a' };
+    const child = { id: 'auto', membership: { seedId: 'seed', nodeId: 'a', origin: 'auto' as const, source: 'cluster' as const } };
+
+    it('stores a normalised map on the connection', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+
+      await registry.setNodeAvailabilityZones('seed', { ' 10.0.0.1:7001 ': ' us-east-1a ' });
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: zones });
+      expect(registry.getNodeAvailabilityZones('seed')).toEqual(zones);
+    });
+
+    it('clears the map when given an empty one', async () => {
+      const { registry, storage } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+
+      await registry.setNodeAvailabilityZones('seed', {});
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: undefined });
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('rejects an invalid map without storing it', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+
+      await expect(registry.setNodeAvailabilityZones('seed', { '10.0.0.1': 'us-east-1a' })).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('rejects an unknown connection', async () => {
+      const { registry } = build();
+
+      await expect(registry.setNodeAvailabilityZones('missing', zones)).rejects.toThrow("Connection 'missing' not found.");
+    });
+
+    it.each([
+      ['an agent connection', { id: 'remote', host: 'agent', port: 0 }],
+      ['an external connection', { id: 'remote', connectionType: 'external' as const }],
+    ])('rejects %s, which is not stored like a direct one', async (_case, config) => {
+      const { registry, storage } = build();
+      put(registry, config);
+
+      await expect(registry.setNodeAvailabilityZones('remote', zones)).rejects.toThrow(
+        'Availability zones can only be set on a direct connection',
+      );
+      await expect(registry.setNodeAvailabilityZones('remote', zones)).rejects.toBeInstanceOf(BadRequestException);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('remote')).toBeUndefined();
+    });
+
+    it('keeps a map that was set while the connection was reconnecting', async () => {
+      const { registry } = build();
+      put(registry, seed);
+      let connected!: () => void;
+      jest.mocked(UnifiedDatabaseAdapter).mockImplementationOnce(
+        () =>
+          ({
+            connect: jest.fn(() => new Promise<void>((resolve) => (connected = resolve))),
+            disconnect: jest.fn().mockResolvedValue(undefined),
+          }) as never,
+      );
+
+      const reconnecting = registry.reconnect('seed');
+      await registry.setNodeAvailabilityZones('seed', zones);
+      connected();
+      await reconnecting;
+
+      expect(registry.getNodeAvailabilityZones('seed')).toEqual(zones);
+    });
+
+    it('keeps the stored map when the storage write fails', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      storage.updateConnection.mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(registry.setNodeAvailabilityZones('seed', zones)).rejects.toThrow('disk full');
+
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('stores a map set through a cluster member on its seed', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      put(registry, child);
+
+      await registry.setNodeAvailabilityZones('auto', zones);
+
+      expect(storage.updateConnection).toHaveBeenLastCalledWith('seed', { nodeAvailabilityZones: zones });
+      expect(registry.getConfig('auto')?.nodeAvailabilityZones).toBeUndefined();
+    });
+
+    it('rejects a map set through a member that is removed while the update waits for the seed lock', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      put(registry, child);
+      let release!: () => void;
+      const held = registry.withSeedLock('seed', () => new Promise<void>((resolve) => { release = resolve; }));
+      const removal = registry.removeConnection('auto');
+      await new Promise((resolve) => setImmediate(resolve));
+      const update = expect(registry.setNodeAvailabilityZones('auto', zones)).rejects.toThrow("Connection 'auto' not found.");
+      release();
+
+      await Promise.all([held, removal, update]);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
+    it('gives a cluster member the map of its seed', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      put(registry, child);
+
+      expect(registry.getNodeAvailabilityZones('auto')).toEqual(zones);
+    });
+
+    it('uses the map of the default connection when no id is given', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      (registry as unknown as Internals).defaultId = 'seed';
+
+      expect(registry.getNodeAvailabilityZones()).toEqual(zones);
+    });
+
+    it('has no map for an unknown connection', () => {
+      const { registry } = build();
+
+      expect(registry.getNodeAvailabilityZones('missing')).toBeUndefined();
+    });
+
+    it('lists the map on the seed and on its members', () => {
+      const { registry } = build();
+      put(registry, { ...seed, nodeAvailabilityZones: zones });
+      put(registry, child);
+
+      const listed = registry.list();
+
+      expect(listed.find((connection) => connection.id === 'seed')?.nodeAvailabilityZones).toEqual(zones);
+      expect(listed.find((connection) => connection.id === 'auto')?.nodeAvailabilityZones).toEqual(zones);
+    });
   });
 
   it('serialises work under the same seed lock', async () => {

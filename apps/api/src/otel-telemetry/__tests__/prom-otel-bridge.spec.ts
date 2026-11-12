@@ -94,5 +94,51 @@ describe('prom-otel-bridge', () => {
       };
       expect(collectDataPoints(metric)).toEqual([{ value: 1, attributes: { a: 'ok', c: 2 } }]);
     });
+
+    it('leaves out an empty connection label, which Prometheus reads as absent', () => {
+      const metric: PromMetricJson = {
+        name: 'betterdb_anomaly_by_severity',
+        type: 'gauge',
+        values: [{ value: 2, labels: { connection: '', severity: 'critical' } }],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        { value: 2, attributes: { severity: 'critical' } },
+      ]);
+    });
+
+    it('leaves out an empty connection label on a counter as well', () => {
+      const metric: PromMetricJson = {
+        name: 'betterdb_anomaly_events_total',
+        type: 'counter',
+        values: [
+          {
+            value: 7,
+            labels: {
+              connection: '',
+              severity: 'critical',
+              metric_type: 'memory_used',
+              anomaly_type: 'spike',
+            },
+          },
+        ],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        {
+          value: 7,
+          attributes: { severity: 'critical', metric_type: 'memory_used', anomaly_type: 'spike' },
+        },
+      ]);
+    });
+
+    it('keeps empty values of other labels', () => {
+      const metric: PromMetricJson = {
+        name: 'x',
+        type: 'gauge',
+        values: [{ value: 1, labels: { connection: 'a:1', name: '' } }],
+      };
+      expect(collectDataPoints(metric)).toEqual([
+        { value: 1, attributes: { connection: 'a:1', name: '' } },
+      ]);
+    });
   });
 });
