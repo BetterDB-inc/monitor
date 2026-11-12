@@ -417,6 +417,17 @@ describe('outbound url guard', () => {
       expect((await run(guardedLookup(withLoopback), 'relay.internal')).address).toBe('127.0.0.1');
     });
 
+    it.each(['development', 'production'])('accepts 0.0.0.0 at create and connect when a CIDR lists it in %s', async (env) => {
+      process.env.NODE_ENV = env;
+      const listed = webhook('0.0.0.0/32');
+      await expect(assertSafeOutboundUrl('http://0.0.0.0:3001/', listed)).resolves.toBeInstanceOf(URL);
+      expect(() => assertConnectableIpLiteral('http://0.0.0.0:3001/', listed)).not.toThrow();
+      await expect(assertSafeOutboundUrl('http://0.0.0.0:3001/', webhook('10.0.0.0/8'))).rejects.toThrow(
+        'Cannot use localhost or 0.0.0.0 as webhook URL',
+      );
+      await expect(assertSafeOutboundUrl('http://localhost:3001/', listed)).rejects.toBeInstanceOf(BadRequestException);
+    });
+
     it('keeps the development loopback exception when no policy is configured', async () => {
       process.env.NODE_ENV = 'development';
       const none = { label: 'webhook URL' };

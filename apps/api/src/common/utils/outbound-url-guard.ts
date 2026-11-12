@@ -199,7 +199,7 @@ export async function assertSafeOutboundUrl(rawUrl: string, options: OutboundUrl
       return parsed;
     }
 
-    if (parsed.hostname === 'localhost' || parsed.hostname === '0.0.0.0') {
+    if (parsed.hostname === 'localhost' || (parsed.hostname === '0.0.0.0' && isBlockedIp(host, allow))) {
       throw new BadRequestException(`Cannot use localhost or 0.0.0.0 as ${label}${isProduction ? ' in production' : ''}`);
     }
 
