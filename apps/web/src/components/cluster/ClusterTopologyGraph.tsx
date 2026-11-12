@@ -21,6 +21,7 @@ import { formatBytes } from '../../lib/utils';
 import { countSlots } from '../../types/cluster';
 import type { ClusterNode } from '../../types/metrics';
 import type { NodeStats } from '../../types/cluster';
+import { graphNodeHealth, type GraphNodeHealth } from './nodeHealth';
 
 interface GraphNode extends SimulationNodeDatum {
   id: string;
@@ -29,7 +30,7 @@ interface GraphNode extends SimulationNodeDatum {
   masterId?: string;
   slots: number[][];
   stats?: NodeStats;
-  healthy: boolean;
+  health: GraphNodeHealth;
   availabilityZone?: string;
 }
 
@@ -55,6 +56,7 @@ const CONTAINER_HEIGHT = 600;
 const MASTER_COLOR = 'var(--chart-1)';
 const REPLICA_COLOR = 'var(--chart-5)';
 const UNHEALTHY_COLOR = 'var(--destructive)';
+const SUSPECT_COLOR = 'var(--color-yellow-500, #eab308)';
 const LINK_COLOR = 'var(--muted-foreground)';
 const TEXT_COLOR = 'var(--muted-foreground)';
 const NODE_STROKE_COLOR = 'var(--background)';
@@ -160,7 +162,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
         masterId: node.master && node.master !== '-' ? node.master : undefined,
         slots: node.slots,
         stats: nodeStats?.find((s) => s.nodeId === node.id),
-        healthy: node.linkState === 'connected' && !node.flags.includes('fail'),
+        health: graphNodeHealth(node),
         availabilityZone: node.availabilityZone,
         x: pos.x,
         y: pos.y,
@@ -272,7 +274,8 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       .append('circle')
       .attr('r', NODE_RADIUS)
       .attr('fill', (d) => {
-        if (!d.healthy) return UNHEALTHY_COLOR;
+        if (d.health === 'unhealthy') return UNHEALTHY_COLOR;
+        if (d.health === 'suspect') return SUSPECT_COLOR;
         return d.role === 'master' ? MASTER_COLOR : REPLICA_COLOR;
       })
       .attr('stroke', NODE_STROKE_COLOR)
@@ -303,6 +306,7 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
       const slotCount = countSlots(d.slots);
       return (
         `${d.address}\nRole: ${d.role}\n` +
+        (d.health === 'healthy' ? '' : `State: ${d.health}\n`) +
         (d.availabilityZone ? `Zone: ${d.availabilityZone}\n` : '') +
         `Slots: ${slotCount > 0 ? slotCount.toLocaleString() : 'none'}\n` +
         `Memory: ${d.stats ? formatBytes(d.stats.memoryUsed) : 'N/A'}\n` +
@@ -389,6 +393,10 @@ export function ClusterTopologyGraph({ nodes, nodeStats, viewToggle }: ClusterTo
               <div className="flex items-center gap-1">
                 <div className="w-3 h-3 rounded-full bg-[var(--chart-5)]"></div>
                 <span>Replica</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+                <span>Suspect</span>
               </div>
               <div className="flex items-center gap-1">
                 <div className="w-3 h-3 rounded-full bg-[var(--destructive)]"></div>

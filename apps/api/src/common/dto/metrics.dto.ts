@@ -390,8 +390,13 @@ export class DiscoveredNodeDto {
   @ApiProperty({ description: 'Slot ranges [[start, end], ...]', type: 'array', example: [[0, 5460]] })
   slots: number[][];
 
-  @ApiProperty({ description: 'Node health status', example: true })
-  healthy: boolean;
+  @ApiProperty({
+    description:
+      'Node state from its CLUSTER NODES flags: failed when its peers agreed it is down (fail), suspect when they only suspect it (fail?) or it is not a full member yet (handshake, noaddr), healthy otherwise',
+    enum: ['healthy', 'suspect', 'failed'],
+    example: 'healthy',
+  })
+  state: 'healthy' | 'suspect' | 'failed';
 
   @ApiPropertyOptional({
     description: 'Availability zone the node reports in CLUSTER SHARDS (Valkey 9.1+, when the node has one set)',

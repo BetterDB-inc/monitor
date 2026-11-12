@@ -213,14 +213,26 @@ describe('MonitorController', () => {
 
     it('returns descriptor list with isCluster:true when nodes exist', async () => {
       clusterDiscovery.discoverNodes.mockResolvedValueOnce([
-        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], healthy: true },
-        { id: 'b', address: 'h2:6379', role: 'replica', masterId: 'a', slots: [], healthy: true },
+        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'healthy' },
+        { id: 'b', address: 'h2:6379', role: 'replica', masterId: 'a', slots: [], state: 'healthy' },
       ]);
       const result = await controller.listConnectionNodes('conn-1');
       expect(result.isCluster).toBe(true);
       expect(result.nodes).toEqual([
-        { id: 'a', address: 'h1:6379', role: 'master', healthy: true },
-        { id: 'b', address: 'h2:6379', role: 'replica', healthy: true },
+        { id: 'a', address: 'h1:6379', role: 'master', state: 'healthy' },
+        { id: 'b', address: 'h2:6379', role: 'replica', state: 'healthy' },
+      ]);
+    });
+
+    it('reports the state of a node its peers suspect or agreed has failed', async () => {
+      clusterDiscovery.discoverNodes.mockResolvedValueOnce([
+        { id: 'a', address: 'h1:6379', role: 'master', slots: [[0, 5460]], state: 'suspect' },
+        { id: 'b', address: 'h2:6379', role: 'master', slots: [[5461, 10922]], state: 'failed' },
+      ]);
+      const result = await controller.listConnectionNodes('conn-1');
+      expect(result.nodes).toEqual([
+        { id: 'a', address: 'h1:6379', role: 'master', state: 'suspect' },
+        { id: 'b', address: 'h2:6379', role: 'master', state: 'failed' },
       ]);
     });
 

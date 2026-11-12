@@ -188,7 +188,7 @@ describe('Cluster API (E2E)', () => {
         expect(node).toHaveProperty('id');
         expect(node).toHaveProperty('address');
         expect(node).toHaveProperty('role');
-        expect(node).toHaveProperty('healthy');
+        expect(['healthy', 'suspect', 'failed']).toContain(node.state);
         expect(['master', 'replica']).toContain(node.role);
       }
     });

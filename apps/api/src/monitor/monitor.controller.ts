@@ -13,7 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
-import { Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
+import { ClusterNodeState, Feature, StoredCaptureTrigger, StoredScheduledCapture } from '@betterdb/shared';
 import { LicenseGuard } from '@proprietary/licenses';
 import { RequiresFeature } from '@proprietary/licenses/requires-feature.decorator';
 import { AllowMembers } from '../auth/guards/roles.decorator';
@@ -77,7 +77,7 @@ export interface MonitorNodeDescriptor {
   id: string;
   address: string;
   role: 'master' | 'replica';
-  healthy: boolean;
+  state: ClusterNodeState;
 }
 
 export interface MonitorNodesResponse {
@@ -185,7 +185,7 @@ export class MonitorController {
           id: n.id,
           address: n.address,
           role: n.role,
-          healthy: n.healthy,
+          state: n.state,
         })),
       };
     } catch {

@@ -11,6 +11,7 @@ import {
   TableCell,
 } from '../ui/table';
 import { ChevronDown, ChevronRight, Server, Copy } from 'lucide-react';
+import { clusterNodeState } from '@betterdb/shared';
 import type { ClusterNode } from '../../types/metrics';
 import { formatSlotRanges, countSlots } from '../../types/cluster';
 
@@ -118,6 +119,17 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
     );
   };
 
+  const getNodeStateBadge = (node: ClusterNode) => {
+    const state = clusterNodeState(node.flags);
+    if (state === 'failed') {
+      return <Badge className="bg-destructive/10 text-destructive border-0">Failed</Badge>;
+    }
+    if (state === 'suspect') {
+      return <Badge className="bg-yellow-500/10 text-yellow-500 border-0">Suspect</Badge>;
+    }
+    return null;
+  };
+
   const getMasterAddress = (node: ClusterNode) => {
     if (node.master === '-') return 'N/A';
     const masterNode = nodeMap.get(node.master);
@@ -217,7 +229,12 @@ export function ClusterNodesTable({ nodes }: ClusterNodesTableProps) {
                       </div>
                     </TableCell>
                     <TableCell>{getRoleBadge(node)}</TableCell>
-                    <TableCell>{getStateBadge(node.linkState)}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        {getStateBadge(node.linkState)}
+                        {getNodeStateBadge(node)}
+                      </div>
+                    </TableCell>
                     <TableCell>
                       {isMaster ? (
                         <span className="font-medium">{slotCount.toLocaleString()}</span>

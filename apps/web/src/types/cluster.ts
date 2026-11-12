@@ -1,3 +1,5 @@
+import type { ClusterNodeState } from '@betterdb/shared';
+
 export const CLUSTER_TOTAL_SLOTS = 16384;
 export const CLUSTER_GRID_SIZE = 128; // 128x128 = 16384 slots
 // https://valkey.io/topics/cluster-spec/
@@ -24,7 +26,7 @@ export interface DiscoveredNode {
   role: 'master' | 'replica';
   masterId?: string;
   slots: number[][];
-  healthy: boolean;
+  state: ClusterNodeState;
   availabilityZone?: string;
   shardId?: string;
 }
