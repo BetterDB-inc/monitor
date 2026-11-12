@@ -180,26 +180,30 @@ function slotDisagreements(indexes: ViewIndex[]): TopologyDisagreement[] {
   const owners = indexes.map((index) => slotOwners(index, ids));
   const names = [...ids.keys()];
   const nameOf = (ordinal: number) => (ordinal < 0 ? UNASSIGNED_SLOT_OWNER : names[ordinal]);
-  const disputes = new Map<string, { slots: number[][]; votes: Map<string, string[]> }>();
+  const claims = new Map<string, { owners: string; slots: number[][]; votes: Map<string, string[]> }>();
 
   for (let slot = 0; slot < SLOT_COUNT; slot++) {
     const first = owners[0][slot];
     if (owners.every((view) => view[slot] === first)) continue;
 
-    const claimed = sortedUnique(owners.map((view) => nameOf(view[slot])));
-    const key = `slot_owner:${claimed.join('|')}`;
-    let dispute = disputes.get(key);
+    const claim = owners.map((view) => view[slot]).join(',');
+    let dispute = claims.get(claim);
     if (!dispute) {
-      dispute = { slots: [], votes: new Map() };
-      disputes.set(key, dispute);
+      const votes = new Map<string, string[]>();
+      owners.forEach((view, at) => vote(votes, nameOf(view[slot]), indexes[at].observerId));
+      dispute = { owners: sortedUnique([...votes.keys()]).join('|'), slots: [], votes };
+      claims.set(claim, dispute);
     }
     const lastRange = dispute.slots[dispute.slots.length - 1];
     if (lastRange && lastRange[1] === slot - 1) lastRange[1] = slot;
     else dispute.slots.push([slot, slot]);
-    owners.forEach((view, at) => vote(dispute.votes, nameOf(view[slot]), indexes[at].observerId));
   }
 
-  return [...disputes.entries()].map(([key, dispute]) => {
+  const sameOwners = new Map<string, number>();
+  return [...claims.values()].map((dispute) => {
+    const nth = (sameOwners.get(dispute.owners) ?? 0) + 1;
+    sameOwners.set(dispute.owners, nth);
+    const key = `slot_owner:${dispute.owners}${nth > 1 ? `#${nth}` : ''}`;
     const positions = positionsOf(dispute.votes);
     return {
       key,
@@ -402,7 +406,9 @@ export function settleOpenDivergences(input: {
       open.set(signature, { group, lastConfirmedAt: at, clean: 0 });
       continue;
     }
-    if (!input.comparable || input.pendingSignatures.has(signature)) {
+    const pending = input.pendingSignatures.has(signature);
+    if (!input.comparable || pending) {
+      if (pending) entry.clean = 0;
       if (at - entry.lastConfirmedAt <= TOPOLOGY_DIVERGENCE_BLIND_MS) kept.add(signature);
       continue;
     }

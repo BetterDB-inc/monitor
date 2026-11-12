@@ -178,6 +178,44 @@ describe('compareTopologyViews', () => {
     });
   });
 
+  it('never puts one observer on both sides when two views swap claims on different slots', () => {
+    const swapped = {
+      p1: { slots: [[1, 5460], [5461, 5461]] },
+      p2: { slots: [[0, 0], [5462, 10922]] },
+    };
+    const found = compareTopologyViews([view('p1'), view('p2', swapped), view('p3')]);
+
+    expect(found).toEqual([
+      {
+        key: 'slot_owner:p1|p2',
+        kind: 'slot_owner',
+        subjectIds: ['p1', 'p2'],
+        slots: [[0, 0]],
+        positions: [
+          { value: 'p1', observers: ['p1', 'p3'] },
+          { value: 'p2', observers: ['p2'] },
+        ],
+      },
+      {
+        key: 'slot_owner:p1|p2#2',
+        kind: 'slot_owner',
+        subjectIds: ['p1', 'p2'],
+        slots: [[5461, 5461]],
+        positions: [
+          { value: 'p1', observers: ['p2'] },
+          { value: 'p2', observers: ['p1', 'p3'] },
+        ],
+      },
+    ]);
+    expect(compareTopologyViews([view('p3'), view('p2', swapped), view('p1')])).toEqual(found);
+
+    const tracker = new DivergenceTracker();
+    tracker.observe({ at: 1000, disagreements: found, unanswered: [], views: 3 });
+    expect(groupDivergences(tracker.tracked())).toMatchObject([
+      { signature: 'topology_divergence:p2', dissent: ['p2'], others: ['p1', 'p3'] },
+    ]);
+  });
+
   it('reports only the slots in dispute, as ranges', () => {
     const moved = {
       p1: { slots: [[0, 99], [201, 5460]] },
@@ -692,6 +730,29 @@ describe('settleOpenDivergences', () => {
     for (let at = 5000; at <= 30000; at += 5000) {
       expect(settle(open, at, { pendingSignatures: new Set([SIGNATURE]) }).has(SIGNATURE)).toBe(true);
     }
+  });
+
+  it('starts the clean count over when the divergence is being counted again', () => {
+    const open = new Map<string, OpenDivergence>();
+    const pending = { pendingSignatures: new Set([SIGNATURE]) };
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    for (let at = 5000; at <= TOPOLOGY_DIVERGENCE_BLIND_MS; at += 10000) {
+      expect(settle(open, at).has(SIGNATURE)).toBe(true);
+      expect(settle(open, at + 5000, pending).has(SIGNATURE)).toBe(true);
+    }
+    expect(settle(open, TOPOLOGY_DIVERGENCE_BLIND_MS + 5000, pending).has(SIGNATURE)).toBe(false);
+  });
+
+  it('keeps the clean count through a round it could not compare', () => {
+    const open = new Map<string, OpenDivergence>();
+    settle(open, 0, { confirmed: [confirmedGroup] });
+
+    expect(settle(open, 5000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 10000, { comparable: false }).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 15000).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 20000, { comparable: false }).has(SIGNATURE)).toBe(true);
+    expect(settle(open, 25000).has(SIGNATURE)).toBe(false);
   });
 
   it('lets go of an event it could not confirm again within the blind limit', () => {
