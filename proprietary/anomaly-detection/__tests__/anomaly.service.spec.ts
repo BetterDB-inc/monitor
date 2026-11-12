@@ -23297,6 +23297,20 @@ describe('AnomalyService', () => {
       expect(divergenceEvents()).toHaveLength(0);
     });
 
+    it('keeps the event open while the disagreement keeps coming back past the blind limit', async () => {
+      views.b = { a: { epoch: 9 } };
+      await rounds(3);
+      expect(divergenceEvents()).toHaveLength(1);
+
+      for (let round = 0; round < 66; round++) {
+        views.b = round % 2 === 0 ? {} : { a: { epoch: 9 } };
+        await rounds(1);
+      }
+
+      expect(divergenceEvents()).toHaveLength(1);
+      expect(divergenceEvents()[0].resolved).toBe(false);
+    });
+
     it('closes the event after the views agree for the configured rounds', async () => {
       views.b = { a: { epoch: 9 } };
       await rounds(3);
