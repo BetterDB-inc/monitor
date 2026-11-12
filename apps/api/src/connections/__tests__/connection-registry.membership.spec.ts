@@ -717,6 +717,23 @@ describe('ConnectionRegistry membership', () => {
       expect(registry.getConfig('auto')?.nodeAvailabilityZones).toBeUndefined();
     });
 
+    it('rejects a map set through a member that is removed while the update waits for the seed lock', async () => {
+      const { registry, storage } = build();
+      put(registry, seed);
+      put(registry, child);
+      let release!: () => void;
+      const held = registry.withSeedLock('seed', () => new Promise<void>((resolve) => { release = resolve; }));
+      const removal = registry.removeConnection('auto');
+      await new Promise((resolve) => setImmediate(resolve));
+      const update = expect(registry.setNodeAvailabilityZones('auto', zones)).rejects.toThrow("Connection 'auto' not found.");
+      release();
+
+      await Promise.all([held, removal, update]);
+
+      expect(storage.updateConnection).not.toHaveBeenCalled();
+      expect(registry.getNodeAvailabilityZones('seed')).toBeUndefined();
+    });
+
     it('gives a cluster member the map of its seed', () => {
       const { registry } = build();
       put(registry, { ...seed, nodeAvailabilityZones: zones });

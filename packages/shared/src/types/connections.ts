@@ -263,12 +263,14 @@ export type NodeAvailabilityZonesResult =
   | { ok: true; zones: NodeAvailabilityZones | undefined }
   | { ok: false; error: string };
 
-function canonicalHost(host: string): string {
-  if (!host.includes(':')) return host;
+function canonicalHost(host: string): string | undefined {
+  if (!host.includes(':')) {
+    return /^[a-z0-9._-]+$/.test(host) ? host : undefined;
+  }
   try {
     return new URL(`http://[${host}]/`).hostname.slice(1, -1);
   } catch {
-    return host;
+    return undefined;
   }
 }
 
@@ -279,10 +281,11 @@ function normalizeNodeAddress(address: string): string | undefined {
   const rawHost = trimmed.slice(0, separator);
   const host = rawHost.startsWith('[') && rawHost.endsWith(']') ? rawHost.slice(1, -1) : rawHost;
   const port = trimmed.slice(separator + 1);
-  if (!host || /[\s=@,\[\]]/.test(host) || !/^\d{1,5}$/.test(port)) return undefined;
+  if (!/^\d{1,5}$/.test(port)) return undefined;
   const portNumber = Number(port);
   if (portNumber < 1 || portNumber > 65535) return undefined;
-  return `${canonicalHost(host)}:${portNumber}`;
+  const canonical = canonicalHost(host);
+  return canonical ? `${canonical}:${portNumber}` : undefined;
 }
 
 export function nodeAddressKeys(node: { address: string; hostname?: string }): string[] {

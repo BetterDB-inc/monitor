@@ -8,6 +8,7 @@ import { RefreshCw, Server, Info, MapPin } from 'lucide-react';
 import { useCluster } from '../hooks/useCluster';
 import { usePolling } from '../hooks/usePolling';
 import { useConnection } from '../hooks/useConnection';
+import { useConnectionDialog } from '../hooks/useConnectionDialog';
 import { metricsApi } from '../api/metrics';
 import { ClusterHealthCard } from '../components/cluster/ClusterHealthCard';
 import { ClusterTopology } from '../components/cluster/ClusterTopology';
@@ -120,7 +121,7 @@ export function ClusterDashboard() {
       .slice(0, 10);
   }, [slotStats, slotNodeMap, rankByCpu]);
 
-  const [showZones, setShowZones] = useState(false);
+  const zonesDialog = useConnectionDialog(currentConnection?.id);
   const handleZonesSaved = async () => {
     await refreshConnections();
     refetch();
@@ -202,7 +203,7 @@ export function ClusterDashboard() {
         </div>
         <div className="flex items-center gap-2">
           {currentConnection && currentConnection.connectionType !== 'agent' && (
-            <Button type="button" variant="outline" onClick={() => setShowZones(true)}>
+            <Button type="button" variant="outline" onClick={() => zonesDialog.onOpenChange(true)}>
               <MapPin className="w-4 h-4" />
               Availability zones
             </Button>
@@ -220,8 +221,9 @@ export function ClusterDashboard() {
 
       {currentConnection && (
         <AvailabilityZonesDialog
-          open={showZones}
-          onOpenChange={setShowZones}
+          key={currentConnection.id}
+          open={zonesDialog.open}
+          onOpenChange={zonesDialog.onOpenChange}
           connectionId={currentConnection.id}
           nodes={nodes}
           zones={currentConnection.nodeAvailabilityZones}

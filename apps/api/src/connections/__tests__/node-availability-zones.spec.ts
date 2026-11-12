@@ -85,6 +85,11 @@ describe('normalizeNodeAvailabilityZones', () => {
     '10.0.0.1:70a1',
     'bad host:7001',
     '10.0.0.1:7001@17001',
+    'node/name:7001',
+    'node?x:7001',
+    'node#1:7001',
+    'a:b:c:7001',
+    '2001:db8::zz:7001',
   ])('rejects the address %p', (address) => {
     expect(normalizeNodeAvailabilityZones({ [address]: 'us-east-1a' })).toEqual({
       ok: false,

@@ -65,8 +65,14 @@ export function AvailabilityZonesDialog({
     }
   };
 
+  const dismiss = (next: boolean) => {
+    if (!saving) {
+      onOpenChange(next);
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={dismiss}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Availability zones</DialogTitle>

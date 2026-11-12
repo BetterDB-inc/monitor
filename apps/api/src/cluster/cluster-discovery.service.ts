@@ -70,7 +70,8 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
   async discoverNodes(connectionId?: string): Promise<DiscoveredNode[]> {
     // Use connection-specific cache key (default connection uses 'default')
-    const cacheKey = connectionId || this.connectionRegistry.getDefaultId() || 'default';
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const cacheKey = ownerId || 'default';
     const cached = this.freshCache(cacheKey);
     if (cached) {
       return cached;
@@ -80,11 +81,11 @@ export class ClusterDiscoveryService implements OnModuleDestroy {
 
     const discovery: Promise<DiscoveredNode[]> = Promise.resolve().then(async () => {
       try {
-        const client = this.connectionRegistry.get(connectionId);
+        const client = this.connectionRegistry.get(ownerId);
         const [clusterNodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
         const nodes = withConfiguredZones(
           withShardMetadata(clusterNodes, shards),
-          this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+          this.connectionRegistry.getNodeAvailabilityZones(ownerId),
         );
         if (this.discoveryInFlight.get(cacheKey) !== discovery) return this.toDiscoveredNodes(nodes);
         return this.remember(cacheKey, nodes);

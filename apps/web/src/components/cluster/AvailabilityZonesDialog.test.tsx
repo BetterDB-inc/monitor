@@ -120,6 +120,34 @@ describe('AvailabilityZonesDialog', () => {
     expect(props.onOpenChange).not.toHaveBeenCalled();
   });
 
+  it('closes from the Close button while nothing is being saved', () => {
+    const props = renderDialog();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('cannot be dismissed while a save is pending', async () => {
+    let finish!: () => void;
+    fetchApiMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = () => resolve({ success: true });
+      }),
+    );
+    const props = renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(zoneInput(), { key: 'Escape' });
+
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+
+    finish();
+    await waitFor(() => expect(props.onOpenChange).toHaveBeenCalledWith(false));
+    expect(props.onOpenChange).toHaveBeenCalledTimes(1);
+  });
+
   it('starts again from the stored zones when reopened', () => {
     const props = {
       onOpenChange: vi.fn(),

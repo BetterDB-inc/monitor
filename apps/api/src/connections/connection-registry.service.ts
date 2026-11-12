@@ -1618,6 +1618,9 @@ export class ConnectionRegistry implements OnModuleInit, OnModuleDestroy {
     }
     const ownerId = requestedOwner.id;
     await this.withSeedLock(ownerId, async () => {
+      if (!this.configs.has(id)) {
+        throw new NotFoundException(`Connection '${id}' not found.`);
+      }
       if (!this.configs.has(ownerId)) {
         throw new NotFoundException(`Connection '${ownerId}' not found.`);
       }

@@ -149,11 +149,12 @@ export class MetricsService {
   }
 
   async getClusterNodes(connectionId?: string): Promise<ClusterNode[]> {
-    const client = this.getClient(connectionId);
+    const ownerId = connectionId || this.connectionRegistry.getDefaultId() || undefined;
+    const client = this.getClient(ownerId);
     const [nodes, shards] = await Promise.all([client.getClusterNodes(), readClusterShards(client)]);
     return withConfiguredZones(
       withShardMetadata(nodes, shards),
-      this.connectionRegistry.getNodeAvailabilityZones(connectionId),
+      this.connectionRegistry.getNodeAvailabilityZones(ownerId),
     );
   }
 
