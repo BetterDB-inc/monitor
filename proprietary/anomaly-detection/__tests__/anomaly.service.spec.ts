@@ -2225,6 +2225,42 @@ describe('AnomalyService', () => {
       expect(service.getHotShards('conn-a')).toEqual([]);
     });
 
+    it('does not replace an event resolved by hand while the sample is being judged', async () => {
+      const warm = [170_000, 100_000, 100_000];
+      await step(HOT, 6);
+      await step(warm, 25);
+      const [event] = hotEvents();
+      expect(event.resolved).toBe(false);
+      jest.spyOn(service as any, 'refreshHotShardKeys').mockImplementationOnce(async () => {
+        await service.resolveAnomaly(event.id);
+      });
+
+      await step(warm, 3);
+
+      expect(event.resolved).toBe(true);
+      expect(hotEvents()).toHaveLength(1);
+      expect(service.getHotShards('conn-a')).toEqual([]);
+    });
+
+    it('judges a sample with its own top slots when a later one arrives meanwhile', async () => {
+      await step(HOT, 6);
+      const slots = () => service.getHotShards('conn-a')[0].topSlots.map((slot) => slot.slot);
+      expect(slots()).toEqual([0, 1]);
+      jest.spyOn(service as any, 'forgetResolvedHotShards').mockImplementationOnce(async () => {
+        counters.set(1, (counters.get(1) ?? 0) + 1_000_000_000);
+        shardLoad.record('conn-a', reading(), clock + 1_000);
+      });
+
+      await step(HOT);
+
+      expect(slots()).toEqual([0, 1]);
+
+      await idle(STEP_MS);
+
+      expect(slots()).toEqual([1, 0]);
+      expect(service.getHotShards('conn-a')[0].sampledAt).toBe(BASE + 7 * STEP_MS + 1_000);
+    });
+
     it('raises nothing while the shard load is not measured', async () => {
       for (let n = 0; n < 30; n += 1) await idle(STEP_MS);
 

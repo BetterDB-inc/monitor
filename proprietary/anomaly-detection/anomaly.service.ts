@@ -6269,6 +6269,7 @@ export class AnomalyService
 
       const shardIds = sample.shards.map((shard) => shard.nodeId);
       await this.forgetResolvedHotShards(connectionId, shardIds);
+      if (this.shardLoad.getLatest(connectionId) !== sample) return;
       const eventIds = this.hotShardEventIds.get(connectionId);
       const open = new Set(shardIds.filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))));
       const findings = this.isReshardWindowOpen(connectionId, timestamp)
@@ -6288,8 +6289,9 @@ export class AnomalyService
         return;
       }
       await this.refreshHotShardKeys(ctx, timestamp, sample.timestamp, findings, topSlots);
-      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, findings, topSlots, selfId);
-      this.rememberHotShards(connectionId, sample.timestamp, findings, topSlots);
+      const judged = await this.withoutHotShardsResolvedSince(connectionId, findings, open);
+      await this.applyHotShardGate(ctx, timestamp, sample.timestamp, judged, topSlots, selfId);
+      this.rememberHotShards(connectionId, sample.timestamp, judged, topSlots);
     } catch (err) {
       this.logger.warn(
         `Hot shard check failed for ${ctx.connectionName}: ${err instanceof Error ? err.message : err}`,
@@ -6317,6 +6319,19 @@ export class AnomalyService
       this.hotShardDetails.get(connectionId)?.delete(signature);
       this.hotShardKeys.get(connectionId)?.delete(signature);
     }
+  }
+
+  private async withoutHotShardsResolvedSince(
+    connectionId: string,
+    findings: HotShardFinding[],
+    open: ReadonlySet<string>,
+  ): Promise<HotShardFinding[]> {
+    await this.forgetResolvedHotShards(connectionId, [...open]);
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    return findings.filter(
+      (finding) =>
+        !open.has(finding.shardId) || eventIds?.has(hotShardSignature(finding.shardId)) === true,
+    );
   }
 
   private isReshardWindowOpen(connectionId: string, timestamp: number): boolean {
