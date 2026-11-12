@@ -23,6 +23,7 @@ import {
   AnomalyPattern,
 } from './types';
 import { ReplicaDivergenceHistory } from './replication-divergence-detector';
+import { HotShardDetail } from './hot-shard-detector';
 import { LicenseGuard, RequiresFeature, Feature } from '@proprietary/licenses';
 import { ConnectionId, CONNECTION_ID_HEADER } from '../../apps/api/src/common/decorators';
 import { parseOptionalInt } from '../../apps/api/src/common/utils/parse-query-param';
@@ -163,6 +164,14 @@ export class AnomalyController {
     const rangeEnd = parsedEndTime ?? Date.now();
     const rangeStart = parsedStartTime ?? rangeEnd - 60 * 60 * 1000;
     return this.anomalyService.getReplicationDivergenceHistory(connectionId, rangeStart, rangeEnd);
+  }
+
+  @Get('hot-shards')
+  @UseGuards(LicenseGuard)
+  @RequiresFeature(Feature.ANOMALY_DETECTION)
+  @ApiHeader({ name: CONNECTION_ID_HEADER, required: true, description: 'Connection ID of the cluster' })
+  getHotShards(@ConnectionId({ required: true }) connectionId: string): HotShardDetail[] {
+    return this.anomalyService.getHotShards(connectionId);
   }
 
   @Post('events/:id/resolve')

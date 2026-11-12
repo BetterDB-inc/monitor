@@ -1,5 +1,6 @@
 import type { ShardLoad, ShardLoadSample, SlotLoadRate } from '@app/cluster/shard-load';
 import { median } from '../latency-regression/regression-detector';
+import { type HotShardKey, type HotShardKeyDetail, describeHotKeys } from './hot-shard-keys';
 
 export const HOT_SHARD_MIN_PRIMARIES = 3;
 export const HOT_SHARD_RAISE_FACTOR = 2;
@@ -37,7 +38,7 @@ export interface HotShardSlot {
   shareOfShard: number;
 }
 
-export interface HotShardDetail {
+export interface HotShardDetail extends HotShardKeyDetail {
   shardId: string;
   nodeAddr: string;
   slotCount: number;
@@ -128,6 +129,7 @@ export function describeHotShard(
   finding: HotShardFinding,
   topSlots: readonly HotShardSlot[],
   heldMs: number,
+  topKeys: readonly HotShardKey[] = [],
 ): string {
   const listed = topSlots.slice(0, MESSAGE_TOP_SLOTS);
   const slots = listed
@@ -139,6 +141,7 @@ export function describeHotShard(
     `Hot shard ${finding.shardId.substring(0, 8)} at ${finding.nodeAddr}: ` +
     `${describeCpu(finding.cpu)} for ${Math.round(heldMs / 1000)}s.` +
     describeNetwork(finding.network) +
-    (listed.length > 0 ? ` Top slots by CPU: ${slots}.` : '')
+    (listed.length > 0 ? ` Top slots by CPU: ${slots}.` : '') +
+    describeHotKeys(topKeys)
   );
 }
