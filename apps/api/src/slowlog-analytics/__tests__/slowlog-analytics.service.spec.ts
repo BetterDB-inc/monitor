@@ -150,7 +150,7 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     );
   }
 
-  async function poll(): Promise<void> {
+  async function poll(runId = 'run-a'): Promise<void> {
     await (service as unknown as { pollConnection(ctx: unknown): Promise<void> }).pollConnection({
       connectionId: 'conn-1',
       connectionName: 'Primary',
@@ -160,7 +160,7 @@ describe('SlowLogAnalyticsService external entry counts', () => {
         getSlowLog: jest.fn(async () => served),
         getServingEndpoint: () => ({ host: '10.0.0.1', port: 6379 }),
         getConnectionGeneration: () => 1,
-        getInfo: async () => ({ server: { run_id: 'run-a' } }),
+        getInfo: async () => ({ server: { run_id: runId } }),
       },
     });
   }
@@ -292,5 +292,37 @@ describe('SlowLogAnalyticsService external entry counts', () => {
     await poll();
 
     expect(service.getExternalEntryCount('conn-1')).toBe(0);
+  });
+
+  it('adds nothing for the entries already in the log of a source the connection moved to', async () => {
+    await poll();
+    expect(service.getExternalEntryCount('conn-1')).toBe(2);
+
+    // Another server process: its 100 entries were logged before the move.
+    served = Array.from({ length: 100 }, (_, i) => entry(500 + i, 'app'));
+    await poll('run-b');
+    expect(service.getExternalEntryCount('conn-1')).toBe(2);
+    expect(saved).toHaveLength(105);
+
+    served = [...served, entry(600, 'app')];
+    await poll('run-b');
+    expect(service.getExternalEntryCount('conn-1')).toBe(3);
+  });
+
+  it('still adds nothing after a move when the first save on the new source fails', async () => {
+    const save = jest
+      .fn()
+      .mockImplementationOnce(async (entries: StoredSlowLogEntry[]) => entries.length)
+      .mockRejectedValueOnce(new Error('storage down'))
+      .mockImplementation(async (entries: StoredSlowLogEntry[]) => entries.length);
+    service = buildService(save);
+    await poll();
+    expect(service.getExternalEntryCount('conn-1')).toBe(2);
+
+    served = Array.from({ length: 100 }, (_, i) => entry(500 + i, 'app'));
+    await expect(poll('run-b')).rejects.toThrow('storage down');
+    await poll('run-b');
+
+    expect(service.getExternalEntryCount('conn-1')).toBe(2);
   });
 });

@@ -36,9 +36,13 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   // New slowlog entries that anomaly detection should count. Own clients and
   // the configured prefixes/commands are stored, but they do not move this.
   // Entries logged but never read are estimated from the gap tracker's count.
-  // Reset wherever lastSeenIds is deleted: a moved log source, or a removed
-  // connection. Absent means this connection has not completed a poll yet.
+  // Absent means this connection has not completed a poll yet. It keeps
+  // running when the log source moves, so the difference of two readings is
+  // never taken across two sources.
   private externalEntryCounts = new Map<string, number>();
+  // Connections whose log source moved. Their next completed poll adds
+  // nothing: what it reads may have been logged before the move.
+  private readonly baselineDue = new Set<string>();
   private readonly ignoreOwnClients: boolean;
   private readonly ignoreClientPrefixes: readonly string[];
   private readonly ignoreCommands: ReadonlySet<string>;
@@ -99,10 +103,10 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
           this.logger.log(
             `Slow log source for ${ctx.connectionName} moved from ${moved.previous} to ${describeLogSource(source)}`,
           );
+          this.baselineDue.add(ctx.connectionId);
         }
         this.lastSeenIds.delete(ctx.connectionId);
         this.gaps.sourceChanged(ctx.connectionId);
-        this.externalEntryCounts.delete(ctx.connectionId);
       }
 
       // Initialize lastSeenId from storage if not already set
@@ -147,6 +151,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
         if (!this.externalEntryCounts.has(ctx.connectionId)) {
           this.externalEntryCounts.set(ctx.connectionId, 0);
         }
+        this.baselineDue.delete(ctx.connectionId);
         this.logger.debug(`No new slow log entries to save for ${ctx.connectionName}`);
         return;
       }
@@ -187,10 +192,14 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
       // nothing.
       const externalRead = newEntries.filter((entry) => !this.isIgnoredSlowlogEntry(entry)).length;
       const externalMissed = Math.round((missed * externalRead) / newEntries.length);
-      // Published only after the save: a failed first poll must still be the
-      // first poll when it is retried.
+      // Published only after the save: a failed first poll, or a failed first
+      // poll after a move, must still be that poll when it is retried.
+      const baseline = this.baselineDue.delete(ctx.connectionId);
       const previous = this.externalEntryCounts.get(ctx.connectionId) ?? 0;
-      this.externalEntryCounts.set(ctx.connectionId, previous + externalRead + externalMissed);
+      this.externalEntryCounts.set(
+        ctx.connectionId,
+        baseline ? previous : previous + externalRead + externalMissed,
+      );
 
       this.logger.debug(`Saved ${saved} new slow log entries for ${ctx.connectionName} (lastSeenId: ${this.lastSeenIds.get(ctx.connectionId)})`);
     } catch (error) {
@@ -206,6 +215,7 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
   protected onConnectionRemoved(connectionId: string): void {
     this.lastSeenIds.delete(connectionId);
     this.externalEntryCounts.delete(connectionId);
+    this.baselineDue.delete(connectionId);
     this.logSources.forget(connectionId);
     this.gaps.forget(connectionId);
     this.cachedEntries.delete(connectionId);
@@ -290,7 +300,8 @@ export class SlowLogAnalyticsService extends MultiConnectionPoller implements On
 
   /**
    * Cumulative count of new slowlog entries that anomaly detection counts.
-   * Null until the first completed poll for this connection.
+   * Null until the first completed poll for this connection. It does not
+   * restart when the log source moves.
    */
   getExternalEntryCount(connectionId?: string): number | null {
     const id = connectionId || this.connectionRegistry.getDefaultId();
