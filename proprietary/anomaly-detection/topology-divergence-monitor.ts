@@ -188,9 +188,8 @@ export class TopologyDivergenceMonitor {
     });
     state.sampled = selection.sampled;
     state.observers = new Set(selection.observers);
-    for (const id of state.offered.keys()) {
-      if (!state.observers.has(id)) state.offered.delete(id);
-    }
+    const offered = state.offered;
+    state.offered = new Map();
 
     const byId = new Map(input.nodes.map((node) => [node.id, node]));
     const views: TopologyView[] = [{ observerId: self.id, nodes: input.nodes }];
@@ -198,7 +197,7 @@ export class TopologyDivergenceMonitor {
     const reads: ClusterNode[] = [];
     for (const id of selection.observers) {
       if (id === self.id) continue;
-      const offer = registered.has(id) ? state.offered.get(id) : undefined;
+      const offer = registered.has(id) ? offered.get(id) : undefined;
       if (offer && at - offer.at <= idleMs) views.push({ observerId: id, nodes: offer.nodes });
       else if (this.backingOff(state, id, at)) unanswered.add(id);
       else reads.push(byId.get(id) as ClusterNode);
