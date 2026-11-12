@@ -723,6 +723,29 @@ used_cpu_user:20.3\r
 
         await expect(service.checkSlotMigrations()).resolves.toEqual({ migrations: [], complete: false });
       });
+
+      it('is incomplete when the topology read does not answer in time', async () => {
+        jest.useFakeTimers();
+        try {
+          mockDiscoveryService.discoverNodes.mockReturnValueOnce(new Promise(() => undefined));
+          jest
+            .spyOn((service as unknown as { logger: Logger }).logger, 'error')
+            .mockImplementation(() => undefined);
+          const settled = jest.fn();
+
+          const pending = service.checkSlotMigrations('conn-1').then((check) => {
+            settled();
+            return check;
+          });
+          await jest.advanceTimersByTimeAsync(4_999);
+          expect(settled).not.toHaveBeenCalled();
+          await jest.advanceTimersByTimeAsync(1);
+
+          await expect(pending).resolves.toEqual({ migrations: [], complete: false });
+        } finally {
+          jest.useRealTimers();
+        }
+      });
     });
 
     it('keeps the MIGRATING view of a legacy move whichever node answers first', async () => {

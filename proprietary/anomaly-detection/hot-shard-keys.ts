@@ -5,7 +5,7 @@ export const HOT_KEY_REFRESH_MS = 5 * 60_000;
 export const HOT_KEY_NAME_LIMIT = 64;
 
 const MESSAGE_KEYS = 3;
-const UNSAFE_IN_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}"\\]/gu;
+const UNSAFE_IN_DISPLAY = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}"\\]/gu;
 const SLOT_MOVED = /^(MOVED|ASK) /;
 const SHORT_NOTES: ReadonlyArray<[RegExp, string]> = [
   [/LFU/, 'no LFU policy'],

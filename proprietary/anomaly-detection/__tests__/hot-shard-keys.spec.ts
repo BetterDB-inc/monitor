@@ -371,6 +371,11 @@ describe('displayKeyName', () => {
     expect(displayKeyName('a\ud800b')).toBe('a\\u{d800}b');
   });
 
+  it('writes characters that show nothing as text, so two names cannot look the same', () => {
+    expect(displayKeyName('a\u034fb')).toBe('a\\u{34f}b');
+    expect(displayKeyName('a\u3164b\ufe0fc\u{e0001}d')).toBe('a\\u{3164}b\\u{fe0f}c\\u{e0001}d');
+  });
+
   it('escapes quotes and backslashes, so the quoted name cannot be closed early', () => {
     expect(displayKeyName('a"b\\c')).toBe('a\\"b\\\\c');
   });

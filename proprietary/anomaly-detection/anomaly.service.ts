@@ -2205,6 +2205,9 @@ export class AnomalyService
       if (live) await this.detectLargeReplyPressure(ctx, timestamp);
     } catch (error) {
       this.logger.error(`Failed to poll metrics for ${ctx.connectionName}:`, error);
+      if (this.tracksHotShards(ctx.connectionId)) {
+        await this.detectHotShards(ctx, Date.now(), undefined);
+      }
       throw error;
     } finally {
       this.crossCheckDeadline.set(ctx.connectionId, null);
@@ -6265,12 +6268,10 @@ export class AnomalyService
       this.hotShardSampleAt.set(connectionId, sample.timestamp);
       this.hotShardJudgedAt.set(connectionId, timestamp);
 
+      const shardIds = sample.shards.map((shard) => shard.nodeId);
+      await this.forgetResolvedHotShards(connectionId, shardIds);
       const eventIds = this.hotShardEventIds.get(connectionId);
-      const open = new Set(
-        sample.shards
-          .map((shard) => shard.nodeId)
-          .filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))),
-      );
+      const open = new Set(shardIds.filter((nodeId) => eventIds?.has(hotShardSignature(nodeId))));
       const findings = this.isReshardWindowOpen(connectionId, timestamp)
         ? null
         : judgeHotShards(sample, open);
@@ -6302,6 +6303,21 @@ export class AnomalyService
       (this.hotShardEventIds.get(connectionId)?.size ?? 0) > 0 ||
       (this.hotShardFirstSeen.get(connectionId)?.size ?? 0) > 0
     );
+  }
+
+  private async forgetResolvedHotShards(connectionId: string, shardIds: string[]): Promise<void> {
+    const eventIds = this.hotShardEventIds.get(connectionId);
+    if (!eventIds) return;
+    for (const shardId of shardIds) {
+      const signature = hotShardSignature(shardId);
+      const eventId = eventIds.get(signature);
+      if (eventId === undefined) continue;
+      if (await this.isTrackedEventOpen(eventId, connectionId, MetricType.HOT_SHARD)) continue;
+      eventIds.delete(signature);
+      this.activeHotShards.get(connectionId)?.delete(signature);
+      this.hotShardDetails.get(connectionId)?.delete(signature);
+      this.hotShardKeys.get(connectionId)?.delete(signature);
+    }
   }
 
   private isReshardWindowOpen(connectionId: string, timestamp: number): boolean {
@@ -7660,18 +7676,12 @@ export class AnomalyService
       if (eventIdsByConn) {
         const existingId = eventIds.get(signature);
         if (existingId) {
-          const existing =
-            this.recentAnomalies.find((e) => e.id === existingId) ??
-            this.persistenceOutbox.unsavedAnomaly(existingId);
           // Still open in the in-memory ring → dedupe. If it's been evicted from
           // the ring we can't tell from memory alone, so consult the storage-
           // backed feed (the source of truth for activeOnly reads): only re-emit
           // when the tracked event is genuinely gone/resolved there — otherwise a
           // still-unresolved stored row would get a duplicate WARNING alongside it.
-          const stillOpen =
-            existing !== undefined
-              ? !existing.resolved
-              : await this.isAnomalyUnresolvedInStorage(existingId, connId, metricType);
+          const stillOpen = await this.isTrackedEventOpen(existingId, connId, metricType);
           if (stillOpen) {
             active.add(signature);
             continue;
@@ -7726,6 +7736,18 @@ export class AnomalyService
     for (const sig of active) {
       if (!currentSignatures.has(sig) && !isPreserved(sig)) active.delete(sig);
     }
+  }
+
+  private isTrackedEventOpen(
+    id: string,
+    connectionId: string,
+    metricType?: MetricType,
+  ): Promise<boolean> {
+    const cached =
+      this.recentAnomalies.find((e) => e.id === id) ?? this.persistenceOutbox.unsavedAnomaly(id);
+    return cached !== undefined
+      ? Promise.resolve(!cached.resolved)
+      : this.isAnomalyUnresolvedInStorage(id, connectionId, metricType);
   }
 
   /**
